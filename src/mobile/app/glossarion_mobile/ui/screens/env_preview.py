@@ -1,8 +1,8 @@
 """Env preview (``/settings/logs/env``): the environment the next translation run would get.
 
 ``build_env_preview`` runs on a worker thread while holding
-``ENV_PREVIEW_LOCK`` (U3 replaces it with ``job_runner.JOB_LOCK``, so a
-preview never overlaps a job). It builds a ``HeadlessOwner`` from a
+``ENV_PREVIEW_LOCK``, which is ``job_runner.JOB_LOCK`` (U3), so a preview
+never overlaps a job. It builds a ``HeadlessOwner`` from a
 ``MobileConfigStore.snapshot()`` (including edits not saved yet) and calls
 ``run_env.build_translation_env(owner, input_path, api_key)``, the same
 builders the desktop uses. The owner's init writes process-global
@@ -11,7 +11,9 @@ store, ``sys.argv`` and the working directory) are snapshotted before and
 restored afterwards, key by key (the environment is never cleared, so other
 threads keep seeing every unchanged variable). The run builder applies the
 snapshot's key pools to ``UnifiedClient``; the preview gets fresh pool objects
-and the previous pool state is put back afterwards.
+and the previous pool state is put back afterwards. The scoping is the shared
+``job_runner.scoped_process_state`` (``restore_mapping`` / ``isolated_key_pools``
+moved there in U3 and are re-exported here).
 
 Values are redacted before they reach the UI: names ending in KEY, TOKEN,
 SECRET, PASSWORD, COOKIE, AUTHORIZATION or BEARER or containing API_KEY /
@@ -40,6 +42,9 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator, Optional
 
+# Shared GUI-free backend (U3): one lock for jobs and previews, and the process-state scoping.
+from job_runner import JOB_LOCK, _is_pool_state_attr, isolated_key_pools, restore_mapping, scoped_process_state
+
 __all__ = [
     "ENV_PREVIEW_LOCK",
     "EnvPreviewResult",
@@ -59,8 +64,8 @@ __all__ = [
 
 log = logging.getLogger("glossarion.env_preview")
 
-# One HeadlessOwner at a time (its init mutates os.environ). U3: job_runner.JOB_LOCK.
-ENV_PREVIEW_LOCK = threading.Lock()
+# One HeadlessOwner at a time (its init mutates os.environ): the job lock.
+ENV_PREVIEW_LOCK = JOB_LOCK
 
 INPUT_KINDS = (("epub", "EPUB"), ("txt", "TXT"), ("pdf", "PDF"))
 
@@ -194,93 +199,10 @@ def rows_as_text(rows: Iterable[EnvRow]) -> str:
 # ---- building -----------------------------------------------------------------------------------
 
 
-def restore_mapping(target: Any, saved: dict) -> None:
-    """Put ``target`` back to ``saved`` key by key: drop added keys, reset changed ones.
-
-    Never clears the mapping, so keys that did not change (``GLOSSARION_*``,
-    ``CONFIG_FILE``, ...) stay readable by other threads the whole time; the
-    ``mobile_runtime`` gates read ``os.environ`` live."""
-    for key in [k for k in list(target.keys()) if k not in saved]:
-        target.pop(key, None)
-    for key, value in saved.items():
-        if target.get(key) != value:
-            target[key] = value
-
-
-#: UnifiedClient class attributes that ``key_pools.apply_key_pools_to_runtime`` writes through the
-#: ``set_/clear_in_memory_*`` and ``setup_*_key_pool`` class methods (beyond the ``_in_memory_*``
-#: lists, ``*_key_pool`` objects and ``*_pool_logged`` / ``_last_*_pool_setup_status`` flags).
-_POOL_EXTRA_ATTRS = ("_force_rotation", "_rotation_frequency", "_rate_limit_cache")
-
-
-def _is_pool_state_attr(name: str) -> bool:
-    if name.endswith("_lock"):
-        return False
-    return (name.startswith("_in_memory_") or name.endswith(("_key_pool", "_pool_logged", "_pool_setup_status"))
-            or name in _POOL_EXTRA_ATTRS)
-
-
-@contextlib.contextmanager
-def isolated_key_pools() -> Iterator[None]:
-    """Give the body fresh ``UnifiedClient`` key pools and put the previous pool state back afterwards.
-
-    ``run_env.build_translation_env`` applies the snapshot's key pools
-    (``key_pools.apply_key_pools_to_runtime``): class attributes are replaced and the shared
-    ``APIKeyPool`` objects are reloaded in place. The pool objects are detached first
-    (``setup_*_key_pool`` builds a new pool when the attribute is None), so the previous pools
-    are never mutated, and every pool attribute is restored on exit. Only acts when
-    ``unified_api_client`` is already imported (``build_env_preview`` imports it first)."""
-    module = sys.modules.get("unified_api_client")
-    cls = getattr(module, "UnifiedClient", None) if module is not None else None
-    saved = {n: v for n, v in vars(cls).items() if _is_pool_state_attr(n)} if cls is not None else {}
-    if cls is not None:
-        for name, value in saved.items():
-            if name.endswith("_key_pool") and value is not None:
-                setattr(cls, name, None)
-    try:
-        yield
-    finally:
-        if cls is not None:
-            missing = object()
-            for name in [n for n in list(vars(cls)) if _is_pool_state_attr(n) and n not in saved]:
-                try:
-                    delattr(cls, name)
-                except AttributeError:
-                    pass
-            for name, value in saved.items():
-                if vars(cls).get(name, missing) is not value:
-                    setattr(cls, name, value)
-
-
-@contextlib.contextmanager
 def scoped_process_env() -> Iterator[None]:
     """Restore ``os.environ``, ``large_env``'s overflow store, ``sys.argv``, the cwd and the
     ``UnifiedClient`` key pools afterwards (environment restored key by key, never cleared)."""
-    saved_env = dict(os.environ)
-    saved_argv = list(sys.argv)
-    try:
-        saved_cwd: Optional[str] = os.getcwd()
-    except OSError:
-        saved_cwd = None
-    large = sys.modules.get("large_env")
-    store = getattr(large, "_store", None)
-    saved_store = dict(store) if isinstance(store, dict) else None
-    try:
-        with isolated_key_pools():
-            yield
-    finally:
-        restore_mapping(os.environ, saved_env)
-        sys.argv[:] = saved_argv
-        if saved_cwd is not None:
-            try:
-                if os.getcwd() != saved_cwd:
-                    os.chdir(saved_cwd)
-            except OSError:
-                pass
-        large = sys.modules.get("large_env")
-        store = getattr(large, "_store", None)
-        if isinstance(store, dict):
-            restore_mapping(store, saved_store or {})
+    return scoped_process_state(keywise=True, isolate_key_pools=True, restore_cwd=True)
 
 
 class _PreviewHost:

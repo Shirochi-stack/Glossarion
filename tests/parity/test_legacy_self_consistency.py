@@ -92,14 +92,19 @@ def test_frozen_shared_mixins_are_verbatim_and_never_live(legacy):
     bundle, _factory = legacy
     manifest = bundle.manifest
     listed = [module for module, _cls in manifest.get("shared_mixins", [])]
+    helpers = list(manifest.get("shared_helpers", []))  # U3+: job_runner / stop_control (no owner mixin)
     frozen = manifest.get("frozen_mixins") or {}
-    assert sorted(frozen) == sorted(listed)
+    assert sorted(frozen) == sorted(listed + helpers)
     for module, info in frozen.items():
         path = Path(vars(bundle.mixins[module])["__frozen_path__"])
         assert path.name == info["file"]
         source = freeze_legacy.frozen_mixin_source(path, info)
         assert source == freeze_legacy.git_show_text(manifest["sha"], info["source_file"])
         assert freeze_legacy._sha256(source) == info["source_sha256"]
+        if info["class"] is None:
+            assert module in helpers
+            assert bundle.mixins[module] is not sys.modules.get(module)
+            continue
         cls = getattr(bundle.mixins[module], info["class"])
         live = sys.modules.get(module)
         assert live is None or getattr(live, info["class"], None) is not cls

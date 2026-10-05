@@ -24,7 +24,7 @@ from glossarion_mobile.ui.router import ROUTES, ROUTES_BY_NAME, RouteMatch, Rout
 __all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "ROUTE_ICONS", "build_screen_view"]
 
 # Milestones whose surfaces exist in this build.
-SHIPPED_MILESTONES = frozenset({"U0", "U1"})
+SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3"})
 
 ROUTE_ICONS = {
     "library": "LOCAL_LIBRARY",

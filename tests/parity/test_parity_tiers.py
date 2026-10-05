@@ -470,6 +470,8 @@ def _gui_mixins(tg, shared):
         module = klass.__module__ or ""
         if klass in shared or klass is object or module.startswith(("PySide6", "shiboken6", "Shiboken")):
             continue
+        if module in mf.SHARED_MODULES or module == "job_runner":
+            continue  # a shared mixin's in-module base (GlossaryPipelineMixin, JobHooksMixin, ...)
         out.append(klass)
     return out
 

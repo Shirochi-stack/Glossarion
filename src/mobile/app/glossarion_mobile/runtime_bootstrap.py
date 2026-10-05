@@ -102,6 +102,9 @@ WARM_IMPORT_MODULES = (
     "epub_converter",
     "scan_html_folder",
     "qa_scan_runtime",
+    # U3: the job owner (pipelines) and the Direct Text chat store + stream the chat calls
+    "headless_owner",
+    "direct_text_stream",
 )
 
 # tiktoken encodings shipped in app/assets/tiktoken (cache files are named

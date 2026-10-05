@@ -1461,7 +1461,10 @@ def test_subtitle_zip_glossary_autoload_uses_archive_identity(
     gui.logs = []
     gui.append_log = gui.logs.append
 
+    import translation_pipeline  # U3: _auto_load_glossary_after_extraction lives here now
+
     monkeypatch.setattr(translator_gui, "_get_app_dir", lambda: str(app_dir))
+    monkeypatch.setattr(translation_pipeline, "_get_app_dir", lambda: str(app_dir))
     monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
     monkeypatch.setenv("MANUAL_GLOSSARY", str(unrelated))
 
@@ -1718,7 +1721,10 @@ def test_subtitle_glossary_refresh_paths_are_wired_without_qt_imports():
     assert "_glossary_editor_input_sources()" in gui_source[
         autofill_start:autofill_end
     ]
-    assert "resolve_glossary_input_sources" in manager_source
+    # U3: _glossary_editor_input_sources moved from GlossaryManager_GUI into the shared
+    # translation_pipeline (part of the desktop corpus); GlossaryManager_GUI re-exports it
+    assert "resolve_glossary_input_sources" in gui_source
+    assert "_glossary_editor_input_sources = GlossaryPipelineMixin._glossary_editor_input_sources" in manager_source
 
 
 def _direct_text_dialog_class():

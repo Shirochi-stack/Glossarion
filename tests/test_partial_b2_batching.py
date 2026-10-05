@@ -283,15 +283,22 @@ def test_graceful_stop_groups_queued_refinement_chapter_logs(
 
 
 def test_gui_publishes_stop_mode_before_shared_stop_callback_latch():
-    gui_source = (
-        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
-    ).read_text(encoding="utf-8")
+    # U3: the flag protocol is stop_control.request_stop; stop_translation hands it the
+    # latch (the callback that sets stop_requested) as set_stop_requested.
+    src = Path(__file__).resolve().parents[1] / "src"
+    gui_source = (src / "translator_gui.py").read_text(encoding="utf-8-sig")
     stop_method = gui_source.split("    def stop_translation(self):", 1)[1].split(
         "    def preserve_file_path", 1
     )[0]
+    latch = stop_method.split("def _latch_stop_requested():", 1)[1].split("request_stop(", 1)[0]
+    assert "self.stop_requested = True" in latch
+    assert "set_stop_requested=_latch_stop_requested" in stop_method
+    assert "self.stop_requested = True" not in stop_method.replace(latch, "")
 
-    mode_publish = stop_method.index(
+    protocol = (src / "stop_control.py").read_text(encoding="utf-8")
+    protocol = protocol.split("def request_stop(", 1)[1].split("\ndef ", 1)[0]
+    mode_publish = protocol.index(
         "os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'"
     )
-    callback_latch = stop_method.index("self.stop_requested = True")
+    callback_latch = protocol.index("    set_stop_requested()")
     assert mode_publish < callback_latch

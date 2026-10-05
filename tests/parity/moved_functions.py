@@ -35,6 +35,8 @@ Fields:
 ``optional``  the name may legitimately stay in ``TranslatorGUI`` (decided while
               moving); a missing mixin attribute then skips instead of failing.
 ``kind``      ``'method'`` or ``'attr'`` (class attributes: value equality only).
+``stubs``     ``(module, attribute)`` pairs replaced by call recorders while the entry
+              is fuzzed (backend work the moved code hands off, e.g. the metadata worker).
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from dataclasses import dataclass, field
 
 U1 = "U1"
 U2 = "U2"
+U3 = "U3"
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,7 @@ class Moved:
     reason: str = ""
     optional: bool = False
     kind: str = "method"
+    stubs: tuple = ()
 
     @property
     def legacy_names(self) -> tuple:
@@ -79,6 +83,11 @@ MIXINS = {
     "owner_state": "ConfigStateMixin",
     "run_env": "RunEnvMixin",
     "settings_persistence": "SettingsPersistenceMixin",
+    # U3
+    "text_jobs": "TextJobsMixin",
+    "input_preparation": "InputPreparationMixin",
+    # (TranslationPipelineMixin inherits GlossaryPipelineMixin and PipelineHooksMixin)
+    "translation_pipeline": "TranslationPipelineMixin",
 }
 
 #: Desktop hooks (shared-core §3.3): mixin default is GUI-free, TranslatorGUI overrides
@@ -97,6 +106,20 @@ HOOK_NAMES = frozenset({
     # added by the U2 move (startup save_config / context-mode widget layout)
     "_hook_save_default_config",
     "_hook_context_mode_layout",
+    # U3 pipelines (translation_pipeline.PipelineHooksMixin): message box hook, and GUI-free
+    # defaults of the TranslatorGUI GUI methods the moved pipelines call (desktop keeps its
+    # own, which win), incl. the U7 placeholders (image / RPG Maker / generative runners)
+    "_ui_message",
+    "_lazy_load_modules",
+    "_attach_gui_logging_handlers",
+    "_create_watchdog_snapshot",
+    "_start_autoscroll_delay",
+    "_update_manual_glossary_status",
+    # U3 fix pass: the set-up's Library raw-input registry write (desktop: epub_library)
+    "_record_library_raw_inputs",
+    "_process_image_file",
+    "_process_rpgmaker_game",
+    "_run_generative_prompt_mode",
 })
 
 #: Every flat GUI-free module of the shared core (tier I: import hygiene + Python 3.10 parse).
@@ -120,11 +143,22 @@ SHARED_MODULES = (
     "settings_schema_data",
     "settings_rules",
     "library_core",
+    # U3
+    "job_runner",
+    "stop_control",
+    "text_jobs",
+    "input_preparation",
+    "translation_pipeline",
+    # U3 step 3: the Direct Text dialog's mixins (tests/test_direct_text_core.py pins the moves)
+    "direct_text_store",
+    "direct_text_stream",
 )
 
 _RUN_ENV = ("run_env", "RunEnvMixin")
 _STATE = ("owner_state", "ConfigStateMixin")
 _PERSIST = ("settings_persistence", "SettingsPersistenceMixin")
+_TEXT = ("text_jobs", "TextJobsMixin")
+_INPUT = ("input_preparation", "InputPreparationMixin")
 
 
 def _run_env(name: str, **kw) -> Moved:
@@ -139,7 +173,38 @@ def _persist(name: str, **kw) -> Moved:
     return Moved(name, *_PERSIST, **kw)
 
 
+def _text(name: str, **kw) -> Moved:
+    return Moved(name, *_TEXT, milestone=U3, **kw)
+
+
+def _input(name: str, **kw) -> Moved:
+    return Moved(name, *_INPUT, milestone=U3, **kw)
+
+
+_PIPELINE = ("translation_pipeline", "TranslationPipelineMixin")
+#: why the pipeline moves are not fuzzed here (the main oracle freezes most of them without
+#: their closure): tier T runs them end to end, legacy vs desktop vs mobile
+_TIER_T = ("tier T (tests/parity/test_trace_parity.py) drives the whole pipeline, legacy oracle vs "
+           "working-tree desktop vs HeadlessOwner; tests/test_translation_pipeline.py checks the "
+           "body is the legacy body plus the documented edits")
+
+
+def _pipeline(name: str, **kw) -> Moved:
+    """TranslationPipelineMixin / GlossaryPipelineMixin (resolved through TranslationPipelineMixin)."""
+    kw.setdefault("fuzz", False)
+    kw.setdefault("reason", _TIER_T)
+    return Moved(name, *_PIPELINE, milestone=U3, **kw)
+
+
 _COMPILE_FOLDER = "<SANDBOX>/outputs/Fuzz Novel"
+#: selected_files exercising every input-preparation branch (fuzz_moved.FUZZ_ARCHIVES)
+_ARCHIVE_SELECTION = [
+    "<SANDBOX>/inputs/Fuzz Chapters.zip",
+    "<SANDBOX>/inputs/Fuzz Subs.zip",
+    "<SANDBOX>/inputs/Fuzz Page.html",
+    "<SANDBOX>/inputs/Fuzz Novel.epub",
+    "<SANDBOX>/inputs/Fuzz Images.cbz",
+]
 
 #: shared-core design §3.2 (RunEnvMixin) + §1 P2 row (ConfigStateMixin) + §2 (SettingsPersistenceMixin).
 MOVED = (
@@ -279,6 +344,71 @@ MOVED = (
              reason="extracted from save_config 48092-48210"),
     _persist("_apply_live_settings_to_config", via="save_config", args="save_config",
              reason="save_config sections 2-3 in place (_collect_live_settings is its deep-copying view)"),
+
+    # ---- TextJobsMixin (U3): per-file runners; backends are the stubbed entry points ----------
+    _text("_process_text_file"),
+    _text("_extract_glossary_from_text_file"),
+    _text("_run_parallel_metadata_files", args="unique_files",
+          stubs=(("metadata_translation_worker", "run_metadata_translation_job"),),
+          reason="the metadata worker is a recorder; unique files keep the thread pool's log order fixed"),
+    _text("_run_epub_compile", via="run_epub_converter_direct", setup={"epub_folder": _COMPILE_FOLDER},
+          reason="the try/except of run_epub_converter_direct (the desktop runner keeps its finally)"),
+    _text("_run_pdf_compile", via="run_pdf_converter_direct", setup={"pdf_folder": _COMPILE_FOLDER},
+          reason="the try/except of run_pdf_converter_direct (the desktop runner keeps its finally)"),
+    # ---- InputPreparationMixin (U3): ZIP / CBZ / HTML / subtitle-ZIP inputs ---------------------
+    _input("_convert_zip_input_to_epub_if_needed", args="archive_path",
+           reason="wrapper over input_preparation.resolve_input_to_epub (the moved body)"),
+    _input("_extract_subtitle_zip_input_if_needed", args="archive_path"),
+    _input("_has_epub_conversion_inputs", setup={"selected_files": _ARCHIVE_SELECTION}),
+    _input("_resolve_zip_inputs_for_translation", setup={"selected_files": _ARCHIVE_SELECTION}),
+    # ---- TranslationPipelineMixin (U3): run_translation_thread split at its worker thread -------
+    _pipeline("_prepare_translation_run",
+              reason="run_translation_thread's set-up between the Run-button preflight and the worker "
+                     "thread (no legacy method of its own); " + _TIER_T),
+    _pipeline("_translation_worker",
+              reason="run_translation_thread's simple_thread_target closure body (no legacy method of "
+                     "its own); " + _TIER_T),
+    _pipeline("run_translation_direct"),
+    _pipeline("_await_direct_text_glossary_approval"),
+    _pipeline("_clear_automatic_glossary_for_non_epub_selection"),
+    # ---- QA-failure collection and multipass refinement planning ---------------------------------
+    _pipeline("_flatten_translation_qa_issue_text"),
+    _pipeline("_is_foreign_character_translation_qa_issue"),
+    _pipeline("_entry_has_foreign_character_qa_failure"),
+    _pipeline("_collect_translation_qa_failures"),
+    _pipeline("_chapter_scope_filename_key"),
+    _pipeline("_filter_translation_qa_failures_to_current_range"),
+    _pipeline("_translation_qa_failure_key"),
+    _pipeline("_qa_failure_matches_resolution_request"),
+    _pipeline("_prepare_multipass_qa_refinement_run"),
+    _pipeline("_clear_translation_run_overrides"),
+    _pipeline("_format_chapter_list"),
+    _pipeline("_log_translation_qa_failure_summary"),
+    # ---- GlossaryPipelineMixin: glossary extraction, image-folder glossary ----------------------
+    _pipeline("run_glossary_extraction_direct"),
+    _pipeline("_process_image_folder_for_glossary"),
+    _pipeline("_init_image_glossary_progress_manager"),
+    _pipeline("_save_intermediate_glossary_with_skip"),
+    _pipeline("_call_api_with_interrupt"),
+    # ---- glossary auto-loading / auto-mapping -----------------------------------------------------
+    _pipeline("auto_load_glossary_for_file"),
+    _pipeline("_auto_load_glossary_after_extraction"),
+    _pipeline("_autofill_glossary_for_current_selection"),
+    _pipeline("_glossary_dir_signature"),
+    _pipeline("_get_glossary_dir_candidates"),
+    _pipeline("_guess_glossary_for_input_file"),
+    _pipeline("_copy_glossary_to_output_folders"),
+    _pipeline("_sync_automapped_glossaries_to_output"),
+    # ---- input-selection helpers both pipelines use ---------------------------------------------
+    _pipeline("_is_special_file"),
+    _pipeline("_should_skip_special_file"),
+    _pipeline("_get_spine_filenames_for_preview"),
+    _pipeline("_get_opf_file_order"),
+    _pipeline("_windows_supported_input_path"),
+    _pipeline("_windows_glossary_rename_dirs"),
+    _pipeline("_path_lookup_key"),
+    _pipeline("_remap_windows_renamed_epub_glossary"),
+    _pipeline("_normalize_windows_input_filenames"),
 )
 
 MOVED_BY_NAME = {m.name: m for m in MOVED}

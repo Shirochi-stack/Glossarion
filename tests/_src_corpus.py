@@ -2,7 +2,12 @@
 
 The mobile rewrite (milestone U2) moved TranslatorGUI methods verbatim into shared
 GUI-free mixins that TranslatorGUI inherits (``settings_persistence``, ``run_env``,
-``owner_state``) and the Direct Text run attributes into ``headless_owner``. Tests
+``owner_state``) and the Direct Text run attributes into ``headless_owner``; U3 moved
+the per-file job runners (``text_jobs``), input preparation (``input_preparation``),
+the job hooks (``job_runner``), the stop protocol (``stop_control``) and the translation /
+glossary pipelines (``translation_pipeline``: run set-up + worker, run_translation_direct,
+QA/multipass planning, glossary extraction and auto-loading) and the Direct Text dialog's
+chat persistence / log-stream model (``direct_text_store``, ``direct_text_stream``). Tests
 that grep translator_gui.py for a code fragment, or look a TranslatorGUI method up by
 AST, search the whole corpus instead so they keep checking the same code wherever
 it now lives.
@@ -23,11 +28,19 @@ from pathlib import Path
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 #: translator_gui plus the shared modules holding code that moved out of it (MRO order).
-DESKTOP_GUI_MODULES = ("translator_gui", "settings_persistence", "run_env", "owner_state", "headless_owner")
+DESKTOP_GUI_MODULES = ("translator_gui", "translation_pipeline", "text_jobs", "input_preparation", "job_runner", "settings_persistence",
+                       "run_env", "owner_state", "headless_owner", "stop_control", "direct_text_store",
+                       "direct_text_stream")
 
 #: Classes searched by find_method, in TranslatorGUI's method resolution order.
 DESKTOP_GUI_CLASSES = (
     ("translator_gui", "TranslatorGUI"),
+    ("translation_pipeline", "TranslationPipelineMixin"),
+    ("translation_pipeline", "GlossaryPipelineMixin"),
+    ("translation_pipeline", "PipelineHooksMixin"),
+    ("text_jobs", "TextJobsMixin"),
+    ("input_preparation", "InputPreparationMixin"),
+    ("job_runner", "JobHooksMixin"),
     ("settings_persistence", "SettingsPersistenceMixin"),
     ("run_env", "RunEnvMixin"),
     ("owner_state", "ConfigStateMixin"),

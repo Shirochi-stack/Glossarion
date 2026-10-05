@@ -1001,7 +1001,7 @@ def test_compile_pdf_repairs_legacy_page_images_from_only_requested_pages(
 def test_library_compile_action_is_pdf_aware():
     root = Path(__file__).resolve().parents[1]
     library_source = (root / "src" / "epub_library.py").read_text(encoding="utf-8")
-    gui_source = (root / "src" / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()  # U3: the compile runner body lives in text_jobs
 
     assert 'menu.addAction("\\U0001f4c4  Compile PDF")' in library_source
     assert '_workspace_compile_kind(book, compile_folder)' in library_source

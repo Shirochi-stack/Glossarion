@@ -10,7 +10,10 @@ Paste-to-chip: when one ``on_change`` adds more than 10,000 characters the
 pasted part moves into a "Pasted text · N chars" chip and the field keeps what
 was typed before it.
 
-U1 skeleton: no attachments, drafts or token counting yet (U3).
+U3: one attachment chip per turn (desktop parity; × removes it, the hint switches
+to "Add optional instructions for the attached file…"), draft autosave through
+``on_draft_changed`` (the store debounces the save by 450 ms), option pills that
+differ from the defaults (tap -> sheet, × -> reset) and the token hint.
 """
 
 from __future__ import annotations
@@ -23,12 +26,21 @@ import flet as ft
 
 from glossarion_mobile.state.store import Signal
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.chat.direct_text_rules import attachment_icon, attachment_kind_label, format_attachment_size
 from glossarion_mobile.ui.chat.output_mode_row import OutputModeRow
 from glossarion_mobile.ui.chat.send_button import SendStopButton
 from glossarion_mobile.ui.chat.send_state import BlockReason, SendAction, SendInputs, SendState
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
-__all__ = ["Composer", "PASTE_CHIP_THRESHOLD", "PastedTextChip", "StatusCaption", "HINT_EMPTY", "HINT_ATTACHMENT"]
+__all__ = [
+    "AttachmentChip",
+    "Composer",
+    "PASTE_CHIP_THRESHOLD",
+    "PastedTextChip",
+    "StatusCaption",
+    "HINT_EMPTY",
+    "HINT_ATTACHMENT",
+]
 
 PASTE_CHIP_THRESHOLD = 10_000
 EXPAND_ICON_LINES = 3
@@ -69,6 +81,56 @@ class PastedTextChip(ft.Container):
 
 
 @ft.control
+class AttachmentChip(ft.Container):
+    """FileChip for the composer: type icon · name · "EPUB · 1.2 MB" · × (UI_SPEC §2.3, §5.3)."""
+
+    record: dict = field(default_factory=dict, metadata={"skip": True})
+    missing: bool = field(default=False, metadata={"skip": True})
+    on_remove: Optional[Callable[["AttachmentChip"], Any]] = field(default=None, metadata={"skip": True})
+    on_open: Optional[Callable[["AttachmentChip"], Any]] = field(default=None, metadata={"skip": True})
+
+    def init(self) -> None:
+        super().init()
+        extension = str(self.record.get("extension") or "")
+        self.name_text = ft.Text(
+            str(self.record.get("name") or "file"), theme_style=ft.TextThemeStyle.LABEL_MEDIUM, no_wrap=True,
+            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        meta = f"{attachment_kind_label(extension)} · {format_attachment_size(self.record.get('size'))}"
+        self.meta_text = ft.Text(
+            "Attachment missing" if self.missing else meta,
+            theme_style=ft.TextThemeStyle.LABEL_SMALL,
+            color=ft.Colors.ERROR if self.missing else ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE),
+        )
+        self.remove_button = ft.IconButton(
+            icon=ft.Icons.CLOSE, icon_size=16, tooltip="Remove attachment", on_click=self._remove, size_constraints=HIT_TARGET
+        )
+        self.content = ft.Row(
+            [
+                ft.Icon(icon_data(attachment_icon(extension)), size=20, color=ft.Colors.PRIMARY),
+                ft.Column([self.name_text, self.meta_text], spacing=0, tight=True),
+                self.remove_button,
+            ],
+            spacing=6,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self.padding = ft.Padding.only(left=8)
+        self.border_radius = tokens.RADII["chip"]
+        self.bgcolor = ft.Colors.ERROR_CONTAINER if self.missing else ft.Colors.SURFACE_CONTAINER_HIGHEST
+        self.tooltip = str(self.record.get("path") or "")
+        self.on_click = self._open
+
+    def _remove(self, e: Any = None) -> None:
+        if self.on_remove is not None:
+            self.on_remove(self)
+
+    def _open(self, e: Any = None) -> None:
+        if self.on_open is not None:
+            self.on_open(self)
+
+
+@ft.control
 class StatusCaption(ft.Container):
     """One line above the composer; fix buttons for a blocked Send (§2.3, §2.4)."""
 
@@ -82,7 +144,8 @@ class StatusCaption(ft.Container):
             color=ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE),
             max_lines=2,
             overflow=ft.TextOverflow.ELLIPSIS,
-            expand=True,
+            # no expand: Flutter's Wrap (Row(wrap=True)) rejects Expanded children and the
+            # whole chat column then renders as an error box; the text wraps at the row width.
         )
         self.fix_button = ft.FilledTonalButton(content="", visible=False, on_click=self._on_fix)
         self.secondary_button = ft.TextButton(content="", visible=False, on_click=self._on_secondary)
@@ -124,11 +187,18 @@ class Composer(ft.Container):
     on_content_changed: Optional[Callable[[bool], Any]] = field(default=None, metadata={"skip": True})
     on_expand: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
     on_open_mode_options: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
+    on_draft_changed: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
+    on_attachment_removed: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
+    on_attachment_open: Optional[Callable[[dict], Any]] = field(default=None, metadata={"skip": True})
+    on_pill: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
+    on_pill_reset: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
 
     def init(self) -> None:
         super().init()
         self._previous_text = ""
         self.has_attachment = False
+        self.attachment: Optional[dict] = None
+        self.attachment_chip: Optional[AttachmentChip] = None
         self.chips_row = ft.Row([], scroll=ft.ScrollMode.AUTO, spacing=6, visible=False)
         self.text_field = ft.TextField(
             multiline=True,
@@ -229,6 +299,8 @@ class Composer(ft.Container):
         self._previous_text = value
         self.text_field.value = value
         self.expand_button.visible = self._line_estimate(value) >= EXPAND_ICON_LINES
+        if self.on_draft_changed is not None:
+            self.on_draft_changed(value)
         self._content_changed()
 
     def add_pasted_text(self, text: str) -> PastedTextChip:
@@ -243,12 +315,77 @@ class Composer(ft.Container):
         self.chips_row.visible = bool(self.chips_row.controls)
         self._content_changed()
 
+    @property
+    def pasted_text(self) -> str:
+        """Text of the pasted-text chips (sent as the ``["user", text]`` content)."""
+        return "\n".join(chip.text for chip in self.pasted_chips)
+
+    def send_text(self) -> str:
+        """Field text plus pasted chips, as the desktop reads ``toPlainText().strip()``."""
+        parts = [part for part in (self.text, self.pasted_text) if part]
+        return "\n".join(parts).strip()
+
+    def set_text(self, value: str) -> None:
+        """Programmatic set (draft restore) without paste-to-chip and without a draft write."""
+        self._previous_text = value or ""
+        self.text_field.value = value or ""
+        self.expand_button.visible = self._line_estimate(self._previous_text) >= EXPAND_ICON_LINES
+        self._content_changed()
+
+    # ---- attachment (one per turn) ------------------------------------------------------
+
+    def set_attachment(self, record: Optional[dict], *, missing: bool = False) -> None:
+        if self.attachment_chip is not None and self.attachment_chip in self.chips_row.controls:
+            self.chips_row.controls.remove(self.attachment_chip)
+        self.attachment_chip = None
+        self.attachment = dict(record) if record else None
+        if record:
+            self.attachment_chip = AttachmentChip(
+                record=dict(record), missing=missing, on_remove=self._remove_attachment, on_open=self._open_attachment
+            )
+            self.chips_row.controls.insert(0, self.attachment_chip)
+        self.chips_row.visible = bool(self.chips_row.controls)
+        self.set_attachment_hint(bool(record))
+        self._content_changed()
+
+    def _remove_attachment(self, chip: Any = None) -> None:
+        self.set_attachment(None)
+        if self.on_attachment_removed is not None:
+            self.on_attachment_removed()
+
+    def _open_attachment(self, chip: Any = None) -> None:
+        if self.on_attachment_open is not None and self.attachment:
+            self.on_attachment_open(dict(self.attachment))
+
+    # ---- option pills and token hint -----------------------------------------------------
+
+    def set_pills(self, pills: list) -> None:
+        """``[(id, label)]`` of options that differ from the defaults (§2.3 action row)."""
+        self.pills_row.controls = [
+            ft.Chip(
+                label=ft.Text(label),
+                on_click=lambda e, p=pill_id: self.on_pill(p) if self.on_pill else None,
+                on_delete=lambda e, p=pill_id: self.on_pill_reset(p) if self.on_pill_reset else None,
+                key=f"pill-{pill_id}",
+            )
+            for pill_id, label in pills
+        ]
+        self.pills_row.visible = bool(pills)
+
+    def set_token_hint(self, text: str) -> None:
+        self.token_hint.value = text
+        self.token_hint.visible = bool(text)
+
     def clear(self) -> None:
         self.text_field.value = ""
         self._previous_text = ""
         self.chips_row.controls.clear()
         self.chips_row.visible = False
         self.expand_button.visible = False
+        self.attachment = None
+        self.attachment_chip = None
+        self.set_attachment_hint(False)
+        self.token_hint.visible = False
         self._content_changed()
 
     def set_attachment_hint(self, attached: bool) -> None:

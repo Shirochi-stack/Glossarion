@@ -163,7 +163,7 @@ ROUTES: tuple[RouteSpec, ...] = (
     RouteSpec("chat.attachments", "/chat/{cid:cid}/attachments", "Attachments", VIEW, "U7", parent="chat"),
     RouteSpec("chat.compose", "/chat/{cid:cid}/compose", "Composer", FULLSCREEN, "U3", parent="chat"),
     RouteSpec("chat.message", "/chat/{cid:cid}/m/{mid:hex12}", "Message", ROOT, "U3", parent="chat"),
-    RouteSpec("chat.message.edit", "/chat/{cid:cid}/m/{mid:hex12}/edit", "Edit output", FULLSCREEN, "U7", parent="chat"),
+    RouteSpec("chat.message.edit", "/chat/{cid:cid}/m/{mid:hex12}/edit", "Edit output", FULLSCREEN, "U3", parent="chat"),
     RouteSpec("series", "/series/{sid:id}", "Series", VIEW, "U9"),
     # Library and Reader (§3)
     RouteSpec("library", "/library", "Library", VIEW, "U5", query={"shelf": "shelf"}),

@@ -28,7 +28,7 @@ MODE_HINTS = {
     "refinement": "Refinement mode (Full / Full + raw / Failed / Partial / Partial.b / Partial.b2) · "
     "Raw prompt role · Refine prompt",
 }
-MODE_MILESTONES = {"text": None, "vision": "U3", "refinement": "U3", "image": "U7", "video": "U7", "audio": "U7"}
+MODE_MILESTONES = {"text": None, "vision": "U4", "refinement": "U4", "image": "U7", "video": "U7", "audio": "U7"}
 GENERATIVE = ("image", "video", "audio")
 
 

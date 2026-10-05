@@ -255,6 +255,15 @@ app_files = [
     ('settings_schema_data.py', '.'),
     # GUI-free Library registry + source-EPUB resolver (epub_library re-exports it)
     ('library_core.py', '.'),
+    # Mobile rewrite U3: stop protocol, job scope, text/compile jobs, input preparation, the
+    # translation/glossary pipelines and the Direct Text chat store + stream (translator_gui imports them)
+    ('stop_control.py', '.'),
+    ('job_runner.py', '.'),
+    ('text_jobs.py', '.'),
+    ('input_preparation.py', '.'),
+    ('translation_pipeline.py', '.'),
+    ('direct_text_store.py', '.'),
+    ('direct_text_stream.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -417,6 +426,15 @@ app_modules = [
     'settings_schema_data',
     # GUI-free Library registry + source-EPUB resolver (epub_library re-exports it)
     'library_core',
+    # Mobile rewrite U3: stop protocol, job scope, text/compile jobs, input preparation, the
+    # translation/glossary pipelines and the Direct Text chat store + stream (translator_gui imports them)
+    'stop_control',
+    'job_runner',
+    'text_jobs',
+    'input_preparation',
+    'translation_pipeline',
+    'direct_text_store',
+    'direct_text_stream',
 ]
 # GUI Framework
 gui_modules = [

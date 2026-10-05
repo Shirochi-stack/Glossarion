@@ -374,10 +374,33 @@ def roundtrip(value):
     return ast.literal_eval(pprint.pformat(value, width=120, sort_dicts=False))
 
 
+_CALLABLE_PREFIX = "<callable "
+
+
+def callable_name(value):
+    """``'<callable Owner.method.<locals>.<lambda>>'`` -> ``'<lambda>'`` (else None).
+
+    A callable is recorded with its ``__qualname__``, which names the class / function
+    the code lives in. Moving code into a shared module changes that location
+    (``LegacyMethods._process_text_file`` -> ``TextJobsMixin._process_text_file``), not
+    the behaviour, so goldens compare callables by their own name, like tier D's
+    ``fuzz_moved.canon`` (``__name__``).
+    """
+    if isinstance(value, str) and value.startswith(_CALLABLE_PREFIX) and value.endswith(">"):
+        qualname = value[len(_CALLABLE_PREFIX):-1]
+        return qualname.replace(".<locals>.", ".").rsplit(".", 1)[-1]
+    return None
+
+
 def diff(expected, actual, path="", out=None, limit=50) -> list:
-    """Readable recursive differences (first *limit*)."""
+    """Readable recursive differences (first *limit*); callables compare by name (``callable_name``)."""
     out = [] if out is None else out
     if len(out) >= limit:
+        return out
+    exp_callable, act_callable = callable_name(expected), callable_name(actual)
+    if exp_callable is not None and act_callable is not None:
+        if exp_callable != act_callable:
+            out.append(f"{path}: {str(expected)[:160]!r} != {str(actual)[:160]!r}")
         return out
     if isinstance(expected, dict) and isinstance(actual, dict):
         for key in list(expected) + [k for k in actual if k not in expected]:

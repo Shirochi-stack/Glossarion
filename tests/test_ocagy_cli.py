@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
-from _src_corpus import desktop_gui_source
+from _src_corpus import DESKTOP_GUI_MODULES, SRC_DIR, desktop_gui_source, module_tree
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
@@ -63,9 +63,10 @@ def test_zen_error_detail_preserves_unstructured_error():
 ])
 def test_text_translation_error_handler_limits_expected_tracebacks(monkeypatch, error_type, expect_traceback):
     # Execute the actual handler without loading the GUI or starting a translation.
-    tree = ast.parse((SRC / 'translator_gui.py').read_text(encoding='utf-8-sig'))
+    # U3: the handler lives in text_jobs.TextJobsMixin._process_text_file
+    trees = [module_tree(m) for m in DESKTOP_GUI_MODULES if (SRC_DIR / f"{m}.py").exists()]
     handler = next(
-        node for node in ast.walk(tree)
+        node for tree in trees for node in ast.walk(tree)
         if isinstance(node, ast.ExceptHandler)
         and any(isinstance(child, ast.Name) and child.id == 'is_config_error'
                 for child in ast.walk(node))

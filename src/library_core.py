@@ -14,6 +14,10 @@ re-imports every name, so desktop callers get the same function objects:
   ``_read_source_epub_pointer``, ``_origins_raw_sources_for_stem``,
   ``_validate_source_epub_for_workspace`` and the helpers ``_special_file_stem`` /
   ``_norm_book_key``.
+* (U3) ``_read_progress_summary`` (the Library card's translation_progress.json
+  counts, also read by ``job_runner.ProgressWatcher``) with the special-file rules
+  (``_is_configured_special_file`` and its config/env resolvers), ``_is_gallery_filename``
+  and ``_is_progress_sidecar_entry``.
 
 The rest of the Library logic (scans, covers, book details, actions) follows in U5
 (plan section 2). Log records keep the ``epub_library`` logger name so desktop log
@@ -25,10 +29,16 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 
 import logging
 import os
+import re
 import shutil
 import traceback
 from pathlib import Path
 
+from chapter_chunk_progress import (
+    chunk_failure_summary,
+    effective_parent_status,
+    is_multi_chunk_entry,
+)
 from metadata_progress import is_metadata_progress_entry
 from translation_artifacts import is_translation_artifact_progress_entry
 
@@ -746,16 +756,278 @@ def _find_raw_source_for_folder(folder: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# translation_progress.json summary (U3: the Library card numbers, also the mobile
+# job_runner.ProgressWatcher) and the special-file rules it applies; moved verbatim
+# from epub_library.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SPECIAL_FILE_KEYWORDS = (
+    "title, toc, copyright, preface, nav, message, notice, colophon, "
+    "dedication, epigraph, foreword, acknowledgment, author, appendix, "
+    "bibliography"
+)
+
+
+_DEFAULT_SPECIAL_FILE_EXACT = "index, glossary, glossary_extension, glossary_unified"
+
+
+def _parse_special_file_list(value: object) -> list[str]:
+    """Parse a comma-separated special-file setting into lowercase tokens."""
+    if value is None:
+        return []
+    return [p.strip().lower() for p in str(value).split(",") if p.strip()]
+
+
+def _resolve_special_file_lists(config: dict | None = None) -> tuple[list[str], list[str]]:
+    """Return configured (substring_keywords, exact_keywords).
+
+    The Other Settings dialog exposes the same values as
+    ``special_file_keywords`` / ``special_file_exact`` in config and mirrors
+    edits into ``SPECIAL_FILE_KEYWORDS`` / ``SPECIAL_FILE_EXACT``. Environment
+    variables win because translator worker processes use them as runtime
+    overrides; otherwise config wins; otherwise use the UI defaults.
+    """
+    cfg = config or {}
+
+    if "SPECIAL_FILE_KEYWORDS" in os.environ:
+        kw_value = os.environ.get("SPECIAL_FILE_KEYWORDS", "")
+    elif "special_file_keywords" in cfg:
+        kw_value = cfg.get("special_file_keywords", "")
+    else:
+        kw_value = _DEFAULT_SPECIAL_FILE_KEYWORDS
+
+    if "SPECIAL_FILE_EXACT" in os.environ:
+        exact_value = os.environ.get("SPECIAL_FILE_EXACT", "")
+    elif "special_file_exact" in cfg:
+        exact_value = cfg.get("special_file_exact", "")
+    else:
+        exact_value = _DEFAULT_SPECIAL_FILE_EXACT
+
+    return _parse_special_file_list(kw_value), _parse_special_file_list(exact_value)
+
+
+def _has_number_in_filename(name: str) -> bool:
+    """Return True if the filename (without extension) contains a digit.
+
+    Mirrors the translator's ``_has_number_in_filename`` so the library
+    classifies files the same way the translation pipeline does.
+    """
+    stem = os.path.splitext(os.path.basename(str(name or "")))[0]
+    return bool(re.search(r"\d", stem))
+
+
+def _resolve_translate_all_numbered(config: dict | None = None) -> bool:
+    """Return the effective ``translate_all_numbered_html`` setting.
+
+    Environment variable ``TRANSLATE_ALL_NUMBERED_HTML`` wins, then the
+    config dict value (default True).
+    """
+    env = os.environ.get("TRANSLATE_ALL_NUMBERED_HTML", "").strip()
+    if env == "1":
+        return True
+    if env == "0":
+        return False
+    return bool((config or {}).get("translate_all_numbered_html", True))
+
+
+def _is_configured_special_file(name: str, config: dict | None = None) -> bool:
+    """Return True when *name* matches the configured special-file lists.
+
+    When ``translate_all_numbered_html`` is enabled in *config*, files whose
+    stem contains a digit are NOT considered special — they will be translated
+    despite matching a skip keyword.
+    """
+    stem = _special_file_stem(name)
+    if not stem:
+        return False
+    keywords, exact = _resolve_special_file_lists(config)
+    is_match = stem in exact or any(kw in stem for kw in keywords)
+    if not is_match:
+        return False
+    # When the "Translate All Numbered HTML Files" toggle is ON, files
+    # with a digit in their filename are force-translated by the
+    # translator even if they match a skip keyword.  The library must
+    # mirror that decision so the displayed chapter list, progress
+    # fractions, and "Show skipped files" filtering reflect the real
+    # translation scope.
+    if _resolve_translate_all_numbered(config) and _has_number_in_filename(name):
+        return False
+    return True
+
+
+def _is_gallery_filename(name: str) -> bool:
+    """Return True if *name* refers to the auto-generated gallery page.
+
+    Matches ``gallery.xhtml``, ``gallery.html``, ``Gallery.xhtml``,
+    ``response_gallery.*`` and similar variants (case-insensitive,
+    extension-agnostic). The gallery is injected by the translator's
+    compile step, never a real source chapter, so it must never count
+    toward the translation progress fraction nor render a status badge.
+    """
+    if not name:
+        return False
+    base = os.path.basename(str(name)).lower()
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    stem = os.path.splitext(base)[0]
+    return stem == "gallery"
+
+
+_PROGRESS_SIDECAR_FILENAMES = frozenset({
+    "source_epub.txt",
+    "image_rename_map.json",
+})
+
+
+def _is_progress_sidecar_entry(key, entry: dict | None = None) -> bool:
+    """Return True for workspace bookkeeping rows that are never chapters."""
+    entry = entry if isinstance(entry, dict) else {}
+    for value in (
+        key,
+        entry.get("original_basename"),
+        entry.get("output_file"),
+    ):
+        if (value and os.path.basename(str(value)).casefold()
+                in _PROGRESS_SIDECAR_FILENAMES):
+            return True
+    return False
+
+
+def _read_progress_summary(progress_file: str, exclude_special: bool = False,
+                           config: dict | None = None) -> dict | None:
+    """Return a lightweight summary of translation_progress.json or None on failure.
+
+    The summary counts chapter statuses so the library card can render a
+    fraction/percentage without paying for the full OPF-aware match.
+
+    When *exclude_special* is True, entries matching the configured
+    special-file substring/exact lists are dropped from both the total and
+    the status tallies. This matches :func:`_count_epub_spine_items` and
+    :func:`_count_translated_response_files` so the toggle shifts numerator
+    and denominator together.
+
+    **File-existence verification**: entries whose ``status`` is
+    ``"completed"`` are only counted as completed when the
+    corresponding ``output_file`` still exists on disk (relative to
+    the progress file's folder). The translator writes
+    ``response_*.html`` files during translation and marks the
+    progress entry ``completed`` — but if the user later manually
+    deletes one of those files, the JSON still carries the stale
+    ``completed`` status. Without this verification the card would
+    keep reading e.g. 60/60 even though only 55 of the response
+    files remain on disk. Any demoted entries are counted as
+    ``in_progress`` instead so the fraction reflects reality.
+    """
+    import json as _json
+    try:
+        with open(progress_file, "r", encoding="utf-8") as f:
+            prog = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return None
+    chapters = prog.get("chapters", {}) or {}
+    total = 0
+    completed = 0
+    in_progress = 0
+    failed = 0
+    output_folder = os.path.dirname(progress_file) if progress_file else ""
+    output_folder_ok = bool(output_folder) and os.path.isdir(output_folder)
+    for key, ch in chapters.items():
+        if not isinstance(ch, dict):
+            continue
+        if _is_progress_sidecar_entry(key, ch):
+            continue
+        # Metadata / TOC / chapter-header translation rows are workspace
+        # phases, not book chapters. Counting them inflated the total past
+        # the raw spine and let two extra completed rows hide a missing
+        # chapter, so a book could land on Completed with work left.
+        if (
+            is_metadata_progress_entry(key, ch)
+            or bool(ch.get("metadata_progress_key"))
+            or is_translation_artifact_progress_entry(key, ch)
+        ):
+            continue
+        name = (ch.get("original_basename")
+                or ch.get("output_file")
+                or str(key)
+                or "")
+        # Auto-generated gallery entries never count toward progress,
+        # regardless of the translate-special-files toggle.
+        if _is_gallery_filename(name):
+            continue
+        if exclude_special:
+            # Prefer original_basename (source file) over output_file
+            # (response_*.html) so a run started with translate_special=ON
+            # and flipped OFF still filters correctly. Fall back to the
+            # progress-file key as a last resort.
+            stem = _special_file_stem(name)
+            # Only skip when we HAVE a filename to judge by — entries
+            # with no recognizable name stay in the count rather than
+            # silently disappearing.
+            if stem and _is_configured_special_file(name, config):
+                continue
+        total += 1
+        status = ch.get("status", "")
+        chunk_key = str(ch.get("content_hash") or key)
+        chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+        if is_multi_chunk_entry(chunk_entry):
+            chunk_summary = chunk_failure_summary(chunk_entry)
+            status = effective_parent_status(status, chunk_entry)
+            # Keep the parent chapter row individually complete for scanner
+            # compatibility, but count a child-only QA failure as failed in
+            # the book-level aggregate rather than claiming the book is done.
+            if chunk_summary["failed"] and status == "completed":
+                status = "qa_failed"
+        # Phantom-completion check: the progress JSON may say
+        # "completed" but the actual output file could have been
+        # deleted by the user. Verify it's still on disk before
+        # counting it as done — otherwise the card fraction lies.
+        if status == "completed" and output_folder_ok:
+            of = ch.get("output_file") or ""
+            if of:
+                candidate = of if os.path.isabs(of) else os.path.join(
+                    output_folder, of)
+                if not os.path.isfile(candidate):
+                    # Demote locally for counting. The JSON itself
+                    # isn't rewritten — the translator's own progress
+                    # manager is the source of truth for that.
+                    status = "in_progress"
+        if status == "completed":
+            completed += 1
+        elif status in ("in_progress", "pending"):
+            in_progress += 1
+        elif status in ("failed", "qa_failed"):
+            failed += 1
+    return {
+        "total": total,
+        "completed": completed,
+        "in_progress": in_progress,
+        "failed": failed,
+        "prog": prog,
+    }
+
+
 __all__ = [
+    "_DEFAULT_SPECIAL_FILE_EXACT",
+    "_DEFAULT_SPECIAL_FILE_KEYWORDS",
     "_FILENAME_STRIP_CHARS",
     "_LIBRARY_TRACKING_FILENAMES",
+    "_PROGRESS_SIDECAR_FILENAMES",
     "_find_raw_source_for_folder",
+    "_has_number_in_filename",
+    "_is_configured_special_file",
+    "_is_gallery_filename",
+    "_is_progress_sidecar_entry",
     "_load_origins",
     "_migrate_legacy_library_layout",
     "_norm_book_key",
     "_origins_file",
     "_origins_raw_sources_for_stem",
+    "_parse_special_file_list",
+    "_read_progress_summary",
     "_read_source_epub_pointer",
+    "_resolve_special_file_lists",
+    "_resolve_translate_all_numbered",
     "_save_origins",
     "_special_file_stem",
     "_validate_source_epub_for_workspace",

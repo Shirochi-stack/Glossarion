@@ -42,6 +42,12 @@ modules = [
   # GUI-free Library registry + source-EPUB resolver (run_env's EPUB compile env; the rest of
   # the Library logic follows in U5).
   "library_core",
+  # U3 shared core: the Stop protocol and run-start resets, the job scope (JOB_LOCK,
+  # scoped_process_state, ProgressWatcher), text/compile jobs, ZIP/HTML/subtitle input
+  # preparation, the translation + glossary pipelines HeadlessOwner inherits, and the Direct
+  # Text chat store (direct_text_chats.json v2) + log-stream model the chat uses (plan §2).
+  "stop_control", "job_runner", "text_jobs", "input_preparation", "translation_pipeline",
+  "direct_text_store", "direct_text_stream",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).

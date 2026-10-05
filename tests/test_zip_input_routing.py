@@ -32,6 +32,7 @@ def _gui(tmp_path, monkeypatch):
         '_convert_zip_input_to_epub_if_needed',
         '_extract_subtitle_zip_input_if_needed',
         '_resolve_zip_inputs_for_translation',
+        '_ui_request',  # U3: input_files_updated_signal.emit goes through the desktop hook
     ):
         setattr(gui, name, MethodType(getattr(TranslatorGUI, name), gui))
     return gui

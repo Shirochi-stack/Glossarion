@@ -7,8 +7,9 @@ long-press, so the tap must still arrive to explain the reason. The long-press
 menu is a ``ContextMenu(primary_trigger=LONG_PRESS)`` (``PopupMenuButton``
 cannot be opened from code) whose items are rebuilt on every state change.
 
-Not wired to jobs in U1: ``on_action(SendAction)`` is called with what the tap
-or menu item means, and the chat view decides what to do with it.
+``on_action(SendAction)`` is called with what the tap or menu item means; the
+chat view maps it onto ``ChatRuns`` / JobService (send, queue, graceful stop,
+force stop).
 """
 
 from __future__ import annotations

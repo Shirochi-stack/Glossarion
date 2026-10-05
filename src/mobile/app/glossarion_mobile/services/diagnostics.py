@@ -47,6 +47,7 @@ class SelfTestRunner:
         self.state = state
         self.before_run = before_run
         self.runs = 0
+        self.current_suite: Optional[str] = None  # the suite being run ("smoke", "e2e")
 
     @property
     def running(self) -> bool:
@@ -58,6 +59,7 @@ class SelfTestRunner:
             return None
         from glossarion_mobile.diagnostics import selftest
 
+        self.current_suite = suite
         self.state.selftest_running.set(True)
         self.runs += 1
         t0 = time.monotonic()

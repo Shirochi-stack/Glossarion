@@ -79,7 +79,11 @@ jobs:
           tests/test_pdf_mupdf_html.py \
           tests/test_shared_core_p1.py \
           tests/test_headless_owner.py \
-          tests/test_settings_schema.py
+          tests/test_settings_schema.py \
+          tests/test_job_runner.py \
+          tests/test_text_jobs.py \
+          tests/test_translation_pipeline.py \
+          tests/test_direct_text_core.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -97,6 +101,9 @@ jobs:
             # U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
             "owner_state", "run_env", "settings_persistence", "headless_owner", "settings_schema",
             "settings_schema_data", "library_core",
+            # U3: stop protocol, job scope, text jobs, input preparation, pipelines, Direct Text chat
+            "stop_control", "job_runner", "text_jobs", "input_preparation", "translation_pipeline",
+            "direct_text_store", "direct_text_stream",
         )
         failed = []
         for name in SHARED:

@@ -397,7 +397,8 @@ LEGACY_BOOT_PHASES = (
 
 #: Live GUI-free modules whose path globals the owner factory points at the sandbox
 #: (they resolve CONFIG_FILE / _APP_DIR / __file__ at import time).
-SHARED_PATH_MODULES = ("app_paths", "owner_state", "run_env", "settings_persistence", "headless_owner")
+SHARED_PATH_MODULES = ("app_paths", "owner_state", "run_env", "settings_persistence", "headless_owner",
+                       "text_jobs", "input_preparation")
 
 
 def shared_mixin_classes(bundle) -> tuple:

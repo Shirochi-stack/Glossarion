@@ -41,7 +41,7 @@ log = logging.getLogger("glossarion.settings")
 FLUSH_LIFECYCLE_STATES = ("inactive", "hide", "pause", "detach")
 # Routes this feature builds screens for (plus the app's own Logs & diagnostics).
 SCREEN_ROUTES = ("settings", "settings.section", "settings.env_preview")
-IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES + ("settings.logs",))
+IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES + ("settings.logs", "settings.accounts"))  # Accounts: ChatFeature (U3)
 _RUNNING_JOB_STATES = ("running", "finishing", "stopping")
 
 

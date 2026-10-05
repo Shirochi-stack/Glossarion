@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1 and U2 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1, U2 and U3 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -308,6 +308,14 @@ U2_SHARED_MODULES = (
     "library_core",
 )
 
+# U3: TranslatorGUI inherits the text-job / input-preparation / pipeline mixins, its Stop button
+# and run start use stop_control, and the Direct Text dialog inherits the chat store and stream
+# mixins (translator_gui imports all of them at module level).
+U3_SHARED_MODULES = (
+    "stop_control", "job_runner", "text_jobs", "input_preparation", "translation_pipeline",
+    "direct_text_store", "direct_text_stream",
+)
+
 
 def _spec_list(source, name):
     lines = source.splitlines()
@@ -323,7 +331,7 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         source = spec.read_text(encoding="utf-8")
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
-        for name in U1_SHARED_MODULES + U2_SHARED_MODULES:
+        for name in U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES:
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")

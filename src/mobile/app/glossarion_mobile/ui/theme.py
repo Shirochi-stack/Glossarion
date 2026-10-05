@@ -23,6 +23,7 @@ from glossarion_mobile.ui import tokens
 __all__ = [
     "Appearance",
     "HIT_TARGET",
+    "TEXT_THEME_COLOR",
     "apply_theme",
     "build_theme",
     "build_text_theme",
@@ -78,8 +79,20 @@ def text_style(name: str, *, scale: float = 1.0, color: Optional[str] = None, fa
     )
 
 
+#: Text theme colour. Flet's ``parseTextTheme`` replaces each Flutter default style
+#: with ours (``textTheme.copyWith(bodyLarge: <ours>, ...)``), so a style without a
+#: colour loses the brightness-aware default and renders near-black in dark mode
+#: (AppBar titles, ReasonChip labels). The role name is resolved against the theme
+#: being built for each brightness (Flet ``parseColor(value, theme)``), so one value
+#: serves light, dark and AMOLED. Widgets that set their own foreground (buttons,
+#: chips) still override it through DefaultTextStyle.
+TEXT_THEME_COLOR = ft.Colors.ON_SURFACE
+
+
 def build_text_theme(scale: float = 1.0) -> ft.TextTheme:
-    return ft.TextTheme(**{name: text_style(name, scale=scale) for name in tokens.TYPE_SCALE})
+    return ft.TextTheme(
+        **{name: text_style(name, scale=scale, color=TEXT_THEME_COLOR) for name in tokens.TYPE_SCALE}
+    )
 
 
 def build_theme(

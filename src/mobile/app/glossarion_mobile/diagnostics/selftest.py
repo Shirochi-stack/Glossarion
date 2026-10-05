@@ -4,6 +4,12 @@ Run on device by the deep link ``glossarion://app/__selftest__?suite=smoke`` (CI
 emulator smoke) or the "Run self-test" button; on the host by
 ``tests_host/test_bootstrap.py`` or ``python -m glossarion_mobile.diagnostics.selftest``.
 
+Suites: ``smoke`` (packages, env contract, offline assets; seconds) and ``e2e``
+(``diagnostics.e2e``: real chat / translate / stop / resume jobs against the fake
+OpenAI server on 127.0.0.1; minutes), run on device by
+``glossarion://app/__selftest__?suite=e2e`` or the "Run end-to-end test" button, on the
+host by ``python -m glossarion_mobile.diagnostics.e2e``.
+
 ``run_selftest()`` is blocking (call it from a worker thread, never from the
 Flet loop), returns a JSON-serialisable dict, writes ``<logs>/selftest-last.json``
 and prints exactly one marker line::
@@ -46,6 +52,7 @@ class Context:
         self.strict = strict
         self.state = rb.get_state()
         self.paths = self.state.paths if self.state is not None else None
+        self.cleanups: list[Callable[[], Any]] = []  # run after the last check (e2e session teardown)
 
     def need(self, module: str):
         """Import ``module``; missing -> failure (strict) or skip (host)."""
@@ -422,6 +429,45 @@ def check_thread_stack(ctx: Context) -> dict[str, Any]:
     return outcome
 
 
+# --------------------------------------------------------------------------
+# e2e suite (diagnostics.e2e; one session shared by the checks of one run)
+# --------------------------------------------------------------------------
+
+
+def _e2e_session(ctx: Context):
+    session = getattr(ctx, "e2e", None)
+    if session is None:
+        paths = ctx.require_bootstrap()
+        for module in ("ebooklib", "openai", "httpx", "lxml"):
+            ctx.need(module)  # host without the backend dependencies: skip (strict: fail)
+        from glossarion_mobile.diagnostics import e2e
+
+        session = e2e.E2ESession(paths, keep=os.environ.get("GLOSSARION_E2E_KEEP") == "1")
+        ctx.e2e = session
+        ctx.cleanups.append(session.close)
+    session.setup()
+    return session
+
+
+def _e2e_check(method: str) -> Callable[[Context], dict[str, Any]]:
+    def check(ctx: Context) -> dict[str, Any]:
+        session = _e2e_session(ctx)
+        try:
+            return getattr(session, method)()
+        except BaseException:
+            session.failed = True
+            raise
+
+    check.__name__ = f"check_{method}"
+    return check
+
+
+def _e2e_checks() -> tuple:
+    from glossarion_mobile.diagnostics.e2e import SCENARIOS
+
+    return tuple((name, _e2e_check(method)) for name, method in SCENARIOS)
+
+
 SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] = {
     "smoke": (
         ("env_contract", check_env_contract),
@@ -437,6 +483,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("onnxruntime", check_onnxruntime),
         ("thread_stack", check_thread_stack),
     ),
+    "e2e": _e2e_checks(),
 }
 
 
@@ -497,25 +544,32 @@ def run_selftest(
         if definitions is None:
             error = f"unknown suite {suite!r} (known: {sorted(SUITES)})"
             definitions = ()
-        for name, func in definitions:
-            if only is not None and name not in only:
-                continue
-            c0 = time.monotonic()
-            entry: dict[str, Any] = {"name": name}
-            try:
-                entry["detail"] = func(ctx)
-                entry["status"] = "pass"
-            except CheckSkipped as exc:
-                entry["status"] = "skip"
-                entry["reason"] = str(exc)
-            except BaseException as exc:
-                if isinstance(exc, KeyboardInterrupt):
-                    raise
-                entry["status"] = "fail"
-                entry["error"] = f"{type(exc).__name__}: {exc}"
-                entry["traceback"] = traceback.format_exc()[-2000:]
-            entry["secs"] = round(time.monotonic() - c0, 3)
-            checks.append(entry)
+        try:
+            for name, func in definitions:
+                if only is not None and name not in only:
+                    continue
+                c0 = time.monotonic()
+                entry: dict[str, Any] = {"name": name}
+                try:
+                    entry["detail"] = func(ctx)
+                    entry["status"] = "pass"
+                except CheckSkipped as exc:
+                    entry["status"] = "skip"
+                    entry["reason"] = str(exc)
+                except BaseException as exc:
+                    if isinstance(exc, KeyboardInterrupt):
+                        raise
+                    entry["status"] = "fail"
+                    entry["error"] = f"{type(exc).__name__}: {exc}"
+                    entry["traceback"] = traceback.format_exc()[-2000:]
+                entry["secs"] = round(time.monotonic() - c0, 3)
+                checks.append(entry)
+        finally:
+            for cleanup in reversed(ctx.cleanups):
+                try:
+                    cleanup()
+                except Exception:
+                    traceback.print_exc()
 
         passed = sum(1 for c in checks if c["status"] == "pass")
         failed = sum(1 for c in checks if c["status"] == "fail")

@@ -2,7 +2,9 @@
 
 Cards: Runtime (bootstrap result, paths, backend warm import) · Self-test
 (runs ``diagnostics.selftest`` on a worker thread through ``SelfTestRunner``
-and shows a PASS/FAIL card with one row per check) · Device checks (opens the
+and shows a PASS/FAIL card with one row per check; "Run end-to-end test" runs the
+``e2e`` suite: real chat / translate / stop / resume jobs against the built-in fake
+OpenAI server, in a sandbox that never touches the user's chats or settings) · Device checks (opens the
 U0 spike screen: SecureStorage, foreground service, notifications,
 Open-with, OAuth loopback, thread stacks, iOS background tasks) · Live log
 (LogConsole over the app log buffer).
@@ -92,6 +94,10 @@ class DiagnosticsScreen(Screen):
         mono = mono_family(self.page)
         self.runtime_text = ft.Text("\n".join(runtime_lines(self.page)), selectable=True, font_family=mono, size=12)
         self.run_button = ft.FilledTonalButton(content="Run self-test", icon=ft.Icons.PLAY_ARROW, on_click=self._on_run)
+        self.e2e_button = ft.FilledTonalButton(
+            content="Run end-to-end test", icon=ft.Icons.SCIENCE_OUTLINED, on_click=self._on_run_e2e,
+            tooltip="Translate the built-in test book against an offline fake model (a few minutes)",
+        )
         self.run_progress = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
         self.result_text = ft.Text(summarize(self.state.selftest_result.value), selectable=True)
         self.checks_column = ft.Column([], spacing=2, tight=True)
@@ -117,8 +123,13 @@ class DiagnosticsScreen(Screen):
             SectionCard(
                 title="Self-test",
                 icon="FACT_CHECK",
-                subtitle="Imports, offline tiktoken, EPUB/lxml, Fernet, openai/pydantic, PyMuPDF, cv2, onnxruntime, env",
-                children=[ft.Row([self.run_button, self.run_progress], spacing=12), self.result_text, self.checks_column],
+                subtitle="Imports, offline tiktoken, EPUB/lxml, Fernet, openai/pydantic, PyMuPDF, cv2, onnxruntime, env; "
+                "end-to-end: chat + glossary approval, translate, stop, resume against an offline fake model",
+                children=[
+                    ft.Row([self.run_button, self.e2e_button, self.run_progress], spacing=12, wrap=True, run_spacing=8),
+                    self.result_text,
+                    self.checks_column,
+                ],
                 key="diag-selftest",
             ),
             SectionCard(
@@ -161,9 +172,11 @@ class DiagnosticsScreen(Screen):
 
     def _render_running(self, running: bool) -> None:
         self.run_button.disabled = bool(running)
+        self.e2e_button.disabled = bool(running)
         self.run_progress.visible = bool(running)
         if running:
-            self.result_text.value = "Running suite 'smoke'…"
+            suite = getattr(self.runner, "current_suite", None) or "smoke"
+            self.result_text.value = f"Running suite '{suite}'…"
 
     def _render_result(self, result: Optional[dict]) -> None:
         self.result_text.value = summarize(result)
@@ -203,7 +216,7 @@ class DiagnosticsScreen(Screen):
 
     def _on_running(self, running: bool) -> None:
         self._render_running(running)
-        self._push(self.run_button, self.run_progress, self.result_text)
+        self._push(self.run_button, self.e2e_button, self.run_progress, self.result_text)
 
     def _on_refresh(self, e: Any = None) -> None:
         self.runtime_text.value = "\n".join(runtime_lines(self.page))
@@ -211,6 +224,9 @@ class DiagnosticsScreen(Screen):
 
     async def _on_run(self, e: Any = None) -> Optional[dict]:
         return await self.runner.run("smoke", source="diagnostics")
+
+    async def _on_run_e2e(self, e: Any = None) -> Optional[dict]:
+        return await self.runner.run("e2e", source="diagnostics")
 
     def _on_device_checks(self, e: Any = None) -> None:
         if self.open_device_checks is not None:

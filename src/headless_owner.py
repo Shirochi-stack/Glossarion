@@ -28,9 +28,18 @@ Construction replays a desktop start in ``TranslatorGUI.__init__`` order:
    re-exports the saved settings after the startup env.
 
 Construction writes ~40 process-wide environment variables, so mobile builds an
-owner only on its job thread (under the job lock), from a config snapshot taken at
-job start. Pipelines (``TranslationPipelineMixin``, ``TextJobsMixin``) arrive in U3
-as extra bases placed before the shared mixins.
+owner only on its job thread (under ``job_runner.JOB_LOCK``), from a config snapshot
+taken at job start. U3 adds the job code as extra bases placed before the shared
+mixins, in TranslatorGUI's order: ``TranslationPipelineMixin`` (``_prepare_translation_run``
++ ``_translation_worker``: the desktop Run Translation; ``run_translation_direct``,
+QA/multipass planning, ``run_glossary_extraction_direct``, glossary auto-loading and
+auto-mapping), ``TextJobsMixin`` (``_process_text_file``,
+``_extract_glossary_from_text_file``, ``_run_epub_compile`` / ``_run_pdf_compile``,
+``_run_parallel_metadata_files``) and ``InputPreparationMixin`` (ZIP / HTML / subtitle
+inputs); their hooks (``_backend_entry``, ``_ui_request``, ``_ui_message``,
+``_notify_compile_result``, ...) use the GUI-free defaults of
+``translation_pipeline.PipelineHooksMixin`` / ``job_runner.JobHooksMixin``, which report
+to ``host.emit`` and ask ``host.ask`` (glossary approval).
 
 Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup.
 """
@@ -41,9 +50,12 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from input_preparation import InputPreparationMixin
 from owner_state import ConfigStateMixin, initialize_extraction_variables
 from run_env import RunEnvMixin
 from settings_persistence import SettingsPersistenceMixin
+from text_jobs import TextJobsMixin
+from translation_pipeline import TranslationPipelineMixin
 
 # ---------------------------------------------------------------------------
 # Widget shims: only the Qt surface the shared code reads. ``hasattr`` answers
@@ -402,11 +414,12 @@ class DirectTextRunOptions:
 # ---------------------------------------------------------------------------
 
 
-class HeadlessOwner(SettingsPersistenceMixin, RunEnvMixin, ConfigStateMixin):
+class HeadlessOwner(TranslationPipelineMixin, TextJobsMixin, InputPreparationMixin,
+                    SettingsPersistenceMixin, RunEnvMixin, ConfigStateMixin):
     """GUI-free owner with the desktop's state machine (see module docstring).
 
-    ``host`` (optional) receives log lines through ``host.log(message)``; later
-    milestones add ``emit``/``ask`` for job events and blocking questions.
+    ``host`` (optional, a ``job_runner.JobHost``) receives log lines through
+    ``host.log(message)`` and job events through ``host.emit(kind, **data)``.
     ``api_key`` fills the API key field (default: the config's ``api_key``);
     ``model`` behaves like a config.json whose ``model`` is that value.
     """
@@ -416,6 +429,7 @@ class HeadlessOwner(SettingsPersistenceMixin, RunEnvMixin, ConfigStateMixin):
         # ---- TranslatorGUI.__init__ plain attribute defaults (before the config load) ----
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
+        self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
         self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = self.pdf_thread = None
         self.translation_future = self.glossary_future = self.qa_future = self.epub_future = self.pdf_future = None
@@ -472,6 +486,12 @@ class HeadlessOwner(SettingsPersistenceMixin, RunEnvMixin, ConfigStateMixin):
         else:
             print(message)
 
+    def _reset_api_watchdog_progress(self, *, clear_stale_external_files=True):
+        """Desktop watchdog reset without its progress bar: counters + watchdog files."""
+        from stop_control import reset_api_watchdog
+
+        reset_api_watchdog(clear_stale_external_files=clear_stale_external_files)
+
     def save_config(self, show_message=True):
         """The in-memory half of TranslatorGUI.save_config (no backup, dialogs or file write).
 
@@ -519,6 +539,9 @@ class HeadlessOwner(SettingsPersistenceMixin, RunEnvMixin, ConfigStateMixin):
             AUTO_GLOSSARY_SHORTCUT_ITEMS, index=self._saved_auto_glossary_shortcut_index()
         )
         # create_file_section
+        self.selected_files = []
+        self.current_file_index = 0
+        self.entry_epub = TextShim("No file selected")
         self.vertex_location_entry = TextShim(self.vertex_location_var)
         self.deep_scan_check = CheckShim(bool(self.deep_scan_var), "include subfolders")
         # _create_api_section: the key field shows config['api_key'] (decrypted)
@@ -546,6 +569,13 @@ OWNER_CONTRACT_MODULES = (
     ("owner_state", "ConfigStateMixin"),
     ("run_env", "RunEnvMixin"),
     ("settings_persistence", "SettingsPersistenceMixin"),
+    # U3: the pipelines, job runners and input preparation (+ their GUI-free hook defaults)
+    ("translation_pipeline", "TranslationPipelineMixin"),
+    ("translation_pipeline", "GlossaryPipelineMixin"),
+    ("translation_pipeline", "PipelineHooksMixin"),
+    ("text_jobs", "TextJobsMixin"),
+    ("input_preparation", "InputPreparationMixin"),
+    ("job_runner", "JobHooksMixin"),
 )
 
 
@@ -567,10 +597,43 @@ def _guarded_names(test):
     return out
 
 
+#: ``except`` types whose ``try`` body counts as guarded: a missing attribute there cannot
+#: fail the run (same rule as tests/parity/owner_contract.py).
+_GUARD_EXCEPTIONS = frozenset({'AttributeError', 'Exception', 'BaseException'})
+
+
+class _AllNames(frozenset):
+    """Guard set of a guarded ``try`` body: every name counts as guarded."""
+
+    def __contains__(self, item):
+        return True
+
+    def __or__(self, other):
+        return self
+
+    __ror__ = __or__
+
+
+_ALL_GUARDED = _AllNames()
+
+
+def _try_guards(node):
+    """True for a ``try`` with a bare ``except`` or one catching AttributeError/Exception/BaseException."""
+    for handler in node.handlers:
+        if handler.type is None:
+            return True
+        types_ = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        if any(ast.unparse(t).split('.')[-1] in _GUARD_EXCEPTIONS for t in types_):
+            return True
+    return False
+
+
 def _unguarded_reads(class_node):
     reads, stores = set(), set()
 
     def visit(node, guarded):
+        if isinstance(node, ast.ClassDef) and node is not class_node:
+            return  # a class nested in a method: its ``self`` is not the owner
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
             inner = guarded | _guarded_names(node.test)
             visit(node.test, guarded | _guarded_names(node.test))
@@ -579,11 +642,18 @@ def _unguarded_reads(class_node):
             for child in (node.orelse if isinstance(node.orelse, list) else [node.orelse]):
                 visit(child, guarded)
             return
+        if isinstance(node, ast.Try) and _try_guards(node):
+            for child in node.body:
+                visit(child, _ALL_GUARDED)
+            for part in (node.handlers, node.orelse, node.finalbody):
+                for child in part:
+                    visit(child, guarded)
+            return
         if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
-            seen = set(guarded)
+            seen = guarded
             for value in node.values:
                 visit(value, seen)
-                seen |= _guarded_names(value)
+                seen = seen | _guarded_names(value)
             return
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
             if isinstance(node.ctx, ast.Store):

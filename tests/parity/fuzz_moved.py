@@ -188,6 +188,8 @@ class ReadSet:
         provided = set(provided)
         self.attrs -= provided
         self.attrs.discard("config")
+        # harness internals (FakeState's recorder) are never owner state to perturb
+        self.attrs = {a for a in self.attrs if not a.startswith("_parity_")}
         for name in list(self.widgets):
             if name in provided:
                 del self.widgets[name]
@@ -628,15 +630,20 @@ _ADDR_RE = re.compile(r"0x[0-9a-fA-F]{6,}")
 #: "Traceback (most recent call last):" header and the final exception line stay.
 _TB_FRAME_RE = re.compile(r'(?m)^ *File "[^"\n]*", line \d+[^\n]*\n(?:(?: {4,}|\t)[^\n]*\n)*')
 _FRAME_RE = re.compile(r'File "[^"\n]+", line \d+')
+#: the name suggestion a printed AttributeError/NameError gets (3.10+) depends on how many
+#: attributes the owner class has (none above CPython's candidate limit): side-specific
+_SUGGESTION_RE = re.compile(r"\. Did you mean: '[^'\n]*'\?")
 
 
 def mask(text: str) -> str:
-    """Side-independent text: memory addresses and traceback frames masked."""
+    """Side-independent text: memory addresses, traceback frames and name suggestions masked."""
     if "0x" in text:
         text = _ADDR_RE.sub("0x?", text)
     if 'File "' in text:
         text = _TB_FRAME_RE.sub("", text)
         text = _FRAME_RE.sub('File "<src>", line <n>', text)
+    if "Did you mean" in text:
+        text = _SUGGESTION_RE.sub("", text)
     return text
 
 
@@ -646,7 +653,7 @@ def canon(value, owner=None, _depth=0):
         return "<max-depth>"
     t = type(value)
     if t is str:
-        return mask(value) if ("0x" in value or 'File "' in value) else value
+        return mask(value) if ("0x" in value or 'File "' in value or "Did you mean" in value) else value
     if t is int or t is bool or value is None:
         return value
     if t is float:  # tagged: 5.0 must not compare equal to 5 / True
@@ -823,6 +830,44 @@ def install_fd_guard(ctx) -> None:
     ctx.patch(os, "fdopen", _guard_fd_open(real_fdopen))
 
 
+def install_clock_stubs(ctx) -> None:
+    """Wall-clock reads the capture context's fixed ``time.time`` does not cover.
+
+    Generated files embed the current time (``time.gmtime()`` / ``time.localtime()``
+    without an argument, ``datetime.now()`` in the archive -> EPUB converters); two
+    sides straddling a second boundary would otherwise write different bytes.
+    """
+    import datetime as _dt
+
+    real_gmtime, real_localtime = time.gmtime, time.localtime
+    fixed = normalize.FIXED_TIME
+
+    def gmtime(secs=None):
+        return real_gmtime(fixed if secs is None else secs)
+
+    def localtime(secs=None):
+        return real_localtime(fixed if secs is None else secs)
+
+    real_datetime = _dt.datetime
+
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.fromtimestamp(fixed, tz)
+
+        @classmethod
+        def utcnow(cls):
+            return real_datetime.fromtimestamp(fixed, _dt.timezone.utc).replace(tzinfo=None)
+
+        @classmethod
+        def today(cls):
+            return real_datetime.fromtimestamp(fixed)
+
+    ctx.patch(time, "gmtime", gmtime)
+    ctx.patch(time, "localtime", localtime)
+    ctx.patch(_dt, "datetime", FixedDatetime)
+
+
 def install_side_effect_stubs(ctx) -> None:
     rec = ctx.recorder
 
@@ -865,6 +910,68 @@ FUZZ_FILES = {
     "inputs/fuzz_glossary.csv": _GLOSSARY_CSV,
     "outputs/Fuzz Novel/response_0001_chapter.html": "<html><body><p>x</p></body></html>",
 }
+
+def _zip_bytes(members) -> bytes:
+    """A ZIP archive (bytes) of ``[(name, data)]`` (stored, deterministic timestamps)."""
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, data in members:
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            archive.writestr(info, data)
+    return buffer.getvalue()
+
+
+def _png_bytes() -> bytes:
+    """A valid 1x1 RGB PNG."""
+    import struct
+
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    signature = bytes([0x89]) + b"PNG" + bytes([0x0D, 0x0A, 0x1A, 0x0A])
+    pixels = bytes([0x00, 0xFF, 0x00, 0x00])  # filter byte + one RGB pixel
+    return (signature + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+
+
+def _archive_fixtures() -> dict:
+    """Inputs for the U3 input-preparation entries (one per resolve_input_to_epub branch)."""
+    nl = chr(10)
+    page = "<html><head><title>{t}</title></head><body><h1>{t}</h1><p>본문 {t}.</p></body></html>"
+    png = _png_bytes()
+    srt = "1" + nl + "00:00:01,000 --> 00:00:02,000" + nl + "{t}" + nl
+    container = ('<?xml version="1.0"?><container version="1.0" '
+                 'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+                 '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+                 '</rootfiles></container>')
+    opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+           '<metadata/><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>'
+           '</manifest><spine><itemref idref="c1"/></spine></package>')
+    images = _zip_bytes([("001.png", png), ("002.png", png)])
+    return {
+        "inputs/Fuzz Chapters.zip": _zip_bytes([("ch1.html", page.format(t="One").encode()),
+                                                ("ch2.html", page.format(t="Two").encode())]),
+        "inputs/Fuzz Images.zip": images,
+        "inputs/Fuzz Images.cbz": images,
+        "inputs/Fuzz Subs.zip": _zip_bytes([("ep01.srt", srt.format(t="안녕").encode()),
+                                            ("ep02.srt", srt.format(t="잘 가").encode())]),
+        "inputs/Fuzz Bad.zip": _zip_bytes([("data.bin", bytes([0, 1, 2]))]),
+        "inputs/Fuzz Epub.zip": _zip_bytes([("mimetype", b"application/epub+zip"),
+                                            ("META-INF/container.xml", container.encode()),
+                                            ("OEBPS/content.opf", opf.encode()),
+                                            ("OEBPS/c1.xhtml", page.format(t="E").encode())]),
+        "inputs/Fuzz Page.html": page.format(t="Page"),
+        "inputs/Fuzz Broken.zip": b"PK" + bytes([3, 4]) + b" not really a zip",
+    }
+
+
+#: Archive / HTML inputs (``archive_path`` / ``unique_files`` argument profiles); written
+#: into every fuzz sandbox by ``fuzz_template_files``.
+FUZZ_ARCHIVES = _archive_fixtures()
 
 #: Path pool for path-like arguments (relative to the sandbox root; None/''/'abc' added).
 FUZZ_PATHS = (
@@ -940,6 +1047,7 @@ class FuzzContext:
     def __enter__(self):
         self.cap.__enter__()
         install_fd_guard(self)
+        install_clock_stubs(self)
         self._src_before = _src_tripwire()
         self.base_os_env = dict(os.environ)
         self.base_eff = normalize.effective_env()
@@ -1351,9 +1459,10 @@ ENV_DICT_VALUES = (None, {}, {"OUTPUT_MODE": "vision", "MODEL": "gpt-4o"}, {"X":
 class ArgGen:
     """Arguments for one callable: harvested literal call sites + name-based heuristics."""
 
-    def __init__(self, fn=None, *, harvested=(), paths=(), hints=None, profile=None):
+    def __init__(self, fn=None, *, harvested=(), paths=(), hints=None, profile=None, archives=()):
         self.harvested = list(harvested)
         self.paths = list(paths)
+        self.archives = list(archives)
         self.hints = hints or {}
         self.profile = profile
         self.params = []
@@ -1432,9 +1541,34 @@ class ArgGen:
         return rng.choice(SCALARS + TEXT_VALUES[:4])
 
 
+def _unique_files_args(gen, rng):
+    """``(files,)`` without duplicates (at most one real EPUB: a thread pool of one keeps the
+    worker log order fixed)."""
+    pool = list(dict.fromkeys(gen.paths + gen.archives))
+    files = rng.sample(pool, rng.randint(0, min(3, len(pool)))) if pool else []
+    epubs = [p for p in pool if str(p).lower().endswith(".epub") and os.path.isfile(p)]
+    if epubs and rng.random() < 0.6 and not any(p in files for p in epubs):
+        files.insert(rng.randint(0, len(files)), epubs[0])  # reach the metadata worker more often
+    if rng.random() < 0.1:
+        files.append(rng.choice((None, "", "abc")))
+    return (files,), {}
+
+
+def _archive_path_args(gen, rng):
+    """``(path,)`` from the archive / HTML fixtures (mostly), the plain paths or junk."""
+    r = rng.random()
+    if r < 0.7 and gen.archives:
+        return (rng.choice(gen.archives),), {}
+    if r < 0.9:
+        return (gen.pick_path(rng),), {}
+    return (rng.choice((None, "", "abc", 5, "x.ZIP", "page.HTM")),), {}
+
+
 ARG_PROFILES = {
     "none": lambda gen, rng: ((), {}),
     "save_config": lambda gen, rng: ((), {"show_message": rng.choice((False, True))}),
+    "unique_files": _unique_files_args,
+    "archive_path": _archive_path_args,
 }
 
 
@@ -1986,7 +2120,17 @@ def _module_patch_hooks(bundle):
 def fuzz_template_files() -> dict:
     files = _scenario_files()
     files.update(FUZZ_FILES)
+    files.update(FUZZ_ARCHIVES)
     return files
+
+
+def _stub_recorder(recorder, name):
+    def stub(*args, **kwargs):
+        recorder.record(name, args, kwargs)
+        return None
+
+    stub.__name__ = name.rsplit(".", 1)[-1]
+    return stub
 
 
 def _resolve_bases(ctx, bases, setup) -> list:
@@ -2066,8 +2210,11 @@ def check_available(spec, sess: FuzzSession, mode: str = "desktop") -> None:
 
 def fuzz_moved(spec, sess: FuzzSession | None = None, *, states: int | None = None, seed: int = DEFAULT_SEED,
                mode: str = "desktop", only_index: int | None = None, stop_after: int = 20,
-               check: bool = True, on_state=None) -> FuzzReport:
+               check: bool = True, on_state=None, hooks=None) -> FuzzReport:
     """Tier D for one ``moved_functions.Moved`` entry (legacy oracle vs working-tree desktop).
+
+    ``hooks(label) -> (enter, exit)`` (optional) runs around each side's call, inside the
+    side's own hooks (tier T trace recorders use it); results are not cached then.
 
     ``mode='legacy'`` runs the legacy oracle against itself (harness self-check: any
     mismatch means the per-run reset is incomplete or the code is nondeterministic).
@@ -2077,9 +2224,9 @@ def fuzz_moved(spec, sess: FuzzSession | None = None, *, states: int | None = No
         check_available(spec, sess, mode)
     states = states or requested_states()
     cache_key = None
-    if only_index is None and on_state is None:
-        cache_key = (spec.legacy_names, spec.call_name, spec.args, tuple(sorted(spec.setup.items())),
-                     mode, states, seed, stop_after, id(sess))
+    if only_index is None and on_state is None and hooks is None:
+        cache_key = (spec.legacy_names, spec.call_name, spec.args, repr(sorted(spec.setup.items())),
+                     tuple(getattr(spec, "stubs", ()) or ()), mode, states, seed, stop_after, id(sess))
         if cache_key in _REPORT_CACHE:  # same caller, same states: reuse under this entry's name
             return dataclasses.replace(_REPORT_CACHE[cache_key], label=spec.name)
     bundle = sess.bundle
@@ -2110,6 +2257,9 @@ def fuzz_moved(spec, sess: FuzzSession | None = None, *, states: int | None = No
         patch_src_module_paths(ctx, extra_file_modules=file_modules)
         patch_translator_gui_backends(ctx)
         install_side_effect_stubs(ctx)
+        for module_name, attr in getattr(spec, "stubs", ()) or ():
+            ctx.patch(importlib.import_module(module_name), attr,
+                      _stub_recorder(ctx.recorder, f"{module_name}.{attr}"))
         namespaces = [bundle.namespace, *bundle.externals.values(), *bundle.mixin_namespaces()]
         if "translator_gui" in sys.modules:
             namespaces.append(sys.modules["translator_gui"].__dict__)
@@ -2117,15 +2267,39 @@ def fuzz_moved(spec, sess: FuzzSession | None = None, *, states: int | None = No
         bases = _resolve_bases(ctx, raw_bases, spec.setup)
         hints = _hints(bases, legacy_cls)
         paths = [ctx.path(p) for p in FUZZ_PATHS]
-        arg_gen = ArgGen(sample_fn, harvested=harvested, paths=paths, hints=hints, profile=spec.args)
+        archives = [ctx.path(p) for p in FUZZ_ARCHIVES]
+        arg_gen = ArgGen(sample_fn, harvested=harvested, paths=paths, hints=hints, profile=spec.args,
+                         archives=archives)
         space = StateSpace(rs, bases, arg_gen=arg_gen, seed=function_seed(spec.via or spec.name, seed),
                            provided=provided)
         enter, exit_ = _module_patch_hooks(bundle)
-        legacy_side = Side("legacy", legacy_cls, legacy_call, enter=enter, exit=exit_, bound=sess.bound)
+
+        def _compose(label, first_enter, first_exit):
+            if hooks is None:
+                return first_enter, first_exit
+            extra_enter, extra_exit = hooks(label)
+
+            def composed_enter():
+                if first_enter:
+                    first_enter()
+                extra_enter()
+
+            def composed_exit():
+                try:
+                    extra_exit()
+                finally:
+                    if first_exit:
+                        first_exit()
+
+            return composed_enter, composed_exit
+
+        legacy_enter, legacy_exit = _compose("legacy", enter, exit_)
+        legacy_side = Side("legacy", legacy_cls, legacy_call, enter=legacy_enter, exit=legacy_exit, bound=sess.bound)
         if mode == "legacy":
-            new_side = Side("new", new_cls, new_call, enter=enter, exit=exit_, bound=sess.bound)
+            new_enter, new_exit = _compose("new", enter, exit_)
         else:
-            new_side = Side("new", new_cls, new_call, bound=sess.bound)
+            new_enter, new_exit = _compose("new", None, None)
+        new_side = Side("new", new_cls, new_call, enter=new_enter, exit=new_exit, bound=sess.bound)
         report = differential_fuzz(ctx, legacy_side, new_side, space, states=states, label=spec.name,
                                    only_index=only_index, stop_after=stop_after, on_state=on_state)
         report.notes.append(f"legacy oracle @ {bundle.sha[:12]}; mode={mode}; "

@@ -14,10 +14,19 @@ Reusable tiers for every extraction step (U2+), wired by test_parity_tiers.py:
     owner_contract  - unguarded ``self.<attr>`` reads of the shared mixins (AST)
     import_hygiene  - tier I: PySide6-blocked subprocess imports + Python 3.10 parse
 
+Tier T (U3+, run-pipeline and Stop traces):
+    trace_scenarios - the 17 run scenarios (fresh install, glossary modes, multipass, stops, ...)
+    trace_harness   - its own frozen oracle (``legacy_trace/``) and the legacy / desktop / mixins
+                      (HeadlessOwner + JobService order) / stop_control sides, one ordered trace
+                      of backend entries, env, argv, cwd, stop flags and latch per run
+    test_trace_parity - legacy == desktop (full record) and == mobile (projection)
+
 Run from the repository root::
 
     python tests/parity/freeze_legacy.py            # freeze at HEAD
     python tests/parity/capture_golden.py           # write goldens for the frozen SHA
+    python tests/parity/trace_harness.py --freeze   # freeze the tier-T oracle at HEAD
     python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
-        tests/parity/test_legacy_self_consistency.py tests/parity/test_parity_tiers.py
+        tests/parity/test_legacy_self_consistency.py tests/parity/test_parity_tiers.py \
+        tests/parity/test_trace_parity.py
 """

@@ -179,5 +179,11 @@ tests/**
 !tests/test_settings_schema.py
 !tests/_src_corpus.py
 !tests/_headless_env.py
+# Mobile rewrite (U3+): stop_control/job_runner/text_jobs/input_preparation, the translation +
+# glossary pipelines and the Direct Text chat store/stream moves (verbatim, tier T/G parity).
+!tests/test_job_runner.py
+!tests/test_text_jobs.py
+!tests/test_translation_pipeline.py
+!tests/test_direct_text_core.py
 junktests/
 warp.md

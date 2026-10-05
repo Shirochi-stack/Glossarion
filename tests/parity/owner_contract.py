@@ -51,7 +51,14 @@ INIT_METHODS = ("_init_config_state", "_init_variables", "_init_gui_backed_state
 #: name -> reason. Contract names an owner only gets at run time (set by the job code
 #: right before the moved method runs), so a freshly built owner may lack them.
 #: Every entry needs a reason; the owner-contract tests list anything else as missing.
-RUNTIME_ATTRS: dict = {}
+RUNTIME_ATTRS: dict = {
+    "entry_epub": (
+        "desktop Input File(s) line edit (create_file_section, 'No file selected' at start): "
+        "_prepare_translation_run reads it only when no file is selected; the parity boot "
+        "installs just the widgets the golden closure reads (adding it would change the "
+        "frozen goldens' widget checkpoint); HeadlessOwner has a TextShim"
+    ),
+}
 
 _GUARD_EXCEPTIONS = {"AttributeError", "Exception", "BaseException"}
 _SELF = ("self",)
@@ -213,8 +220,16 @@ def _scan_method(method, module, cls_name, scan: ContractScan) -> None:
     for node in ast.walk(method):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
+    # a class defined inside the method (e.g. a nested progress manager): its ``self`` is
+    # that class's instance, not the owner
+    nested = set()
+    for node in ast.walk(method):
+        if isinstance(node, ast.ClassDef):
+            nested.update(ast.walk(node))
     assigned_lines: dict = {}
     for node in ast.walk(method):
+        if node in nested:
+            continue
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in _SELF \
                 and isinstance(node.ctx, ast.Store):
             assigned_lines.setdefault(node.attr, node.lineno)
@@ -234,6 +249,8 @@ def _scan_method(method, module, cls_name, scan: ContractScan) -> None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("_var"):
                 scan.init_assigned.add(node.value)
     for node in ast.walk(method):
+        if node in nested:
+            continue
         if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in _SELF):
             continue
         if not isinstance(node.ctx, ast.Load):

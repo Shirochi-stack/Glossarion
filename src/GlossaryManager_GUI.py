@@ -29,6 +29,7 @@ from glossary_usage import (
     prepare_translated_output_text,
 )
 from language_options import TARGET_LANGUAGES
+from translation_pipeline import GlossaryPipelineMixin
 from gender_tracking import (
     BINARY_GENDERS,
     collapse_tracked_gender_variants,
@@ -304,42 +305,9 @@ class GlossaryManagerMixin:
         saved_mode = cls._configured_glossary_refinement_chunking_mode(config)
         return 0 if saved_mode == 'separate' else 1
 
-    def _glossary_editor_input_sources(self):
-        """Return the current source identities used by the glossary editor.
-
-        Extracted subtitle members from one ZIP collapse back to the archive
-        path, so the editor uses the one archive-level glossary instead of
-        treating every SRT/ASS/LRC member as a separate book.
-        """
-        try:
-            files = list(getattr(self, 'selected_files', None) or [])
-        except Exception:
-            files = []
-
-        fallback_path = None
-        if not files:
-            try:
-                fallback_path = getattr(self, 'file_path', None)
-            except Exception:
-                fallback_path = None
-        if not files and not fallback_path:
-            try:
-                getter = getattr(self, 'get_current_epub_path', None)
-                fallback_path = getter() if callable(getter) else None
-            except Exception:
-                fallback_path = None
-
-        from glossary_paths import resolve_glossary_input_sources
-
-        return resolve_glossary_input_sources(
-            files,
-            fallback_path=fallback_path,
-            subtitle_info_resolver=getattr(
-                self,
-                '_subtitle_zip_output_info',
-                None,
-            ),
-        )
+    # Moved verbatim to the shared GUI-free pipeline (translation_pipeline.GlossaryPipelineMixin,
+    # which TranslatorGUI inherits ahead of this mixin); re-exported so the name stays here.
+    _glossary_editor_input_sources = GlossaryPipelineMixin._glossary_editor_input_sources
 
     def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
         """Force hidden glossary settings tabs through their first layout pass."""

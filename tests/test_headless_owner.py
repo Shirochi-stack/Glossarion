@@ -79,12 +79,8 @@ HEADLESS_ENTRIES = (
     "chapter_range_runtime_env", "metadata_only_env", "direct_text_env", "forced_streaming_env",
 )
 #: OWNER_CONTRACT names HeadlessOwner does not provide yet, with the reason.
-HEADLESS_DEFERRED = {
-    "auto_load_glossary_for_file": (
-        "U3 glossary auto-mapping: only reached by the glossary-mode handler when exactly one "
-        "EPUB is selected (inside try/except; never at startup)"
-    ),
-}
+#: (U3: auto_load_glossary_for_file arrived with translation_pipeline.GlossaryPipelineMixin.)
+HEADLESS_DEFERRED: dict = {}
 #: Env keys where a first-run desktop differs from the same desktop restarted from the
 #: config its startup save_config wrote (HeadlessOwner from _collect_live_settings()
 #: equals the restarted desktop). Desktop behaviour, recorded in DISCREPANCIES.md (U2).
@@ -191,10 +187,13 @@ def _shared_names() -> dict:
 def test_translator_gui_lists_the_shared_mixins_first():
     cls = _class("translator_gui", "TranslatorGUI")
     bases = [ast.unparse(b) for b in cls.bases]
-    assert bases == [
+    u2 = [
         "SettingsPersistenceMixin", "RunEnvMixin", "ConfigStateMixin",
         "QAScannerMixin", "RetranslationMixin", "GlossaryManagerMixin", "QMainWindow",
     ]
+    # U3 shared mixins (job runners, input preparation, pipelines) precede the U2 ones
+    assert bases[-len(u2):] == u2
+    assert set(bases[:-len(u2)]) <= {"TranslationPipelineMixin", "TextJobsMixin", "InputPreparationMixin"}
 
 
 def test_shared_mixins_do_not_overlap_or_define_init():
@@ -791,7 +790,8 @@ def parity(tmp_path_factory):
         new_bundle = freeze_legacy.load_legacy(WORKTREE_SHA)
     manifest = new_bundle.manifest
     assert manifest["layouts"] == {"init_config_block": "u2", "gui_state": "u2", "gui_handlers": "u2"}
-    assert [m for m, _c in manifest["shared_mixins"]] == ["settings_persistence", "run_env", "owner_state"]
+    # U3+ worktrees also freeze the job-runner mixins (and helper modules) before the U2 ones
+    assert [m for m, _c in manifest["shared_mixins"]][-3:] == ["settings_persistence", "run_env", "owner_state"]
     assert not manifest["missing"], manifest["missing"]
 
     desktop_factory = fakes.make_legacy_owner_factory(new_bundle)
@@ -846,10 +846,11 @@ def test_oracle_frozen_at_a_mixin_commit_never_runs_the_live_mixins(parity, monk
     bundle, cg, fakes = parity["worktree_bundle"], parity["cg"], parity["fakes"]
     live = {"owner_state": owner_state, "run_env": run_env, "settings_persistence": settings_persistence}
     frozen = bundle.manifest["frozen_mixins"]
-    assert sorted(frozen) == sorted(live)
+    assert set(live) <= set(frozen)  # U3+: text_jobs / input_preparation / job_runner / stop_control too
     classes = fakes.shared_mixin_classes(bundle)
-    assert [c.__name__ for c in classes] == ["SettingsPersistenceMixin", "RunEnvMixin", "ConfigStateMixin"]
-    for module, info in frozen.items():
+    assert [c.__name__ for c in classes][-3:] == ["SettingsPersistenceMixin", "RunEnvMixin", "ConfigStateMixin"]
+    for module in live:
+        info = frozen[module]
         assert info["source_sha256"] == freeze_legacy._sha256(_worktree_text(None, info["source_file"]))
         frozen_cls = getattr(bundle.mixins[module], info["class"])
         assert frozen_cls in classes and frozen_cls is not getattr(live[module], info["class"])

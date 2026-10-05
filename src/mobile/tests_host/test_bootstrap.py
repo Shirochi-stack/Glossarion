@@ -616,6 +616,24 @@ def app_env(storage, monkeypatch):
                 "strict": False, "checks": [{"name": "fake", "status": "pass", "secs": 0.0}]}
 
     monkeypatch.setattr(selftest, "run_selftest", fake_selftest)
+    # Hermetic ChatGPT token store for the app's sign-in status (U3 ChatFeature): authgpt_auth
+    # resolves ``~`` once at import, and on Windows expanduser ignores the HOME override, so it
+    # would read the developer's real ~/.glossarion tokens.
+    try:
+        import authgpt_auth
+    except Exception:  # pragma: no cover - backend not importable
+        authgpt_auth = None
+    if authgpt_auth is not None:
+        token_dir = os.path.join(str(storage["data"]), "home", ".glossarion")
+        token_file = os.path.join(token_dir, "authgpt_tokens.json")
+        monkeypatch.setattr(authgpt_auth, "_DEFAULT_TOKEN_DIR", token_dir)
+        monkeypatch.setattr(authgpt_auth, "_DEFAULT_TOKEN_FILE", token_file)
+        monkeypatch.setattr(authgpt_auth, "_default_store", None)
+        monkeypatch.setattr(authgpt_auth, "_account_stores", {})
+        monkeypatch.setenv("AUTHGPT_TOKEN_FILE", token_file)
+    # A returning user: the first-run Welcome flow (U3) is done, so it does not cover the chat home.
+    # (test_ui_foundations._start(first_run=True) removes this for the first-run tests.)
+    (storage["data"] / "mobile_state.json").write_text(json.dumps({"welcome_completed": True}), encoding="utf-8")
     return calls
 
 

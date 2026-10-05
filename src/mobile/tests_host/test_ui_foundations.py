@@ -400,17 +400,31 @@ def test_send_visuals_and_reasons():
 
 
 def _desktop_constants() -> dict:
-    path = SRC_DIR / "translator_gui.py"
-    if not path.is_file():
-        return {}
-    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-    wanted = {"_OUTPUT_MODE_CHOICES", "_IMAGE_ATTACHMENT_EXTENSIONS", "_VISION_ARCHIVE_ATTACHMENT_EXTENSIONS"}
+    """The Direct Text dialog constants, wherever the desktop code keeps them now: the dialog
+    (translator_gui) and, since U3, the shared modules it inherits / imports them from
+    (``direct_text_store.ChatStoreMixin``, ``translation_pipeline.IMAGE_ATTACHMENT_EXTENSIONS``,
+    which the dialog's ``_IMAGE_ATTACHMENT_EXTENSIONS`` aliases)."""
+    wanted = {
+        "_OUTPUT_MODE_CHOICES": "_OUTPUT_MODE_CHOICES",
+        "_IMAGE_ATTACHMENT_EXTENSIONS": "_IMAGE_ATTACHMENT_EXTENSIONS",
+        "IMAGE_ATTACHMENT_EXTENSIONS": "_IMAGE_ATTACHMENT_EXTENSIONS",
+        "_VISION_ARCHIVE_ATTACHMENT_EXTENSIONS": "_VISION_ARCHIVE_ATTACHMENT_EXTENSIONS",
+    }
     found: dict = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            name = node.targets[0].id
-            if name in wanted and name not in found:
-                found[name] = ast.literal_eval(node.value)
+    for module in ("translator_gui", "direct_text_store", "translation_pipeline"):
+        path = SRC_DIR / f"{module}.py"
+        if not path.is_file():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                key = wanted.get(node.targets[0].id)
+                if key is None or key in found:
+                    continue
+                try:
+                    found[key] = ast.literal_eval(node.value)
+                except ValueError:
+                    continue  # an alias (``_IMAGE_ATTACHMENT_EXTENSIONS = IMAGE_ATTACHMENT_EXTENSIONS``)
     return found
 
 
@@ -420,10 +434,8 @@ def test_output_modes_match_desktop_direct_text():
         pytest.skip("translator_gui.py _OUTPUT_MODE_CHOICES not found")
     assert output_modes.OUTPUT_MODE_CHOICES == desktop["_OUTPUT_MODE_CHOICES"]
     assert [m.emoji for m in output_modes.OUTPUT_MODES] == ["📝", "👁️", "🖼️", "🎬", "🔊", "✨"]
-    if "_IMAGE_ATTACHMENT_EXTENSIONS" in desktop:
-        assert output_modes.IMAGE_ATTACHMENT_EXTENSIONS == frozenset(desktop["_IMAGE_ATTACHMENT_EXTENSIONS"])
-    if "_VISION_ARCHIVE_ATTACHMENT_EXTENSIONS" in desktop:
-        assert output_modes.VISION_ARCHIVE_ATTACHMENT_EXTENSIONS == frozenset(desktop["_VISION_ARCHIVE_ATTACHMENT_EXTENSIONS"])
+    assert output_modes.IMAGE_ATTACHMENT_EXTENSIONS == frozenset(desktop["_IMAGE_ATTACHMENT_EXTENSIONS"])
+    assert output_modes.VISION_ARCHIVE_ATTACHMENT_EXTENSIONS == frozenset(desktop["_VISION_ARCHIVE_ATTACHMENT_EXTENSIONS"])
 
 
 def test_output_mode_state_rules():
@@ -1196,7 +1208,14 @@ def _load_main_module():
     return module
 
 
-async def _start(platform="android", width=412):
+async def _start(platform="android", width=412, *, first_run=False):
+    """Start the real app on a fake session. ``app_env`` starts it as a returning user (the
+    first-run Welcome flow, U3, is marked done in ``mobile_state.json``); ``first_run=True``
+    removes that mark, so the Welcome flow opens over the chat home."""
+    if first_run:
+        paths = rb.get_paths()
+        if paths is not None:
+            (Path(paths.data) / "mobile_state.json").unlink(missing_ok=True)
     main_module = _load_main_module()
     conn, session = _fake_session(platform)
     session.apply_page_patch({"width": width, "height": 860})

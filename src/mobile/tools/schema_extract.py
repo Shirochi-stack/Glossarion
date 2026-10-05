@@ -93,10 +93,13 @@ OWNER_CLASSES = ("TranslatorGUI",)          # plus every *Mixin class in OWNER_M
 DIALOG_MODULES = (                           # label / tooltip / UI-site priority order
     "other_settings.py",
     "translator_gui.py",
+    "direct_text_store.py",   # the Direct Text dialog's GUI-free halves (inherited by the dialog)
+    "direct_text_stream.py",
     "GlossaryManager_GUI.py",
     "QA_Scanner_GUI.py",
     "manga_settings_dialog.py",
     "epub_library.py",
+    "library_core.py",      # epub_library's GUI-free half (re-imported by the Library)
     "Retranslation_GUI.py",
     "multi_api_key_manager.py",
 )
@@ -207,6 +210,8 @@ UI_SITE_ROOTS = (
     ("translator_gui.py", "_create_profile_section", "main.prompt"),
     ("translator_gui.py", "create_file_section", "main.file"),
     ("translator_gui.py", "_InputOutputDialog.*", "direct_text"),
+    ("direct_text_store.py", "ChatStoreMixin.*", "direct_text"),
+    ("direct_text_stream.py", "DirectTextStreamMixin.*", "direct_text"),
     ("GlossaryManager_GUI.py", "_setup_glossary_general_tab", "glossary.general"),
     ("GlossaryManager_GUI.py", "_setup_manual_glossary_tab", "glossary.balanced_full"),
     ("GlossaryManager_GUI.py", "_setup_auto_glossary_tab", "glossary.minimal"),
@@ -219,6 +224,7 @@ UI_SITE_ROOTS = (
     ("QA_Scanner_GUI.py", "*", "qa"),
     ("manga_settings_dialog.py", "*", "manga"),
     ("epub_library.py", "*", "library"),
+    ("library_core.py", "*", "library"),
     ("Retranslation_GUI.py", "*", "progress"),
     ("multi_api_key_manager.py", "*", "keys"),
 )

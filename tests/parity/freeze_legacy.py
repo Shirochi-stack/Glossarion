@@ -131,6 +131,14 @@ TG_ENTRY_METHODS = (
     "_extract_glossary_from_text_file",
     "run_epub_converter_direct",
     "run_pdf_converter_direct",
+    "_run_parallel_metadata_files",
+    # input_preparation (U3): ZIP / HTML / subtitle-ZIP input resolution
+    "_convert_zip_input_to_epub_if_needed",
+    "_resolve_zip_inputs_for_translation",
+    "_extract_subtitle_zip_input_if_needed",
+    "_has_epub_conversion_inputs",
+    # stop_control (U3): the desktop stop protocol (tier T trace tests drive it)
+    "stop_translation",
     # settings persistence (U2 _collect_live_settings/_export_settings_env); desktop
     # startup runs it once from the glossary shortcut handler
     "save_config",
@@ -138,14 +146,23 @@ TG_ENTRY_METHODS = (
 
 #: Frozen verbatim for later steps (U3 trace tier) but NOT closed over or exercised in U0.
 TG_FREEZE_ONLY_METHODS = (
-    "stop_translation",
     "run_translation_thread",
     "run_translation_direct",
     "run_glossary_extraction_direct",
-    "_run_parallel_metadata_files",
-    "_convert_zip_input_to_epub_if_needed",
-    "_resolve_zip_inputs_for_translation",
     "_reset_prompt_profile_to_default",
+    # U3: run-start resets (stop_control) and the translation / glossary pipelines
+    "run_glossary_extraction_thread",
+    "stop_glossary_extraction",
+    "_reset_stop_flags_if_idle",
+    "_process_image_folder_for_glossary",
+    "_collect_translation_qa_failures",
+    "_filter_translation_qa_failures_to_current_range",
+    "_qa_failure_matches_resolution_request",
+    "_prepare_multipass_qa_refinement_run",
+    "_clear_translation_run_overrides",
+    "_log_translation_qa_failure_summary",
+    "auto_load_glossary_for_file",
+    "_run_generative_prompt_mode",
 )
 
 #: GUI-only TranslatorGUI methods: never frozen, provided by fakes.FakeState recorders.
@@ -174,10 +191,21 @@ TG_RECORDED_METHODS = frozenset({
 #: used by the legacy side: imports of a frozen mixin module from frozen code
 #: resolve to its frozen copy.
 SHARED_MIXIN_MODULES = (
+    # U3, in TranslatorGUI's base order (shared mixins first, pipelines before env/state)
+    ("translation_pipeline", "TranslationPipelineMixin"),
+    ("text_jobs", "TextJobsMixin"),
+    ("input_preparation", "InputPreparationMixin"),
+    # U2
     ("settings_persistence", "SettingsPersistenceMixin"),
     ("run_env", "RunEnvMixin"),
     ("owner_state", "ConfigStateMixin"),
 )
+
+#: GUI-free helper modules the moved code imports (U3+: job hooks, scoped process state,
+#: the stop protocol). They hold no owner mixin of their own (TextJobsMixin and
+#: InputPreparationMixin inherit job_runner.JobHooksMixin), but they are frozen whole like
+#: the mixin modules so the legacy side never runs their live working-tree versions.
+SHARED_HELPER_MODULES = ("job_runner", "stop_control")
 
 #: (method, statement prefix) - GUI-backed *state* assignments made while _setup_gui builds widgets.
 GUI_STATE_STATEMENTS = (
@@ -404,6 +432,21 @@ def class_attr_statements(cls: ast.ClassDef) -> dict:
                     out[t.id] = stmt
         elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
             out[stmt.target.id] = stmt
+    return out
+
+
+def _in_module_lineage(msrc: "ModuleSource", class_name: str) -> list:
+    """[(name, ClassDef)] of *class_name* and its base classes defined in the same module
+    (transitively, subclass first): the methods an owner inherits through that mixin."""
+    out, queue, seen = [], [class_name], set()
+    while queue:
+        name = queue.pop(0)
+        if name in seen or name not in msrc.classes:
+            continue
+        seen.add(name)
+        node = msrc.classes[name]
+        out.append((name, node))
+        queue.extend(b.id for b in node.bases if isinstance(b, ast.Name))
     return out
 
 
@@ -954,15 +997,19 @@ def legacy_paths(sha: str) -> tuple:
 
 
 def shared_mixin_sources(sha: str) -> dict:
-    """{module: (class_name, ModuleSource)} for the shared mixin modules present at *sha*."""
+    """{module: (class_name, ModuleSource)} for the shared mixin modules present at *sha*.
+
+    Helper modules (``SHARED_HELPER_MODULES``) are listed with ``class_name None``.
+    """
     out = {}
-    for module, class_name in SHARED_MIXIN_MODULES:
+    specs = list(SHARED_MIXIN_MODULES) + [(module, None) for module in SHARED_HELPER_MODULES]
+    for module, class_name in specs:
         try:
             text = git_show_text(sha, f"src/{module}.py")
         except (subprocess.CalledProcessError, OSError):
             continue  # not extracted yet at this SHA
         src = ModuleSource(f"{module}.py", text)
-        if class_name not in src.classes:
+        if class_name is not None and class_name not in src.classes:
             raise SystemExit(f"freeze_legacy: {module}.py has no class {class_name}")
         out[module] = (class_name, src)
     return out
@@ -1002,9 +1049,26 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR, *, entry_methods=None)
     mixin_methods: dict[str, list] = {}
     mixin_refs: dict[str, set] = {}
     for module, (class_name, msrc) in mixins.items():
+        if class_name is None:
+            # helper module: only its *Mixin classes are owner code (job_runner.JobHooksMixin);
+            # other classes (ProgressWatcher, StopClickTracker) use ``self`` for themselves
+            owner_classes = [(name, cls) for name, cls in sorted(msrc.classes.items()) if name.endswith("Mixin")]
+            mixin_methods[module] = sorted({n for _name, cls in owner_classes
+                                            for n in list(class_methods(cls)) + list(class_attr_statements(cls))})
+            refs = set()
+            for name, cls in owner_classes:
+                refs |= self_references(cls, name)
+            mixin_refs[module] = refs
+            continue
         mcls = msrc.classes[class_name]
-        mixin_methods[module] = sorted(class_methods(mcls)) + sorted(class_attr_statements(mcls))
-        refs = self_references(mcls, class_name)
+        # the named mixin plus its base classes defined in the same module (U3:
+        # TranslationPipelineMixin -> GlossaryPipelineMixin -> PipelineHooksMixin)
+        owner_classes = _in_module_lineage(msrc, class_name)
+        mixin_methods[module] = (sorted({n for _name, c in owner_classes for n in class_methods(c)})
+                                 + sorted({n for _name, c in owner_classes for n in class_attr_statements(c)}))
+        refs = set()
+        for name, c in owner_classes:
+            refs |= self_references(c, name)
         for fn in msrc.functions.values():  # module helpers taking the owner (owner/self param)
             refs |= self_references(fn, class_name)
         mixin_refs[module] = refs
@@ -1183,6 +1247,7 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR, *, entry_methods=None)
             "gui_handlers": handler_layout,
         },
         "shared_mixins": [[module, mixins[module][0]] for module, _cls in SHARED_MIXIN_MODULES if module in mixins],
+        "shared_helpers": [module for module in SHARED_HELPER_MODULES if module in mixins],
         "frozen_mixins": frozen_mixins,
         "mixin_methods": mixin_methods,
         "moved_to_mixins": moved_to_mixins,
@@ -1436,6 +1501,9 @@ def _load_frozen_mixins(short: str, manifest: dict) -> tuple:
     modules: dict = {}
     if not frozen:
         return modules, builtins
+    if str(SRC_DIR) not in sys.path:
+        # the frozen modules import their live src siblings (emoticon_patterns, app_paths, ...)
+        sys.path.insert(0, str(SRC_DIR))
     real_import = builtins.__import__
 
     def frozen_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -1456,7 +1524,10 @@ def _load_frozen_mixins(short: str, manifest: dict) -> tuple:
         mod.__frozen_path__ = str(path)
         modules[module] = mod  # registered first: import cycles resolve like sys.modules
         try:
-            exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), vars(mod))
+            # dont_inherit: a whole module is compiled with ITS future flags, not this file's
+            # ``from __future__ import annotations`` (string annotations break @dataclass in a
+            # module that is not in sys.modules)
+            exec(compile(path.read_text(encoding="utf-8"), str(path), "exec", dont_inherit=True), vars(mod))
         except BaseException:
             modules.pop(module, None)
             raise

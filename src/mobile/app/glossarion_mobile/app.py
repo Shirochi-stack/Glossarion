@@ -14,10 +14,15 @@ ran in ``app/main.py`` before Flet was imported):
 5. start the dispatcher pump; read (or create) the API-key and token
    encryption keys in SecureStorage and pass them to
    ``api_key_encryption.set_key_material`` / ``token_encryption.set_symmetric_key``
-   (``services.secure_keys``), *then* start the backend warm import (prints
-   ``GLOSSARION_BACKEND_READY``; Send stays "Preparing engine…" until then);
+   (``services.secure_keys``); install Settings (MobileConfigStore, U2), the jobs
+   layer (JobService, FileBridge, IntentRouter, background execution, Jobs /
+   Files screens, U3) and the chat (ChatStoreAdapter over the shared
+   ``direct_text_store``, ChatRuns, ChatGPT sign-in, Accounts / Welcome screens,
+   U3); the backend warm import starts right after Settings, once the keys are in
+   (prints ``GLOSSARION_BACKEND_READY``; Send stays "Preparing engine…" until then);
 6. dispatch the initial route (a cold-start ``/__selftest__`` deep link runs
-   the self-test, which prints ``GLOSSARION_SELFTEST PASS|FAIL``).
+   the self-test, which prints ``GLOSSARION_SELFTEST PASS|FAIL``); on a first run
+   that opened on the chat home the Welcome flow follows.
 
 Handled routes (``/__selftest__``, ``/oauth/return``) never push a View; after
 handling them the client route is put back to what is on screen, so the same
@@ -126,6 +131,13 @@ class GlossarionApp:
         self.settings: Any = None
         self.config_store: Any = None
         self.prefs: Any = None
+        # U3: JobsFeature.install sets jobs (the feature; JobService API), job_service, files and
+        # intents; ChatFeature.install sets chat_feature.
+        self.jobs: Any = None
+        self.job_service: Any = None
+        self.files: Any = None
+        self.intents: Any = None
+        self.chat_feature: Any = None
 
     @staticmethod
     def _make_secure_storage() -> Any:
@@ -166,7 +178,7 @@ class GlossarionApp:
             on_open_chat=self._open_chat,
             on_chat_long_press=self._chat_actions,
             on_new_chat=lambda e: self.chat_view._on_new_chat(e),
-            on_new_scratch=lambda e: self.notify("Scratch chats arrive in U3"),
+            on_new_scratch=lambda e: self.notify("Scratch chats arrive in U4"),
             on_status=self._on_status_chip,
             on_settings=lambda e: self._drawer_navigate("settings"),
             on_help=self._on_help,
@@ -202,8 +214,11 @@ class GlossarionApp:
         await self._install_backend_keys()  # before anything imports or uses the backend
         await self._install_settings()  # decrypts config.json with those keys; before the first route
         rb.start_warm_import(on_done=lambda result: self.dispatcher.post(self._on_backend_ready, result))
+        await self._install_jobs()  # JobService + files + intents; the chat submits through it
+        await self._install_chat()  # chat history (decrypted keys), runs, sign-in, welcome
         self.dispatcher.spawn(self._after_ready())
-        await self.dispatch_route(page.route, source="initial")
+        match = await self.dispatch_route(page.route, source="initial")
+        await self._maybe_welcome(match)
 
     async def _install_backend_keys(self) -> None:
         """SecureStorage keys -> ``set_key_material`` / ``set_symmetric_key`` (plan §4 bootstrap)."""
@@ -226,6 +241,76 @@ class GlossarionApp:
         except Exception:
             log.exception("settings feature unavailable; /settings shows the hub")
 
+    async def _install_jobs(self) -> None:
+        """JobService, FileBridge, IntentRouter, background execution and the Jobs / Files
+        screens (U3). Recovery of interrupted jobs runs in the background. If it fails the
+        chat still opens (Send then reports that the job service is not running)."""
+        try:
+            from glossarion_mobile.ui.screens.jobs import JobsFeature
+
+            await JobsFeature.install(self)  # sets self.jobs / job_service / files / intents
+        except Exception:
+            log.exception("jobs feature unavailable; jobs cannot run in this session")
+
+    async def _install_chat(self) -> None:
+        """The chat over the shared Direct Text store + ChatGPT sign-in + Accounts / Welcome (U3)."""
+        try:
+            from glossarion_mobile.ui.chat.integration import ChatFeature
+
+            await ChatFeature.install(self)  # sets self.chat_feature; binds the chat view
+        except Exception:
+            log.exception("chat feature unavailable; the chat home stays a preview")
+            return
+        intents = self.intents
+        if intents is not None:
+            try:
+                from glossarion_mobile.services.intents import ACTION_TRANSLATE_NEW_CHAT
+
+                intents.handlers[ACTION_TRANSLATE_NEW_CHAT] = self._translate_in_new_chat
+            except Exception:
+                log.exception("registering the Translate-in-new-chat action failed")
+
+    async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
+        """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome
+        flow, only when the app opened on the chat home (never over a deep link or the
+        self-test). Awaited, so it is on screen before ``start`` returns."""
+        feature = self.chat_feature
+        if feature is None or (match is not None and match.name != "home"):
+            return
+        try:
+            if feature.welcome_shown or not feature.needs_welcome():
+                return
+            feature.welcome_shown = True
+            await self.navigate(build_route("welcome"))
+        except Exception:
+            log.exception("showing the welcome flow failed")
+
+    def _translate_in_new_chat(self, imp: Any) -> Optional[str]:
+        """IntentRouter "Translate in new chat": a fresh (or the empty current) chat with the
+        shared file attached, ready to send."""
+        chat_view = self.chat_view
+        imported = getattr(imp, "imported", None)
+        if chat_view is None or imported is None or not chat_view.bound:
+            self.notify("The chat is not available in this session")
+            return None
+        cid = chat_view.env.chats.new_chat()
+        self._open_chat(cid)
+        if chat_view.cid != cid:
+            chat_view.load_chat(cid)
+        chat_view.attach_file(imported.path)
+        return cid
+
+    def prefill_composer(self, text: str) -> None:
+        """Shared text (Open-with / Share): into the current chat's composer, as a draft."""
+        chat_view = self.chat_view
+        if chat_view is None:
+            return
+        chat_view.composer.set_text(str(text or ""))
+        chat_view._on_draft_changed(str(text or ""))
+        chat_view.refresh_send()
+        self.navigate_to("home" if chat_view.cid in (None, "1") else "chat",
+                         None if chat_view.cid in (None, "1") else {"cid": chat_view.cid})
+
     def _on_backend_ready(self, result: dict) -> None:
         self.state.backend.set(dict(result or {}))
         if result and not result.get("ok"):
@@ -240,8 +325,12 @@ class GlossarionApp:
             items = []
         self.initial_shared = items
         await self._route_launch_links(items)
-        if any(not (isinstance(i, dict) and i.get("kind") == "url" and i.get("source") == "launch") for i in items):
-            self.notify("Importing shared files arrives in U3")  # Open-with at cold start
+        shared = [i for i in items if not (isinstance(i, dict) and i.get("kind") == "url" and i.get("source") == "launch")]
+        if shared and self.jobs is not None:
+            try:
+                await self.jobs.handle_initial_shared(shared)  # Open-with at cold start (IntentRouter)
+            except Exception:
+                log.exception("importing the shared files failed")
 
     # ---- screens --------------------------------------------------------------------------
 
@@ -405,7 +494,8 @@ class GlossarionApp:
         def pin() -> None:
             self.state.chats.set_pinned(chat.cid, not chat.pinned)
 
-        later = lambda what: (lambda: self.notify(f"{what} arrives in U3"))  # noqa: E731
+        # Fallback only: ChatFeature (U3) replaces this sheet once the chat store is installed.
+        later = lambda what: (lambda: self.notify(f"{what} needs the chat store, which is not available"))  # noqa: E731
         sheet = ActionSheet(
             [
                 ActionItem("Rename", later("Renaming chats"), icon="DRIVE_FILE_RENAME_OUTLINE"),
@@ -461,21 +551,22 @@ class GlossarionApp:
     # ---- share / OAuth -------------------------------------------------------------------
 
     def _on_share(self, event: dict) -> None:
-        """Open-with / Share: never routed. Launch links are; files wait for the IntentRouter (U3)."""
+        """Open-with / Share: launch links are routed; files and text go to the IntentRouter,
+        which JobsFeature registers as its own ``share`` listener (never routed)."""
         if launch_links(event.get("items")):
             self.dispatcher.spawn(self._route_launch_links(event.get("items")))
             return
         count = len(event.get("items") or [])
         log.info("share event with %d item(s)", count)
-        if self.spike is None or self.spike_view not in self.shell.overlays:
-            self.notify("Importing shared files arrives in U3")
+        if self.jobs is None and (self.spike is None or self.spike_view not in self.shell.overlays):
+            self.notify("Shared files cannot be imported in this session")
 
     def _on_oauth_return(self, match: RouteMatch) -> None:
         provider = match.get("p")
         if provider == "spike" and self.spike is not None:
             self.spike._on_oauth_return(match)
             return
-        log.info("OAuth return for %r (sign-in arrives in U3)", provider)
+        log.info("OAuth return for %r (no sign-in is waiting for it)", provider)
         self.dispatcher.spawn(self.opener.close_in_app_view())
 
     # ---- device checks (U0 spike) ------------------------------------------------------------
