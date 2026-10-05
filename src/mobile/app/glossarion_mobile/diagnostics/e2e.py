@@ -416,6 +416,10 @@ class WriteAudit:
             except OSError:
                 pass
         self.allowed = tuple(sorted(roots))
+        # Bytecode caching is the interpreter's business: PYTHONPYCACHEPREFIX (set by CI) moves
+        # the __pycache__ trees elsewhere, so treat that prefix like a __pycache__ directory.
+        prefix = getattr(sys, "pycache_prefix", None)
+        self.pycache_prefix = (os.path.normcase(os.path.abspath(prefix)),) if prefix else ()
         self.devnull = os.path.normcase(os.path.abspath(os.devnull))
         self.violations: list = []
         self._lock = threading.Lock()
@@ -433,7 +437,8 @@ class WriteAudit:
             full = os.path.normcase(os.path.abspath(text))
             if full == self.devnull or text in (os.devnull, "nul", "NUL"):
                 return
-            if "__pycache__" in full.split(os.sep) or _under(full, self.allowed):
+            if ("__pycache__" in full.split(os.sep) or _under(full, self.allowed)
+                    or (self.pycache_prefix and _under(full, self.pycache_prefix))):
                 return
             with self._lock:
                 if len(self.violations) < 200:
@@ -1314,6 +1319,9 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--strict", action="store_true", help="missing packages fail instead of skip")
     parser.add_argument("--only", action="append", help="run only this check (repeatable)")
     args = parser.parse_args(argv)
+    if args.json:
+        # bootstrap() chdirs into the data dir, so resolve a relative path against the caller's cwd now.
+        args.json = os.path.abspath(args.json)
     os.environ[ISOLATED_ENV] = "1"
     if args.keep:
         os.environ["GLOSSARION_E2E_KEEP"] = "1"
