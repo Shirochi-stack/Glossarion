@@ -804,20 +804,34 @@ def test_compile_does_not_return_while_the_inprocess_pdf_thread_is_alive(mobile_
     _pdf_worker = import_pdf_worker()
     import pdf_generation_manager
 
+    # Parse epub_converter (~10k lines) before the renderer starts: on a slow runner the
+    # parse alone outlasted a fixed release timer, the render finished first and the
+    # loop (correctly) never ran its stop branch.
+    wait_loop = _epub_converter_pdf_wait_loop()
     started, release = threading.Event(), threading.Event()
     monkeypatch.setattr(_pdf_worker, "run_pdf_generation", _slow_inprocess_generation(_pdf_worker, started, release))
     manager = pdf_generation_manager.PdfGenerationManager(log_callback=lambda _m: None)
+    real_stop, stops = manager.stop, []
+
+    def stop():
+        # The renderer reaches its next checkpoint only some time after the stop request,
+        # so a loop that returns right after stop() leaves the render thread alive.
+        stops.append(True)
+        real_stop()
+        threading.Timer(0.5, release.set).start()
+
+    manager.stop = stop
     pdf_done = threading.Event()
     manager.generate_pdf_async(str(tmp_path / "x.json"), completion_callback=lambda _ok, _result: pdf_done.set())
     assert started.wait(10)
-    threading.Timer(0.5, release.set).start()  # the renderer reaches its next checkpoint later
     logs = []
     compiler = types.SimpleNamespace(is_stopped=lambda: True, log=logs.append)
 
-    exec(_epub_converter_pdf_wait_loop(), {
+    exec(wait_loop, {
         "self": compiler, "_pdf_mgr": manager, "_pdf_done": pdf_done, "mobile_runtime": mobile_runtime,
     })
 
+    assert stops == [True]
     assert release.is_set() and pdf_done.is_set()
     assert not manager._thread.is_alive() and manager.is_running is False
     assert _pdf_worker._INPROCESS_LOCK.acquire(blocking=False)

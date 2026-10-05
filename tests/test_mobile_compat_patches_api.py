@@ -751,8 +751,17 @@ def _free_port():
 
 
 def _port_is_free(port):
+    """True when nothing listens on 127.0.0.1:*port*, i.e. a new callback server could bind it.
+
+    Binds the way HTTPServer does (``allow_reuse_address``): on Linux/macOS a connection
+    the server accepted and closed leaves a TIME_WAIT entry that fails a plain bind for
+    ~60 s, while SO_REUSEADDR still fails against a socket that is listening. Windows
+    keeps the plain bind: SO_REUSEADDR there would bind over a live listener.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if os.name != "nt":
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("127.0.0.1", port))
         return True
     except OSError:
@@ -767,6 +776,36 @@ def _http_get(host, port, path):
         return resp.status, dict(resp.getheaders()), resp.read().decode("utf-8")
     finally:
         conn.close()
+
+
+def test_port_probe_sees_a_live_listener_but_not_time_wait():
+    """``_port_is_free`` fails while an HTTPServer listens, also after it served a request,
+    and passes once it is closed although the served connection left TIME_WAIT behind."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _UntilClose(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")  # no Content-Length: the client reads to EOF, so the server closes first
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _UntilClose)
+    port = server.server_address[1]
+    try:
+        assert not _port_is_free(port)
+        handler = threading.Thread(target=server.handle_request, daemon=True)
+        handler.start()
+        status, _, body = _http_get("127.0.0.1", port, "/")
+        assert status == 200 and body == "ok"
+        handler.join(10)
+        assert not handler.is_alive()
+        assert not _port_is_free(port)
+    finally:
+        server.server_close()
+    assert _port_is_free(port)
 
 
 class _FakeTokenEndpoint:

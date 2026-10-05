@@ -67,6 +67,19 @@ class Context:
 # --------------------------------------------------------------------------
 
 
+def _same_dir(a: str | os.PathLike[str], b: str | os.PathLike[str]) -> bool:
+    """True when ``a`` and ``b`` are the same directory, however each is spelled.
+
+    Android's app storage ``/data/user/0/<pkg>`` is a symlink to ``/data/data/<pkg>``:
+    the data dir keeps the symlinked spelling while ``os.getcwd()`` reads back the
+    resolved one. Different directories still compare unequal.
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:  # one side is missing or unreadable: compare the resolved spellings
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
 def check_env_contract(ctx: Context) -> dict[str, Any]:
     paths = ctx.require_bootstrap()
     expected = paths.env_contract()
@@ -81,8 +94,9 @@ def check_env_contract(ctx: Context) -> dict[str, Any]:
         problems.append(f"SSL_CERT_FILE missing or not a file: {ca_file!r}")
     if os.environ.get("REQUESTS_CA_BUNDLE") != ca_file:
         problems.append("REQUESTS_CA_BUNDLE != SSL_CERT_FILE")
-    if os.path.normcase(os.getcwd()) != os.path.normcase(str(paths.data)):
-        problems.append(f"cwd is {os.getcwd()!r}, expected the data dir")
+    cwd = os.getcwd()
+    if not _same_dir(cwd, paths.data):
+        problems.append(f"cwd is {cwd!r}, expected the data dir {str(paths.data)!r}")
     stack = rb.current_thread_stack_size()
     if stack < rb.THREAD_STACK_SIZE:
         problems.append(f"thread stack size {stack} < 16 MiB")

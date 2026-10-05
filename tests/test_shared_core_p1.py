@@ -166,6 +166,20 @@ def renamed(node):
     return _Rename().visit(copy.deepcopy(node))
 
 
+def require_qt_widgets() -> None:
+    """Skip unless ``PySide6.QtWidgets`` really loads.
+
+    ``pytest.importorskip("PySide6")`` alone also succeeds where the wheel is
+    installed but Qt's native libraries are not (``libEGL.so.1: cannot open
+    shared object file`` on a bare Linux runner).
+    """
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6 import QtWidgets  # noqa: F401
+    except ImportError as exc:
+        pytest.skip(f"PySide6.QtWidgets does not load here: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # import hygiene / Python 3.10
 # ---------------------------------------------------------------------------
@@ -492,7 +506,7 @@ def test_metadata_defaults_match_legacy():
 
 
 def test_ollama_settings_match_legacy():
-    pytest.importorskip("PySide6")
+    require_qt_widgets()
     import ollama_settings
     import ollama_settings_dialog
 
@@ -846,7 +860,7 @@ def test_restore_config_backup_file_validates_and_replaces_atomically(config_pat
 # ---------------------------------------------------------------------------
 
 def test_library_dir_seam(tmp_path, monkeypatch):
-    pytest.importorskip("PySide6")
+    require_qt_widgets()
     import epub_library
 
     home = tmp_path / "home"
@@ -866,7 +880,7 @@ def test_library_dir_seam(tmp_path, monkeypatch):
 
 
 def test_translator_gui_reexports_shared_names():
-    pytest.importorskip("PySide6")
+    require_qt_widgets()
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     import app_paths
     import config_backup
@@ -910,7 +924,7 @@ def _worktree_text(_sha, relpath):
 
 @pytest.fixture(scope="module")
 def parity(tmp_path_factory):
-    pytest.importorskip("PySide6")
+    require_qt_widgets()
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from parity import capture_golden as cg
     from parity import fakes, freeze_legacy

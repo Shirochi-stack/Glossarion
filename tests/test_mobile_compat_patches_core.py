@@ -13,6 +13,7 @@ branch must run and no process API may be touched.
 import ast
 import concurrent.futures
 import functools
+import importlib.util
 import logging
 import multiprocessing
 import os
@@ -31,7 +32,7 @@ if str(SRC) not in sys.path:
 
 import mobile_runtime  # noqa: E402
 
-SELFTEST_EPUB = SRC / "mobile" / "app" / "assets" / "selftest" / "selftest_ko_12ch.epub"
+PREPARE_ASSETS = SRC / "mobile" / "tools" / "prepare_assets.py"
 PATCHED_FILES = (
     "TransateKRtoEN.py",
     "extract_glossary_from_epub.py",
@@ -331,13 +332,29 @@ def test_chapter_extractor_keeps_the_desktop_pool_expression():
 
 # --------------------------------------------------------------------------- Chapter_Extractor (P1)
 
-def _extract_selftest(out_dir, monkeypatch):
+@pytest.fixture(scope="module")
+def selftest_epub(tmp_path_factory):
+    """The 12-chapter Korean self-test EPUB, built by src/mobile/tools/prepare_assets.py.
+
+    app/assets/selftest/ is generated and gitignored (absent on CI), so build a fresh
+    copy with the same builder into a temp dir instead of reading the app's assets.
+    """
+    pytest.importorskip("ebooklib")
+    spec = importlib.util.spec_from_file_location("_mobile_prepare_assets", PREPARE_ASSETS)
+    prepare_assets = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare_assets)
+    path = tmp_path_factory.mktemp("selftest_assets") / prepare_assets.SELFTEST_EPUB
+    prepare_assets.build_selftest_epub(path)
+    return path
+
+
+def _extract_selftest(epub_path, out_dir, monkeypatch):
     import Chapter_Extractor as CE
 
     monkeypatch.setenv("EXTRACTION_WORKERS", "2")
     monkeypatch.setenv("EXTRACTION_MODE", "smart")
     monkeypatch.delenv("SINGLE_CHAPTER_FILTER", raising=False)
-    with zipfile.ZipFile(SELFTEST_EPUB) as zf:
+    with zipfile.ZipFile(epub_path) as zf:
         html_files = [n for n in zf.namelist() if n.endswith(".xhtml")]
         assert len(html_files) == 13  # > 10 files -> Chapter_Extractor's pool path
         chapters = CE.extract_chapters(zf, str(out_dir))
@@ -369,13 +386,15 @@ def _spy_make_pool_executor(monkeypatch):
     return made
 
 
-def test_chapter_extraction_pool_path_runs_on_threads_without_processes(tmp_path, no_processes_env, capsys):
+def test_chapter_extraction_pool_path_runs_on_threads_without_processes(
+    tmp_path, selftest_epub, no_processes_env, capsys
+):
     import Chapter_Extractor as CE
 
     no_processes_env.setattr(CE, "ProcessPoolExecutor", _forbidden("ProcessPoolExecutor"))
     made = _spy_make_pool_executor(no_processes_env)
 
-    chapters = _extract_selftest(tmp_path / "out", no_processes_env)
+    chapters = _extract_selftest(selftest_epub, tmp_path / "out", no_processes_env)
 
     out = capsys.readouterr().out
     assert "Using parallel processing with 2 workers" in out
@@ -389,7 +408,7 @@ def test_chapter_extraction_pool_path_runs_on_threads_without_processes(tmp_path
     assert all(ch.get("body") for ch in chapters)
 
 
-def test_chapter_extraction_uses_a_real_process_pool_on_desktop(tmp_path, desktop_env):
+def test_chapter_extraction_uses_a_real_process_pool_on_desktop(tmp_path, selftest_epub, desktop_env):
     """Desktop: the original ProcessPoolExecutor(max_workers=EXTRACTION_WORKERS) runs, same result as threads."""
     import Chapter_Extractor as CE
 
@@ -403,13 +422,13 @@ def test_chapter_extraction_uses_a_real_process_pool_on_desktop(tmp_path, deskto
 
     desktop_env.setattr(CE, "ProcessPoolExecutor", RecordingProcessPool)
     made = _spy_make_pool_executor(desktop_env)
-    desktop = _extract_selftest(tmp_path / "desktop", desktop_env)
+    desktop = _extract_selftest(selftest_epub, tmp_path / "desktop", desktop_env)
     assert used == [((), {"max_workers": 2})]
     assert made == []
 
     desktop_env.setenv("GLOSSARION_NO_PROCESSES", "1")
     desktop_env.setattr(CE, "ProcessPoolExecutor", _forbidden("ProcessPoolExecutor"))
-    threaded = _extract_selftest(tmp_path / "threads", desktop_env)
+    threaded = _extract_selftest(selftest_epub, tmp_path / "threads", desktop_env)
     assert _normalised(threaded, tmp_path / "threads") == _normalised(desktop, tmp_path / "desktop")
 
 
