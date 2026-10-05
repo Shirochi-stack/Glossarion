@@ -296,10 +296,17 @@ def test_pipeline_module_never_imports_qt_or_the_gui():
 
 
 def test_line_endings_are_crlf_without_bom():
+    # Line endings follow the checkout (CRLF on Windows with core.autocrlf, LF on
+    # Linux CI). What must hold everywhere: the module matches translator_gui.py's
+    # convention, has no BOM, and translator_gui keeps its BOM.
     raw = (SRC / f"{MODULE}.py").read_bytes()
+    gui = (SRC / "translator_gui.py").read_bytes()
     assert not raw.startswith(b"\xef\xbb\xbf")
-    assert raw.count(b"\r\n") == raw.count(b"\n")
-    assert (SRC / "translator_gui.py").read_bytes().startswith(b"\xef\xbb\xbf")
+    assert gui.startswith(b"\xef\xbb\xbf")
+    if gui.count(b"\r\n") == gui.count(b"\n"):
+        assert raw.count(b"\r\n") == raw.count(b"\n")
+    else:
+        assert b"\r\n" not in raw
 
 
 # ---------------------------------------------------------------------------

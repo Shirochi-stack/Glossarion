@@ -694,6 +694,14 @@ def configure():
     if _configured:
         return
     _configured = True
+    # Glossarion Mobile has no Qt display to configure; never probe displays
+    # there (xrandr / system_profiler are subprocesses, unavailable on iOS/Android).
+    try:
+        import mobile_runtime
+        if mobile_runtime.is_mobile():
+            return
+    except Exception:
+        pass
 
     if _qgui_application_exists():
         # Qt's scale-factor policy and scale env vars are pre-QGuiApplication
