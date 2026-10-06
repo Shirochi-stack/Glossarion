@@ -58,7 +58,7 @@ dependencies = [
 
   # Auth / crypto
   "google-auth==2.49.1",
-  "cryptography==50.0.0",
+  "cryptography==43.0.1",  # newest with Android/iOS wheels on pypi.flet.dev (50.x has none)
   "cffi==2.0.0",
 
   # Cloud OCR
@@ -71,7 +71,7 @@ dependencies = [
   "pypdf==6.19.0",
 
   # Images / on-device ONNX
-  "pillow==12.3.0",
+  "pillow==12.2.0",  # newest with Android/iOS wheels on pypi.flet.dev (12.3.0 has none)
   "numpy==2.4.6",
   "opencv-python-headless==5.0.0.93",
   "onnxruntime==1.27.0",
