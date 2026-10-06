@@ -105,7 +105,7 @@ replicate
 # heavy imports (increases .exe file size by 1.5gb)
 # CUDA-enabled PyTorch wheels
 --extra-index-url https://download.pytorch.org/whl/cu130
-torch==2.11.0+cu130
+torch==2.12.1+cpu
 torchvision==0.26.0+cu130
 onnxruntime
 safetensors
