@@ -149,7 +149,9 @@ def _check(condition: Any, message: str) -> None:
 
 
 def _norm(path: Any) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    # realpath, not abspath: Android reaches the app's data dir as /data/user/0/<pkg> and as
+    # /data/data/<pkg> (a symlink), so two spellings of one folder must compare equal.
+    return os.path.normcase(os.path.realpath(os.fspath(path)))
 
 
 def _under(path: str, roots: Any) -> bool:
