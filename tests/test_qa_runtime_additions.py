@@ -350,9 +350,27 @@ def test_runtime_changed_only_in_the_documented_places(legacy_runtime):
     assert all(i in new_imports for i in old_imports)
 
 
+def _drop_local_hashlib_import(tree):
+    """The user-approved fix (2026-10-06): update_new_format_progress no longer re-imports hashlib
+    locally (that import shadowed the module one and raised UnboundLocalError). Applied to the
+    legacy tree so the comparison below still pins everything else."""
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "update_new_format_progress")
+    removed = 0
+    for node in ast.walk(fn):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if isinstance(stmts, list):
+                kept = [s for s in stmts if not (isinstance(s, ast.Import) and [a.name for a in s.names] == ["hashlib"])]
+                removed += len(stmts) - len(kept)
+                setattr(node, field, kept)
+    return removed
+
+
 def test_scanner_refusal_defaults_are_key_pool_service_list():
     legacy_tree = ast.parse(git_text("src/scan_html_folder.py"))
     new_tree = ast.parse(src_text("scan_html_folder.py"))
+    assert _drop_local_hashlib_import(legacy_tree) == 1
+    assert _drop_local_hashlib_import(new_tree) == 0
     old = [n for n in legacy_tree.body if isinstance(n, ast.Assign)
            and getattr(n.targets[0], "id", "") == "DEFAULT_REFUSAL_PATTERNS"]
     assert len(old) == 1 and ast.literal_eval(old[0].value) == list(key_pool_service.DEFAULT_REFUSAL_PATTERNS)
@@ -360,7 +378,7 @@ def test_scanner_refusal_defaults_are_key_pool_service_list():
     assert [[a.name for a in n.names] for n in imports] == [["DEFAULT_REFUSAL_PATTERNS"]]
     assert not [n for n in new_tree.body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], "id", "") == "DEFAULT_REFUSAL_PATTERNS"]
-    # the import stands where the list was; nothing else in the scanner changed
+    # the import stands where the list was; nothing else in the scanner changed (bar the hashlib fix)
     old_body = [ast.dump(n) for n in legacy_tree.body]
     new_body = [ast.dump(n) for n in new_tree.body]
     index = old_body.index(ast.dump(old[0]))
@@ -1082,3 +1100,24 @@ def test_quick_scan_report_desktop_path_equals_mobile_path(e2e_workspace, tmp_pa
         assert desk_tree[rel] == mob_tree[rel], f"{rel} differs between the desktop and the mobile scan"
     progress = json.loads((tmp_path / "desktop" / "Output" / BOOK / "translation_progress.json").read_text("utf-8"))
     assert progress["chapters"], "the scan dropped the progress entries"
+
+
+def test_update_new_format_progress_hashes_flagged_translation_artifacts(tmp_path):
+    """User-approved desktop fix (2026-10-06): a QA-flagged translation artifact
+    (translated_headers.txt / TOC.txt) used to end the scan with UnboundLocalError on
+    'hashlib', because a function-local `import hashlib` shadowed the module import."""
+    import hashlib
+    import scan_html_folder as shf
+
+    for name in ("translated_headers.txt", "TOC.txt"):
+        folder = tmp_path / name.replace(".", "_")
+        folder.mkdir()
+        artifact = folder / name
+        artifact.write_text("Chapter 1: Title\n", encoding="utf-8")
+        prog = {"version": "2.1", "chapters": {}, "chapter_chunks": {}, "content_hashes": {}}
+        faulty = [{"filename": name, "file_index": 0, "issues": ["non_english_content"],
+                   "file_path": str(artifact)}]
+        shf.update_new_format_progress(prog, faulty, [], lambda *_: None, str(folder))
+        entries = [e for e in prog["chapters"].values() if e.get("output_file") == name]
+        assert entries, (name, prog["chapters"])
+        assert entries[0]["content_hash"] == hashlib.sha256(artifact.read_bytes()).hexdigest()

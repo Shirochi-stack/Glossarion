@@ -6020,7 +6020,6 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                     try:
                         with open(os.path.join(folder_path, faulty_filename), 'r', encoding='utf-8') as f:
                             content = f.read()
-                        import hashlib
                         content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
                     except:
                         pass

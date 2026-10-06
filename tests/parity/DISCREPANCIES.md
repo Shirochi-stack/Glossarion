@@ -3007,14 +3007,15 @@ reviewer (same pieces / rows / status; one row edit saved to the same sidecar by
 progress file) and the Async Processing dialog with "Estimate Cost Only" (same widgets, labels and
 boxes). Every section is identical.
 
-### Desktop bug recorded (pending the user's decision; found by the U6 device E2E)
+### Desktop bug fixed (user-approved 2026-10-06; found by the U6 device E2E)
 
 `scan_html_folder.update_new_format_progress` uses `hashlib` at line 5971 (the artifact branch) but
 re-imports it locally at line 6023 (`import hashlib`), which makes `hashlib` a local name of the
 whole function: whenever QA flags TOC.txt / translated_headers.txt the scan ends with
 `UnboundLocalError: cannot access local variable 'hashlib'`. The scanner never seeds langdetect, so
-this hits about one run in ten. Fix (one line, not applied): drop the local import (the module
-imports hashlib at line 25). The mobile E2E pins the langdetect seed (5befbc80) so its QA checks are
+this hit about one run in ten. Fixed in a separate commit with the owner's approval: the local
+import is gone, so the module-level hashlib (line 25) is used; regression test
+tests/test_qa_runtime_additions.py::test_update_new_format_progress_hashes_flagged_translation_artifacts. The mobile E2E pins the langdetect seed (5befbc80) so its QA checks are
 deterministic.
 
 ## U7 review: second round (mobile and test-only, no desktop change)
