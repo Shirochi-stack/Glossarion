@@ -38,12 +38,12 @@ dependencies = [
   "markdown2==2.5.5",
 
   # HTTP
-  "requests==2.32.5",
-  "urllib3==2.6.3",
+  "requests==2.33.0",
+  "urllib3==2.8.0",
   "certifi==2026.2.25",
   "httpx==0.28.1",
   "httpcore==1.0.9",
-  "anyio==4.13.0",
+  "anyio==4.14.2",
 
   # LLM SDKs: the httpx-based majors the desktop is tested with
   "openai>=2.32,<3",
@@ -58,7 +58,7 @@ dependencies = [
 
   # Auth / crypto
   "google-auth==2.49.1",
-  "cryptography==43.0.1",
+  "cryptography==50.0.0",
   "cffi==2.0.0",
 
   # Cloud OCR
@@ -68,10 +68,10 @@ dependencies = [
 
   # PDF
   "pymupdf==1.27.2.3",
-  "pypdf==6.4.1",
+  "pypdf==6.19.0",
 
   # Images / on-device ONNX
-  "pillow==12.2.0",
+  "pillow==12.3.0",
   "numpy==2.4.6",
   "opencv-python-headless==5.0.0.93",
   "onnxruntime==1.27.0",
