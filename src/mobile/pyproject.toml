@@ -138,6 +138,13 @@ spinner_size = 28
 prepare_message = "Unpacking Glossarion…"
 startup_message = "Starting translation engine…"
 
+# The flet 1.0.3 build template overrides jni to 1.0.0; jni_flutter 1.0.4 / 1.0.4+1 (2026-10-06)
+# generate bindings that assert jni ^1.1.0 (JniVersionCheck(1, 1)) and break the Dart compile on
+# Android and iOS. 1.0.3 is the last release whose bindings check jni 1.0 (JniVersionCheck(1, 0)).
+# Drop this pin once the template moves to jni 1.1.
+[tool.flet.flutter.pubspec.dependency_overrides]
+jni_flutter = "1.0.3"
+
 [tool.flet.android]
 min_sdk_version = 26
 target_arch = ["arm64-v8a", "x86_64"]          # onnxruntime has no armeabi-v7a wheel
