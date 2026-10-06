@@ -653,13 +653,24 @@ class AccountsScreen(Screen):
             self._push(self.project_note)
             return []
         self.projects = list(projects)
-        marks = {"billed": "✅", "unknown": "❔", "unbilled": "⚠️"}
-        options = []
-        for pid, status in self.projects:
-            suffix = " (no billing)" if status == "unbilled" else ""
-            options.append(ft.DropdownOption(key=pid, text=f"{marks.get(status, '❔')} {pid}{suffix}"))
+        # The desktop dropdown items and selection rule (authgem_auth.authgem_project_items /
+        # choose_authgem_project_index); the local labels only for a build without them.
+        items = self.oauth.gemini_project_items(self.projects) if hasattr(self.oauth, "gemini_project_items") else None
+        if items is None:
+            marks = {"billed": "✅", "unknown": "❔", "unbilled": "⚠️"}
+            items = [(f"{marks.get(status, '❔')} {pid}{' (no billing)' if status == 'unbilled' else ''}", pid)
+                     for pid, status in self.projects]
+        options = [ft.DropdownOption(key=pid, text=label) for label, pid in items]
         if self.project_dropdown is not None:
             self.project_dropdown.options = options
+        chosen = None
+        if self.projects and hasattr(self.oauth, "gemini_project_choice"):
+            try:
+                chosen = self.oauth.gemini_project_choice(self.projects, str(self._cfg("authgem_project", "") or ""))
+            except Exception:
+                log.debug("choosing the GCP project failed", exc_info=True)
+        if chosen:
+            self.apply_project(chosen)  # desktop: the picker applies its selection at once
         billed = [pid for pid, status in self.projects if status == "billed"]
         self.project_note.value = (f"Found {len(billed)} GCP project(s) with billing enabled" if billed
                                    else "⚠️ No GCP projects with billing found — Vertex AI won't work"
@@ -670,7 +681,8 @@ class AccountsScreen(Screen):
     async def _on_load_projects(self, e: Any = None) -> None:
         await self.load_projects()
 
-    def select_project(self, project_id: str) -> Optional[str]:
+    def apply_project(self, project_id: str) -> Optional[str]:
+        """Save and push ``project_id`` (desktop ``_authgem_project_changed``) and select it in the picker."""
         project_id = str(project_id or "").strip()
         if not project_id:
             return None
@@ -685,6 +697,12 @@ class AccountsScreen(Screen):
                 self.project_dropdown.options = list(self.project_dropdown.options or []) + [
                     ft.DropdownOption(key=project_id, text=project_id)]
             self.project_dropdown.value = project_id
+        return project_id
+
+    def select_project(self, project_id: str) -> Optional[str]:
+        project_id = self.apply_project(project_id)
+        if not project_id:
+            return None
         self.project_note.value = f"📁 AuthGem project set: {project_id}"
         self._push(self.project_dropdown, self.project_note)
         return project_id

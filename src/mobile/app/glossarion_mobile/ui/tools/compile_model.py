@@ -62,7 +62,8 @@ IMAGE_OPTION_KEYS = (
     "exclude_gif_compression",
 )
 
-FONT_EXTENSIONS = (".ttf", ".otf", ".woff", ".woff2")
+#: The "Load Font…" font types (other_settings ``_FONT_EXTS``, output_tools_core.FONT_EXTS)
+from output_tools_core import FONT_EXTS as FONT_EXTENSIONS  # noqa: E402
 CSS_EXTENSIONS = (".css",)
 
 
@@ -92,35 +93,14 @@ def count_fonts(fonts_dir: str) -> int:
 def import_fonts(paths: Iterable[str], fonts_dir: str) -> int:
     """Copy font files (and every font inside ZIP archives) into ``fonts_dir``; returns the count.
 
-    Same rules as the desktop "Load Font…" button (other_settings ``_on_load_font_clicked``):
+    The desktop "Load Font…" button's own copy rules (``output_tools_core.import_custom_fonts``):
     ``.ttf/.otf/.woff/.woff2`` are copied, ZIPs contribute their font entries (subfolders
-    flattened), unreadable files are skipped.
+    flattened), unreadable files are skipped. Like the button, the folder is created first.
     """
+    from output_tools_core import import_custom_fonts
+
     os.makedirs(fonts_dir, exist_ok=True)
-    copied = 0
-    for src in paths or ():
-        ext = os.path.splitext(src)[1].lower()
-        if ext == ".zip":
-            try:
-                with zipfile.ZipFile(src, "r") as zf:
-                    for entry in zf.namelist():
-                        if os.path.splitext(entry)[1].lower() not in FONT_EXTENSIONS:
-                            continue
-                        name = os.path.basename(entry)
-                        if not name:
-                            continue
-                        with zf.open(entry) as zin, open(os.path.join(fonts_dir, name), "wb") as zout:
-                            zout.write(zin.read())
-                        copied += 1
-            except Exception:
-                pass
-        elif ext in FONT_EXTENSIONS:
-            try:
-                shutil.copy2(src, os.path.join(fonts_dir, os.path.basename(src)))
-                copied += 1
-            except Exception:
-                pass
-    return copied
+    return import_custom_fonts(list(paths or ()), fonts_dir)
 
 
 def clear_fonts(fonts_dir: str) -> int:

@@ -11,6 +11,7 @@ Endpoints::
     GET  /v1/models                  model list (OpenAI shape)
     GET  /v1/models/<id>             one model
     POST /v1/chat/completions        JSON, or SSE when "stream": true
+    POST /v1/images/generations      a PNG as b64_json (the OpenAI Images API shape)
     GET  /health                     {"ok": true}
 
 What it answers:
@@ -27,24 +28,33 @@ What it answers:
   injected) are substituted first, so a run that used its glossary shows
   ``Seo-yeon Lee`` instead of the romanized name. Markup, chapter split markers
   and JSON stay intact, so the backend's own parsing works unchanged.
+* **Vision requests** (a user message with an ``image_url`` part, i.e. ``send_image``):
+  the fixed OCR text ``FAKE_OCR_TEXT`` (U7 Vision output mode).
+* **Image generation** (``/v1/images/generations``, the client's Images API route for the
+  Image output mode): ``FAKE_PNG`` as ``b64_json``; the prompt is recorded in ``preview``.
 
 Test controls: ``delay`` / ``stream_chunk_delay`` slow responses down;
 ``hold()`` / ``release(abort=...)`` park new requests until released (a "stuck" model
 for force-stop tests; parked requests answer after ``hold_timeout`` at the latest, or are
 dropped without a response when released with ``abort=True``);
 ``on_request`` / ``on_response`` hooks run on the handler thread with the
-``RequestRecord`` (the E2E uses them to press Stop at a precise point).
+``RequestRecord`` (the E2E uses them to press Stop at a precise point);
+``leave_raw_once[chapter] = text`` makes the next answer for that chapter keep ``text``
+(Korean) untranslated, so a QA scan flags the chapter (U7 Resolve QA).
 Every request is recorded in ``requests``.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
+import struct
 import threading
 import time
 import uuid
+import zlib
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -53,6 +63,8 @@ __all__ = [
     "DEFAULT_GLOSSARY",
     "FAKE_MARKER",
     "FAKE_MODEL",
+    "FAKE_OCR_TEXT",
+    "FAKE_PNG",
     "FakeLLMServer",
     "GlossaryEntry",
     "RequestRecord",
@@ -61,11 +73,31 @@ __all__ = [
     "classify_request",
     "fake_translate",
     "glossary_csv",
+    "has_image_part",
+    "png_bytes",
     "romanize_hangul",
 ]
 
 FAKE_MARKER = "GLFAKE"
 FAKE_MODEL = "gpt-4o-mini"  # an OpenAI chat model name: routed through the custom endpoint as-is
+#: What the model "reads" from any image (Vision output mode).
+FAKE_OCR_TEXT = "GLFAKE-OCR The knight of the Silver Forest raised her sword at dawn."
+
+
+def png_bytes(width: int = 8, height: int = 8, rgb: tuple = (200, 40, 40)) -> bytes:
+    """A valid solid-colour RGB PNG (stdlib only)."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    row = b"\x00" + bytes(rgb) * int(width)
+    raw = row * int(height)
+    header = struct.pack(">IIBBBBB", int(width), int(height), 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+#: The image every generation request gets (32x32, blue).
+FAKE_PNG = png_bytes(32, 32, (30, 90, 200))
 
 
 @dataclass(frozen=True)
@@ -182,8 +214,20 @@ def _content_text(content: Any) -> str:
 _EXTRACTION_COLUMNS = re.compile(r"\btype\s*,\s*raw_name\s*,\s*translated_name", re.IGNORECASE)
 
 
+def has_image_part(payload: dict) -> bool:
+    """A message carries an ``image_url`` part (``UnifiedClient.send_image``)."""
+    for message in payload.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") in ("image_url", "input_image")
+                                             for p in content):
+            return True
+    return False
+
+
 def classify_request(payload: dict) -> str:
-    """``"glossary"`` for glossary extraction prompts, else ``"translation"``."""
+    """``"glossary"`` for glossary extraction prompts, ``"vision"`` for image requests, else ``"translation"``."""
+    if has_image_part(payload):
+        return "vision"
     messages = payload.get("messages") or []
     text = "\n".join(_content_text(m.get("content")) for m in messages if isinstance(m, dict))
     lowered = text.lower()
@@ -308,6 +352,12 @@ class _Handler(BaseHTTPRequestHandler):
         owner = self.server.owner
         path = self.path.split("?", 1)[0].rstrip("/")
         payload = self._read_json()
+        if path in ("/v1/images/generations", "/images/generations"):
+            if payload is None:
+                self._error(400, "Request body is not a JSON object")
+                return
+            owner._serve_image(self, payload, path)
+            return
         if path not in ("/v1/chat/completions", "/chat/completions"):
             owner._record_unsupported(path)
             self._error(404, f"The fake server only implements /v1/chat/completions (got {path})")
@@ -348,6 +398,8 @@ class FakeLLMServer:
         self.hold_timeout = float(hold_timeout)
         self.on_request: list = []
         self.on_response: list = []
+        #: chapter number -> Korean text the next answer for that chapter keeps untranslated (once)
+        self.leave_raw_once: dict = {}
         self.requests: list = []
         self.access_log: list = []
         self._lock = threading.Lock()
@@ -448,6 +500,7 @@ class FakeLLMServer:
         self.on_request = []
         self.on_response = []
         self.kind_delays = {}
+        self.leave_raw_once = {}
         self.release(abort=True)
 
     # ---- queries ---------------------------------------------------------------------------
@@ -530,12 +583,50 @@ class FakeLLMServer:
         record.chapters = chapter_numbers(last_user)
         if record.kind == "glossary":
             return glossary_csv(last_user or full_text, self.glossary)
+        if record.kind == "vision":
+            return FAKE_OCR_TEXT
         applied = applied_entries(full_text, self.glossary)
         record.glossary_applied = [e.raw_name for e in applied if e.raw_name in last_user]
         user_lines = set(last_user.splitlines())
         record.glossary_lines = [line for line in full_text.splitlines() if line not in user_lines
                                  and any(e.raw_name and e.raw_name in line for e in self.glossary)]
-        return fake_translate(last_user, applied, marker=self.marker)
+        reply = fake_translate(last_user, applied, marker=self.marker)
+        with self._lock:
+            # only a chapter's own request (one heading), never a TOC / headers batch naming many chapters
+            raw = (self.leave_raw_once.pop(record.chapters[0], None) if len(record.chapters) == 1 else None)
+        if raw:
+            # a model that left a passage of the chapter untranslated (the QA scan flags it)
+            reply = reply.replace("<p>", f"<p>{raw} ", 1) if "<p>" in reply else f"{reply}\n{raw}"
+        return reply
+
+    def _serve_image(self, handler: _Handler, payload: dict, path: str) -> None:
+        """``/v1/images/generations``: one ``FAKE_PNG`` per request (``n`` ignored)."""
+        with self._lock:
+            record = RequestRecord(id=len(self.requests) + 1, path=path, kind="image_generation",
+                                   model=str(payload.get("model") or ""), started=time.time())
+            self.requests.append(record)
+        try:
+            prompt = str(payload.get("prompt") or "")
+            record.prompt_chars = len(prompt)
+            record.preview = " ".join(prompt.split())[:160]
+            self._run_hooks(self.on_request, record)
+            if not self._wait_released(record):
+                record.status = "aborted"
+                handler.close_connection = True
+                return
+            self._sleep(self.delay + self.kind_delays.get("image_generation", 0.0))
+            body = {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(FAKE_PNG).decode("ascii")}]}
+            record.reply = "<png>"
+            record.reply_chars = len(FAKE_PNG)
+            self._complete(record)
+            handler._send_json(200, body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout, OSError):
+            record.status = "aborted"
+        finally:
+            if record.finished is None:
+                record.finished = time.time()
+            if record.status == "ok":
+                self._run_hooks(self.on_response, record)
 
     def _serve_chat(self, handler: _Handler, payload: dict, path: str) -> None:
         kind = classify_request(payload)

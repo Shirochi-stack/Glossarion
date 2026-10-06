@@ -1183,3 +1183,108 @@ def test_grok_pkce_callback_page_seam_and_parity(xai, monkeypatch, fixed_secrets
     else:
         assert body == LEGACY_GROK_SUCCESS_HTML
     assert results["split"] == results["legacy"]
+
+
+# ---------------------------------------------------------------------------
+# U7: the GCP project picker's list and selection rule (authgem_auth chooser)
+# ---------------------------------------------------------------------------
+
+#: translator_gui before the U7 move of _authgem_projects_loaded's selection rule into authgem_auth.
+U7_BASE_SHA = "41814faa95e273e956870bd3aac5a2c6fb7d66b1"
+
+
+class _FakeProjectCombo:
+    """The QComboBox surface _authgem_projects_loaded uses (items, findData, current index)."""
+
+    def __init__(self, log):
+        self.items, self.index, self.log = [], -1, log
+
+    def blockSignals(self, value):
+        self.log.append(("blockSignals", value))
+
+    def clear(self):
+        self.items, self.index = [], -1
+
+    def addItem(self, label, data):
+        self.items.append((label, data))
+        if self.index < 0:
+            self.index = 0
+
+    def findData(self, data):
+        return next((i for i, (_label, d) in enumerate(self.items) if d == data), -1)
+
+    def setCurrentIndex(self, index):
+        self.index = index
+
+    def currentIndex(self):
+        return self.index
+
+    def count(self):
+        return len(self.items)
+
+    def show(self):
+        self.log.append(("show",))
+
+    def hide(self):
+        self.log.append(("hide",))
+
+
+def _projects_loaded_function(text):
+    import ast
+
+    tree = ast.parse(text)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TranslatorGUI")
+    node = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_authgem_projects_loaded")
+    lines = text.split("\n")
+    source = "class _Probe:\n" + "\n".join(lines[node.lineno - 1:node.end_lineno]) + "\n"
+    ns = {"os": os, "Slot": lambda *a, **k: (lambda f: f), "__name__": "translator_gui"}
+    exec(compile(source, "<_authgem_projects_loaded>", "exec"), ns)
+    return vars(ns["_Probe"])["_authgem_projects_loaded"]
+
+
+def test_authgem_project_picker_rule_matches_the_desktop_slot():
+    """The working-tree slot (list + rule from authgem_auth) shows and selects exactly what the
+    U7 parent's inline code did, for random billing results and saved projects."""
+    import random
+
+    legacy_text = subprocess.run(["git", "show", f"{U7_BASE_SHA}:src/translator_gui.py"], cwd=str(REPO_ROOT),
+                                 capture_output=True).stdout.decode("utf-8-sig").replace("\r\n", "\n")
+    if not legacy_text:
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(f"git show {U7_BASE_SHA[:12]} unavailable")
+        pytest.skip(f"git show {U7_BASE_SHA[:12]} unavailable")
+    current_text = (SRC / "translator_gui.py").read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
+    sides = {"legacy": _projects_loaded_function(legacy_text), "new": _projects_loaded_function(current_text)}
+    assert "authgem_auth.choose_authgem_project_index(" in current_text
+    rng = random.Random("u7-authgem-projects")
+    pool = [f"proj-{i}" for i in range(7)]
+    for state in range(600):
+        ids = rng.sample(pool, rng.randint(0, 6))
+        billed, unbilled, unknown = [], [], []
+        for pid in ids:
+            rng.choice((billed, unbilled, unknown)).append(pid)
+        saved = rng.choice(["", None, "elsewhere"] + pool)
+        has_combo = rng.random() > 0.05
+        observed = {}
+        for side, fn in sides.items():
+            log = []
+            owner = types.SimpleNamespace(
+                config={"authgem_project": saved} if saved is not None else {},
+                _authgem_billed_projects=list(billed), _authgem_unbilled_projects=list(unbilled),
+                _authgem_unknown_projects=list(unknown),
+                _authgem_project_changed=lambda index, _log=log: _log.append(("changed", index)),
+                _reposition_authgem_project_combo=lambda _log=log: _log.append(("reposition",)),
+                append_log=lambda message, _log=log: _log.append(("log", message)))
+            if has_combo:
+                owner.authgem_project_combo = _FakeProjectCombo(log)
+            fn(owner)
+            combo = getattr(owner, "authgem_project_combo", None)
+            observed[side] = (log, combo.items if combo else None, combo.index if combo else None)
+        assert observed["legacy"] == observed["new"], (state, billed, unbilled, unknown, saved)
+    # the shared helpers on their own (the mobile picker calls exactly these)
+    items = authgem_auth.authgem_project_items(["b1"], ["u1"], ["k1", "k2"])
+    assert items == [("✅ b1", "b1"), ("❔ k1", "k1"), ("❔ k2", "k2"), ("⚠️ u1 (no billing)", "u1")]
+    assert authgem_auth.choose_authgem_project_index("k2", ["b1"], ["u1"], ["k1", "k2"]) == 2
+    assert authgem_auth.choose_authgem_project_index("u1", ["b1"], ["u1"], ["k1"]) == 0  # known unbilled: first billed
+    assert authgem_auth.choose_authgem_project_index("u1", [], ["u1"], ["k1"]) == 0  # else the first unknown
+    assert authgem_auth.choose_authgem_project_index("", [], ["u1"], []) == -1

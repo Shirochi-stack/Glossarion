@@ -372,6 +372,14 @@ app_files = [
     ('glossary_document.py', '.'),
     ('glossary_files.py', '.'),
     ('parallel_epub_core.py', '.'),
+    # Mobile rewrite U7: the image / generative and RPG Maker runners (translation_pipeline), the async
+    # batch core (async_api_processor), the output tools core (other_settings) and the SDLXLIFF reviewer
+    # core (Retranslation_GUI, progress_actions import them)
+    ('image_job.py', '.'),
+    ('rpgmaker_job.py', '.'),
+    ('async_batch_core.py', '.'),
+    ('output_tools_core.py', '.'),
+    ('sdlxliff_review_core.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -722,6 +730,14 @@ app_modules = [
     'glossary_document',
     'glossary_files',
     'parallel_epub_core',
+    # Mobile rewrite U7: the image / generative and RPG Maker runners (translation_pipeline), the async
+    # batch core (async_api_processor), the output tools core (other_settings) and the SDLXLIFF reviewer
+    # core (Retranslation_GUI, progress_actions import them)
+    'image_job',
+    'rpgmaker_job',
+    'async_batch_core',
+    'output_tools_core',
+    'sdlxliff_review_core',
 ]
 
 # GUI Framework

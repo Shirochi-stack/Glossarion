@@ -3909,6 +3909,10 @@ def test_retranslate_selected_bulk_reset_runs_off_the_qt_thread():
     reset_start = source.index("def retranslate_selected():")
     reset_end = source.index("# Add buttons", reset_start)
     reset_source = source[reset_start:reset_end]
+    # U7: the worker half is progress_actions.apply_retranslation (plan/apply split)
+    shared = Path(retranslation_gui_module.__file__).with_name("progress_actions.py").read_text(
+        encoding="utf-8")
+    reset_source += shared[shared.index("def plan_retranslation("):shared.index("def retranslate_rows(")]
 
     assert 'yield "run_background"' in reset_source
     assert 'yield "apply_ui"' in reset_source

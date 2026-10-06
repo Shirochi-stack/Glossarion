@@ -102,6 +102,9 @@ OWNER_MODULES = (
     # ``config`` in place of ``self.config``)
     "glossary_files.py",
     "parallel_epub_core.py",
+    # U7: the image / generative and RPG Maker runners (TranslatorGUI mixins, moved verbatim)
+    "image_job.py",
+    "rpgmaker_job.py",
     "translator_gui.py",
 )
 OWNER_CLASSES = ("TranslatorGUI",)          # plus every *Mixin class in OWNER_MODULES
@@ -123,9 +126,25 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     "progress_core.py",     # the Progress Manager's GUI-free half (Retranslation_GUI inherits it, U5)
     "progress_actions.py",
     "glossary_progress_core.py",
+    "sdlxliff_review_core.py",   # U7: the SDLXLIFF reviewer / sidecar auto-generation (Retranslation_GUI)
     "multi_api_key_manager.py",
+    # U7: moved dialog code whose functions are listed in UI_SITE_ROOTS (no "*" root): the QA
+    # Scanner's bulk scan loop and the main window's "Translate Headers Now" worker
+    "qa_scan_runtime.py",
+    "translate_headers_standalone.py",
 )
 EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py")
+# Dialog modules scanned for a few moved functions only (the rest of the module is backend code
+# that was never part of the dialog): module -> top-level names. Reach stays inside the list.
+DIALOG_MODULE_FUNCTIONS = {
+    "qa_scan_runtime.py": ("run_bulk_qa_scan", "load_current_qa_settings"),
+    "translate_headers_standalone.py": ("run_translate_headers_now",),
+}
+# Dialog-handler rules moved into functions that RETURN the config writes as a dict literal
+# (the handler applies them with ``config.update(...)``): the literal's keys are touched keys.
+CONFIG_UPDATE_FUNCS = {
+    ("direct_text_store.py", "glossary_override_config_updates"),   # U7: _on_glossary_override_toggled
+}
 # Top-level definitions a scanned module holds for the mobile app only (not desktop code moved out
 # of a dialog): never scanned, so they add no records, origins or UI sites of their own.
 SCAN_EXCLUDE = {
@@ -223,6 +242,12 @@ NESTED_NAME_HINTS = {
         "current_qa_settings": "qa_scanner_settings",
         "refreshed_qa_settings": "qa_scanner_settings",
     },
+    # U7: QA_Scanner_GUI's run_scan loop (qa_scan_runtime.run_bulk_qa_scan, DIALOG_MODULE_FUNCTIONS)
+    "qa_scan_runtime.py": {
+        "qa_settings": "qa_scanner_settings",
+        "current_qa_settings": "qa_scanner_settings",
+        "refreshed_qa_settings": "qa_scanner_settings",
+    },
 }
 
 # Desktop UI sites: (module, top-level function) -> site id. Reachable helpers
@@ -247,6 +272,12 @@ UI_SITE_ROOTS = (
     ("translator_gui.py", "create_file_section", "main.file"),
     ("translator_gui.py", "_InputOutputDialog.*", "direct_text"),
     ("direct_text_store.py", "ChatStoreMixin.*", "direct_text"),
+    # U7: the Direct Text dialog's handler rules moved out of translator_gui as module functions
+    ("direct_text_store.py", "configured_glossary_override_mode", "direct_text"),
+    ("direct_text_store.py", "glossary_override_config_updates", "direct_text"),
+    ("direct_text_store.py", "chat_rename_title", "direct_text"),
+    ("direct_text_store.py", "manual_glossary_source_record", "direct_text"),
+    ("direct_text_store.py", "sniff_manual_glossary_extension", "direct_text"),
     ("direct_text_stream.py", "DirectTextStreamMixin.*", "direct_text"),
     ("GlossaryManager_GUI.py", "_setup_glossary_general_tab", "glossary.general"),
     ("GlossaryManager_GUI.py", "_setup_manual_glossary_tab", "glossary.balanced_full"),
@@ -273,6 +304,9 @@ UI_SITE_ROOTS = (
     ("glossary_document.py", "unified_rebuild_settings", "glossary.unified"),
     ("glossary_document.py", "*", "glossary.editor"),
     ("QA_Scanner_GUI.py", "*", "qa"),
+    # U7: QA_Scanner_GUI's run_scan worker and settings loader closure (moved verbatim; only the
+    # DIALOG_MODULE_FUNCTIONS are scanned, at the "*" distance they had inside QA_Scanner_GUI)
+    ("qa_scan_runtime.py", "*", "qa"),
     ("manga_settings_dialog.py", "*", "manga"),
     ("epub_library.py", "*", "library"),
     ("library_core.py", "*", "library"),
@@ -283,7 +317,10 @@ UI_SITE_ROOTS = (
     ("progress_core.py", "*", "progress"),
     ("progress_actions.py", "*", "progress"),
     ("glossary_progress_core.py", "*", "progress"),
+    ("sdlxliff_review_core.py", "*", "progress"),
     ("multi_api_key_manager.py", "*", "keys"),
+    # U7: other_settings' "Translate Headers Now" worker (prompt management section)
+    ("translate_headers_standalone.py", "run_translate_headers_now", "other.meta_data"),
 )
 UI_REACH_DEPTH = 3
 # Never walk into these from a UI root: they touch every setting and are not UI.
@@ -1308,7 +1345,7 @@ class Collector:
         # move into the GUI-free mixins)
         for name in DIALOG_MODULES:
             mod = self.mods.get(name)
-            if mod is None or name in OWNER_MODULES:
+            if mod is None or name in OWNER_MODULES or name in DIALOG_MODULE_FUNCTIONS:
                 continue
             for node in ast.walk(mod.tree):
                 if isinstance(node, ast.Assign) and len(node.targets) == 1 and is_self_attr(node.targets[0]):
@@ -1579,6 +1616,8 @@ class Collector:
             attr_paths = _module_attr_paths(mod)
             hints = {k: (v,) for k, v in NESTED_NAME_HINTS.get(name, {}).items()}
             funcs = list(iter_functions(mod))
+            if name in DIALOG_MODULE_FUNCTIONS:
+                funcs = [fn for fn in funcs if fn.qualname.split(".", 1)[0] in DIALOG_MODULE_FUNCTIONS[name]]
             if name == "translator_gui.py":
                 # methods moved into the GUI-free mixins are still TranslatorGUI methods
                 funcs += [fn for fn in owner_functions(self.mods) if fn.module.name != name]
@@ -1592,6 +1631,10 @@ class Collector:
                 for stmt in fn.node.body:
                     for key, _default in ctx.refs(stmt, into_defs=True):
                         touched.add(key)
+                if (name, fn.qualname) in CONFIG_UPDATE_FUNCS:
+                    for node in ast.walk(fn.node):
+                        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+                            touched.update(k for k in (const_str(item) for item in node.value.keys if item) if k)
                 for node in ast.walk(fn.node):
                     if (isinstance(node, ast.Assign) and len(node.targets) == 1
                             and isinstance(node.targets[0], ast.Subscript)):

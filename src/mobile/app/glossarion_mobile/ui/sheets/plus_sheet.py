@@ -2,8 +2,9 @@
 
 1. Attach tiles (72 dp, radius 14, tonal): Files (long-press: Pick folder…),
    Photos, Camera, From Library, Clipboard.
-2. Output mode: the same OutputModeRow as the composer (shared Signal) and the
-   active mode's options hint.
+2. Output mode: the same OutputModeRow as the composer (shared Signal) and,
+   inline below it, the active mode's options (``ModeOptionsContent``, the body of
+   the ModeOptionsSheet, U7; the hint line when no factory is given).
 3. Tools (also slash commands): Extract glossary · QA scan · Compile EPUB / PDF ·
    Translate headers / metadata · Manga translator · Generate review · Async
    batch (50% off) · Progress manager · Glossary progress · Retranslate chapters.
@@ -73,6 +74,7 @@ class PlusSheet:
         on_this_chat: Optional[Callable[[str], Any]] = None,
         on_open_mode_options: Optional[Callable[[str], Any]] = None,
         on_dismiss: Optional[Callable[..., Any]] = None,
+        mode_content: Optional[Callable[[str], Any]] = None,  # mode -> ft.Control (the mode's options)
     ) -> None:
         self.on_attach = on_attach
         self.on_attach_long_press = on_attach_long_press
@@ -89,6 +91,9 @@ class PlusSheet:
         self.mode_hint = ft.Text(
             MODE_HINTS[self.output_row.mode], theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT
         )
+        self.mode_content = mode_content
+        self.mode_options = ft.AnimatedSwitcher(content=self._options_for(self.output_row.mode), duration=200,
+                                                key="plus-mode-options")
         self.tool_tiles = {
             tool_id: ft.ListTile(
                 leading=ft.Icon(icon_data(icon)),
@@ -121,7 +126,7 @@ class PlusSheet:
                         self._header("Output mode"),
                         ft.Container(
                             padding=ft.Padding.symmetric(horizontal=12),
-                            content=ft.Column([self.output_row, self.mode_hint], spacing=4, tight=True),
+                            content=ft.Column([self.output_row, self.mode_options], spacing=4, tight=True),
                         ),
                         self._header("Tools"),
                         *self.tool_tiles.values(),
@@ -169,10 +174,22 @@ class PlusSheet:
             tooltip=reason or label,
         )
 
+    def _options_for(self, mode_id: str) -> ft.Control:
+        """The active mode's options inline (UI_SPEC §2.5 item 2); the hint line as a fallback."""
+        if self.mode_content is not None:
+            try:
+                control = self.mode_content(mode_id)
+            except Exception:
+                control = None
+            if control is not None:
+                return control
+        return self.mode_hint
+
     def _mode_changed(self, mode_id: str) -> None:
         self.mode_hint.value = MODE_HINTS.get(mode_id, "")
+        self.mode_options.content = self._options_for(mode_id)
         try:
-            self.mode_hint.update()
+            self.mode_options.update()
         except Exception:
             pass
 

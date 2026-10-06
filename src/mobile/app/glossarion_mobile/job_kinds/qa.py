@@ -1,38 +1,30 @@
 """QA_SCAN: the desktop QA Scanner run over one or more translation output folders.
 
-Every folder goes through ``qa_scan_runtime.run_qa_scan_path`` - the shared path the
-desktop QA Scanner (``QA_Scanner_GUI.run_qa_scan``), the post-translation scan phase and
-the worker-side Multipass "Failed" scan all use: it normalises the settings, mirrors them
-into the ``QA_*`` env, configures the scanner caches and calls
-``scan_html_folder.scan_html_folder`` (reports in ``<folder>/<folder>_Scan Report/``, the
-``qa_failed`` marks in ``translation_progress.json``). The owner is the job's
-``HeadlessOwner`` (``prepare_qa_scan_settings(owner=...)`` reads its config, API key field
-and model exactly as it reads TranslatorGUI's).
+The scan itself is the desktop's: ``qa_scan_runtime.run_bulk_qa_scan`` is the body of the
+desktop QA Scanner's ``run_scan`` worker (``QA_Scanner_GUI.run_qa_scan``, moved in U7). Per
+folder it reloads the saved settings (``load_current_qa_settings``), matches the source EPUB
+of a bulk scan by folder name (no fallback to another book's EPUB: the source-dependent
+checks are disabled instead), logs a source/folder name mismatch, auto-detects a PDF source
+and calls ``run_qa_scan_path`` (normalised settings, ``QA_*`` env, scanner caches,
+``scan_html_folder.scan_html_folder``: reports in ``<folder>/<folder>_Scan Report/``, the
+``qa_failed`` marks in ``translation_progress.json``), then logs the bulk summary and the cache
+statistics. The owner is the job's ``HeadlessOwner``.
 
-What the desktop's ``run_scan`` closure does around that call, this adapter does with the
-same rules and log lines (UI_SPEC §4.4; the interactive parts - mode dialog, source
+What happens around it here (UI_SPEC §4.4; the interactive parts - mode dialog, source
 pickers, mismatch question - happen on the QA screen before the job is queued):
 
-* settings: ``normalize_qa_scan_settings(config['qa_scanner_settings'],
-  target_language=config['output_language'])`` (desktop ``_load_current_qa_settings``);
-  the Custom mode thresholds are the saved ``custom_mode_settings`` (the Custom sheet
-  saves them first, like the desktop "Start Scan" button);
-* ``disable_word_count`` (the user answered "continue without word count"): the run's
-  ``check_word_count_ratio`` is off;
-* a bulk scan (2+ folders) whose folder has no matching source disables every
-  source-dependent check (word count, AI truncation, silent truncation) - the desktop's
-  "NO FALLBACK TO GLOBAL EPUB FOR BULK SCANS" rule; on mobile the source comes from the
-  Library (or the picker), never from a file-name search;
-* a source/folder name mismatch is logged with ``check_epub_folder_match`` when
-  ``qa_scan_runtime`` provides it (the shared copy of the QA_Scanner_GUI helper);
-* Direct Text workspaces are skipped (``is_direct_text_qa_path``), a missing folder is
-  skipped, a failing folder fails the whole job only when it is the only one;
-* bulk summary, cache statistics (``cache_show_stats``) and the closing line.
-
-Stop: ``run_qa_scan_path`` polls the job latch; the first poll after a Stop also raises
-``scan_html_folder.stop_scan()`` (the desktop QA stop sets both). The job's stop protocol
-is the translation one (JobService); the desktop's QA-specific escalation
-(``stop_qa_scan``) is not extracted (recorded divergence).
+* the run start resets the global cancel flags (``reset_qa_cancel_flags``, desktop
+  ``run_qa_scan``);
+* the targets' sources come from the Library (or the picker): a bulk scan hands them to the
+  shared loop as its "selected EPUBs" keyed by folder name, a single folder scan as its EPUB;
+* Direct Text workspaces and missing folders are skipped (desktop: before the worker starts);
+* ``disable_word_count`` (the user answered "continue without word count") switches the word
+  count check off for the run;
+* Stop follows the desktop QA escalation (``next_qa_stop_phase``): the first Stop sets the
+  graceful flags (``apply_qa_graceful_stop_flags``: scan loop stop, ``GRACEFUL_STOP``,
+  ``TRANSLATION_CANCELLED``), a force stop (graceful stop off, or the second Stop) the force
+  flags (``apply_qa_force_stop_flags``: + the client cancellation); after a stopped scan the
+  heavy flags are cleared (``clear_qa_stop_flags``).
 
 params: ``mode`` (``quick-scan`` | ``aggressive`` | ``ai-hunter`` | ``custom``),
 ``targets`` (``[{"folder", "source"}]``; else every input is a folder), ``disable_word_count``.
@@ -48,7 +40,7 @@ __all__ = ["KINDS", "MODES", "REPORT_FILE", "normalize_targets", "report_path_fo
 
 MODES = ("quick-scan", "aggressive", "ai-hunter", "custom")
 REPORT_FILE = "validation_results.html"
-#: settings whose checks need the source file (desktop ``_needs_epub``)
+#: settings whose checks need the source file (desktop ``_needs_epub``; the QA screen's source question)
 SOURCE_DEPENDENT_CHECKS = ("check_word_count_ratio", "check_ai_truncation_detection", "check_silent_truncation")
 
 
@@ -94,50 +86,37 @@ def _qa_runtime() -> Any:
         import qa_scan_runtime
     except Exception as exc:  # pragma: no cover - bundle without the scanner
         raise JobError(f"The shared QA scanner (qa_scan_runtime) is not in this build ({exc}).") from exc
+    if not hasattr(qa_scan_runtime, "run_bulk_qa_scan"):  # pragma: no cover - older bundle
+        raise JobError("This build's qa_scan_runtime has no run_bulk_qa_scan (U7).")
     return qa_scan_runtime
 
 
-def _load_settings(qa_scan_runtime: Any, config: Mapping[str, Any]) -> dict:
-    """Desktop ``_load_current_qa_settings``: the shared normaliser over the saved settings."""
-    try:
-        main_lang = config.get("output_language") or os.getenv("OUTPUT_LANGUAGE", "")
-        return qa_scan_runtime.normalize_qa_scan_settings(config.get("qa_scanner_settings", {}),
-                                                          target_language=main_lang)
-    except Exception:
-        return dict(config.get("qa_scanner_settings", {}) or {})
+def _stop_flag(ctx: Any, qa: Any) -> tuple:
+    """``(stop_flag, phase)``: the scan's stop poll with the desktop QA Stop escalation."""
+    state = {"phase": "idle"}
 
-
-def _stop_flag(ctx: Any) -> Callable[[], bool]:
-    raised: list = []
+    def graceful() -> bool:
+        check = getattr(getattr(ctx, "host", None), "is_graceful_stop", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:
+            return False
 
     def stop() -> bool:
         if not ctx.stop_requested():
             return False
-        if not raised:
-            raised.append(True)
-            try:
-                from scan_html_folder import stop_scan
-
-                stop_scan()
-            except Exception:
-                pass
+        phase = state["phase"]
+        if phase == "idle" or (phase == "graceful" and not graceful()):
+            new = qa.next_qa_stop_phase(phase, graceful())
+            if new == "graceful":
+                qa.apply_qa_graceful_stop_flags()
+            elif new == "force":
+                qa.apply_qa_force_stop_flags()
+            if new:
+                state["phase"] = new
         return True
 
-    return stop
-
-
-def _log_cache_stats(log: Callable[[str], Any]) -> None:
-    try:
-        from scan_html_folder import get_cache_info
-
-        cache_stats = get_cache_info()
-    except Exception:
-        return
-    log("\n📊 Cache Performance Statistics:")
-    for name, info in cache_stats.items():
-        if info:
-            hit_rate = info.hits / (info.hits + info.misses) if (info.hits + info.misses) > 0 else 0
-            log(f"  {name}: {info.hits} hits, {info.misses} misses ({hit_rate:.1%} hit rate)")
+    return stop, state
 
 
 def run(ctx: Any) -> dict:
@@ -152,7 +131,6 @@ def run(ctx: Any) -> dict:
         raise JobError("Nothing to scan: no output folder.")
     qa = _qa_runtime()
     is_direct_text = getattr(qa, "is_direct_text_qa_path", lambda _path: False)
-    name_match = getattr(qa, "check_epub_folder_match", None)
     config = ctx.config or getattr(ctx.owner, "config", {}) or {}
     log = ctx.log
     allowed: list = []
@@ -171,82 +149,58 @@ def run(ctx: Any) -> dict:
     if not allowed:
         log("⏭️ QA scan skipped: no non-Direct-Text output folders were selected.")
         return {"ok": False, "outputs": [], "error": "No output folder to scan."}
+    # Reset global cancel flags in case of a previous stop (desktop run_qa_scan)
+    qa.reset_qa_cancel_flags()
+    qa_settings = qa.load_current_qa_settings(config)
     # No ``set_output_dir``: ProgressWatcher would show the folder's translation progress
     # ("Ch 12/80") as the scan's progress; the phase line counts the folders instead.
-    total = len(allowed)
+    folders = [folder for folder, _source in allowed]
+    total = len(folders)
     if total == 1:
-        log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {allowed[0][0]}")
+        log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folders[0]}")
     else:
         log(f"🔍 Starting bulk QA scan in {mode.upper()} mode for {total} folders")
     ctx.phase("Scanning")
-    stop_flag = _stop_flag(ctx)
-    disable_word_count = bool(params.get("disable_word_count"))
-    successful = failed = 0
+    stop_flag, stop_state = _stop_flag(ctx, qa)
+    # The Library knows each folder's source: the shared loop's "selected EPUBs", keyed by folder name
+    epub_basename_map = {os.path.basename(folder.rstrip("/\\")): source
+                         for folder, source in allowed if source} if total > 1 else {}
     reports: list = []
-    last_settings: dict = {}
-    for index, (folder, source) in enumerate(allowed):
-        if stop_flag():
-            log(f"⚠️ Bulk scan stopped by user at folder {index + 1}/{total}")
-            break
-        folder_name = os.path.basename(folder)
-        if total > 1:
-            log(f"\n📁 [{index + 1}/{total}] Scanning folder: {folder_name}")
-            ctx.phase(f"Scanning {index + 1}/{total}")
-        settings = dict(_load_settings(qa, config))
-        last_settings = settings
-        if disable_word_count:
-            settings["check_word_count_ratio"] = False
-        needs_source = any(settings.get(key, False) for key in SOURCE_DEPENDENT_CHECKS)
-        if total > 1 and needs_source:
-            if source:
-                log(f"  📖 Using EPUB: {os.path.basename(source)}")
-            else:
-                log(f"  ⚠️ No matching EPUB found for folder '{folder_name}' - disabling EPUB-dependent checks")
-                for key in SOURCE_DEPENDENT_CHECKS:
-                    settings[key] = False
-        if (source and callable(name_match) and settings.get("check_word_count_ratio", False)
-                and settings.get("warn_name_mismatch", True)):
-            epub_name = os.path.splitext(os.path.basename(source))[0]
-            folder_check = os.path.basename(folder.rstrip("/\\"))
-            try:
-                matches = name_match(epub_name, folder_check, settings.get("custom_output_suffixes", ""))
-            except Exception:
-                matches = True
-            if not matches:
-                log(f"  ⚠️ Warning: source/folder name mismatch - {epub_name} vs {folder_check}")
-        try:
-            qa.run_qa_scan_path(
-                folder,
-                log=log,
-                stop_flag=stop_flag,
-                mode=mode,
-                qa_settings=settings,
-                epub_path=source,
-                selected_files=None,
-                text_file_mode=None,
-                owner=ctx.owner,
-            )
-            successful += 1
-            report = report_path_for(folder)
-            if os.path.exists(report):
-                reports.append(report)
-            if total > 1:
-                log(f"✅ Folder '{folder_name}' scan completed successfully")
-        except Exception as folder_error:
-            failed += 1
-            log(f"❌ Folder '{folder_name}' scan failed: {folder_error}")
-            if total == 1:
-                raise
-    if total > 1:
-        log(f"\n📋 Bulk scan summary: {successful} successful, {failed} failed")
-    if last_settings.get("cache_show_stats", False):
-        _log_cache_stats(log)
+
+    def scan_log(message: Any) -> None:
+        text = str(message)
+        if total > 1 and text.startswith("\n📁 ["):
+            ctx.phase("Scanning " + text.split("[", 1)[1].split("]", 1)[0])
+        log(message)
+
+    def on_report(path: str) -> None:
+        if path not in reports:
+            reports.append(path)
+
+    try:
+        successful, _failed = qa.run_bulk_qa_scan(
+            folders,
+            mode=mode,
+            epub_path=allowed[0][1] if total == 1 else None,
+            qa_settings=qa_settings,
+            load_settings=lambda: qa.load_current_qa_settings(config),
+            selected_mode_value=mode,
+            disable_word_count_for_run=bool(params.get("disable_word_count")),
+            epub_basename_map=epub_basename_map,
+            global_selected_files=None,
+            log=scan_log,
+            stop_flag=stop_flag,
+            owner=ctx.owner,
+            on_report=on_report,
+        )
+    finally:
+        if stop_state["phase"] != "idle":
+            qa.clear_qa_stop_flags()
     if reports:
         ctx.add_outputs(reports)
-        ctx.set_result(qa_reports=list(reports), qa_mode=mode, qa_folders=[f for f, _s in allowed])
+        ctx.set_result(qa_reports=list(reports), qa_mode=mode, qa_folders=folders)
     if ctx.stop_requested():
         return {"ok": None, "outputs": reports}
-    log("✅ QA scan completed successfully." if total == 1 else "✅ Bulk QA scan completed.")
     if successful == 0:
         return {"ok": False, "outputs": reports, "error": "No folder could be scanned (see the log)."}
     return {"ok": True, "outputs": reports}

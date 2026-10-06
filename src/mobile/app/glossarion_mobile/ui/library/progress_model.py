@@ -14,6 +14,16 @@ Manager and Glossary Progress panels run:
   ``resolve_llm_token_qa``, ``insert_missing_images``, ``build_partial_b_request``,
   ``special_keyword_for`` / ``remove_special_keyword``, ``row_actions``) and their
   desktop summary texts. Every progress write is ``mutate_progress`` inside them.
+* Retranslate: ``progress_actions.plan_retranslation`` decides the refusals and
+  the confirmation copy (``RetranslatePlanVM``); the confirmed plan runs as a
+  ``retranslate`` job (``apply_retranslation`` + ``retranslation_result_message``,
+  ``job_kinds.retranslate``). Resolve QA's raw-foreign-text branch becomes a
+  ``resolve_qa`` job (``resolve_qa_spec``: the Partial.b request of
+  ``build_partial_b_request``; the job runs ``prepare_single_qa_resolution`` + the
+  translation pipeline). Manual editing (``retranslation_manual_editing``) is the
+  owner's persisted toggle.
+* Image folders: the Progress Manager's image-folder view (``progress_core``
+  image-folder rows and its Mark as Skipped / Delete Selected writes).
 * Glossary: ``glossary_progress_core`` (``open_glossary_progress``,
   ``reload_glossary_progress``, ``glossary_rows``, ``glossary_stats``,
   ``mark_glossary_completed``, ``remove_glossary_progress``, ``glossary_footnotes``,
@@ -27,6 +37,8 @@ or an eligibility rule.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field, replace
@@ -42,20 +54,32 @@ __all__ = [
     "GP_GROUPS",
     "GlossaryRowVM",
     "GlossaryView",
+    "ImageFolderView",
+    "ImageItemVM",
     "PM_GROUP_ORDER",
     "ProgressView",
+    "RetranslatePlanVM",
     "RowVM",
     "StatChip",
     "apply_action",
+    "audio_path_for",
     "glossary_signature",
+    "image_delete_confirmation",
+    "image_folder_action",
     "load_glossary_view",
+    "load_image_folder_view",
     "load_progress_view",
+    "manual_editing_state",
     "mode_label",
     "plan_action",
+    "plan_retranslation",
     "progress_signature",
+    "resolve_qa_spec",
+    "retranslate_spec",
     "row_action_ids",
     "row_matches",
     "run_glossary_action",
+    "set_manual_editing",
 ]
 
 PM_GROUP_ORDER = ("completed", "merged", "in_progress", "pending", "missing", "failed", "skipped")
@@ -474,6 +498,19 @@ class ActionPlan:
     extra: dict = field(default_factory=dict)
 
 
+def exact_output_path(output_dir: str, info: Mapping[str, Any]) -> Optional[str]:
+    """A row's translated output file, or None when it is missing (the Progress Manager's
+    ``_exact_output_path_for_item``: the row's ``output_file`` or its entry's, relative to the
+    output folder unless absolute)."""
+    entry = info.get("info") if isinstance(info.get("info"), dict) else {}
+    output_file = info.get("output_file") or entry.get("output_file")
+    if not output_file:
+        return None
+    normalized = str(output_file).replace("\\", "/")
+    path = os.path.normpath(normalized if os.path.isabs(normalized) else os.path.join(output_dir, normalized))
+    return path if os.path.isfile(path) else None
+
+
 def plan_action(service: Any, view: ProgressView, action: str, rows: Sequence[RowVM]) -> ActionPlan:
     """Blocking: the targets of an action (desktop selection filters + refusal texts)."""
     pa = service.core.module("progress_actions")
@@ -508,15 +545,21 @@ def plan_action(service: Any, view: ProgressView, action: str, rows: Sequence[Ro
             return ActionPlan(action, refusal="No audio file was found for this chapter.")
         return ActionPlan(action, [info], 1, extra={"audio_path": path})
     if action == "resolve_qa":
+        # Desktop row menu (``elif act_resolve_qa``): an entry with an LLM-token QA issue always
+        # goes to ``_resolve_llm_token_qa_issue(display_info, qa_file_path)`` - the exact output
+        # path, None when the file is missing (the shared repair then reports "Output file not
+        # found"); otherwise the raw foreign-text issue runs the single-entry Partial.b job
+        # (``_start_single_progress_qa_resolution``).
         info = infos[0]
         entry = info.get("info") if isinstance(info.get("info"), dict) else {}
+        has_llm_token = service.core.fn("progress_core", "_progress_entry_has_llm_token_qa")
+        if has_llm_token is not None and has_llm_token(entry):
+            return ActionPlan(action, [info], 1,
+                              extra={"output_path": exact_output_path(state.data.get("output_dir") or "", info)})
         request = pa.build_partial_b_request(state.data, info)
         if request is not None:
             return ActionPlan(action, [info], 1, extra={"partial_b": request})
-        output = os.path.join(state.data.get("output_dir") or "", str(info.get("output_file") or ""))
-        if not entry.get("qa_issues_found") or not os.path.isfile(output):
-            return ActionPlan(action, refusal="This chapter has no resolvable QA issue.")
-        return ActionPlan(action, [info], 1, extra={"output_path": output})
+        return ActionPlan(action, refusal="This chapter has no resolvable QA issue.")
     if action == "do_not_skip":
         keyword = pa.special_keyword_for(state.owner, infos[0])
         if not keyword:
@@ -547,20 +590,24 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
         if action == "restore_in_progress":
             return pa.restore_in_progress_message(pa.restore_in_progress(progress_file, output_dir, plan.targets))
         if action == "reset_tts":
-            return pa.reset_tts_message(pa.reset_tts(state.owner, progress_file, output_dir, plan.targets))
+            message = pa.reset_tts_message(pa.reset_tts(state.owner, progress_file, output_dir, plan.targets))
+            data["skip_cleanup"] = True  # desktop: no cleanup pass on the refreshes after a TTS reset
+            return message
         if action == "delete_audio":
             pa.delete_row_audio(state.owner, data, plan.targets[0], plan.extra.get("audio_path"))
             return f"Deleted {os.path.basename(str(plan.extra.get('audio_path') or 'the audio file'))}."
         if action == "resolve_qa":
             if plan.extra.get("partial_b") is not None:
-                return ("This QA issue needs the translation engine (a Partial.b request on this chapter); "
-                        "single-entry QA resolution jobs arrive in U7.")
+                # The raw foreign-text branch is an engine run: submit ``resolve_qa_spec``.
+                raise ValueError("Partial.b QA resolution runs as a resolve_qa job (resolve_qa_spec)")
             output_path = plan.extra["output_path"]
             outcome = pa.resolve_llm_token_qa(progress_file, plan.targets[0], output_path)
-            if outcome.get("error"):
-                return f"Could not update progress: {outcome['error']}"
-            if not (outcome.get("repair") or {}).get("resolved"):
-                return str((outcome.get("repair") or {}).get("message") or "No LLM-token issue could be repaired.")
+            repair = outcome.get("repair") or {}
+            if not repair.get("resolved"):  # desktop "QA Issue Not Resolved"
+                return str(repair.get("error") or "The empty-attribute repair did not remove the LLM token issue.")
+            if outcome.get("error"):  # desktop "QA Issue Not Fully Resolved"
+                return ("The malformed tags were repaired, but the progress file could not be updated:\n"
+                        f"{outcome['error']}")
             return pa.llm_token_repair_summary(outcome, output_path)
         if action == "insert_image":
             kind, _title, message, _refreshed = pa.insert_missing_images(data, plan.targets[0], restore_fn)
@@ -585,6 +632,269 @@ def action_message(result: Any, fallback: str = "Done") -> str:
         if value:
             return str(value)
     return fallback
+
+
+# ---------------------------------------------------------------------------
+# Retranslate Selected, Resolve QA (Partial.b), Manual editing, audio files
+# ---------------------------------------------------------------------------
+
+MANUAL_EDITING_KEY = "retranslation_manual_editing"
+#: Display-info fields the Partial.b job re-targets its entry with (``_partial_b_target``).
+PARTIAL_B_INFO_KEYS = ("progress_key", "parent_progress_key", "output_file", "translation_artifact_label",
+                       "metadata_label", "is_chunk_progress", "chunk_progress_key", "chunk_index")
+
+
+@dataclass
+class RetranslatePlanVM:
+    """``progress_actions.plan_retranslation`` for the Chapters tab (desktop copy, verbatim).
+
+    ``mode``: ``retranslate`` (ask ``title`` / ``message``: Yes / No, or - ``choices`` - the
+    RECYCLED three-button dialog), ``reset_tts`` (audio output: ask, then ``reset_tts``) or
+    ``refused`` (show ``refusal`` = ``(kind, title, message)``). ``book`` is the detached
+    ``BookProgress`` the plan was made on: the ``retranslate`` job applies the plan to it, so
+    the Book page's 2 s refresh never mutates the data the job is writing from.
+    """
+
+    mode: str
+    refusal: Optional[tuple] = None
+    title: str = ""
+    message: str = ""
+    choices: tuple = ()  # ((value, label), ...) in desktop button order; () = Yes / No
+    count: int = 0
+    plan: Any = None
+    book: Any = None
+
+    @property
+    def needs_choice(self) -> bool:
+        return bool(self.choices)
+
+
+def manual_editing_state(service: Any, view: Optional[ProgressView] = None) -> bool:
+    """The Progress Manager's persisted "Manual editing" toggle (``retranslation_manual_editing``)."""
+    try:
+        return bool(service.cfg(MANUAL_EDITING_KEY, False))
+    except Exception:
+        owner = getattr(getattr(view, "state", None), "owner", None)
+        getter = getattr(owner, "_get_retranslation_manual_editing_state", None)
+        return bool(getter()) if callable(getter) else False
+
+
+def set_manual_editing(service: Any, view: Optional[ProgressView], enabled: bool) -> bool:
+    """Persist the Manual editing toggle (desktop ``_on_manual_editing_toggled``: config key + the
+    view data's ``manual_editing_state``); Retranslate plans read it as ``settings['manual_editing']``."""
+    enabled = bool(enabled)
+    service.set_cfg(MANUAL_EDITING_KEY, enabled)
+    state = getattr(view, "state", None)
+    owner = getattr(state, "owner", None)
+    config = getattr(owner, "config", None)
+    if isinstance(config, dict):
+        config[MANUAL_EDITING_KEY] = enabled
+    data = getattr(state, "data", None)
+    if isinstance(data, dict):
+        data["manual_editing_state"] = enabled
+    return enabled
+
+
+def _detached_book(state: Any) -> Any:
+    """A copy of a ``BookProgress`` whose ``data`` the Book page's refresh will not touch."""
+    try:
+        data = copy.deepcopy(state.data)
+    except Exception:
+        data = dict(state.data)
+        for key in ("prog", "chapter_display_info", "spine_chapters"):
+            if key in data:
+                data[key] = copy.deepcopy(data[key])
+    try:
+        return dataclasses.replace(state, data=data)
+    except Exception:
+        clone = copy.copy(state)
+        clone.data = data
+        return clone
+
+
+def _plan_rows(state: Any, rows: Sequence[Any]) -> list:
+    """Selected rows as indices into ``chapter_display_info`` (the detached copy keeps the order)."""
+    infos = state.data.get("chapter_display_info") or []
+    by_identity = {id(info): index for index, info in enumerate(infos)}
+    out: list = []
+    for row in rows:
+        info = row.info if isinstance(row, RowVM) else row
+        if not isinstance(info, dict) or not info:
+            continue
+        index = by_identity.get(id(info))
+        out.append(index if index is not None else info)
+    return out
+
+
+def plan_retranslation(service: Any, view: ProgressView, rows: Sequence[Any]) -> RetranslatePlanVM:
+    """Blocking: Retranslate Selected's plan (guards, confirmation copy, RECYCLED choice)."""
+    fn = service.core.fn("progress_actions", "plan_retranslation")
+    if fn is None:
+        raise CoreMissing("progress_actions.plan_retranslation")
+    state = view.state
+    if state is None:
+        return RetranslatePlanVM("refused", refusal=("warning", "Retranslate", "The progress could not be read"))
+    selection = _plan_rows(state, rows)
+    book = _detached_book(state)
+    plan = fn(book, selection, {"manual_editing": manual_editing_state(service, view)})
+    refusal = getattr(plan, "refusal", None)
+    return RetranslatePlanVM(
+        mode=str(getattr(plan, "mode", "retranslate") or "retranslate"),
+        refusal=tuple(refusal) if refusal else None,
+        title=str(getattr(plan, "confirm_title", "") or ""),
+        message=str(getattr(plan, "confirm_message", "") or ""),
+        choices=tuple(tuple(c) for c in (getattr(plan, "linked_choice_labels", ()) or ())),
+        count=int(getattr(plan, "count", 0) or 0),
+        plan=plan,
+        book=book,
+    )
+
+
+def retranslate_spec(service: Any, book: Mapping[str, Any], vm: RetranslatePlanVM,
+                     linked_choice: Optional[str] = None) -> Any:
+    """The ``retranslate`` job for a confirmed plan (not resumable: the plan lives in memory)."""
+    from glossarion_mobile.job_kinds import retranslate as retranslate_kind
+    from glossarion_mobile.services.jobs import JobSpec
+
+    token = retranslate_kind.stash(vm.book, vm.plan)
+    name = str(book.get("name") or "")
+    return JobSpec(kind="retranslate", title=f"{name} · {vm.count} selected" if name else f"{vm.count} selected",
+                   params={"plan": token, "linked_choice": linked_choice, "count": vm.count,
+                           "output_dir": str(getattr(vm.book, "output_dir", "") or "")},
+                   origin=service.origin_for(book), resumable=False)
+
+
+def _json_value(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def resolve_qa_spec(service: Any, book: Mapping[str, Any], plan: ActionPlan) -> Any:
+    """The single-entry ``resolve_qa`` (Partial.b) job of a planned Resolve QA action."""
+    from glossarion_mobile.services.jobs import JobSpec
+
+    request = dict(plan.extra.get("partial_b") or {})
+    info = plan.targets[0] if plan.targets else {}
+    display = {key: info.get(key) for key in PARTIAL_B_INFO_KEYS if key in info and _json_value(info.get(key))}
+    label = (info.get("translation_artifact_label") or info.get("metadata_label") or request.get("output_file")
+             or f"entry {request.get('progress_key')}")
+    name = str(book.get("name") or "")
+    return JobSpec(kind="resolve_qa", title=f"{name} · {label}" if name else str(label),
+                   inputs=(str(request.get("source_path") or ""),),
+                   params={"request": {k: v for k, v in request.items() if _json_value(v)}, "display_info": display,
+                           "label": str(label)},
+                   origin=service.origin_for(book))
+
+
+def audio_path_for(service: Any, view: ProgressView, row: RowVM) -> Optional[str]:
+    """Blocking: the row's generated TTS audio file (desktop "🔊 Open Audio File"), or None."""
+    fn = service.core.fn("progress_actions", "find_row_audio")
+    state = view.state
+    if fn is None or state is None:
+        return None
+    try:
+        path = fn(state.owner, state.data, row.info)
+    except Exception:
+        log.debug("looking up the row audio failed", exc_info=True)
+        return None
+    return str(path) if path and os.path.isfile(str(path)) else None
+
+
+# ---------------------------------------------------------------------------
+# Image folders (Progress Manager - Images; Retranslation_GUI image-folder view)
+# ---------------------------------------------------------------------------
+
+#: Delete Selected's result text (desktop ``retranslate_selected`` of the image-folder view).
+IMAGE_DELETED = "Deleted {count} file(s).\n\nThey will be retranslated on the next run."
+
+
+@dataclass(frozen=True)
+class ImageItemVM:
+    key: str
+    kind: str  # "translated" | "cover" (``file_info`` row type)
+    status: str  # palette key: completed / skipped
+    title: str
+    label: str
+    path: str = ""
+    index: int = 0  # row index in ``file_info``
+    raw: Any = None  # the ``file_info`` row
+
+
+@dataclass(frozen=True)
+class ImageFolderView:
+    items: tuple = ()
+    output_dir: str = ""
+    error: Optional[str] = None
+    error_title: str = ""
+    missing: tuple = ()
+    state: Any = None  # the desktop refresh data (``build_image_folder_progress``)
+
+
+def _image_item_vm(index: int, info: Mapping[str, Any], text: str) -> ImageItemVM:
+    parts = [p.strip() for p in str(text or "").split(" | ")]
+    title = " | ".join(parts[:-1]) if len(parts) > 1 else str(text or info.get("file") or "")
+    label = parts[-1] if len(parts) > 1 else ""
+    kind = str(info.get("type") or "translated")
+    return ImageItemVM(key=f"img:{index}:{info.get('file') or ''}", kind=kind,
+                       status="skipped" if kind == "cover" else "completed", title=title, label=label,
+                       path=str(info.get("path") or ""), index=index, raw=info)
+
+
+def load_image_folder_view(service: Any, folder: str) -> ImageFolderView:
+    """Blocking: the image-folder Progress Manager rows (``progress_core.build_image_folder_progress``:
+    output lookup, the refresh scan and the list texts), or the desktop "Info" text."""
+    fn = service.core.fn("progress_core", "build_image_folder_progress")
+    if fn is None:
+        return ImageFolderView(error="The image-folder progress view is not available in this build",
+                               missing=("progress_core.build_image_folder_progress",))
+    try:
+        owner = make_owner(service)
+        data, notice = fn(folder, owner.config, owner=owner)
+    except CoreMissing as exc:
+        return ImageFolderView(error=str(exc), missing=(exc.name,))
+    except Exception as exc:
+        log.info("image-folder progress failed: %s", exc)
+        return ImageFolderView(error=f"Progress could not be read ({exc})")
+    if data is None:
+        _kind, title, message = (tuple(notice or ()) + ("info", "Info", ""))[:3]
+        return ImageFolderView(error=str(message), error_title=str(title))
+    rows = list(data.get("rows") or ())
+    infos = list(data.get("file_info") or ())
+    items = tuple(_image_item_vm(i, info, rows[i] if i < len(rows) else "") for i, info in enumerate(infos))
+    return ImageFolderView(items=items, output_dir=str(data.get("output_dir") or ""), state=data)
+
+
+def image_delete_confirmation(service: Any, view: ImageFolderView, items: Sequence[ImageItemVM]) -> Optional[str]:
+    """Delete Selected's confirmation text (``progress_core.image_folder_delete_confirmation``)."""
+    fn = service.core.fn("progress_core", "image_folder_delete_confirmation")
+    data = view.state if isinstance(view.state, dict) else {}
+    if fn is None or not data:
+        return None
+    return str(fn(data.get("file_info") or [], [item.index for item in items]))
+
+
+def image_folder_action(service: Any, view: ImageFolderView, action: str, items: Sequence[ImageItemVM]) -> tuple:
+    """Blocking: Mark as Skipped / Delete Selected on the image-folder rows (the shared writes,
+    progress through ``mutate_progress``); returns the desktop ``(title, message)``."""
+    data = view.state if isinstance(view.state, dict) else None
+    if data is None:
+        raise ValueError("The image-folder progress could not be read")
+    try:
+        if action == "mark_skipped":
+            mark = service.core.require("progress_core", "mark_image_folder_items_skipped")
+            message_fn = service.core.require("progress_core", "image_folder_mark_skipped_message")
+            moving = [(item.index, item.raw) for item in items if item.kind != "cover"]
+            result = mark(data.get("folder_path"), data.get("output_dir"), data.get("progress_file"),
+                          data.get("progress_data"), moving, data.get("file_info"))
+            _kind, title, message = message_fn(result)
+            return str(title), str(message)
+        if action == "delete":
+            delete = service.core.require("progress_core", "delete_image_folder_items")
+            count = delete(data.get("progress_file"), data.get("progress_data"), data.get("file_info"),
+                           [item.index for item in items])
+            return "Success", IMAGE_DELETED.format(count=int(count or 0))
+    finally:
+        service.mark_dirty()
+    raise ValueError(action)
 
 
 # ---------------------------------------------------------------------------

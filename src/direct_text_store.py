@@ -52,6 +52,16 @@ Edits made while moving (everything else is byte-for-byte):
   ``_start_translation`` (9339-9349) with the dialog state as parameters;
 * ``_atomic_text_write`` (translator_gui 1321) lives here; translator_gui re-imports it.
 
+U7: four small rules that were still inline in the dialog's Qt handlers moved here verbatim
+as module functions the dialog now calls (``translator_gui.py`` @ 41814faa):
+``configured_glossary_override_mode`` (the ``__init__`` read of
+``direct_text_glossary_override_mode``), ``glossary_override_config_updates``
+(``_on_glossary_override_toggled``'s three config writes), ``chat_rename_title``
+(``_rename_chat``'s title rule) and ``manual_glossary_source_record`` /
+``sniff_manual_glossary_extension`` (the "Provide Manual Glossary" dialog's ``_accept``),
+plus ``MANUAL_GLOSSARY_EXTENSIONS`` (its accepted file types). The mobile chat calls the same
+functions.
+
 Hooks the moved code calls (the dialog implements them with Qt; ``ChatStore`` GUI-free):
 ``_refresh_chat_list``, ``_render_output``, ``_set_status``, ``_direct_text_notice``,
 ``_confirm_attachment_merge`` (see ``CHAT_STORE_HOOKS``).
@@ -78,17 +88,24 @@ __all__ = [
     "ChatStore",
     "ChatStoreMixin",
     "DirectTextOwnerView",
+    "GLOSSARY_OVERRIDE_MODES",
     "HISTORY_FILE_NAME",
+    "MANUAL_GLOSSARY_EXTENSIONS",
     "SIDECAR_NAME",
     "apply_direct_text_run_environment",
+    "chat_rename_title",
+    "configured_glossary_override_mode",
     "default_history_path",
     "force_no_glossary_for_mode",
     "format_attachment_size",
+    "glossary_override_config_updates",
     "history_window_bounds",
+    "manual_glossary_source_record",
     "markup_to_html",
     "normalize_attachment_record",
     "normalize_rendered_card_limit",
     "prepare_direct_text_input",
+    "sniff_manual_glossary_extension",
     "timestamp_label",
 ]
 
@@ -2860,6 +2877,95 @@ def timestamp_label(created_at):
     return ChatStoreMixin._assistant_timestamp_label(
         ChatStoreMixin(), ("assistant", "", "", "", "", "", {"created_at": created_at})
     )
+
+
+# ---------------------------------------------------------------------------
+# Dialog rules that were inline in Qt handlers (U7; the dialog calls these)
+# ---------------------------------------------------------------------------
+
+#: The Direct Text glossary override modes (the dialog's four Settings-tab radios).
+GLOSSARY_OVERRIDE_MODES = ('none', 'attachments_only', 'no_glossary', 'manual')
+#: Glossary file types the "Provide Manual Glossary" dialog accepts (drop / Browse…).
+MANUAL_GLOSSARY_EXTENSIONS = frozenset({'.csv', '.json', '.txt', '.md'})
+
+
+def configured_glossary_override_mode(value):
+    """The dialog ``__init__``'s reading of ``direct_text_glossary_override_mode`` (unknown or empty -> attachments_only)."""
+    configured_glossary_override = str(
+        value or ''
+    ).strip().lower()
+    if configured_glossary_override not in {
+        'none', 'attachments_only', 'no_glossary', 'manual'
+    }:
+        # Plain text keeps the safe No Glossary behavior, while attached
+        # documents inherit the main translator by default.
+        configured_glossary_override = 'attachments_only'
+    return configured_glossary_override
+
+
+def glossary_override_config_updates(mode):
+    """``_on_glossary_override_toggled``'s config writes for the checked radio, in its order.
+
+    Unlike the ``__init__`` read, an empty *mode* means ``'none'`` here.
+    """
+    mode = str(mode or 'none').strip().lower()
+    if mode not in {
+        'none', 'attachments_only', 'no_glossary', 'manual'
+    }:
+        mode = 'attachments_only'
+    return {
+        'direct_text_glossary_override_mode': mode,
+        # Keep the previous keys synchronized for backward compatibility
+        # with older builds that do not know about the enum setting.
+        'direct_text_force_no_glossary': mode == 'no_glossary',
+        'direct_text_manual_glossary': mode == 'manual',
+    }
+
+
+def chat_rename_title(new_title):
+    """``_rename_chat``'s title rule: whitespace collapsed, at most 120 characters ('' keeps the title)."""
+    return " ".join(str(new_title or "").split())[:120]
+
+
+def sniff_manual_glossary_extension(content):
+    """Extension the "Provide Manual Glossary" dialog gives pasted or edited contents."""
+    extension = '.txt'
+    stripped = content.lstrip()
+    if stripped.startswith(('{', '[')):
+        try:
+            json.loads(content)
+            extension = '.json'
+        except (TypeError, ValueError):
+            # Keep malformed/non-JSON structured text as plain text;
+            # this avoids silently rewriting what the user pasted.
+            extension = '.txt'
+    else:
+        nonempty_lines = [line for line in content.splitlines() if line.strip()]
+        if len(nonempty_lines) > 1 and ',' in nonempty_lines[0]:
+            extension = '.csv'
+    return extension
+
+
+def manual_glossary_source_record(content, source_path='', source_text='', source_extension='.txt'):
+    """The "Provide Manual Glossary" dialog's accepted record (its ``_accept``); None when empty.
+
+    A loaded file left unedited (*content* equals the *source_text* read from *source_path*)
+    is used by path; edited or pasted contents get the sniffed extension and are written by
+    the run into its temp folder (``prepare_direct_text_input``).
+    """
+    if not content.strip():
+        return None
+    if source_path and content == source_text:
+        return {
+            'kind': 'path',
+            'path': source_path,
+            'extension': source_extension,
+        }
+    return {
+        'kind': 'content',
+        'content': content,
+        'extension': sniff_manual_glossary_extension(content),
+    }
 
 
 def prepare_direct_text_input(text, attachment=None, manual_glossary_source=None, *, temp_parent=None,

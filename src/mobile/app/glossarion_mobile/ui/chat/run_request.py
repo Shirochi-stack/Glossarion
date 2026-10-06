@@ -54,6 +54,8 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
 
 __all__ = [
     "DIRECT_TEXT_JOB_KIND",
+    "GENERATE_MEDIA_JOB_KIND",
+    "GENERATIVE_SENTINEL",
     "DirectTextRun",
     "attachment_record",
     "build_run_options",
@@ -64,6 +66,10 @@ __all__ = [
 ]
 
 DIRECT_TEXT_JOB_KIND = "direct_text"
+#: "Generate from prompt (no input)" (UI_SPEC §2.6): the desktop generative-only run as a chat job.
+GENERATE_MEDIA_JOB_KIND = "generate_media"
+#: ``translation_pipeline``'s no-input file sentinel (``selected_files == ["__generative_mode__"]``).
+GENERATIVE_SENTINEL = "__generative_mode__"
 TEMP_PREFIX = "glossarion_input_output_"  # the dialog's mkdtemp prefix
 
 

@@ -1467,14 +1467,28 @@ def _attach_logging_handlers(gui_instance):
             pass
 
 
-def run_translate_headers_gui(gui_instance):
+def translate_headers_now(gui_instance, *, show_error=None, process_events=None, output_dir_for=None):
     """
-    GUI wrapper for standalone header translation
-    
+    "Translate Headers Now" for the selected EPUB/PDF files, without Qt (U7 move of
+    run_translate_headers_gui's body; the desktop wrapper passes the message box and the
+    Qt event pump).
+
     Args:
-        gui_instance: The GUI instance (translator_gui or other_settings)
+        gui_instance: The GUI instance (translator_gui or other_settings), or a GUI-free
+            owner (Glossarion Mobile's HeadlessOwner) with the same attributes
+        show_error: ``show_error(title, text)`` for the dialog's error boxes (default: a
+            log line)
+        process_events: called where the GUI pumped its event loop (default: nothing)
+        output_dir_for: ``output_dir_for(source_path)`` -> the output folder when the front
+            end knows it (mobile Library); default: the desktop folder search
     """
-    from PySide6.QtWidgets import QMessageBox
+    if show_error is None:
+        def show_error(title, text):
+            gui_instance.append_log(f"❌ {text}")
+    if process_events is None:
+        def process_events():
+            return None
+
     
     try:
         # Re-attach GUI logging handlers to reclaim logs from manga integration
@@ -1496,9 +1510,7 @@ def run_translate_headers_gui(gui_instance):
         if not epub_files:
             epub_path = gui_instance.get_current_epub_path()
             if not epub_path or not os.path.exists(epub_path):
-                QMessageBox.critical(
-                    None, 
-                    "Error", 
+                show_error("Error", 
                     "No EPUB or PDF file selected, or the file does not exist."
                 )
                 return
@@ -1513,9 +1525,7 @@ def run_translate_headers_gui(gui_instance):
                         epub_files.append(full_path)
                 
                 if not epub_files:
-                    QMessageBox.critical(
-                        None,
-                        "Error",
+                    show_error("Error",
                         f"No EPUB or PDF files found in directory: {epub_path}"
                     )
                     return
@@ -1527,9 +1537,7 @@ def run_translate_headers_gui(gui_instance):
         
         # Check API client once before processing any files
         if not hasattr(gui_instance, 'api_client') or not gui_instance.api_client:
-            QMessageBox.critical(
-                None, 
-                "Error", 
+            show_error("Error", 
                 "API client not initialized. Please check your API settings."
             )
             return
@@ -1599,6 +1607,9 @@ def run_translate_headers_gui(gui_instance):
                 candidates.insert(0, os.path.join(override_dir, epub_base))
                 gui_instance.append_log(f"🔍 Checking override directory: {override_dir}")
             
+            if output_dir_for is not None:  # the front end knows the folder (mobile Library)
+                candidates = [c for c in [output_dir_for(current_epub)] if c]
+            
             output_dir = None
             checked_locations = []
             
@@ -1625,8 +1636,7 @@ def run_translate_headers_gui(gui_instance):
                 gui_instance.append_log(f"⏭️ Skipping to next EPUB... ({successful + failed}/{total_files} processed)\n")
                 # Force GUI event processing
                 try:
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents()
+                    process_events()
                 except Exception:
                     pass
                 continue
@@ -1885,8 +1895,7 @@ def run_translate_headers_gui(gui_instance):
                 
                 # Force GUI event processing
                 try:
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents()
+                    process_events()
                 except Exception:
                     pass
                 continue
@@ -1937,8 +1946,7 @@ def run_translate_headers_gui(gui_instance):
             
             # Force GUI event processing after each file
             try:
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents()
+                process_events()
             except Exception:
                 pass
         
@@ -1951,8 +1959,161 @@ def run_translate_headers_gui(gui_instance):
                 gui_instance.append_log(f"  ❌ Failed: {failed}/{total_files}")
             gui_instance.append_log(f"{'='*60}")
     
+        return successful, failed
     except Exception as e:
         import traceback
         error_msg = f"Error during header translation: {e}\n\n{traceback.format_exc()}"
         gui_instance.append_log(f"❌ {error_msg}")
-        QMessageBox.critical(None, "Error", error_msg)
+        show_error("Error", error_msg)
+
+
+def run_translate_headers_gui(gui_instance):
+    """
+    GUI wrapper for standalone header translation
+    
+    Args:
+        gui_instance: The GUI instance (translator_gui or other_settings)
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    def _process_events():
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+    return translate_headers_now(
+        gui_instance,
+        show_error=lambda title, text: QMessageBox.critical(None, title, text),
+        process_events=_process_events,
+    )
+
+
+def run_translate_headers_now(gui_instance, model, api_key, *, headers_runner=None, rebuild_epub=True):
+    """"Translate Headers Now" without Qt: API client, header translation, then the EPUB rebuild.
+
+    The worker of other_settings.run_standalone_translate_headers (U7 move): the desktop
+    thread calls it after its API key / model checks with ``headers_runner =
+    run_translate_headers_gui``; GUI-free callers keep the default (``translate_headers_now``
+    with log-line errors) or pass their own runner.
+    ``rebuild_epub=False`` skips the EPUB rebuild (Glossarion Mobile's "Rebuild EPUB" switch).
+    """
+    import traceback
+    if headers_runner is None:
+        headers_runner = translate_headers_now
+    try:
+        original_client = getattr(gui_instance, 'api_client', None)
+
+        if original_client:
+            # Use existing client - it already has multi-key mode configured
+            gui_instance.append_log("✅ Using existing API client (with multi-key support)")
+            api_client = original_client
+        else:
+            # Initialize new API client with current settings
+            # Multi-key mode is configured via environment variables (not constructor params)
+            from unified_api_client import UnifiedClient
+            import json
+
+            # Set environment variables for multi-key mode if configured
+            if hasattr(gui_instance, 'config'):
+                if gui_instance.config.get('use_multi_api_keys', False):
+                    multi_keys = gui_instance.config.get('multi_api_keys', [])
+                    os.environ['USE_MULTI_API_KEYS'] = '1'
+                    os.environ['USE_MULTI_KEYS'] = '1'
+                    os.environ['FORCE_KEY_ROTATION'] = '1' if gui_instance.config.get('force_key_rotation', True) else '0'
+                    os.environ['ROTATION_FREQUENCY'] = str(gui_instance.config.get('rotation_frequency', 1))
+
+                    # Avoid Windows env var length limit by keeping keys in memory
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.set_in_memory_multi_keys(
+                            multi_keys,
+                            force_rotation=gui_instance.config.get('force_key_rotation', True),
+                            rotation_frequency=gui_instance.config.get('rotation_frequency', 1),
+                        )
+                    except Exception:
+                        pass
+
+                    gui_instance.append_log(f"🔑 Multi-key mode enabled ({len(multi_keys)} keys)")
+
+            api_client = UnifiedClient(
+                model=model, 
+                api_key=api_key
+            )
+            gui_instance.append_log("✅ Created new API client")
+
+            # Set it temporarily
+            gui_instance.api_client = api_client
+
+        try:
+            # Import and run the translation GUI
+            headers_runner(gui_instance)
+            if not rebuild_epub:
+                return
+
+            # After translation completes, run EPUB converter to rebuild the EPUB
+            # with the updated HTML files
+            gui_instance.append_log("\n📦 Rebuilding EPUB with translated headers...")
+            try:
+                from epub_converter import fallback_compile_epub
+
+                # Find the output directory for the current EPUB
+                epub_path = gui_instance.get_current_epub_path() if hasattr(gui_instance, 'get_current_epub_path') else None
+                if not epub_path and hasattr(gui_instance, 'selected_files') and gui_instance.selected_files:
+                    # Get first EPUB from selection
+                    epub_files = [f for f in gui_instance.selected_files if f.lower().endswith('.epub')]
+                    if epub_files:
+                        epub_path = epub_files[0]
+
+                if epub_path:
+                    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                    current_dir = os.getcwd()
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+                    # Find output directory (same logic as header translation)
+                    candidates = [
+                        os.path.join(current_dir, epub_base),
+                        os.path.join(script_dir, epub_base),
+                        os.path.join(current_dir, 'src', epub_base),
+                    ]
+
+                    # Add output directory override if configured
+                    override_dir = os.environ.get('OUTPUT_DIRECTORY') or gui_instance.config.get('output_directory')
+                    if override_dir:
+                        candidates.insert(0, os.path.join(override_dir, epub_base))
+
+                    output_dir = None
+                    for candidate in candidates:
+                        if os.path.isdir(candidate):
+                            files = os.listdir(candidate)
+                            html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                            if html_files:
+                                output_dir = candidate
+                                break
+
+                    if output_dir:
+                        # Set EPUB_PATH env var for the converter
+                        os.environ['EPUB_PATH'] = epub_path
+
+                        gui_instance.append_log(f"📂 Output directory: {output_dir}")
+                        fallback_compile_epub(
+                            output_dir,
+                            log_callback=gui_instance.append_log,
+                            api_client=api_client,
+                        )
+                        gui_instance.append_log("✅ EPUB rebuilt successfully with translated headers!")
+                    else:
+                        gui_instance.append_log("⚠️ Could not find output directory to rebuild EPUB")
+                else:
+                    gui_instance.append_log("⚠️ No EPUB file selected - skipping EPUB rebuild")
+            except Exception as epub_error:
+                gui_instance.append_log(f"⚠️ Failed to rebuild EPUB: {epub_error}")
+                import traceback as tb
+                gui_instance.append_log(tb.format_exc())
+        finally:
+            # Restore original client
+            if original_client is not None:
+                gui_instance.api_client = original_client
+            elif hasattr(gui_instance, 'api_client'):
+                delattr(gui_instance, 'api_client')
+    except Exception as e:
+        error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
+        gui_instance.append_log(f"❌ {error_msg}")

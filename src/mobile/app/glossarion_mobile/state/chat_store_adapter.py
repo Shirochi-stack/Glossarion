@@ -25,27 +25,44 @@ extracted methods by their desktop names (``_load_chat_history``,
 * session operations with the desktop rules (reuse an empty chat on New chat,
   auto-title on the first send, 120-character rename, validated folder delete,
   draft autosave debounced 450 ms, lazy bodies with a 128-entry cache);
-* message fingerprints / opaque ``mid`` ids for routes (Appendix B).
+* message fingerprints / opaque ``mid`` ids for routes (Appendix B);
+* U7 (mobile-only mutations that keep the v2 file valid, UI_SPEC §2.10 / §2.16 / §2.17 / §2.19):
+  scratch chats (``s<uuid>`` ids; each one is a ``ChatStore`` of its own under the scratch
+  folder, never written to ``direct_text_chats.json``; Save moves it into the history and its
+  folder under ``Direct Text/`` through the shared ``_relocate_session_attachment_paths``),
+  Delete message (renames the surviving responses' ``Chat Messages`` files to their new
+  indices, re-indexes ``expanded``, remaps the sidecar fingerprints and records the turns of
+  the chat's jobs in the sidecar ``job_turns``), message versions
+  (sidecar ``versions``), the generated media of a response (the shared
+  ``_assistant_generated_media`` / ``_generated_media_references_from_text``) and the desktop
+  attachment Migrate (``ChatStore.migrate_attachment``).
 
 Thread-safety: every method takes the adapter lock; listeners run on the thread
 that changed the data unless ``post`` is set (the chat feature sets it to
 ``UiDispatcher.post`` so the drawer always refreshes on the UI loop). Blocking
-file I/O (load, save, delete, body reads) belongs on a worker thread.
+file I/O (load, save, delete, body reads) belongs on a worker thread. The shared
+ChatStore has a lock of its own (held through its long work: ``finish_run``, Migrate);
+it is always taken before the adapter lock, never while holding it, and long file moves
+(Migrate, delete workspace, Save scratch) run without the adapter lock, so the UI loop
+never waits behind them.
 
 Pure Python (3.10); never imports Flet. Backend modules load lazily.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import logging
 import os
+import shutil
 import threading
 import time
+import uuid
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
@@ -57,11 +74,17 @@ __all__ = [
     "ChatStoreAdapter",
     "ChatStoreBinding",
     "MobileChatSidecar",
+    "SCRATCH_DIR_NAME",
     "SIDECAR_NAME",
+    "STORAGE_PATH_KEYS",
+    "ScratchChat",
     "StoreUnavailable",
     "default_history_path",
+    "is_scratch_cid",
     "message_fingerprints",
     "message_id",
+    "remap_sidecar_entry",
+    "summary_for_scratch",
 ]
 
 log = logging.getLogger("glossarion.chats")
@@ -71,6 +94,18 @@ SIDECAR_VERSION = 1
 DRAFT_SAVE_DELAY = 0.45  # desktop _chat_history_save_timer
 BODY_CACHE_LIMIT = 128  # desktop _message_text_cache
 NEW_CHAT_TITLE = "New chat"
+SCRATCH_DIR_NAME = "Direct Text Scratch"  # UI_SPEC §2.16: cache/Direct Text Scratch/<uuid>/
+#: v2 storage keys holding history-relative file references (desktop normalizer limits, §2.19).
+STORAGE_PATH_KEYS = (
+    "content_path", "content_text_path", "content_html_path", "content_xhtml_path",
+    "thinking_path", "image_path", "media_path",
+)
+
+
+def is_scratch_cid(cid: Any) -> bool:
+    """Scratch chat ids are ``s<uuid hex>`` (route-safe, never a v2 int id)."""
+    text = str(cid or "")
+    return len(text) > 1 and text[0] == "s" and all(c in "0123456789abcdefABCDEF-" for c in text[1:])
 
 
 class StoreUnavailable(RuntimeError):
@@ -274,6 +309,24 @@ class ChatStoreBinding:
             return os.path.abspath(value)
         return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(self.history_path)), value))
 
+    def history_reference(self, path: str) -> str:
+        """The v2 reference of a file (``_history_file_reference``: relative to the history file)."""
+        fn = self.fn("history_file_reference", required=False)
+        if fn is not None:
+            return fn(path)
+        absolute = os.path.abspath(os.path.expanduser(str(path or "")))
+        try:
+            reference = os.path.relpath(absolute, os.path.dirname(os.path.abspath(self.history_path)))
+        except ValueError:
+            reference = absolute
+        return reference.replace("\\", "/")
+
+    @property
+    def lock(self) -> Any:
+        """The ChatStore's own lock (its operations hold it), or None for a store without one."""
+        lock = getattr(self.store, "lock", None)
+        return lock if lock is not None and hasattr(lock, "__enter__") else None
+
     def ensure_output_folder(self, session: dict) -> str:
         return str(self.fn("ensure_conversation_output_folder_for_session", "ensure_output_folder")(session) or "")
 
@@ -289,6 +342,46 @@ class ChatStoreBinding:
         except Exception:
             log.debug("attachment folder scan failed", exc_info=True)
             return []
+
+    # ---- U7: media, relocation, migrate -------------------------------------------------------
+
+    def generated_media(self, message: Any, content: str) -> tuple:
+        """``(primary, references)`` of one response: the desktop ``_assistant_generated_media``
+        (storage ``media_path`` / ``image_path``, else the first existing marker) and every
+        ``[GENERATED_IMAGE|VIDEO|AUDIO:<path>]`` marker (``_generated_media_references_from_text``)."""
+        primary_fn = self.fn("assistant_generated_media", required=False)
+        refs_fn = self.fn("generated_media_references_from_text", required=False)
+        primary: tuple = ("", "")
+        if primary_fn is not None:
+            try:
+                primary = tuple(primary_fn(message, content) or ("", ""))
+            except Exception:
+                log.debug("generated media lookup failed", exc_info=True)
+        references: list = []
+        if refs_fn is not None:
+            try:
+                references = [tuple(item) for item in (refs_fn(content) or [])]
+            except Exception:
+                log.debug("generated media markers failed", exc_info=True)
+        return primary, references
+
+    def relocate(self, session: dict, source_folder: str, target_folder: str) -> None:
+        """The shared ``_relocate_session_attachment_paths`` (response links follow a moved tree)."""
+        self.fn("relocate_session_attachment_paths")(session, source_folder, target_folder)
+
+    def migrate_attachment(self, session: dict, source_folder: str, confirm_merge: Any = None) -> dict:
+        """Desktop Migrate (``ChatStore.migrate_attachment``): ``{"ok", "notices"}``."""
+        fn = self.fn("migrate_attachment")
+        return dict(fn(session, source_folder, confirm_merge=confirm_merge) or {})
+
+    def is_managed_attachment_workspace(self, session: dict, folder: str) -> bool:
+        fn = self.fn("is_managed_attachment_workspace", required=False)
+        return bool(fn(session, folder)) if fn is not None else False
+
+    def migration_output_root(self, session: dict) -> str:
+        """Where Migrate moves a workspace (the desktop ``_direct_text_migration_output_root``)."""
+        fn = self.fn("migration_output_root", required=False)
+        return str(fn(session) or "") if fn is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +458,83 @@ class MobileChatSidecar:
         return changed
 
 
+def remap_sidecar_entry(entry: dict, fp_map: dict, index_map: dict) -> bool:
+    """Rewrite one chat's sidecar data after messages were removed (Delete message, §2.19).
+
+    ``fp_map``: old fingerprint -> new fingerprint (removed messages are absent); ``index_map``:
+    old message index -> new index. Versions keep their surviving members (a group needs two;
+    a removed anchor is replaced by its first surviving member), ``add_only`` its surviving
+    fingerprints, a pending Plan its user turn (dropped when that turn was removed) and
+    ``job_turns`` (run key -> the user turn's fingerprint) follows its turns (None once a
+    turn is removed).
+    """
+    changed = False
+    job_turns = entry.get("job_turns")
+    if isinstance(job_turns, dict):
+        for key, fp in list(job_turns.items()):
+            moved = fp_map.get(fp) if fp else None
+            if moved != fp:
+                job_turns[key] = moved  # None: the job's turn was deleted (its card is gone)
+                changed = True
+    versions = entry.get("versions")
+    if isinstance(versions, dict):
+        rebuilt: dict = {}
+        for anchor, group in versions.items():
+            members = [fp_map[fp] for fp in (group or {}).get("members") or () if fp in fp_map]
+            if len(members) < 2:
+                changed = True
+                continue
+            old_members = list((group or {}).get("members") or ())
+            try:
+                selected_fp = old_members[int((group or {}).get("selected", len(old_members) - 1))]
+            except (IndexError, TypeError, ValueError):
+                selected_fp = None
+            new_anchor = fp_map.get(anchor) or members[0]
+            selected = members.index(fp_map[selected_fp]) if selected_fp in fp_map else len(members) - 1
+            rebuilt[new_anchor] = {"members": members, "selected": selected}
+            if new_anchor != anchor or members != old_members or selected != (group or {}).get("selected"):
+                changed = True
+        if rebuilt:
+            entry["versions"] = rebuilt
+        else:
+            entry.pop("versions", None)
+    add_only = entry.get("add_only")
+    if isinstance(add_only, list):
+        kept = [fp_map[fp] for fp in add_only if fp in fp_map]
+        if kept != add_only:
+            changed = True
+        if kept:
+            entry["add_only"] = kept
+        else:
+            entry.pop("add_only", None)
+    plan = entry.get("pending_plan")
+    if isinstance(plan, dict) and plan.get("user_index") is not None:
+        try:
+            old_index = int(plan["user_index"])
+        except (TypeError, ValueError):
+            old_index = -1
+        if old_index in index_map:
+            if index_map[old_index] != old_index:
+                plan["user_index"] = index_map[old_index]
+                changed = True
+        else:
+            entry.pop("pending_plan", None)
+            changed = True
+    return changed
+
+
+@dataclass
+class ScratchChat:
+    """One unsaved scratch chat (UI_SPEC §2.16): its session, its own ChatStore and folder."""
+
+    cid: str
+    root: str  # <scratch dir>/<uuid>: the scratch store's history file and output root
+    binding: Any  # ChatStoreBinding over a ChatStore whose history lives inside ``root``
+    session: dict
+    created: float = 0.0
+    meta: dict = field(default_factory=dict)  # the sidecar entry of a v2 chat (never saved)
+
+
 # ---------------------------------------------------------------------------
 # The adapter
 # ---------------------------------------------------------------------------
@@ -393,10 +563,13 @@ class ChatStoreAdapter:
         sidecar_path: Optional[str] = None,
         clock: Callable[[], float] = time.time,
         save_delay: float = DRAFT_SAVE_DELAY,
+        scratch_dir: Optional[str] = None,
     ) -> None:
         self._binding = binding
         self._history_path = history_path or (binding.history_path if binding is not None else None)
         self._sidecar_path = sidecar_path
+        self._scratch_dir = scratch_dir
+        self._scratch: "OrderedDict[str, ScratchChat]" = OrderedDict()
         self._clock = clock
         self._lock = threading.RLock()
         self._listeners: list[Callable[[], None]] = []
@@ -409,6 +582,7 @@ class ChatStoreAdapter:
         self._bodies: "OrderedDict[tuple, str]" = OrderedDict()
         self._attachments: dict = {}
         self._running: set = set()
+        self._saving: set = set()  # scratch chats whose Save is moving files
         self._saver = DebouncedSaver(self._save_now, delay=save_delay, name="gl-chats-save")
         self.saves = 0
 
@@ -431,6 +605,12 @@ class ChatStoreAdapter:
     @property
     def sidecar_path(self) -> str:
         return self._sidecar_path or os.path.join(os.path.dirname(os.path.abspath(self.history_path)), SIDECAR_NAME)
+
+    @property
+    def scratch_dir(self) -> str:
+        """``<cache>/Direct Text Scratch`` (the chat feature passes the app cache; default: beside the history)."""
+        return os.path.abspath(self._scratch_dir or os.path.join(
+            os.path.dirname(os.path.abspath(self.history_path)), "cache", SCRATCH_DIR_NAME))
 
     def load(self) -> bool:
         """Read history + sidecar (blocking). False (and ``load_error``) when the store is missing."""
@@ -456,10 +636,43 @@ class ChatStoreAdapter:
             orphans = sidecar.drop_orphans(ids, fingerprints)
         for session in list(sessions):
             self._scan_attachments(session)
-        if orphans:
+        if self._clear_stale_scratch() or orphans:
             self._save_sidecar()
         self._notify()
         return True
+
+    def _clear_stale_scratch(self) -> bool:
+        """Scratch chats are never saved: folders a previous launch left behind are removed."""
+        sidecar = self.sidecar
+        if sidecar is None:
+            return False
+        stale = list(sidecar.data.get("scratch") or [])
+        live = {entry.root for entry in self._scratch.values()}
+        kept = []
+        for item in stale:
+            root = str((item or {}).get("root") or "") if isinstance(item, dict) else ""
+            if root in live:
+                kept.append(item)
+                continue
+            self._remove_scratch_root(root)
+        changed = kept != stale
+        sidecar.data["scratch"] = kept
+        return changed
+
+    def _remove_scratch_root(self, root: str) -> bool:
+        """rmtree one scratch folder, only when it is an immediate child of the scratch dir."""
+        if not root:
+            return False
+        folder = os.path.realpath(os.path.abspath(root))
+        parent = os.path.realpath(self.scratch_dir)
+        if os.path.normcase(os.path.dirname(folder)) != os.path.normcase(parent) or not os.path.isdir(folder):
+            return False
+        try:
+            shutil.rmtree(folder)
+            return True
+        except OSError:
+            log.warning("could not remove the scratch folder %s", folder, exc_info=True)
+            return False
 
     def flush(self) -> bool:
         """Synchronous save of pending changes (lifecycle hide, job start)."""
@@ -477,15 +690,28 @@ class ChatStoreAdapter:
             self.flush()
         self._saver.close()
 
+    def _store_lock(self, cid: Any = None) -> Any:
+        """The shared ChatStore's own lock for chat ``cid`` (default: the history's store).
+
+        Lock order: the store lock is always taken BEFORE the adapter lock, never while the
+        adapter lock is held. The ChatStore holds its lock through long work of its own
+        (``finish_run`` persisting a run's output, the desktop Migrate moving a workspace), so a
+        thread that waits for it must not park the adapter lock the UI loop reads under.
+        """
+        binding = self.binding_for(cid) if cid is not None else self._binding
+        lock = getattr(binding, "lock", None) if binding is not None else None
+        return lock if lock is not None else contextlib.nullcontext()
+
     def _save_now(self) -> None:
-        with self._lock:
-            if not self.available:
-                return
-            try:
-                self.binding.save(self.sessions, self.current_id)
-                self.saves += 1
-            except Exception:
-                log.exception("saving direct_text_chats.json failed")
+        with self._store_lock():
+            with self._lock:
+                if not self.available:
+                    return
+                try:
+                    self.binding.save(self.sessions, self.current_id)
+                    self.saves += 1
+                except Exception:
+                    log.exception("saving direct_text_chats.json failed")
         self._save_sidecar()
 
     def _save_sidecar(self) -> None:
@@ -527,6 +753,9 @@ class ChatStoreAdapter:
                 log.exception("chat store listener failed")
 
     def _changed(self, cid: Any = None, *, save: bool = True, touch: bool = True) -> None:
+        if is_scratch_cid(cid):
+            self._notify()  # scratch chats are never written to the history or the sidecar
+            return
         if touch and cid is not None and self.sidecar is not None:
             with self._lock:
                 self.sidecar.chat(cid, create=True)["updated_at"] = self._clock()
@@ -544,12 +773,33 @@ class ChatStoreAdapter:
             return None
 
     def session(self, cid: Any = None) -> Optional[dict]:
+        if is_scratch_cid(cid):
+            with self._lock:
+                entry = self._scratch.get(str(cid))
+                return entry.session if entry is not None else None
         key = self._key(cid if cid is not None else self.current_id)
         with self._lock:
             for session in self.sessions:
                 if session.get("id") == key:
                     return session
         return None
+
+    def is_scratch(self, cid: Any) -> bool:
+        with self._lock:
+            return str(cid) in self._scratch
+
+    def scratch_ids(self) -> list:
+        with self._lock:
+            return list(self._scratch)
+
+    def binding_for(self, cid: Any) -> ChatStoreBinding:
+        """The ChatStore binding that owns chat ``cid`` (a scratch chat has its own store)."""
+        if is_scratch_cid(cid):
+            with self._lock:
+                entry = self._scratch.get(str(cid))
+            if entry is not None:
+                return entry.binding
+        return self.binding
 
     def current_cid(self) -> str:
         with self._lock:
@@ -606,11 +856,21 @@ class ChatStoreAdapter:
             running=cid in self._running,
         )
 
+    def _scratch_summary(self, entry: ScratchChat) -> ChatSummary:
+        title = str(entry.session.get("title") or NEW_CHAT_TITLE)
+        title = "Scratch chat" if title == NEW_CHAT_TITLE else f"{title} · scratch"
+        summary = summary_for_scratch(entry.cid, title, clock=lambda: entry.created)
+        return replace(summary, running=entry.cid in self._running, attachments=self._attachments.get(entry.cid, 0))
+
     def all(self) -> list:
         with self._lock:
-            return [self._summary(s) for s in self.sessions]
+            return [self._summary(s) for s in self.sessions] + [self._scratch_summary(e) for e in self._scratch.values()]
 
     def get(self, cid: Any) -> Optional[ChatSummary]:
+        if is_scratch_cid(cid):
+            with self._lock:
+                entry = self._scratch.get(str(cid))
+                return self._scratch_summary(entry) if entry is not None else None
         session = self.session(cid)
         if session is None:
             return None
@@ -642,7 +902,7 @@ class ChatStoreAdapter:
         return sorted(out, key=lambda c: c.updated_at, reverse=True)
 
     def set_pinned(self, cid: Any, pinned: bool) -> bool:
-        if self.sidecar is None or self.session(cid) is None:
+        if self.sidecar is None or self.session(cid) is None or is_scratch_cid(cid):
             return False
         with self._lock:
             meta = self.sidecar.chat(cid, create=True)
@@ -728,7 +988,10 @@ class ChatStoreAdapter:
         """_delete_current_chat after its confirmation: validated rmtree, then drop the session.
 
         Returns ``(ok, error message)``. Blocking (rmtree); call it off the UI loop.
+        A scratch chat is discarded (its folder under the scratch dir is removed).
         """
+        if is_scratch_cid(cid):
+            return (True, "") if self.discard_scratch(cid) else (False, "This chat no longer exists.")
         session = self.session(cid)
         if session is None:
             return False, "This chat no longer exists."
@@ -761,7 +1024,10 @@ class ChatStoreAdapter:
         return True, ""
 
     def delete_notice(self, cid: Any) -> tuple:
-        """(title, body) of the desktop "Delete chat?" confirmation."""
+        """(title, body) of the desktop "Delete chat?" confirmation (scratch: "Discard scratch chat?")."""
+        if is_scratch_cid(cid):
+            return "Discard scratch chat?", ("This scratch chat was never saved. Discarding it removes its "
+                                             "messages and output files.")
         session = self.session(cid) or {}
         title = str(session.get("title", NEW_CHAT_TITLE) or NEW_CHAT_TITLE)
         output_folder = str(session.get("output_folder", "") or "")
@@ -843,7 +1109,11 @@ class ChatStoreAdapter:
         return indices
 
     def truncate_messages(self, cid: Any, length: int) -> bool:
-        """Drop messages from ``length`` on (a cancelled Plan's unsent turn; mobile-only, stays v2-valid)."""
+        """Drop messages from ``length`` on (a cancelled Plan's unsent turn; mobile-only, stays v2-valid).
+
+        The sidecar forgets the dropped messages like Delete message does (``remap_sidecar_entry``):
+        a cancelled Run again / Retranslate turn leaves its version group, so a later send of the
+        same file (same fingerprint) is not grouped with the turn it was meant to re-run."""
         session = self.session(cid)
         if session is None:
             return False
@@ -851,9 +1121,16 @@ class ChatStoreAdapter:
             current = list(session.get("messages") or [])
             if length >= len(current):
                 return False
-            session["messages"] = current[: max(0, int(length))]
+            kept = max(0, int(length))
+            old_fps = message_fingerprints(current)
+            session["messages"] = current[:kept]
             session["expanded"] = {i for i in (session.get("expanded") or ()) if i < length}
             self._bodies = OrderedDict((k, v) for k, v in self._bodies.items() if k[0] != session.get("id"))
+            entry = self._meta_entry(cid)
+            remapped = entry is not None and remap_sidecar_entry(
+                entry, {fp: fp for fp in old_fps[:kept]}, {i: i for i in range(kept)})
+        if remapped:
+            self._meta_saved(cid)
         self._changed(cid)
         return True
 
@@ -928,7 +1205,7 @@ class ChatStoreAdapter:
                 self._bodies.move_to_end(key)
                 return cached
         # desktop _assistant_message_text: v2 reference (relative to the history file) -> UTF-8 text
-        path = self.binding.resolve_reference(reference)
+        path = self.binding_for(cid).resolve_reference(reference)
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 value = handle.read()
@@ -946,8 +1223,8 @@ class ChatStoreAdapter:
         session = self.session(cid)
         if session is None:
             raise IndexError("Response message is no longer available")
-        with self._lock:
-            result = self.binding.save_response_edit(self.sessions, session, index, source)
+        with self._store_lock(cid), self._lock:
+            result = self.binding_for(cid).save_response_edit(self.sessions, session, index, source)
         self.forget_bodies(cid)
         self.schedule_save()
         self._notify()
@@ -968,8 +1245,8 @@ class ChatStoreAdapter:
         if session is None:
             return ""
         if create:
-            with self._lock:
-                folder = self.binding.ensure_output_folder(session)
+            with self._store_lock(cid), self._lock:
+                folder = self.binding_for(cid).ensure_output_folder(session)
             self.schedule_save()
             return folder
         return str(session.get("output_folder", "") or "")
@@ -984,10 +1261,14 @@ class ChatStoreAdapter:
         session = self.session(cid)
         if session is None:
             return []
-        folders = self.binding.attachment_folders(session)
+        folders = self.binding_for(cid).attachment_folders(session)
         with self._lock:
-            self._attachments[str(session.get("id"))] = len(folders)
+            self._attachments[str(cid) if is_scratch_cid(cid) else str(session.get("id"))] = len(folders)
         return folders
+
+    def attachment_count(self, cid: Any) -> int:
+        with self._lock:
+            return int(self._attachments.get(str(cid), 0))
 
     def refresh_attachments(self, cid: Any) -> None:
         self.attachment_folders(cid)
@@ -995,22 +1276,34 @@ class ChatStoreAdapter:
 
     # ---- sidecar data --------------------------------------------------------------------------
 
-    def meta(self, cid: Any) -> dict:
+    def _meta_entry(self, cid: Any, create: bool = False) -> Optional[dict]:
+        """The sidecar entry of a v2 chat, or a scratch chat's in-memory entry (never saved)."""
+        if is_scratch_cid(cid):
+            entry = self._scratch.get(str(cid))
+            return entry.meta if entry is not None else ({} if create else None)
         if self.sidecar is None:
-            return {}
+            return None
+        return self.sidecar.chat(cid, create=create)
+
+    def _meta_saved(self, cid: Any) -> None:
+        if not is_scratch_cid(cid):
+            self._save_sidecar()
+
+    def meta(self, cid: Any) -> dict:
         with self._lock:
-            return copy.deepcopy(self.sidecar.chat(cid))
+            entry = self._meta_entry(cid)
+            return copy.deepcopy(entry) if entry else {}
 
     def set_meta(self, cid: Any, key: str, value: Any) -> None:
-        if self.sidecar is None:
-            return
         with self._lock:
-            entry = self.sidecar.chat(cid, create=True)
+            entry = self._meta_entry(cid, create=True)
+            if entry is None:
+                return
             if value is None:
                 entry.pop(key, None)
             else:
                 entry[key] = value
-        self._save_sidecar()
+        self._meta_saved(cid)
         self._notify()
 
     def overrides(self, cid: Any) -> dict:
@@ -1020,10 +1313,10 @@ class ChatStoreAdapter:
     def set_override(self, cid: Any, key: str, value: Any) -> None:
         if key not in OVERRIDE_KEYS:
             raise KeyError(key)
-        if self.sidecar is None:
-            return
         with self._lock:
-            entry = self.sidecar.chat(cid, create=True)
+            entry = self._meta_entry(cid, create=True)
+            if entry is None:
+                return
             overrides = dict(entry.get("overrides") or {})
             if value is None:
                 overrides.pop(key, None)
@@ -1033,7 +1326,7 @@ class ChatStoreAdapter:
                 entry["overrides"] = overrides
             else:
                 entry.pop("overrides", None)
-        self._save_sidecar()
+        self._meta_saved(cid)
         self._notify()
 
     def reset_overrides(self, cid: Any) -> None:
@@ -1052,6 +1345,441 @@ class ChatStoreAdapter:
         fps = self.fingerprints(cid)
         return message_id(fps[index]) if 0 <= index < len(fps) else None
 
+    # ---- U7: generated media of a response -----------------------------------------------------
+
+    def message_media(self, cid: Any, index: int) -> list:
+        """``[(kind, path, exists)]`` of one response's generated media (blocking: reads the body).
+
+        The primary item is the desktop ``_assistant_generated_media`` (storage ``media_path`` /
+        ``image_path``, else the first existing marker); every other ``[GENERATED_*:<path>]``
+        marker follows (an image gallery), missing files included so the card can say so.
+        """
+        message = self.message(cid, index)
+        if not message or str(message[0]) != "assistant":
+            return []
+        content = self.message_text(cid, index, "content")
+        primary, references = self.binding_for(cid).generated_media(message, content)
+        out: list = []
+        seen: set = set()
+
+        def add(kind: str, path: str) -> None:
+            if not kind or not path:
+                return
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                return
+            seen.add(key)
+            out.append((str(kind), os.path.abspath(path), os.path.isfile(path)))
+
+        if primary and len(primary) == 2:
+            add(primary[0], primary[1])
+        for kind, path in references:
+            if primary and primary[1] and kind != primary[0] and kind in ("video", "audio"):
+                continue  # one player per response, like the desktop card
+            add(kind, path)
+        return out
+
+    # ---- U7: delete message (mobile-only, stays v2-valid) ------------------------------------
+
+    def delete_messages(self, cid: Any, indices: Iterable[int], *, jobs: Iterable[tuple] = ()) -> bool:
+        """Blocking: remove messages (UI_SPEC §2.19); the history is saved before it returns.
+
+        * The shared store names a response's managed body files after its message index
+          (``Chat Messages/NNNNNN-response.{md,txt,html,xhtml}`` / ``-thinking.md``:
+          ``_externalize_session_messages`` and ``_editable_response_paths``). The removed
+          responses' own files are deleted and every surviving response's files are renamed to
+          its new index (``_rehome_bodies``), so a later response or edit at a reused index can
+          never write over a surviving one. Files outside the chat's ``Chat Messages`` folder
+          (attachment outputs, a duplicated chat's originals) are left alone.
+        * ``expanded`` is re-indexed and the sidecar remapped (``remap_sidecar_entry``).
+        * ``jobs``: ``[(run key, submitted user index)]`` of the chat's known jobs (the chat's
+          ``ChatRuns.chat_job_turns``). Each one's turn is recorded by fingerprint in the sidecar
+          ``job_turns`` (read back by ``job_turns()``), so job cards stay on their turns.
+        """
+        session = self.session(cid)
+        if session is None:
+            return False
+        binding = self.binding_for(cid)
+        with self._store_lock(cid), self._lock:
+            messages = list(session.get("messages") or [])
+            drop = {int(i) for i in indices if 0 <= int(i) < len(messages)}
+            if not drop:
+                return False
+            old_fps = message_fingerprints(messages)
+            keep = [i for i in range(len(messages)) if i not in drop]
+            kept = self._rehome_bodies(binding, session, messages, keep, drop)
+            new_fps = message_fingerprints(kept)
+            fp_map = {old_fps[old]: new_fps[new] for new, old in enumerate(keep)}
+            index_map = {old: new for new, old in enumerate(keep)}
+            session["messages"] = kept
+            session["expanded"] = {index_map[i] for i in (session.get("expanded") or ()) if i in index_map}
+            key = session.get("id")
+            self._bodies = OrderedDict((k, v) for k, v in self._bodies.items() if k[0] != key)
+            jobs = [(str(k), i) for k, i in jobs or () if k]
+            entry = self._meta_entry(cid, create=bool(jobs))
+            if entry is not None:
+                turns = entry.get("job_turns") if isinstance(entry.get("job_turns"), dict) else {}
+                for job_key, user_index in jobs:
+                    if job_key not in turns:  # first delete since the job ran: its turn by fingerprint
+                        try:
+                            index = int(user_index)
+                        except (TypeError, ValueError):
+                            index = -1
+                        turns[job_key] = old_fps[index] if 0 <= index < len(old_fps) else None
+                if turns:
+                    entry["job_turns"] = turns
+                remap_sidecar_entry(entry, fp_map, index_map)
+        self._meta_saved(cid)
+        self._changed(cid)
+        if not is_scratch_cid(cid):
+            self.flush()  # the renamed body files and the v2 references they moved to land together
+        return True
+
+    #: Storage keys of a response's managed body files (``Chat Messages/NNNNNN-<suffix>``).
+    _BODY_KEYS = ("content_path", "content_text_path", "content_html_path", "content_xhtml_path", "thinking_path")
+
+    def _rehome_bodies(self, binding: ChatStoreBinding, session: dict, messages: list, keep: list, drop: set) -> list:
+        """The surviving messages, each response's managed body files moved to its new index.
+
+        Only files a response owns are touched: a storage reference resolving into this chat's
+        ``Chat Messages`` folder under the response's own ``NNNNNN-`` prefix. Survivors move in
+        ascending order (a new index is never above the old one, so the slot is free by then).
+        Called with both locks held.
+        """
+        kept = [messages[i] for i in keep]
+        folder = str(session.get("output_folder", "") or "")
+        if not folder:
+            return kept
+        managed_dir = os.path.normcase(os.path.join(os.path.abspath(folder), "Chat Messages"))
+
+        def own_files(message: Any, index: int) -> list:
+            if not (isinstance(message, (list, tuple)) and message and str(message[0]) == "assistant"):
+                return []
+            storage = message[6] if len(message) > 6 and isinstance(message[6], dict) else {}
+            prefix = f"{index + 1:06d}-"
+            found = []
+            for storage_key in self._BODY_KEYS:
+                reference = str(storage.get(storage_key, "") or "")
+                if not reference:
+                    continue
+                path = os.path.abspath(binding.resolve_reference(reference))
+                if os.path.normcase(os.path.dirname(path)) == managed_dir and os.path.basename(path).startswith(prefix):
+                    found.append((storage_key, path))
+            return found
+
+        surviving = {os.path.normcase(path) for i in keep for _k, path in own_files(messages[i], i)}
+        for index in sorted(drop):
+            for _key, path in own_files(messages[index], index):
+                if os.path.normcase(path) in surviving:
+                    continue
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.warning("could not remove the deleted response file %s", path, exc_info=True)
+        rebuilt = []
+        for new, old in enumerate(keep):
+            message = messages[old]
+            files = own_files(message, old) if new != old else []
+            if not files:
+                rebuilt.append(message)
+                continue
+            storage = dict(message[6])
+            old_prefix, new_prefix = f"{old + 1:06d}-", f"{new + 1:06d}-"
+            for storage_key, path in files:
+                target = os.path.join(os.path.dirname(path), new_prefix + os.path.basename(path)[len(old_prefix):])
+                if os.path.isfile(path):
+                    os.replace(path, target)
+                storage[storage_key] = binding.history_reference(target)
+            values = list(message)
+            values[6] = storage
+            rebuilt.append(tuple(values))
+        return rebuilt
+
+    # ---- U7: job <-> turn (Delete message keeps job cards on their turns) ----------------------
+
+    def job_turns(self, cid: Any) -> dict:
+        """``{run key: user turn fingerprint or None}`` recorded by ``delete_messages``.
+
+        A job without an entry still sits at its submitted ``params["user_index"]`` (no message
+        before it was deleted since it ran); None: its turn was deleted. ``ChatRuns`` resolves a
+        fingerprint to the turn's current index.
+        """
+        with self._lock:
+            entry = self._meta_entry(cid)
+            turns = (entry or {}).get("job_turns")
+            return dict(turns) if isinstance(turns, dict) else {}
+
+    # ---- U7: versions (edit-and-resend / retranslate variants, sidecar ``versions``) ---------
+
+    def version_groups(self, cid: Any) -> dict:
+        """``{anchor fp: {"members": [fp, ...], "selected": i}}`` (Appendix B ``versions``)."""
+        versions = self.meta(cid).get("versions")
+        return dict(versions) if isinstance(versions, dict) else {}
+
+    def add_version(self, cid: Any, anchor_index: int, new_index: int) -> Optional[str]:
+        """Record turn ``new_index`` as the newest version of turn ``anchor_index``; returns the anchor fp."""
+        fps = self.fingerprints(cid)
+        if not (0 <= anchor_index < len(fps) and 0 <= new_index < len(fps)) or anchor_index == new_index:
+            return None
+        anchor_fp, new_fp = fps[anchor_index], fps[new_index]
+        with self._lock:
+            entry = self._meta_entry(cid, create=True)
+            if entry is None:
+                return None
+            versions = dict(entry.get("versions") or {})
+            group_key = next((k for k, g in versions.items() if k == anchor_fp or anchor_fp in (g or {}).get("members", ())),
+                             anchor_fp)
+            group = dict(versions.get(group_key) or {"members": [anchor_fp]})
+            members = [fp for fp in group.get("members") or [anchor_fp] if fp != new_fp] + [new_fp]
+            versions[group_key] = {"members": members, "selected": len(members) - 1}
+            entry["versions"] = versions
+        self._meta_saved(cid)
+        self._notify()
+        return group_key
+
+    def select_version(self, cid: Any, anchor: str, selected: int) -> bool:
+        with self._lock:
+            entry = self._meta_entry(cid)
+            group = ((entry or {}).get("versions") or {}).get(anchor)
+            if not group:
+                return False
+            members = list(group.get("members") or ())
+            value = max(0, min(int(selected), len(members) - 1))
+            if value == group.get("selected"):
+                return False
+            group["selected"] = value
+        self._meta_saved(cid)
+        self._notify()
+        return True
+
+    # ---- U7: attachments manager (Migrate, delete workspace) ---------------------------------
+
+    def migrate_attachment(self, cid: Any, folder: str, confirm_merge: Optional[Callable[[str], bool]] = None) -> dict:
+        """Blocking: the desktop Migrate of one ``Attachments/<stem>`` workspace (``{"ok", "notices"}``).
+
+        The shared migrate moves (or, for "Merge and replace", copies) the workspace, relocates
+        the stored paths and saves the history under the ChatStore's own lock, like
+        ``finish_run``; the adapter lock is not held meanwhile, so the UI loop never waits for
+        the file work (the chat refuses Migrate while one of its jobs runs).
+        """
+        session = self.session(cid)
+        if session is None:
+            return {"ok": False, "notices": [{"level": "warning", "title": "Attachment unavailable",
+                                              "text": "This chat no longer exists."}]}
+        result = self.binding_for(cid).migrate_attachment(session, folder, confirm_merge)
+        with self._lock:
+            self._bodies = OrderedDict((k, v) for k, v in self._bodies.items() if k[0] != session.get("id"))
+        self.attachment_folders(cid)
+        self._changed(cid)
+        return result
+
+    def migration_target(self, cid: Any, folder: str) -> str:
+        """The folder Migrate would create (exists -> the desktop "Attachment folder already exists" choice)."""
+        session = self.session(cid)
+        if session is None:
+            return ""
+        root = self.binding_for(cid).migration_output_root(session)
+        return os.path.abspath(os.path.join(root, os.path.basename(os.path.normpath(str(folder))))) if root else ""
+
+    def delete_attachment_workspace(self, cid: Any, folder: str) -> tuple:
+        """Blocking: remove one managed ``Attachments/<stem>`` workspace (``(ok, error)``)."""
+        session = self.session(cid)
+        if session is None:
+            return False, "This chat no longer exists."
+        binding = self.binding_for(cid)
+        if not binding.is_managed_attachment_workspace(session, folder):
+            return False, "This folder is no longer a managed attachment for the conversation."
+        try:  # no lock held during the rmtree: the UI loop keeps reading the chat meanwhile
+            shutil.rmtree(os.path.realpath(os.path.abspath(folder)))
+        except OSError as exc:
+            return False, f"The attachment workspace could not be deleted.\n\n{exc}"
+        self.attachment_folders(cid)
+        self._changed(cid)
+        return True, ""
+
+    # ---- U7: scratch chats (UI_SPEC §2.16) ------------------------------------------------------
+
+    def _make_scratch(self, title: str = NEW_CHAT_TITLE) -> ScratchChat:
+        token = uuid.uuid4().hex
+        cid = "s" + token
+        root = os.path.join(self.scratch_dir, token)
+        os.makedirs(root, exist_ok=True)
+        binding = ChatStoreBinding(history_path=os.path.join(root, "direct_text_chats.json"), output_root=root)
+        session = binding.new_session(1)
+        session["title"] = title or NEW_CHAT_TITLE
+        store = binding.store
+        try:  # the scratch store holds just this session (its own saves stay inside the scratch folder)
+            store._chat_sessions = [session]
+            store.set_current_session(session)
+        except Exception:
+            log.debug("scratch store set-up", exc_info=True)
+        entry = ScratchChat(cid=cid, root=root, binding=binding, session=session, created=self._clock())
+        return entry
+
+    def _register_scratch(self, entry: ScratchChat) -> None:
+        with self._lock:
+            self._scratch[entry.cid] = entry
+            if self.sidecar is not None:
+                items = [i for i in self.sidecar.data.get("scratch") or [] if isinstance(i, dict)]
+                items.append({"cid": entry.cid, "root": entry.root, "created": entry.created})
+                self.sidecar.data["scratch"] = items
+        self._save_sidecar()
+        self._notify()
+
+    def new_scratch(self) -> str:
+        """Drawer / header "New scratch chat": an unsaved chat (never in ``direct_text_chats.json``)."""
+        entry = self._make_scratch()
+        self._register_scratch(entry)
+        return entry.cid
+
+    def duplicate_as_scratch(self, cid: Any) -> Optional[str]:
+        """Blocking: drawer "Duplicate as scratch", a scratch copy of the chat's messages.
+
+        The copy owns its response bodies: the files its responses keep in the original's
+        ``Chat Messages`` folder are copied into the scratch chat's own ``Chat Messages`` under the
+        same names (the store's index naming), because a later Delete message in the original
+        renames or removes those files (``_rehome_bodies``) and an edit rewrites them. Other
+        references (attachment outputs, generated media) keep pointing at the original files by
+        absolute path: folders are not copied.
+        """
+        source = self.session(cid)
+        if source is None:
+            return None
+        binding = self.binding_for(cid)
+        with self._store_lock(cid):  # the original's bodies are not renamed / rewritten while they are copied
+            with self._lock:
+                messages = [self._absolute_message(binding, m) for m in source.get("messages") or []]
+                title = str(source.get("title") or NEW_CHAT_TITLE)
+                expanded = set(source.get("expanded") or ())
+                folder = str(source.get("output_folder", "") or "")
+            entry = self._make_scratch(title)
+            messages = self._copy_managed_bodies(entry, messages, folder)
+        entry.session["messages"] = messages
+        entry.session["expanded"] = expanded
+        self._register_scratch(entry)
+        return entry.cid
+
+    @staticmethod
+    def _copy_managed_bodies(entry: "ScratchChat", messages: list, folder: str) -> list:
+        """``messages`` (absolute references) with every file inside ``<folder>/Chat Messages`` copied
+        into the scratch chat's own output folder and its reference pointed at the copy."""
+        managed = os.path.normcase(os.path.join(os.path.abspath(folder), "Chat Messages")) if folder else ""
+        if not managed:
+            return messages
+        copies_dir = ""
+        out = []
+        for message in messages:
+            if not (message and str(message[0]) == "assistant" and len(message) > 6 and isinstance(message[6], dict)):
+                out.append(message)
+                continue
+            storage = dict(message[6])
+            changed = False
+            for key in STORAGE_PATH_KEYS:
+                path = str(storage.get(key, "") or "")
+                if not path or os.path.normcase(os.path.dirname(os.path.abspath(path))) != managed:
+                    continue
+                if not os.path.isfile(path):
+                    continue  # already missing: the copy shows the same "missing" placeholder
+                if not copies_dir:
+                    copies_dir = os.path.join(entry.binding.ensure_output_folder(entry.session), "Chat Messages")
+                    os.makedirs(copies_dir, exist_ok=True)
+                target = os.path.join(copies_dir, os.path.basename(path))
+                shutil.copy2(path, target)
+                storage[key] = target
+                changed = True
+            if changed:
+                values = list(message)
+                values[6] = storage
+                out.append(tuple(values))
+            else:
+                out.append(message)
+        return out
+
+    @staticmethod
+    def _absolute_message(binding: ChatStoreBinding, message: Any) -> tuple:
+        """One message with its storage file references made absolute (store-independent)."""
+        values = list(message) if isinstance(message, (list, tuple)) else [message]
+        if values and str(values[0]) == "assistant" and len(values) > 6 and isinstance(values[6], dict):
+            storage = dict(values[6])
+            for key in STORAGE_PATH_KEYS:
+                reference = str(storage.get(key, "") or "")
+                if reference:
+                    storage[key] = binding.resolve_reference(reference)
+            values[6] = storage
+        return tuple(values)
+
+    def discard_scratch(self, cid: Any) -> bool:
+        """Blocking: forget a scratch chat and remove its folder."""
+        with self._lock:
+            entry = self._scratch.pop(str(cid), None)
+            if entry is None:
+                return False
+            if self.sidecar is not None:
+                self.sidecar.data["scratch"] = [i for i in self.sidecar.data.get("scratch") or []
+                                                if isinstance(i, dict) and i.get("cid") != entry.cid]
+            self._running.discard(entry.cid)
+        self._remove_scratch_root(entry.root)
+        self._save_sidecar()
+        self._notify()
+        return True
+
+    def save_scratch(self, cid: Any) -> Optional[str]:
+        """Blocking: Save a scratch chat (UI_SPEC §2.16) -> the new v2 chat id.
+
+        Assigns a v2 id, moves the scratch output folder into ``Direct Text/<safe title> - <ts>_<uuid8>/``
+        (the shared ``_ensure_conversation_output_folder_for_session`` names it) and rewrites the
+        stored paths with the shared ``_relocate_session_attachment_paths``; the scratch folder goes.
+        The files move with no lock held (the UI loop keeps reading the chats meanwhile).
+        """
+        with self._store_lock(), self._lock:
+            entry = self._scratch.get(str(cid))
+            if entry is None or not self.available or entry.cid in self._saving:
+                return None
+            self._saving.add(entry.cid)
+            session = entry.session
+            messages = [self._absolute_message(entry.binding, m) for m in session.get("messages") or []]
+            source_folder = str(session.get("output_folder", "") or "")
+            next_id = max([int(s.get("id") or 0) for s in self.sessions] + [0]) + 1
+            saved = {
+                **{k: v for k, v in session.items() if k not in ("id", "output_folder", "output_folder_name")},
+                "id": next_id,
+                "messages": messages,
+                "expanded": set(session.get("expanded") or ()),
+                "output_folder": "",
+                "output_folder_name": "",
+            }
+            self.sessions.append(saved)  # first: the shared folder helpers then see a known session
+            target = ""
+            if source_folder and os.path.isdir(source_folder):
+                target = self.binding.ensure_output_folder(saved)
+            else:
+                saved["next_output_index"] = 1
+        try:
+            if target:
+                for name in os.listdir(source_folder):
+                    shutil.move(os.path.join(source_folder, name), os.path.join(target, name))
+        finally:
+            with self._store_lock(), self._lock:
+                if target:
+                    self.binding.relocate(saved, source_folder, target)
+                self._saving.discard(entry.cid)
+        with self._lock:
+            self.current_id = next_id
+            self._scratch.pop(entry.cid, None)
+            if self.sidecar is not None:
+                meta = copy.deepcopy(entry.meta)
+                if meta:
+                    self.sidecar.data["chats"][str(next_id)] = meta
+                self.sidecar.data["scratch"] = [i for i in self.sidecar.data.get("scratch") or []
+                                                if isinstance(i, dict) and i.get("cid") != entry.cid]
+            self._running.discard(entry.cid)
+        self._remove_scratch_root(entry.root)
+        self._scan_attachments(saved)
+        self._changed(str(next_id))
+        self.flush()
+        return str(next_id)
 
 def summary_for_scratch(cid: str, title: str, clock: Callable[[], float] = time.time) -> ChatSummary:
     """A drawer row for an unsaved scratch chat (never written to the v2 file)."""

@@ -495,6 +495,48 @@ def list_gcp_projects(access_token: str, *, on_listed=None, http=None):
     return billed, unbilled, unknown
 
 
+def authgem_project_items(billed, unbilled, unknown):
+    """``(label, project id)`` items of the GCP project picker, in the desktop dropdown order.
+
+    Moved from the desktop ``TranslatorGUI._authgem_projects_loaded`` (U7; the mobile
+    Accounts project picker shows the same list): billed projects first (✅, confirmed
+    usable), then unknown ones (❔, billing not readable, still selectable), then the
+    unbilled ones (⚠️ ... (no billing)).
+    """
+    items = []
+    # Add billed projects first (confirmed usable)
+    for pid in billed:
+        items.append((f"✅ {pid}", pid))
+    # Add unknown projects (billing API inaccessible — still selectable)
+    for pid in unknown:
+        items.append((f"❔ {pid}", pid))
+    # Add unbilled projects last (confirmed no billing)
+    for pid in unbilled:
+        items.append((f"⚠️ {pid} (no billing)", pid))
+    return items
+
+
+def choose_authgem_project_index(saved, billed, unbilled, unknown):
+    """Index into ``authgem_project_items(billed, unbilled, unknown)`` the picker selects; -1 keeps none.
+
+    The desktop ``_authgem_projects_loaded`` rule (U7): keep the saved project unless it is
+    known unbilled; otherwise the first billed project, else the first unknown one.
+    """
+    project_ids = [pid for _label, pid in authgem_project_items(billed, unbilled, unknown)]
+    selected_idx = -1
+    if saved:
+        # Only restore saved project if it's NOT known-unbilled;
+        # prefer a billed project over a previously-saved unbilled one.
+        if saved not in unbilled:
+            selected_idx = project_ids.index(saved) if saved in project_ids else -1
+    # If no saved or saved not found/unbilled, pick first billed; if none, first unknown
+    if selected_idx < 0 and billed:
+        selected_idx = 0
+    elif selected_idx < 0 and unknown:
+        selected_idx = len(billed)  # first unknown item
+    return selected_idx
+
+
 def reset_cached_project(account_id: int = 0):
     """Clear the cached GCP project ID for a specific account.
 

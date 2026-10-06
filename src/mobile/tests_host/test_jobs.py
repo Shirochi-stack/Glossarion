@@ -1511,6 +1511,51 @@ def test_jobs_feature_wires_routes_strip_and_recovery(app_env, tmp_path):
     asyncio.run(scenario())
 
 
+@needs_flet
+def test_text_editor_route_back_keeps_unsaved_edits(app_env, tmp_path, monkeypatch):
+    """U7 review: the ``tools.text`` route (Chapters ✏️ Edit file, SDLXLIFF Edit Output, File browser
+    Open with) must not drop unsaved edits on Android back / the iOS swipe / the app-bar arrow. Its
+    View cannot pop while the text is dirty; Back asks first and Discard leaves through the app."""
+    from glossarion_mobile.ui.tools import common as tools_common
+    from glossarion_mobile.ui.tools.text_editor import TextEditorScreen
+
+    spec = importlib.util.spec_from_file_location("_glossarion_jobs_tf_helpers", Path(__file__).with_name("test_ui_foundations.py"))
+    tf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tf)
+    shown = []
+    show = tools_common.ChoiceDialog.show
+    monkeypatch.setattr(tools_common.ChoiceDialog, "show", lambda self, page: (shown.append(self), show(self, page))[1])
+
+    async def scenario():
+        _m, conn, session, page, app = await tf._start("android")
+        try:
+            await tf._wait(lambda: app.state.engine_ready)
+            assert await tf._wait(lambda: app.jobs is not None, timeout=10)
+            root = app.jobs.file_roots()["output"]
+            os.makedirs(root, exist_ok=True)
+            note = Path(root) / "note.txt"
+            note.write_text("original\n", encoding="utf-8")
+            app.navigate_to("tools.text", {"fid": app.prefs.file_ref(str(note))})
+            assert await tf._wait(lambda: tf._routes(page)[-1].startswith("/tools/text/"), timeout=5)
+            entry = app.shell.stack[-1]
+            screen = entry.screen
+            assert isinstance(screen, TextEditorScreen)
+            assert await tf._wait(lambda: screen.loaded is not None, timeout=5)
+            screen.editor.value = "edited but unsaved\n"
+            assert screen.dirty and entry.view.can_pop is False and callable(entry.view.on_confirm_pop)
+            await entry.view.on_confirm_pop(None)  # Android back / iOS swipe / app-bar arrow
+            assert await tf._wait(lambda: shown and shown[-1]._future is not None, timeout=5)
+            assert app.shell.stack[-1].screen is screen  # still open while it asks
+            shown[-1].choose("discard")
+            assert await tf._wait(lambda: tf._routes(page) == ["/"], timeout=5)
+            assert all(e.screen is not screen for e in app.shell.stack)
+            assert note.read_text(encoding="utf-8") == "original\n"
+        finally:
+            await tf._stop(app)
+
+    asyncio.run(scenario())
+
+
 # ==========================================================================
 # U3 review fixes: worker outcome, stops during set-up, stop protocol off the UI loop,
 # cleanup wait, resume once, sign-in events, ordered background transitions

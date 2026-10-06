@@ -138,6 +138,80 @@ def _first_header_chapter_ref(headers):
     return {'chapter_num': chapter_num}
 
 
+
+# ─── "Configure Metadata Translation" field rules (U7) ──────────────────────
+# Lifted out of MetadataBatchTranslatorUI.configure_metadata_fields so the
+# mobile Headers & metadata screen applies the same tables and save rules.
+
+#: Standard metadata fields: field -> (label, description), in dialog order.
+METADATA_STANDARD_FIELDS = {
+    'title': ('Title', 'The book title'),
+    'creator': ('Author/Creator', 'The author or creator'),
+    'publisher': ('Publisher', 'The publishing company'),
+    'subject': ('Subject/Genre', 'Subject categories or genres'),
+    'description': ('Description', 'Book synopsis'),
+    'series': ('Series Name', 'Name of the book series'),
+    'language': ('Language', 'Original language'),
+    'date': ('Publication Date', 'When published'),
+    'rights': ('Rights', 'Copyright information')
+}
+
+#: Fields that are enabled by default.
+#: Title used to be controlled exclusively by the main toggle. Keep
+#: it enabled when migrating configurations without an explicit key.
+METADATA_DEFAULT_ENABLED_FIELDS = frozenset({'title', 'description', 'subject'})
+
+
+def saved_metadata_fields_for_epub(translate_fields_config, epub_path):
+    """Get saved field selections for a specific EPUB."""
+    basename = os.path.basename(epub_path) if epub_path else ''
+    # Check for per-EPUB config first
+    per_epub = translate_fields_config.get('_per_epub', {})
+    if basename in per_epub:
+        return per_epub[basename]
+    # Fallback to flat config
+    return translate_fields_config
+
+
+def metadata_field_checked(field, saved, field_sync_state, default_value):
+    """A field checkbox's state: synced state if available, then saved, then default."""
+    if field in field_sync_state:
+        checked = field_sync_state[field]
+    else:
+        checked = saved.get(field, default_value)
+        field_sync_state[field] = checked
+    return checked
+
+
+def store_metadata_field_selection(translate_fields_config, epub_paths, epub_path, saved):
+    """Store one EPUB's checkbox states (``_per_epub`` with several EPUBs, else the flat dict)."""
+    # Store in translate_fields_config
+    if len(epub_paths) > 1:
+        if '_per_epub' not in translate_fields_config:
+            translate_fields_config['_per_epub'] = {}
+        translate_fields_config['_per_epub'][os.path.basename(epub_path)] = saved
+    else:
+        translate_fields_config.clear()
+        translate_fields_config.update(saved)
+
+
+def final_metadata_fields_config(translate_fields_config, epub_paths):
+    """``translate_metadata_fields`` to save: per-EPUB data plus their merge, or the flat dict."""
+    # Build final config
+    if len(epub_paths) > 1:
+        # Multi-EPUB: merge all per-epub selections into a combined flat dict
+        # for backward compat, while also keeping per-epub data
+        combined = {}
+        per_epub = translate_fields_config.get('_per_epub', {})
+        for basename, fields in per_epub.items():
+            combined.update(fields)
+        combined['_per_epub'] = per_epub
+        return combined
+    else:
+        # Single EPUB: flat dict
+        return {k: v for k, v in translate_fields_config.items() if k != '_per_epub'}
+
+
 class MetadataBatchTranslatorUI:
     """UI handlers for metadata and batch translation features"""
     
@@ -448,35 +522,17 @@ class MetadataBatchTranslatorUI:
             field_sync_state = {}  # {field_name: bool}
             sync_enabled = {'active': True}  # Guard to prevent recursion
             
-            # Fields that are enabled by default
-            # Title used to be controlled exclusively by the main toggle. Keep
-            # it enabled when migrating configurations without an explicit key.
-            default_enabled_fields = {'title', 'description', 'subject'}
+            # Fields that are enabled by default (shared table)
+            default_enabled_fields = METADATA_DEFAULT_ENABLED_FIELDS
             
             # Get saved per-EPUB settings (or flat dict for backward compat)
             translate_fields_config = self.gui.config.get('translate_metadata_fields', {})
             
-            standard_fields = {
-                'title': ('Title', 'The book title'),
-                'creator': ('Author/Creator', 'The author or creator'),
-                'publisher': ('Publisher', 'The publishing company'),
-                'subject': ('Subject/Genre', 'Subject categories or genres'),
-                'description': ('Description', 'Book synopsis'),
-                'series': ('Series Name', 'Name of the book series'),
-                'language': ('Language', 'Original language'),
-                'date': ('Publication Date', 'When published'),
-                'rights': ('Rights', 'Copyright information')
-            }
+            standard_fields = METADATA_STANDARD_FIELDS
             
             def _get_saved_fields_for_epub(epub_path):
                 """Get saved field selections for a specific EPUB."""
-                basename = os.path.basename(epub_path) if epub_path else ''
-                # Check for per-EPUB config first
-                per_epub = translate_fields_config.get('_per_epub', {})
-                if basename in per_epub:
-                    return per_epub[basename]
-                # Fallback to flat config
-                return translate_fields_config
+                return saved_metadata_fields_for_epub(translate_fields_config, epub_path)
             
             def _rebuild_fields(epub_path):
                 """Rebuild the fields area for the given EPUB."""
@@ -522,11 +578,7 @@ class MetadataBatchTranslatorUI:
                             # Title / Metadata" toggle remains the overall gate.
                             default_value = field in default_enabled_fields
                             # Use synced state if available, then saved, then default
-                            if field in field_sync_state:
-                                checked = field_sync_state[field]
-                            else:
-                                checked = saved.get(field, default_value)
-                                field_sync_state[field] = checked
+                            checked = metadata_field_checked(field, saved, field_sync_state, default_value)
                             checkbox = self._create_styled_checkbox(f"{label}:")
                             checkbox.setChecked(checked)
                             checkbox.setMinimumWidth(200)
@@ -571,11 +623,7 @@ class MetadataBatchTranslatorUI:
                             frame_layout.setContentsMargins(0, 5, 0, 5)
                             
                             checkbox = self._create_styled_checkbox(f"{field}:")
-                            if field in field_sync_state:
-                                checked = field_sync_state[field]
-                            else:
-                                checked = saved.get(field, False)
-                                field_sync_state[field] = checked
+                            checked = metadata_field_checked(field, saved, field_sync_state, False)
                             checkbox.setChecked(checked)
                             checkbox.setMinimumWidth(200)
                             field_vars[field] = checkbox
@@ -620,13 +668,7 @@ class MetadataBatchTranslatorUI:
                             pass
                     per_epub_field_vars[ep] = None  # Clear widget refs (will be rebuilt)
                     # Store in translate_fields_config
-                    if len(epub_paths) > 1:
-                        if '_per_epub' not in translate_fields_config:
-                            translate_fields_config['_per_epub'] = {}
-                        translate_fields_config['_per_epub'][os.path.basename(ep)] = saved
-                    else:
-                        translate_fields_config.clear()
-                        translate_fields_config.update(saved)
+                    store_metadata_field_selection(translate_fields_config, epub_paths, ep, saved)
             
             # Nav button handlers
             def _on_prev():
@@ -693,19 +735,8 @@ class MetadataBatchTranslatorUI:
                 # Save current EPUB selections first
                 _save_current_selections()
                 
-                # Build final config
-                if len(epub_paths) > 1:
-                    # Multi-EPUB: merge all per-epub selections into a combined flat dict
-                    # for backward compat, while also keeping per-epub data
-                    combined = {}
-                    per_epub = translate_fields_config.get('_per_epub', {})
-                    for basename, fields in per_epub.items():
-                        combined.update(fields)
-                    combined['_per_epub'] = per_epub
-                    self.gui.translate_metadata_fields = combined
-                else:
-                    # Single EPUB: flat dict
-                    self.gui.translate_metadata_fields = {k: v for k, v in translate_fields_config.items() if k != '_per_epub'}
+                # Build final config (per-EPUB data + merge, or the flat dict)
+                self.gui.translate_metadata_fields = final_metadata_fields_config(translate_fields_config, epub_paths)
                 
                 # Get selected translation mode
                 selected_mode = 'together'

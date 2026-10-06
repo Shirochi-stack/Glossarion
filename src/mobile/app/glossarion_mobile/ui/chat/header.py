@@ -13,6 +13,10 @@ once the transcript is scrolled past 4 px (``set_scrolled``).
 Phones put the header in ``View.appbar``; tablets render the same controls as
 a 56 dp bar at the top of the main area (``build(tablet=True)``), so the
 persistent sidebar is not covered by an app bar.
+
+U7: the ⋯ menu shows "Attachments (N)"; a scratch chat shows a "Scratch" chip and a Save
+button instead of the scratch toggle (UI_SPEC §2.1, §2.16); "Search in chat" turns the title
+into the ``ChatSearchBar`` (field · "3/17" · ▲ ▼ · ✕, §2.18).
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from glossarion_mobile.state.app_state import ChatContext
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ChatHeader", "MENU_ITEMS", "SCROLL_TINT_PX"]
+__all__ = ["ChatHeader", "ChatSearchBar", "MENU_ITEMS", "SCROLL_TINT_PX"]
 
 SCROLL_TINT_PX = 4
 
@@ -53,8 +57,14 @@ class ChatHeader:
         on_new_scratch: Optional[Callable[..., Any]] = None,
         on_menu_action: Optional[Callable[[str], Any]] = None,
         on_rename: Optional[Callable[..., Any]] = None,
+        on_save_scratch: Optional[Callable[..., Any]] = None,
+        on_search: Optional[Callable[[str], Any]] = None,
+        on_search_step: Optional[Callable[[int], Any]] = None,
+        on_search_close: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.context = context or ChatContext()
+        self.is_scratch = False
+        self.empty = True
         self.on_open_model_sheet = on_open_model_sheet
         self.on_menu_action = on_menu_action
         self.scrolled = False
@@ -109,20 +119,35 @@ class ChatHeader:
             on_click=on_new_chat,
             size_constraints=HIT_TARGET,
         )
+        self.menu_items = {
+            action: ft.PopupMenuItem(content=label, on_click=lambda e, a=action: self._menu(a), key=f"chat-menu-{action}")
+            for action, label in MENU_ITEMS
+        }
         self.overflow = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             tooltip="More",
-            items=[
-                ft.PopupMenuItem(content=label, on_click=lambda e, a=action: self._menu(a), key=f"chat-menu-{action}")
-                for action, label in MENU_ITEMS
-            ],
+            items=list(self.menu_items.values()),
             size_constraints=HIT_TARGET,
         )
+        self.scratch_chip = ft.Container(
+            content=ft.Text("Scratch", theme_style=ft.TextThemeStyle.LABEL_SMALL),
+            bgcolor=ft.Colors.TERTIARY_CONTAINER,
+            border_radius=tokens.RADII["badge"],
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+            visible=False,
+            tooltip="Scratch chat — not saved",
+            key="header-scratch-chip",
+        )
+        self.save_scratch_button = ft.TextButton(content="Save", visible=False, on_click=on_save_scratch,
+                                                 key="header-scratch-save")
         self.title_column = ft.Column(
             [self.title_gesture, ft.Row([self.subtitle, self.custom_badge], spacing=6, tight=True)],
             spacing=0,
             tight=True,
         )
+        self.search_bar = ChatSearchBar(on_query=on_search, on_step=on_search_step, on_close=on_search_close)
+        self.title_slot = ft.Container(content=self.title_column, expand=True)
+        self.searching = False
         self.wrapper: Any = None
         self.set_context(self.context)
 
@@ -130,7 +155,7 @@ class ChatHeader:
 
     @property
     def actions(self) -> list[ft.Control]:
-        return [self.scratch_button, self.new_chat_button, self.overflow]
+        return [self.scratch_chip, self.save_scratch_button, self.scratch_button, self.new_chat_button, self.overflow]
 
     def build(self, tablet: bool = False) -> Any:
         """``ft.AppBar`` for phones, a 56 dp ``Container`` bar for tablets."""
@@ -142,7 +167,7 @@ class ChatHeader:
                 bgcolor=bgcolor,
                 padding=ft.Padding.only(left=16, right=4),
                 content=ft.Row(
-                    [ft.Container(content=self.title_column, expand=True), *self.actions],
+                    [self.title_slot, *self.actions],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     spacing=0,
                 ),
@@ -150,7 +175,7 @@ class ChatHeader:
         else:
             self.wrapper = ft.AppBar(
                 leading=self.menu_button,
-                title=self.title_column,
+                title=self.title_slot,
                 actions=self.actions,
                 bgcolor=bgcolor,
                 elevation_on_scroll=0,
@@ -193,8 +218,34 @@ class ChatHeader:
         self.title_text.value = title
 
     def set_empty(self, empty: bool) -> None:
-        """The scratch toggle is shown only while the chat is empty (§2.1)."""
-        self.scratch_button.visible = empty
+        """The scratch toggle is shown only while the chat is empty (§2.1), never in a scratch chat."""
+        self.empty = empty
+        self.scratch_button.visible = empty and not self.is_scratch
+
+    def set_scratch(self, scratch: bool) -> None:
+        """A scratch chat shows a "Scratch" chip and Save instead of the toggle (§2.1)."""
+        self.is_scratch = bool(scratch)
+        self.scratch_chip.visible = self.is_scratch
+        self.save_scratch_button.visible = self.is_scratch
+        self.set_empty(self.empty)
+        delete = self.menu_items.get("delete")
+        if delete is not None:
+            delete.content = "Discard scratch chat" if self.is_scratch else "Delete chat"
+
+    def set_attachments(self, count: int) -> None:
+        item = self.menu_items.get("attachments")
+        if item is not None:
+            item.content = f"Attachments ({max(0, int(count or 0))})"
+
+    def open_search(self) -> "ChatSearchBar":
+        self.searching = True
+        self.title_slot.content = self.search_bar
+        self.search_bar.reset()
+        return self.search_bar
+
+    def close_search(self) -> None:
+        self.searching = False
+        self.title_slot.content = self.title_column
 
     def set_scrolled(self, scrolled: bool) -> bool:
         if scrolled == self.scrolled:
@@ -222,3 +273,48 @@ class ChatHeader:
     def _menu(self, action: str) -> None:
         if self.on_menu_action is not None:
             self.on_menu_action(action)
+
+
+class ChatSearchBar(ft.Row):
+    """Search in chat (UI_SPEC §2.18): field · "3/17" · ▲ ▼ · ✕ (Esc closes)."""
+
+    def __init__(self, *, on_query: Optional[Callable[[str], Any]] = None, on_step: Optional[Callable[[int], Any]] = None,
+                 on_close: Optional[Callable[[], Any]] = None) -> None:
+        super().__init__(spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="chat-search")
+        self.on_query = on_query
+        self.on_step = on_step
+        self.on_close = on_close
+        self.field = ft.TextField(hint_text="Search in chat", dense=True, border=ft.NoInputBorder(), expand=True,
+                                  autofocus=True, on_submit=lambda e: self._step(1), on_change=self._changed,
+                                  key="chat-search-field")
+        self.count = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM)
+        self.up = ft.IconButton(icon=ft.Icons.KEYBOARD_ARROW_UP, tooltip="Previous match", size_constraints=HIT_TARGET,
+                                on_click=lambda e: self._step(-1), key="chat-search-up")
+        self.down = ft.IconButton(icon=ft.Icons.KEYBOARD_ARROW_DOWN, tooltip="Next match", size_constraints=HIT_TARGET,
+                                  on_click=lambda e: self._step(1), key="chat-search-down")
+        self.close_button = ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close search", size_constraints=HIT_TARGET,
+                                          on_click=lambda e: self._close(), key="chat-search-close")
+        self.controls = [self.field, self.count, self.up, self.down, self.close_button]
+
+    def reset(self) -> None:
+        self.field.value = ""
+        self.count.value = ""
+
+    def set_count(self, position: int, total: int) -> None:
+        self.count.value = f"{position}/{total}" if total else ("0/0" if (self.field.value or "").strip() else "")
+        try:
+            self.count.update()
+        except Exception:
+            pass
+
+    def _changed(self, e: Any = None) -> None:
+        if self.on_query is not None:
+            self.on_query(self.field.value or "")
+
+    def _step(self, delta: int) -> None:
+        if self.on_step is not None:
+            self.on_step(delta)
+
+    def _close(self) -> None:
+        if self.on_close is not None:
+            self.on_close()

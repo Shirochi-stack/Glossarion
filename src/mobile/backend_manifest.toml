@@ -67,6 +67,12 @@ modules = [
   # lifted from translator_gui) and the Parallel EPUB pair core (parallel_epub_glossary). The
   # Glossary Manager screens load them through services/library.SharedCore (importlib).
   "glossary_document", "glossary_files", "parallel_epub_core",
+  # U7 shared core: the image / generative and RPG Maker runner mixins translation_pipeline
+  # inherits (lifted from translator_gui; the chat's Generate from prompt and Tools › RPG Maker
+  # run them), the async batch core (async_api_processor + its dialog workflow; Tools › Async
+  # batch), the output tools core (Load Font, Validate EPUB, Delete Header Files / TOC.txt, lifted
+  # from other_settings) and the SDLXLIFF reviewer core (Retranslation_GUI; Tools › SDLXLIFF).
+  "image_job", "rpgmaker_job", "async_batch_core", "output_tools_core", "sdlxliff_review_core",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).
@@ -250,7 +256,7 @@ files = []
 "multi_api_key_manager->ollama_settings_dialog" = { count = 1, reason = "MultiAPIKeyDialog._wrap_model_with_ollama_settings (desktop dialog)" }
 "scan_html_folder->PySide6" = { count = 1, reason = "__main__ custom-detection dialog (never runs on import)" }
 "scan_html_folder->QA_Scanner_GUI" = { count = 1, reason = "__main__ custom-detection dialog (never runs on import)" }
-"translate_headers_standalone->PySide6" = { count = 1, reason = "run_translate_headers_gui desktop entry" }
+"translate_headers_standalone->PySide6" = { count = 2, reason = "run_translate_headers_gui desktop entry (QMessageBox + its processEvents hook since U7; mobile runs translate_headers_now / run_translate_headers_now)" }
 
 [baseline.lazy_excluded_edges]
 "model_options->autharena_proxy" = { count = 1, reason = "AuthArena catalog fetch (_fetch_provider_catalog); only reached after the guarded list_accounts() import (U4), route excluded on mobile" }

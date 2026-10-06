@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1-U6 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1-U7 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -347,6 +347,20 @@ U6_IMPORTERS = {
     "parallel_epub_glossary": "parallel_epub_core",
 }
 
+# U7: translation_pipeline inherits the image / generative and RPG Maker runner mixins,
+# async_api_processor is a thin Qt view over async_batch_core, other_settings calls the output
+# tools core (Load Font, Validate EPUB, Delete Header Files / TOC.txt) and Retranslation_GUI /
+# progress_actions import the SDLXLIFF reviewer core (all at module level), so every tier ships them.
+U7_SHARED_MODULES = ("image_job", "rpgmaker_job", "async_batch_core", "output_tools_core", "sdlxliff_review_core")
+#: Desktop or shared module -> the U7 cores it imports at module level.
+U7_IMPORTERS = {
+    "translation_pipeline": ("image_job", "rpgmaker_job"),
+    "async_api_processor": ("async_batch_core",),
+    "other_settings": ("output_tools_core",),
+    "Retranslation_GUI": ("sdlxliff_review_core",),
+    "progress_actions": ("sdlxliff_review_core",),
+}
+
 
 def _spec_list(source, name):
     lines = source.splitlines()
@@ -363,7 +377,7 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
         for name in (U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES + U4_SHARED_MODULES
-                     + U5_SHARED_MODULES + U6_SHARED_MODULES):
+                     + U5_SHARED_MODULES + U6_SHARED_MODULES + U7_SHARED_MODULES):
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")
@@ -407,4 +421,18 @@ def test_u6_modules_are_imported_by_the_desktop_and_stay_gui_free():
     gui = {"PySide6", "translator_gui", "dpi_setup", "GlossaryManager_GUI", "parallel_epub_glossary",
            "QA_Scanner_GUI", "Retranslation_GUI", "epub_library"}
     for name in U6_SHARED_MODULES:
+        assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)
+
+
+def test_u7_modules_are_imported_by_the_desktop_and_stay_gui_free():
+    """The U7 cores are module-level imports of their desktop / shared callers (hence every spec,
+    including the Lite tiers) and never import Qt, the dialogs they were lifted from or the
+    manga stack."""
+    for importer, cores in U7_IMPORTERS.items():
+        for core in cores:
+            assert core in _top_level_imports(importer), (importer, core)
+    gui = {"PySide6", "translator_gui", "dpi_setup", "Retranslation_GUI", "async_api_processor", "other_settings",
+           "review_dialog", "QA_Scanner_GUI", "epub_library", "manga_integration", "manga_translator",
+           "ImageRenderer", "bubble_detector", "local_inpainter", "ocr_manager"}
+    for name in U7_SHARED_MODULES:
         assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)

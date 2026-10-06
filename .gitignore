@@ -207,5 +207,16 @@ tests/**
 !tests/test_glossary_files.py
 !tests/test_parallel_epub_core.py
 !tests/test_qa_runtime_additions.py
+# Mobile rewrite (U7+): Retranslate Selected plan/apply + Resolve QA + image-folder view, the
+# SDLXLIFF reviewer core, the image / generative and RPG Maker runners, the async batch core, the
+# Review run orchestration and the QA / output tool cores (verbatim pins, file-system goldens vs
+# the frozen dialogs, runner-level trace parity, offscreen frozen-vs-rewired dialog sessions).
+!tests/test_retranslate_plan_apply.py
+!tests/test_sdlxliff_review_core.py
+!tests/test_image_job.py
+!tests/test_rpgmaker_job.py
+!tests/test_async_batch_core.py
+!tests/test_review_run_core.py
+!tests/test_u7_tool_cores.py
 junktests/
 warp.md

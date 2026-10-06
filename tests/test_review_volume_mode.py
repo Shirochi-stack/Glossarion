@@ -157,11 +157,16 @@ def test_review_dialog_uses_live_streaming_toggle_for_both_start_paths():
     import inspect
     import review_dialog
 
+    # U7: both Start paths call the shared review_generator.apply_review_streaming_env
+    import review_generator
+
     source = inspect.getsource(review_dialog.ReviewDialog)
-    assert source.count("'enable_streaming_var'") == 2
-    assert source.count(
+    assert source.count("apply_review_streaming_env(self.translator_gui)") == 2
+    shared = inspect.getsource(review_generator.apply_review_streaming_env)
+    assert shared.count("'enable_streaming_var'") == 1
+    assert shared.count(
         "os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'"
-    ) == 2
+    ) == 1
 
 
 def test_volume_filename_sort_is_numerical():

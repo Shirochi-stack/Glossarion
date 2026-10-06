@@ -6,8 +6,11 @@ FileRef registry, never by a path in the route. Every listed path is checked
 against the roots (``realpath``), so a stale or forged ``fid`` cannot leave
 them. Rows show icon, name and "size · date"; a folder opens the next level,
 a file opens the ExportSheet (Share · Save to… · Save to Downloads / Show in
-Files). Rename / Delete / Open-with arrive with the full file tools (U6) and
-are listed disabled. Listing runs on a worker thread.
+Files) plus the file tools: **Open with…** (Text editor for text files,
+Reader for books when the Reader is installed, the MediaViewer for images,
+video and audio, another app through Share),
+**Rename** (same folder, name checks) and **Delete** (confirmation; only
+files inside a root, never a root itself). Listing runs on a worker thread.
 """
 
 from __future__ import annotations
@@ -27,7 +30,8 @@ from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.screens.job_detail import export_sheet
 from glossarion_mobile.ui.theme import icon_data
 
-__all__ = ["ROOT_LABELS", "FileBrowserScreen", "FileEntry", "describe_size", "list_folder", "resolve_location"]
+__all__ = ["ROOT_LABELS", "FileBrowserScreen", "FileEntry", "IMAGE_VIEW_EXTENSIONS", "delete_entry", "describe_size",
+           "list_folder", "media_kind", "rename_entry", "rename_problem", "resolve_location"]
 
 ROOT_LABELS = (("output", "Output"), ("library", "Library"), ("inbox", "Inbox"), ("chats", "Chat workspaces"))
 MAX_ENTRIES = 2000
@@ -38,6 +42,27 @@ _ICONS = {
     ".zip": "FOLDER_ZIP", ".cbz": "FOLDER_ZIP", ".mp3": "AUDIOTRACK", ".wav": "AUDIOTRACK", ".mp4": "MOVIE",
     ".log": "TERMINAL",
 }
+#: Images the MediaViewer's ``Image`` renders on every platform.
+IMAGE_VIEW_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"})
+
+
+def media_kind(path: str) -> Optional[str]:
+    """``image`` / ``video`` / ``audio`` for a file the MediaViewer shows, else None (video and audio:
+    the shared ``ChatStoreMixin`` generated-media extensions)."""
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext in IMAGE_VIEW_EXTENSIONS:
+        return "image"
+    try:
+        from direct_text_store import ChatStoreMixin  # shared (U3)
+
+        video, audio = ChatStoreMixin._VIDEO_OUTPUT_EXTENSIONS, ChatStoreMixin._AUDIO_OUTPUT_EXTENSIONS
+    except Exception:
+        video, audio = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}, {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+    if ext in video:
+        return "video"
+    if ext in audio:
+        return "audio"
+    return None
 
 
 @dataclass(frozen=True)
@@ -107,6 +132,49 @@ def list_folder(folder: str) -> list[FileEntry]:
     return entries
 
 
+_BAD_NAME_CHARS = '<>:"/\\|?*'
+
+
+def rename_problem(path: str, new_name: str) -> Optional[str]:
+    """Why ``path`` cannot be renamed to ``new_name`` (None: it can)."""
+    name = str(new_name or "").strip()
+    if not name or name in (".", ".."):
+        return "Enter a file name"
+    if any(ch in name for ch in _BAD_NAME_CHARS) or any(ord(ch) < 32 for ch in name):
+        return 'A file name cannot contain < > : " / \\ | ? *'
+    if name.startswith("."):
+        return "A file name cannot start with a dot"
+    if name == os.path.basename(path):
+        return "That is already the file's name"
+    target = os.path.join(os.path.dirname(path), name)
+    if os.path.exists(target) and os.path.normcase(os.path.abspath(target)) != os.path.normcase(os.path.abspath(path)):
+        return "A file with that name already exists"
+    return None
+
+
+def rename_entry(path: str, new_name: str, roots: Mapping[str, str]) -> str:
+    """Blocking: rename a file inside its folder (inside a root); returns the new path."""
+    problem = rename_problem(path, new_name)
+    if problem:
+        raise ValueError(problem)
+    if not any(_inside(path, root) and os.path.realpath(path) != os.path.realpath(root)
+               for root in roots.values() if root):
+        raise ValueError("This file is outside the app's storage")
+    target = os.path.join(os.path.dirname(path), str(new_name).strip())
+    os.rename(path, target)
+    return target
+
+
+def delete_entry(path: str, roots: Mapping[str, str]) -> None:
+    """Blocking: delete one file inside a root (folders and the roots themselves are refused)."""
+    if os.path.isdir(path):
+        raise ValueError("Folders are not deleted from the file browser")
+    if not any(_inside(path, root) and os.path.realpath(path) != os.path.realpath(root)
+               for root in roots.values() if root):
+        raise ValueError("This file is outside the app's storage")
+    os.remove(path)
+
+
 class FileBrowserScreen(Screen):
     title = "Files"
 
@@ -123,10 +191,18 @@ class FileBrowserScreen(Screen):
         resolve_ref: Optional[Callable[[str], Optional[str]]] = None,
         run_io: Optional[Callable[..., Any]] = None,
         tablet: bool = False,
+        open_reader: Optional[Callable[..., Any]] = None,
+        push_overlay: Optional[Callable[[Any], Any]] = None,
+        pop_overlay: Optional[Callable[[Any], Any]] = None,
     ) -> None:
         super().__init__(match)
         self.roots = dict(roots)
         self.files = files
+        self.open_reader = open_reader  # (path=...) -> the Reader on a book file, when installed
+        self.push_overlay = push_overlay  # the shell's overlay stack (the MediaViewer is a full-screen View)
+        self.pop_overlay = pop_overlay
+        self.media_viewer: Any = None
+        self.last_sheet: Any = None
         self.page = page
         self.navigate = navigate
         self.notify = notify
@@ -268,15 +344,152 @@ class FileBrowserScreen(Screen):
             return None
         if self.files is None or self.page is None:
             return None
-        later = [
-            ActionItem(label, None, icon=icon, disabled_reason=reason, key=f"file-{key}")
-            for key, label, icon, reason in (
-                ("open", "Open with…", "OPEN_IN_NEW", "Arrives with the text editor and file tools (U7)"),
-                ("rename", "Rename", "DRIVE_FILE_RENAME_OUTLINE", "Arrives with the file tools (U7)"),
-                ("delete", "Delete", "DELETE_OUTLINE", "Arrives with the file tools (U7)"),
-            )
+        tools = [
+            ActionItem("Open with…", lambda it=entry: self.open_with(it), icon="OPEN_IN_NEW", key="file-open"),
+            ActionItem("Rename", lambda it=entry: self.ask_rename(it), icon="DRIVE_FILE_RENAME_OUTLINE",
+                       key="file-rename"),
+            ActionItem("Delete", lambda it=entry: self._spawn(self.confirm_delete(it)), icon="DELETE_OUTLINE",
+                       destructive=True, key="file-delete"),
         ]
         sheet = export_sheet(self.files, entry.path, page=self.page, notify=self.notify, tablet=self.tablet,
-                             extra=later)
+                             extra=tools)
         sheet.show(self.page)
+        self.last_sheet = sheet
         return sheet
+
+    # ---- file tools ------------------------------------------------------------------------------
+
+    def open_with(self, entry: FileEntry) -> Optional[ActionSheet]:
+        """Open with: Text editor (text files) · Reader (books) · Media viewer (images, video, audio) ·
+        another app (Share)."""
+        from glossarion_mobile.ui.tools import text_editor
+
+        ext = os.path.splitext(entry.name)[1].lower()
+        is_book = ext in (".epub", ".txt", ".pdf", ".html", ".xhtml", ".htm", ".md")
+        kind = media_kind(entry.path)
+        items = [
+            ActionItem("Text editor", lambda: self.open_text(entry), icon="EDIT_NOTE", key="open-text",
+                       disabled_reason=None if text_editor.is_text_file(entry.path) else "Not a text file"),
+            ActionItem("Reader", lambda: self.open_reader(path=entry.path) if self.open_reader else None,
+                       icon="AUTO_STORIES", key="open-reader",
+                       disabled_reason=(None if is_book and self.open_reader is not None
+                                        else "Not a book file" if not is_book else "The Reader is not available here")),
+            ActionItem("Media viewer", lambda: self.open_media(entry), icon="PERM_MEDIA", key="open-media",
+                       disabled_reason=(None if kind and self.push_overlay is not None
+                                        else "Not an image, video or audio file" if not kind
+                                        else "The media viewer is not available here")),
+            ActionItem("Another app…", lambda: self._spawn(self.files.share([entry.path])) if self.files else None,
+                       icon="IOS_SHARE", key="open-share",
+                       disabled_reason=None if self.files is not None else "Sharing is not available"),
+        ]
+        sheet = ActionSheet(items, title="Open with", subtitle=entry.name, tablet=self.tablet)
+        if self.page is not None:
+            sheet.show(self.page)
+        self.last_sheet = sheet
+        return sheet
+
+    def open_media(self, entry: FileEntry) -> Any:
+        """The chat's full-screen MediaViewer on one image / video / audio file (zoom, play, Share,
+        Save to…, Open externally: the file's own ExportSheet and share sheet)."""
+        from glossarion_mobile.ui.chat.media_cards import AudioHub
+        from glossarion_mobile.ui.chat.media_model import MediaItem
+        from glossarion_mobile.ui.components.media_viewer import MediaViewer
+
+        kind = media_kind(entry.path)
+        if kind is None or self.push_overlay is None:
+            return None
+
+        def share(path: str) -> Any:
+            return self._spawn(self.files.share([path])) if self.files is not None else None
+
+        def save(path: str) -> Any:
+            if self.files is None or self.page is None:
+                return None
+            sheet = export_sheet(self.files, path, page=self.page, notify=self.notify, tablet=self.tablet)
+            sheet.show(self.page)
+            return sheet
+
+        def close() -> None:
+            if self.pop_overlay is not None:
+                self.pop_overlay(viewer.view)
+
+        viewer = MediaViewer([MediaItem(kind, entry.path, os.path.isfile(entry.path))], on_close=close,
+                             on_save=save, on_share=share, on_open_external=share,
+                             audio_hub=AudioHub() if kind == "audio" else None, spawn=self._spawn)
+        self.media_viewer = viewer
+        self.push_overlay(viewer.view)
+        return viewer
+
+    def open_text(self, entry: FileEntry) -> Optional[str]:
+        if self.navigate is None or self.file_ref is None:
+            return None
+        fid = self.file_ref(entry.path)
+        self.navigate("tools.text", {"fid": fid})
+        return fid
+
+    def ask_rename(self, entry: FileEntry) -> Any:
+        from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+
+        field = ft.TextField(label="New name", value=entry.name, autofocus=True, key="rename-field")
+        dialog = ConfirmDialog(title="Rename", confirm_label="Rename", cancel_label="Cancel",
+                               on_confirm=lambda: self.rename(entry, str(field.value or "")))
+        dialog.dialog.content.content.controls.insert(0, field)
+        dialog.field = field  # type: ignore[attr-defined]
+        if self.page is not None:
+            dialog.show(self.page)
+        self.last_sheet = dialog
+        return dialog
+
+    async def rename(self, entry: FileEntry, new_name: str) -> Optional[str]:
+        try:
+            target = await self._io(lambda: rename_entry(entry.path, new_name, self.roots))
+        except (OSError, ValueError) as exc:
+            self._say(str(exc))
+            return None
+        self._say(f"Renamed to {os.path.basename(target)}")
+        await self.reload()
+        return target
+
+    async def confirm_delete(self, entry: FileEntry) -> bool:
+        from glossarion_mobile.ui.tools.common import ChoiceDialog
+
+        dialog = ChoiceDialog("Delete file", f"Delete {entry.name}?\n\nThis cannot be undone.",
+                              [("cancel", "Cancel", "text"), ("delete", "Delete", "destructive")], key="file-delete")
+        if self.page is None:
+            return False
+        dialog.show(self.page)
+        if await dialog.wait() != "delete":
+            return False
+        return await self.delete(entry)
+
+    async def delete(self, entry: FileEntry) -> bool:
+        try:
+            await self._io(lambda: delete_entry(entry.path, self.roots))
+        except (OSError, ValueError) as exc:
+            self._say(f"Could not delete: {exc}")
+            return False
+        self._say(f"Deleted {entry.name}")
+        await self.reload()
+        return True
+
+    async def _io(self, fn: Callable[..., Any]) -> Any:
+        if self.run_io is not None:
+            return await self.run_io(fn)
+        return fn()
+
+    def _say(self, message: str) -> None:
+        if self.notify is not None:
+            try:
+                self.notify(message)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _spawn(coro: Any) -> Any:
+        import asyncio
+
+        try:
+            return asyncio.ensure_future(coro)
+        except RuntimeError:
+            coro.close()
+            return None

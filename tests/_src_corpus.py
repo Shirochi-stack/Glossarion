@@ -30,7 +30,9 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 #: translator_gui plus the shared modules holding code that moved out of it (MRO order).
 DESKTOP_GUI_MODULES = ("translator_gui", "translation_pipeline", "text_jobs", "input_preparation", "job_runner", "settings_persistence",
                        "run_env", "owner_state", "headless_owner", "stop_control", "direct_text_store",
-                       "direct_text_stream")
+                       "direct_text_stream",
+                       # U7: the image / generative-only and RPG Maker runners
+                       "image_job", "rpgmaker_job")
 
 #: Classes searched by find_method, in TranslatorGUI's method resolution order.
 DESKTOP_GUI_CLASSES = (
@@ -41,6 +43,9 @@ DESKTOP_GUI_CLASSES = (
     ("text_jobs", "TextJobsMixin"),
     ("input_preparation", "InputPreparationMixin"),
     ("job_runner", "JobHooksMixin"),
+    # U7: TranslationPipelineMixin's runner bases
+    ("image_job", "ImageJobMixin"),
+    ("rpgmaker_job", "RpgMakerJobMixin"),
     ("settings_persistence", "SettingsPersistenceMixin"),
     ("run_env", "RunEnvMixin"),
     ("owner_state", "ConfigStateMixin"),
@@ -57,8 +62,10 @@ INIT_BLOCK_METHODS = (
 
 
 #: Retranslation_GUI plus the shared modules holding Progress Manager / Glossary Progress
-#: code that moved out of it in U5 (progress_core, progress_actions, glossary_progress_core).
-PROGRESS_MANAGER_MODULES = ("Retranslation_GUI", "progress_core", "progress_actions", "glossary_progress_core")
+#: code that moved out of it in U5 (progress_core, progress_actions, glossary_progress_core)
+#: and the SDLXLIFF reviewer / sidecar auto-generation core moved in U7 (sdlxliff_review_core).
+PROGRESS_MANAGER_MODULES = ("Retranslation_GUI", "progress_core", "progress_actions", "glossary_progress_core",
+                            "sdlxliff_review_core")
 
 
 @lru_cache(maxsize=None)

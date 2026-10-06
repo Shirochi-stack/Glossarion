@@ -152,10 +152,13 @@ BACKEND_GLOBALS = {
 PREIMPORT = ("TransateKRtoEN", "extract_glossary_from_epub", "epub_converter", "pdf_workspace_compiler",
              "metadata_translation_worker", "unified_api_client", "antigravity_proxy", "scan_html_folder",
              "glossary_translation_gate", "glossary_paths", "output_workspace", "output_naming",
-             "library_core", "headless_owner", "psutil")
-#: live modules whose ``__file__`` the sandbox replaces (they derive output paths from it)
+             "library_core", "headless_owner", "psutil",
+             # U7: the image / RPG Maker runners and what they import lazily
+             "rpgmaker_handler", "history_manager", "image_job", "rpgmaker_job")
+#: live modules whose ``__file__`` the sandbox replaces (they derive output paths from it;
+#: U7: image_job's generative-only run saves into <its folder>/Generated_Media)
 FILE_MODULES = ("translator_gui", "app_paths", "owner_state", "run_env", "settings_persistence",
-                "headless_owner", "library_core") + U3_MODULES
+                "headless_owner", "library_core", "image_job") + U3_MODULES
 #: channels kept by the mobile projection
 MOBILE_CHANNELS = ("backend", "check", "stopapi", "hook", "action", "ask")
 #: sandbox files left out of the mobile projection's file delta (reason in the comment)
@@ -618,6 +621,47 @@ class Tracer:
         self._work(ts.PDF_COMPILE, plan, stop_callback, log_callback)
         return plan.result
 
+    # -- U7: the client calls of the image / generative / RPG Maker runners ----------------------
+    def _client_result(self, plan, payload, default):
+        result = plan.result
+        if callable(result):
+            result = result(self, payload)
+        if isinstance(result, BaseException):
+            raise result
+        if result is None:
+            result = default
+        return result if isinstance(result, tuple) else (result, "stop")
+
+    def client_send(self, _client, messages=None, temperature=None, max_tokens=None, **kwargs):
+        payload = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens, "kwargs": kwargs}
+        index, plan = self._enter(ts.CLIENT_SEND, payload)
+        return self._client_result(plan, payload, f"[trace send {index}]")
+
+    def client_send_image(self, _client, messages, image_data, temperature=None, max_tokens=None,
+                          response_name=None, **kwargs):
+        import hashlib
+
+        data = image_data if isinstance(image_data, (bytes, bytearray)) else str(image_data or "").encode("utf-8")
+        payload = {"messages": messages, "image_sha256": hashlib.sha256(data).hexdigest(), "temperature": temperature,
+                   "max_tokens": max_tokens, "response_name": response_name, "kwargs": kwargs}
+        index, plan = self._enter(ts.IMAGE_SEND, payload)
+        return self._client_result(plan, payload, f"<p>trace image response {index}</p>")
+
+    def send_with_interrupt(self, messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None,
+                            **kwargs):
+        """TransateKRtoEN.send_with_interrupt: records its arguments, then calls ``client.send`` inline."""
+        stop = bool(stop_check_fn()) if callable(stop_check_fn) else None
+        self.record(f"hook:{ts.SEND_INTERRUPT}", [], {"temperature": temperature, "max_tokens": max_tokens,
+                                                      "chunk_timeout": chunk_timeout, "stop": stop,
+                                                      "kwargs": dict(kwargs), "client": type(client).__name__})
+        result = client.send(messages, temperature, max_tokens)
+        return (*result, None) if isinstance(result, tuple) else (result, "stop", None)
+
+    def translate_game_images(self, **kwargs):
+        shown = {k: ("<client>" if k == "client" else "<callable>" if callable(v) else v) for k, v in kwargs.items()}
+        _index, plan = self._enter(ts.GAME_IMAGES, {"kwargs": shown})
+        return 0 if plan.result is None else plan.result
+
     def stop_api(self, name, *, flag=None, result=None):
         tracer = self
 
@@ -665,7 +709,10 @@ class Tracer:
                     "TransateKRtoEN.cancel_queued_translation_sends", result=2),
                 "set_direct_text_glossary_approval_callback": self.hook(
                     "TransateKRtoEN.set_direct_text_glossary_approval_callback", store="approval_callback"),
+                # U7: the image runner's vision call goes through it (a thread + polling in reality)
+                "send_with_interrupt": self.send_with_interrupt,
             },
+            "rpgmaker_handler": {"translate_game_images": self.translate_game_images},
             "extract_glossary_from_epub": {
                 "main": self.glossary_main,
                 "set_stop_flag": self.stop_api("extract_glossary_from_epub.set_stop_flag",
@@ -718,6 +765,21 @@ class Tracer:
             if hasattr(recording_cls, name):
                 stub = self.stop_api(f"UnifiedClient.{name}")
                 ctx.patch(recording_cls, name, classmethod(lambda cls, *a, _s=stub, **k: _s(*a, **k)))
+        # U7: the runners' client calls (the recording client only records its constructor)
+        tracer_ = self
+        ctx.patch(recording_cls, "send", lambda client, *a, **k: tracer_.client_send(client, *a, **k))
+        ctx.patch(recording_cls, "send_image", lambda client, *a, **k: tracer_.client_send_image(client, *a, **k))
+        try:
+            import rpgmaker_handler
+
+            # character-estimate token budgets (no tiktoken download; identical on every side)
+            ctx.patch(rpgmaker_handler._get_tiktoken_encoder, "_enc", None)
+        except ImportError:
+            pass
+        real_strftime, real_localtime = time.strftime, time.localtime
+        clock = self.clock
+        ctx.patch(time, "strftime", lambda fmt, t=None: real_strftime(
+            fmt, real_localtime(clock.time()) if t is None else t))
         # module globals _lazy_load_modules binds (frozen namespace + live translator_gui)
         for ns in namespaces:
             for global_name, (target,) in BACKEND_GLOBALS.items():
@@ -805,7 +867,9 @@ class MobileDriver:
             tracer.record("action:pipeline_start", [kind])
             if scenario["entry"] == ts.GLOSSARY:
                 return owner.run_glossary_extraction_direct()
-            files = [os.path.abspath(os.fspath(p)) for p in (getattr(owner, "selected_files", None) or []) if p]
+            # (the generative-only sentinel is not a path: a mobile job passes it as is, U7)
+            files = [p if p == "__generative_mode__" else os.path.abspath(os.fspath(p))
+                     for p in (getattr(owner, "selected_files", None) or []) if p]
             request = owner._prepare_translation_run(files)
             if request is None or request is False:
                 return request

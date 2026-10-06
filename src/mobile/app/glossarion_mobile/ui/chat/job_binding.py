@@ -319,6 +319,19 @@ class JobsAdapter:
         value = getattr(sig, "value", sig) if sig is not None else None
         return list(value or []) if isinstance(value, (list, tuple)) else []
 
+    def pending(self) -> list:
+        """The active job's and the queued jobs' snapshots (``JobService.view``)."""
+        view = self._signal("view")
+        if callable(view):
+            try:
+                jobs_view = view()
+            except Exception:
+                return []
+            active = getattr(jobs_view, "active", None)
+            return ([active] if active is not None else []) + list(getattr(jobs_view, "queue", ()) or ())
+        active = self.snapshot()
+        return ([active] if active is not None else []) + self.queue()
+
     def subscribe(self, callback: Callable[[Any], Any]) -> Callable[[], None]:
         """``callback(snapshot)`` for every state change, question and progress update."""
         unsubs = []

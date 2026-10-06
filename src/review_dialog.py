@@ -26,16 +26,30 @@ from review_generator import (
     count_review_tokens,
     generate_review,
     generate_chunked_review,
+    # U7: the review run orchestration (shared with the mobile Review job)
+    ReviewStdoutWriter,
+    apply_review_streaming_env,
+    reset_review_stop_flags,
+    review_all_batch_size,
+    review_app_dir,
+    review_log_fn,
+    review_output_dir_for_file,
+    review_paths_for,
+    review_run_params,
+    run_all_reviews,
+    run_review,
+    single_review_batch_size,
+    # U7 integration: the Delete / Restore file moves (shared with the mobile Review screen)
+    copy_review_backup,
+    move_review_to_backups,
+    review_backups,
+    review_backups_dir,
+    review_restore_question,
 )
 
 
-def _get_app_dir() -> str:
-    """Return the application's base directory (Windows-safe)."""
-    if platform.system() == 'Windows':
-        if getattr(sys, 'frozen', False):
-            return os.path.dirname(sys.executable)
-        return os.path.dirname(os.path.abspath(__file__))
-    return os.getcwd()
+#: U7: moved to review_generator.review_app_dir (same folder; the old name stays importable)
+_get_app_dir = review_app_dir
 
 
 _NATURAL_PART_RE = re.compile(r'(\d+)')
@@ -1130,34 +1144,16 @@ class ReviewDialog(QDialog):
 
     def _output_dir_for_file(self, file_path):
         """Return the normal per-file output directory on every supported OS."""
-        stem = os.path.splitext(os.path.basename(file_path))[0]
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
-                       getattr(self.translator_gui, 'config', {}).get('output_directory')
-        if override_dir:
-            return os.path.join(os.path.abspath(os.path.expanduser(override_dir)), stem)
-        return os.path.join(_get_app_dir(), stem)
+        return review_output_dir_for_file(file_path, getattr(self.translator_gui, 'config', {}))
 
     def _get_review_paths(self):
         """Return every path that should contain the active review."""
-        if self._is_volume_mode():
-            paths = [
-                os.path.join(
-                    self._output_dir_for_file(file_path),
-                    "review",
-                    "combined_review",
-                    "review.md",
-                )
-                for file_path in self._volume_paths
-            ]
-        else:
-            paths = [
-                os.path.join(
-                    self._output_dir_for_file(self.file_path),
-                    "review",
-                    "review.md",
-                )
-            ]
-        return list(dict.fromkeys(paths))
+        return review_paths_for(
+            self.file_path,
+            self._volume_paths,
+            self._is_volume_mode(),
+            getattr(self.translator_gui, 'config', {}),
+        )
 
     def _rebuild_epub_combo(self):
         current_path = self.file_path
@@ -1738,31 +1734,14 @@ class ReviewDialog(QDialog):
         self._stop_click_times = []
         self._save_prompt_to_config()
 
-        # Gather parameters from the GUI
+        # Gather parameters from the GUI (review_generator.review_run_params, shared with mobile)
         gui = self.translator_gui
-        api_key = gui.api_key_entry.text().strip() if hasattr(gui, 'api_key_entry') else ''
-        model = getattr(gui, 'model_var', os.getenv('MODEL', 'gemini-2.0-flash'))
-        endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
-        temperature = float(gui.config.get('translation_temperature', 0.3))
-        config = dict(gui.config)
-        # The non-modal key manager and settings controls update live GUI state.
-        # Freeze that effective state for this run instead of relying on a
-        # potentially older config snapshot.
-        config['use_multi_api_keys'] = bool(
-            gui.config.get('use_multi_api_keys', False)
+        params = review_run_params(
+            gui,
+            self.prompt_edit.toPlainText(),
+            self.spoiler_checkbox.isChecked(),
+            getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT),
         )
-
-        # Get input token limit
-        try:
-            token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
-        except (ValueError, AttributeError):
-            token_limit = 200000
-
-        system_prompt = self.prompt_edit.toPlainText().strip()
-        # Replace {target_lang} placeholder with the selected target language
-        output_lang = getattr(gui, 'lang_var', 'English')
-        system_prompt = system_prompt.replace('{target_lang}', output_lang)
-        spoiler_mode = self.spoiler_checkbox.isChecked()
         review_input = self._review_input()
         if isinstance(review_input, list):
             review_input = list(review_input)  # Freeze the manual order for this run.
@@ -1790,26 +1769,7 @@ class ReviewDialog(QDialog):
         self._epub_combo.setEnabled(False)
 
         # Clear any lingering cancellation from a previous force stop
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient.set_global_cancellation(False)
-        except Exception:
-            pass
-        try:
-            import unified_api_client
-            unified_api_client.global_stop_flag = False
-        except Exception:
-            pass
-        try:
-            import extract_glossary_from_epub
-            extract_glossary_from_epub.set_stop_flag(False)
-        except Exception:
-            pass
-        try:
-            import TransateKRtoEN
-            TransateKRtoEN.set_stop_flag(False)
-        except Exception:
-            pass
+        reset_review_stop_flags()
 
         # Message queue for thread → main-thread communication.  Create it
         # before installing either redirect so no early message can target a
@@ -1834,102 +1794,36 @@ class ReviewDialog(QDialog):
         # ── Hijack sys.stdout so print() calls from streaming/thinking code
         #    are routed through the review dialog queue instead of main GUI ──
         self._original_stdout = sys.stdout
-        _review_queue_ref = self._review_queue
-        _active_flag = self  # reference to self for checking _review_log_active
-
-        class _ReviewStdoutWriter:
-            def write(self, text):
-                if text and text.strip() and getattr(_active_flag, '_review_log_active', False):
-                    _review_queue_ref.put(('log', text.strip()))
-            def flush(self):
-                pass
-
-        sys.stdout = _ReviewStdoutWriter()
+        sys.stdout = ReviewStdoutWriter(self._review_queue, self)
 
         # ── Respect the streaming toggle from settings ──
-        stream_on = bool(getattr(
-            self.translator_gui,
-            'enable_streaming_var',
-            self.translator_gui.config.get('enable_streaming', False),
-        ))
-        os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+        apply_review_streaming_env(self.translator_gui)
 
-
-        def _log(msg):
-            # Send through the hijacked append_log (reaches both main GUI and review dialog)
-            # Prefix each line with [Review], but skip separator-only and blank lines
-            lines = str(msg).split('\n')
-            prefixed = []
-            for line in lines:
-                stripped = line.strip()
-                if not stripped or all(c in '─═' for c in stripped):
-                    prefixed.append(line)
-                else:
-                    prefixed.append(f"[Review] {line}")
-            full = '\n'.join(prefixed)
-            try:
-                self.translator_gui.append_log(full)
-            except Exception:
-                print(full)
+        # [Review]-prefixed lines through the hijacked append_log
+        _log = review_log_fn(self.translator_gui)
 
         def _stop_check():
             return self._stop_requested
 
         chunk_mode = self.chunk_mode_checkbox.isChecked()
         wrap_chunks = self.chunk_wrap_checkbox.isChecked()
-        final_review_prompt = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
-        # Replace {target_lang} in final prompt too
-        final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
 
         # Compute batch size for parallel chunk processing
-        chunk_batch_size = 1
-        if chunk_mode:
-            batch_on = bool(getattr(gui, 'batch_translation_var', False))
-            if batch_on:
-                try:
-                    chunk_batch_size = int(getattr(gui, 'batch_size_var', 1))
-                    if chunk_batch_size < 1:
-                        chunk_batch_size = 1
-                except (ValueError, TypeError):
-                    chunk_batch_size = 1
+        chunk_batch_size = single_review_batch_size(gui, chunk_mode)
 
         def _run():
             try:
-                if chunk_mode:
-                    result = generate_chunked_review(
-                        epub_path=review_input,
-                        output_dir=output_dir,
-                        api_key=api_key,
-                        model=model,
-                        endpoint=endpoint,
-                        system_prompt=system_prompt,
-                        final_review_prompt=final_review_prompt,
-                        input_token_limit=token_limit,
-                        spoiler_mode=spoiler_mode,
-                        wrap_chunks=wrap_chunks,
-                        temperature=temperature,
-                        config=config,
-                        batch_size=chunk_batch_size,
-                        log_fn=_log,
-                        stop_check_fn=_stop_check,
-                        review_output_paths=review_output_paths,
-                    )
-                else:
-                    result = generate_review(
-                        epub_path=review_input,
-                        output_dir=output_dir,
-                        api_key=api_key,
-                        model=model,
-                        endpoint=endpoint,
-                        system_prompt=system_prompt,
-                        input_token_limit=token_limit,
-                        spoiler_mode=spoiler_mode,
-                        temperature=temperature,
-                        config=config,
-                        log_fn=_log,
-                        stop_check_fn=_stop_check,
-                        review_output_paths=review_output_paths,
-                    )
+                result = run_review(
+                    params,
+                    review_input,
+                    output_dir,
+                    chunk_mode=chunk_mode,
+                    wrap_chunks=wrap_chunks,
+                    batch_size=chunk_batch_size,
+                    log_fn=_log,
+                    stop_check_fn=_stop_check,
+                    review_output_paths=review_output_paths,
+                )
                 self._review_queue.put(('done', result))
             except Exception as e:
                 self._review_queue.put(('error', str(e)))
@@ -1999,43 +1893,19 @@ class ReviewDialog(QDialog):
         self._force_stop = False
         self._save_prompt_to_config()
 
-        # Gather parameters
+        # Gather parameters (review_generator.review_run_params, shared with mobile)
         gui = self.translator_gui
-        api_key = gui.api_key_entry.text().strip() if hasattr(gui, 'api_key_entry') else ''
-        model = getattr(gui, 'model_var', os.getenv('MODEL', 'gemini-2.0-flash'))
-        endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
-        temperature = float(gui.config.get('translation_temperature', 0.3))
-        config = dict(gui.config)
-        config['use_multi_api_keys'] = bool(
-            gui.config.get('use_multi_api_keys', False)
+        params = review_run_params(
+            gui,
+            self.prompt_edit.toPlainText(),
+            self.spoiler_checkbox.isChecked(),
+            getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT),
         )
-
-        try:
-            token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
-        except (ValueError, AttributeError):
-            token_limit = 200000
-
-        system_prompt_template = self.prompt_edit.toPlainText().strip()
-        output_lang = getattr(gui, 'lang_var', 'English')
-        system_prompt = system_prompt_template.replace('{target_lang}', output_lang)
-        spoiler_mode = self.spoiler_checkbox.isChecked()
         chunk_mode = self.chunk_mode_checkbox.isChecked()
         wrap_chunks = self.chunk_wrap_checkbox.isChecked()
-        final_review_prompt = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
-        final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
 
         # Respect batch mode toggle for parallelism
-        # batch_translation_var is the on/off toggle; batch_size_var is the worker count
-        batch_on = bool(getattr(gui, 'batch_translation_var', False))
-        if batch_on:
-            try:
-                batch_size = int(getattr(gui, 'batch_size_var', 1))
-                if batch_size < 1:
-                    batch_size = 1
-            except (ValueError, TypeError):
-                batch_size = 1
-        else:
-            batch_size = 1  # Sequential when batch mode is OFF
+        batch_size = review_all_batch_size(gui)
 
         # UI state
         self.start_btn.hide()
@@ -2056,26 +1926,7 @@ class ReviewDialog(QDialog):
         self._volume_order_btn.setEnabled(False)
 
         # Clear cancellation
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient.set_global_cancellation(False)
-        except Exception:
-            pass
-        try:
-            import unified_api_client
-            unified_api_client.global_stop_flag = False
-        except Exception:
-            pass
-        try:
-            import extract_glossary_from_epub
-            extract_glossary_from_epub.set_stop_flag(False)
-        except Exception:
-            pass
-        try:
-            import TransateKRtoEN
-            TransateKRtoEN.set_stop_flag(False)
-        except Exception:
-            pass
+        reset_review_stop_flags()
 
         # Create a fresh queue before installing redirects (same as
         # _on_start_review).
@@ -2096,127 +1947,27 @@ class ReviewDialog(QDialog):
 
         # Hijack sys.stdout so print() from streaming/thinking goes to review dialog
         self._original_stdout = sys.stdout
-        _review_queue_ref = self._review_queue
-        _active_flag = self
-
-        class _ReviewStdoutWriter:
-            def write(self, text):
-                if text and text.strip() and getattr(_active_flag, '_review_log_active', False):
-                    _review_queue_ref.put(('log', text.strip()))
-            def flush(self):
-                pass
-
-        sys.stdout = _ReviewStdoutWriter()
+        sys.stdout = ReviewStdoutWriter(self._review_queue, self)
 
         # Respect the streaming toggle from settings
-        stream_on = bool(getattr(
-            self.translator_gui,
-            'enable_streaming_var',
-            self.translator_gui.config.get('enable_streaming', False),
-        ))
-        os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+        apply_review_streaming_env(self.translator_gui)
 
 
         all_paths = list(self._all_epub_paths)
-        total = len(all_paths)
-
-        def _get_output_dir(epub_path):
-            epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
-            if override_dir:
-                return os.path.join(os.path.abspath(override_dir), epub_base)
-            return os.path.join(_get_app_dir(), epub_base)
 
         def _stop_check():
             return self._stop_requested
 
         def _run_all():
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            def _generate_single(idx, epub_path):
-                basename = os.path.basename(epub_path)
-                self._review_queue.put(('log', f"\n{'═'*50}\n📖 [{idx+1}/{total}] {basename}\n{'═'*50}"))
-                self._review_queue.put(('nav', idx))  # Navigate dropdown to this EPUB
-
-                if self._stop_requested:
-                    self._review_queue.put(('log', f"⏹️ Skipped (stopped): {basename}"))
-                    return idx, None, None
-
-                out_dir = _get_output_dir(epub_path)
-                try:
-                    _log_single = lambda msg, _bn=basename: self._review_queue.put(('log', f"[{_bn}] {msg}"))
-                    if chunk_mode:
-                        result = generate_chunked_review(
-                            epub_path=epub_path,
-                            output_dir=out_dir,
-                            api_key=api_key,
-                            model=model,
-                            endpoint=endpoint,
-                            system_prompt=system_prompt,
-                            final_review_prompt=final_review_prompt,
-                            input_token_limit=token_limit,
-                            spoiler_mode=spoiler_mode,
-                            wrap_chunks=wrap_chunks,
-                            temperature=temperature,
-                            config=config,
-                            batch_size=batch_size,
-                            log_fn=_log_single,
-                            stop_check_fn=_stop_check,
-                        )
-                    else:
-                        result = generate_review(
-                            epub_path=epub_path,
-                            output_dir=out_dir,
-                            api_key=api_key,
-                            model=model,
-                            endpoint=endpoint,
-                            system_prompt=system_prompt,
-                            input_token_limit=token_limit,
-                            spoiler_mode=spoiler_mode,
-                            temperature=temperature,
-                            config=config,
-                            log_fn=_log_single,
-                            stop_check_fn=_stop_check,
-                        )
-                    self._review_queue.put(('log', f"✅ Done: {basename}"))
-                    return idx, result, None
-                except Exception as e:
-                    self._review_queue.put(('log', f"❌ Error [{basename}]: {e}"))
-                    return idx, None, str(e)
-
-            workers = min(batch_size, total)
-            completed = 0
-            errors = 0
-
-            if workers <= 1:
-                # Sequential
-                for i, path in enumerate(all_paths):
-                    if self._stop_requested:
-                        break
-                    idx, result, err = _generate_single(i, path)
-                    completed += 1
-                    if err:
-                        errors += 1
-            else:
-                # Parallel
-                self._review_queue.put(('log', f"🔄 Running {workers} reviews in parallel...\n"))
-                with ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = {executor.submit(_generate_single, i, p): i for i, p in enumerate(all_paths)}
-                    for future in as_completed(futures):
-                        if self._stop_requested:
-                            break
-                        try:
-                            idx, result, err = future.result()
-                            completed += 1
-                            if err:
-                                errors += 1
-                        except Exception as e:
-                            completed += 1
-                            errors += 1
-                            self._review_queue.put(('log', f"❌ Future error: {e}"))
-
-            self._review_queue.put(('log', f"\n{'═'*50}\n📊 Finished: {completed}/{total} reviews ({errors} errors)\n{'═'*50}"))
-            self._review_queue.put(('all_done', None))
+            run_all_reviews(
+                params,
+                all_paths,
+                chunk_mode=chunk_mode,
+                wrap_chunks=wrap_chunks,
+                batch_size=batch_size,
+                put=self._review_queue.put,
+                stop_check=_stop_check,
+            )
 
         self._review_thread = threading.Thread(target=_run_all, daemon=True)
         self._review_thread.start()
@@ -3136,9 +2887,6 @@ class ReviewDialog(QDialog):
 
     def _on_delete(self):
         """Move the review file to a backups subfolder."""
-        import shutil
-        from datetime import datetime
-
         review_paths = [path for path in self._get_review_paths() if os.path.exists(path)]
         if not review_paths:
             # Flash "No review found" on the button
@@ -3153,15 +2901,8 @@ class ReviewDialog(QDialog):
             return
 
         try:
-            # Timestamped backup filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            backup_name = f"review_{timestamp}.md"
-            for review_path in review_paths:
-                review_dir = os.path.dirname(review_path)
-                backups_dir = os.path.join(review_dir, "backups")
-                os.makedirs(backups_dir, exist_ok=True)
-                backup_path = os.path.join(backups_dir, backup_name)
-                shutil.move(review_path, backup_path)
+            # Timestamped backups next to every review file (review_generator, shared with mobile)
+            move_review_to_backups(review_paths)
 
             # Clear UI
             self.log_field.clear()
@@ -3215,9 +2956,7 @@ class ReviewDialog(QDialog):
     def _get_backups_dir(self) -> str:
         """Get the backups directory path."""
         review_path = self._get_review_path()
-        if not review_path:
-            return None
-        return os.path.join(os.path.dirname(review_path), "backups")
+        return review_backups_dir(review_path)
 
     def _update_restore_btn_visibility(self):
         """Show/hide the restore button based on whether backups exist
@@ -3235,7 +2974,6 @@ class ReviewDialog(QDialog):
 
     def _on_restore(self):
         """Restore the most recent backup to review.md."""
-        import shutil
         from PySide6.QtWidgets import QMessageBox
 
         backups_dir = self._get_backups_dir()
@@ -3244,10 +2982,7 @@ class ReviewDialog(QDialog):
 
         try:
             # Find the most recent backup
-            backups = sorted(
-                [f for f in os.listdir(backups_dir) if f.endswith('.md')],
-                reverse=True
-            )
+            backups = review_backups(backups_dir)
             if not backups:
                 return
 
@@ -3261,12 +2996,7 @@ class ReviewDialog(QDialog):
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Warning)
                 msg.setWindowTitle("Restore Backup")
-                msg.setText(
-                    "Your current review will be overwritten.\n\n"
-                    "Restoring will replace it with the previous backup:\n"
-                    f"{backups[0]}\n\n"
-                    "Are you sure you want to restore?"
-                )
+                msg.setText(review_restore_question(backups[0]))
                 msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                 msg.setDefaultButton(QMessageBox.No)
                 msg.setStyleSheet("""
@@ -3283,13 +3013,8 @@ class ReviewDialog(QDialog):
                 if msg.exec() != QMessageBox.Yes:
                     return
 
-            for review_path in review_paths:
-                os.makedirs(os.path.dirname(review_path), exist_ok=True)
-                shutil.copy2(latest, review_path)
-
-            # Load restored content into UI
-            with open(review_paths[0], 'r', encoding='utf-8') as f:
-                content = f.read()
+            # Copy the backup over every review path (review_generator, shared with mobile)
+            content = copy_review_backup(latest, review_paths)
             self._raw_review_md = content
             self._last_rendered_html = self._md_to_html(content, **self._get_font_kwargs())
             self.log_field.setHtml(self._last_rendered_html)

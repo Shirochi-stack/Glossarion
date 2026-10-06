@@ -10,8 +10,8 @@ Plan -> Queued -> Running -> Result. Running shows the ProgressWatcher progress
 ("Chapter 12/48 · 3 in flight · ETA …"), the current request and the live request
 cards (``Requests (N)``); Result groups the persisted request cards, the desktop
 "Extraction report" and the "Attachment actions" (Read · Share/Export · Compile ·
-QA scan · Open output · Retry failed · Migrate; surfaces that ship later are shown
-disabled with a ReasonChip, nothing hidden).
+QA scan · Open output · Retry failed · Migrate (the desktop Migrate, U7); an action that
+cannot run is shown disabled with a ReasonChip, nothing hidden).
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ ATTACHMENT_ACTIONS = (
     ("qa", "QA scan", "FACT_CHECK", None),
     ("open_output", "Open output", "FOLDER_OPEN", None),
     ("retry", "Retry failed", "REPLAY", None),
-    ("migrate", "Migrate", "DRIVE_FILE_MOVE", "U7"),
+    ("migrate", "Migrate", "DRIVE_FILE_MOVE", None),
 )
 #: Attachment actions that stay disabled for a reason other than a later milestone.
 ATTACHMENT_ACTION_REASONS = {
@@ -405,6 +405,9 @@ class JobCard(ft.Container):
         self.report_md = ft.Markdown("", selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)
         self.report_tile = ft.ExpansionTile(title="Extraction report", controls=[ft.Container(content=self.report_md, padding=8)],
                                             visible=False, dense=True)
+        self.ocr_column = ft.Column([], spacing=6, tight=True)
+        self.ocr_tile = ft.ExpansionTile(title="OCR (0)", controls=[ft.Container(content=self.ocr_column, padding=8)],
+                                         visible=False, dense=True, key="job-ocr")
         self.plan_box = ft.Column([], spacing=8, tight=True, visible=False)
         self.buttons = ft.Row([], wrap=True, spacing=8, run_spacing=4)
         self.action_buttons: dict = {}
@@ -425,6 +428,7 @@ class JobCard(ft.Container):
                 self.current_text,
                 self.plan_box,
                 self.requests_tile,
+                self.ocr_tile,
                 self.report_tile,
                 self.buttons,
             ],
@@ -504,6 +508,17 @@ class JobCard(ft.Container):
         self.requests_column.controls = rows
         self.requests_tile.title = f"Requests ({len(rows)})"
         self.requests_tile.visible = bool(rows)
+
+    def set_ocr(self, entries: Sequence[tuple]) -> None:
+        """Vision: the run's cached OCR text per image (UI_SPEC §2.6 "a collapsible OCR section")."""
+        self.ocr_column.controls = [
+            ft.Column([ft.Text(str(name), theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED),
+                       ft.Text(str(text)[:4000], theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True)],
+                      spacing=2, tight=True)
+            for name, text in entries
+        ]
+        self.ocr_tile.title = f"OCR ({len(entries)})"
+        self.ocr_tile.visible = bool(entries)
 
     def set_report(self, markdown: str) -> None:
         self.report_md.value = display_markdown(markdown)

@@ -12,6 +12,10 @@
   translation (N chars)") and the action row Copy · Retranslate · ⋯.
   The same control renders a live request card (``set_live(segment)``) while the
   run streams; text is pushed at the coalesced cadence the transcript decides.
+  U7: the response's generated media (``media_cards.media_section``) render under the
+  text, whose ``[GENERATED_*]`` markers are then dropped (``media_model.display_content``),
+  and a refined response offers "Compare with original".
+* ``VersionSwitcher`` - "‹ 2/3 ›" under the visible turn of a version group (§2.10).
 
 Bodies are passed as callables so saved cards read ``Chat Messages/`` files lazily.
 """
@@ -23,6 +27,7 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.chat.media_model import display_content
 from glossarion_mobile.ui.chat.direct_text_rules import (
     attachment_icon,
     attachment_kind_label,
@@ -41,6 +46,7 @@ __all__ = [
     "THINKING_TAIL_CHARS",
     "UserBubble",
     "UserFileCard",
+    "VersionSwitcher",
     "thinking_display",
 ]
 
@@ -123,6 +129,7 @@ class UserFileCard(ft.Row):
         missing: bool = False,
         on_tap: Optional[Callable[["UserFileCard"], Any]] = None,
         on_long_press: Optional[Callable[["UserFileCard"], Any]] = None,
+        thumbnail: bool = False,
         key: Any = None,
     ) -> None:
         import os
@@ -155,6 +162,10 @@ class UserFileCard(ft.Row):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         ]
+        if thumbnail and not missing and self.path:
+            # an image attachment (Vision): the source next to its translation (UI_SPEC §2.6)
+            rows.append(ft.Image(src=self.path, height=160, fit=ft.BoxFit.CONTAIN, border_radius=8,
+                                 semantics_label=self.name, key="source-thumbnail"))
         if self.prompt:
             rows.append(ft.Container(height=1, bgcolor=ft.Colors.OUTLINE_VARIANT, margin=ft.Margin.symmetric(vertical=6)))
             rows.append(ft.Text(ROLE_LABELS[self.role], theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED))
@@ -192,10 +203,14 @@ class AssistantMessage(ft.Column):
         on_retranslate: Optional[Callable[["AssistantMessage"], Any]] = None,
         on_more: Optional[Callable[["AssistantMessage"], Any]] = None,
         on_show_full: Optional[Callable[["AssistantMessage"], Any]] = None,
+        media: Any = (),
+        media_control: Optional[ft.Control] = None,
+        on_compare: Optional[Callable[["AssistantMessage"], Any]] = None,
         key: Any = None,
     ) -> None:
         super().__init__(spacing=2, key=key)
         self.index = index
+        self.media = list(media or ())
         self.live = live
         self.thinking_expanded = bool(expanded)
         self._content_source = content
@@ -255,8 +270,15 @@ class AssistantMessage(ft.Column):
         self.actions_row = ft.Row(
             [self.copy_button, self.retranslate_button, self.more_button], spacing=0, visible=actions and not live
         )
+        self.media_box = ft.Container(content=media_control, visible=media_control is not None,
+                                      padding=ft.Padding.only(top=4, bottom=4), key="media-box")
+        self.on_compare = on_compare
+        self.compare_button = ft.TextButton(content="Compare with original", icon=ft.Icons.COMPARE_ARROWS,
+                                            visible=on_compare is not None,
+                                            on_click=lambda e: self.on_compare(self) if self.on_compare else None,
+                                            key="compare-original")
         self.controls = [header, self.thinking_toggle, self.thinking_body, self.pending_text, self.status_text,
-                         self.content_md, self.full_button, self.actions_row]
+                         self.content_md, self.full_button, self.media_box, self.compare_button, self.actions_row]
         self.processing_label = processing_label
         self.rendered_content = ""
         self.refresh(processing_label=processing_label)
@@ -301,6 +323,8 @@ class AssistantMessage(ft.Column):
         if self.thinking_expanded:
             self.thinking_body.content.value = thinking_display(self.thinking_text, self.live)
         content = self.content_text
+        if self.media:
+            content = display_content(content, self.media)
         preview, truncated = split_long_output(content)
         markdown = display_markdown(preview)
         self.rendered_content = markdown
@@ -331,6 +355,11 @@ class AssistantMessage(ft.Column):
         self.actions_row.visible = True
         self.refresh()
 
+    def set_compare(self, on_compare: Optional[Callable[["AssistantMessage"], Any]]) -> None:
+        """Refine: show "Compare with original" once the unrefined backup is found (off the loop)."""
+        self.on_compare = on_compare
+        self.compare_button.visible = on_compare is not None
+
     def _toggle_thinking(self, e: Any = None) -> None:
         self.thinking_expanded = not self.thinking_expanded
         self.refresh()
@@ -358,3 +387,32 @@ class AssistantMessage(ft.Column):
             self.update()
         except Exception:
             pass
+
+
+class VersionSwitcher(ft.Row):
+    """"‹ 2/3 ›" (UI_SPEC §2.10): steps through the versions of one turn (sidecar ``versions``)."""
+
+    def __init__(self, anchor: str, selected: int, total: int, *,
+                 on_select: Optional[Callable[[str, int], Any]] = None, key: Any = None) -> None:
+        super().__init__(alignment=ft.MainAxisAlignment.END, spacing=0, key=key)
+        self.anchor = anchor
+        self.selected = int(selected)
+        self.total = int(total)
+        self.on_select = on_select
+        self.label = ft.Text(f"{self.selected + 1}/{self.total}", theme_style=ft.TextThemeStyle.LABEL_MEDIUM)
+        self.previous = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous version", size_constraints=HIT_TARGET,
+                                      icon_size=18, disabled=self.selected <= 0, on_click=lambda e: self.step(-1),
+                                      key="version-prev")
+        self.next = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next version", size_constraints=HIT_TARGET,
+                                  icon_size=18, disabled=self.selected >= self.total - 1, on_click=lambda e: self.step(1),
+                                  key="version-next")
+        self.controls = [ft.Text("Versions", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED),
+                         self.previous, self.label, self.next]
+
+    def step(self, delta: int) -> Optional[int]:
+        target = max(0, min(self.selected + int(delta), self.total - 1))
+        if target == self.selected:
+            return None
+        if self.on_select is not None:
+            self.on_select(self.anchor, target)
+        return target

@@ -41,6 +41,10 @@ configured through process-global state (``os.environ``, ``sys.argv``, stdout,
   (the desktop Direct Text request classifier; the chat's live cards and job detail
   read it through ``request_stream(job_id)``), which a ``gl-job-stream`` thread
   drains with the desktop's repaint budget while the job runs.
+* ``add_log_listener(job_id, callback)`` is the desktop ``add_log_listener``: the
+  callback gets every message of that job whole (blank ones and the blank lines inside
+  streamed text included) before any log-buffer filtering, on the thread that logged
+  it, after a replay of the messages the job logged before (the Reader's live panel).
 
 Threading: internal state is guarded by one lock and is safe to call from any
 thread. Listeners (``subscribe``, ``on_transition``, ``on_question``,
@@ -55,6 +59,7 @@ job thread through ``JobBackend`` (tests pass a fake). Python 3.10 compatible.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import copy
 import enum
@@ -105,6 +110,7 @@ INTERRUPTED_STATE_FILE = "interrupted.state"
 CHECKPOINT_INTERVAL = 10.0  # seconds between active.state rewrites while progress moves
 JOB_LOG_MAXLEN = 5000  # lines held in a job's LogBuffer (the per-job file keeps everything)
 JOB_BUFFERS_KEPT = 4  # finished jobs whose LogBuffer stays in memory
+JOB_MESSAGES_KEPT = 4000  # whole log messages a job keeps for listeners that attach late
 LAST_LINE_CHARS = 240
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
 
@@ -136,6 +142,14 @@ class JobKind(str, enum.Enum):
     RENAME_OUTPUTS = "rename_outputs"
     TRANSLATE_HEADERS = "translate_headers"
     METADATA = "metadata"
+    # U7
+    RETRANSLATE = "retranslate"
+    RESOLVE_QA = "resolve_qa"
+    ASYNC_BATCH = "async_batch"
+    REVIEW = "review"
+    RPGMAKER = "rpgmaker"
+    GENERATE_MEDIA = "generate_media"
+    TRANSLATE_IMAGE = "translate_image"
 
 
 class JobState(str, enum.Enum):
@@ -487,6 +501,10 @@ class _Job:
     log_lock: threading.Lock = field(default_factory=threading.Lock)
     last_checkpoint: float = 0.0
     result: dict = field(default_factory=dict)
+    # whole log messages (``add_log_listener``): the replay backlog and the listeners
+    messages: Any = field(default_factory=lambda: collections.deque(maxlen=JOB_MESSAGES_KEPT))
+    message_listeners: list = field(default_factory=list)
+    message_lock: threading.RLock = field(default_factory=threading.RLock)
 
     def snapshot(self) -> JobSnapshot:
         return JobSnapshot(
@@ -559,6 +577,10 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     """"Ch 12/80 · 3 in flight · 12:41" (UI_SPEC §1.7 subtitle); the phase while the total is unknown."""
     parts: list[str] = []
     if snap.question:
+        question = snap.question if isinstance(snap.question, Mapping) else {}
+        if question.get("kind") == "async_batch_question":  # Tools › Async batch asks the dialog's question
+            title = str((question.get("data") or {}).get("title") or "")
+            return f"Waiting for your answer: {title}" if title else "Waiting for your answer"
         return "Waiting for your glossary decision"
     if snap.state is JobState.STOPPING:
         parts.append("Stopping after current request…")
@@ -1840,6 +1862,9 @@ class JobService:
 
     def _job_log(self, job: _Job, text: Any, kwargs: Mapping[str, Any]) -> None:
         raw = "" if text is None else str(text)
+        # Whole-message listeners first (desktop ``append_log``: ``_extra_log_listeners`` get every
+        # raw message before any GUI-side suppression or filtering).
+        self._deliver_message(job, raw)
         # The request stream gets every message whole, blank ones included, like the desktop
         # Direct Text listener (``append_log`` -> ``_on_log_line(message)``): the classifier
         # splits it itself and keeps blank lines inside streamed text (paragraph breaks).
@@ -1869,6 +1894,56 @@ class JobService:
             if buffer is not None:
                 buffer.append(line, kind)
             job.last_line = line[:LAST_LINE_CHARS]
+
+    @staticmethod
+    def _deliver_message(job: _Job, raw: str) -> None:
+        # Under the job's message lock, so a listener that attaches meanwhile sees the backlog and
+        # then every later message exactly once, in order (callbacks must be quick: queue + post).
+        with job.message_lock:
+            job.messages.append(raw)
+            for callback in list(job.message_listeners):
+                try:
+                    callback(raw)
+                except Exception:
+                    log.debug("job log listener failed", exc_info=True)
+
+    def add_log_listener(self, job_id: str, callback: Callable[[str], Any], *,
+                         backlog: bool = True) -> Optional[Callable[[], None]]:
+        """Desktop ``add_log_listener`` for one job: ``callback(message)`` gets every whole log
+        message of ``job_id`` (blank ones, and blank lines inside streamed text, included) on the
+        thread that logged it; with ``backlog`` the messages logged before are replayed first.
+
+        Returns the remover (``remove_log_listener``), or None when the job is unknown. The
+        callback must be thread-safe and quick (it runs under the job's message lock)."""
+        with self._lock:
+            job = self._find_live(job_id)
+        if job is None:
+            return None
+        with job.message_lock:
+            if backlog:
+                for message in list(job.messages):
+                    try:
+                        callback(message)
+                    except Exception:
+                        log.debug("job log listener failed on the backlog", exc_info=True)
+            if callback not in job.message_listeners:
+                job.message_listeners.append(callback)
+
+        def remove() -> None:
+            self.remove_log_listener(job_id, callback, job=job)
+
+        return remove
+
+    def remove_log_listener(self, job_id: str, callback: Callable[[str], Any], *, job: Optional[_Job] = None) -> None:
+        """Unregister a listener added via ``add_log_listener``."""
+        if job is None:
+            with self._lock:
+                job = self._find_live(job_id)
+        if job is None:
+            return
+        with job.message_lock:
+            if callback in job.message_listeners:
+                job.message_listeners.remove(callback)
 
     def _write_log_file(self, job: _Job, line: str) -> None:
         if not job.log_path:

@@ -591,11 +591,18 @@ Every tap triggers `HapticFeedback.light_impact`.
 
 **Generate from prompt (no input).** Image, Video and Audio only.
 - A `FilledTonalButton` in the sheet submits a GENERATE_MEDIA job, the desktop generative-only run.
-- **The prompt is the composer text** (decided). A small `run_env` hook passes it as the generation prompt instead of the main-window state.
+- **The prompt is the composer text** (decided). The job sets the owner attribute `_generative_prompt_override` (`image_job.GENERATIVE_PROMPT_ATTR`), which the moved runner's `_generative_prompt_source()` hook reads instead of the main-window prompt editor, then runs the desktop worker on `[image_job.GENERATIVE_MODE_SENTINEL]` (U7: the hook lives with the runner in `image_job`, not in `run_env`; the sentinel is needed for Audio, which the desktop's empty-selection rule does not treat as generative).
 - The button is enabled only when the composer has text and no attachment. Otherwise it stays visible, disabled, with a reason chip:
   - "Type a prompt in the composer first";
   - "Remove the attachment to generate from a prompt".
 - On success, the user turn is recorded as `["user", prompt]` and the media card follows.
+
+**As built (U7).**
+- The run_env hook is the owner attribute `image_job.GENERATIVE_PROMPT_ATTR` (`_generative_prompt_override`), read first by the shared `_run_generative_prompt_mode`; the `generate_media` job kind sets it and runs the desktop composition (`DirectTextRunOptions` with `selected_files = [GENERATIVE_MODE_SENTINEL]`, the Direct Text run environment, `_prepare_translation_run` + `_translation_worker`). The generated file lands in the run root and `ChatStore.finish_run` copies it into the chat folder as `Direct Text N.<ext>` and promotes the response's marker, like any Direct Text media response.
+- Key pools: Vision keys = the `qa_scan` pool, Image keys = the `inpainter` pool (desktop "Image Keys"), TTS keys = the `tts` pool; each opens Settings › API keys. Batch for Image is the Vision batch pair (`vision_ocr_batch_translation` / `vision_ocr_batch_size`, desktop "Parallel Vision API requests for OCR chunks and EPUB/PDF image output").
+- The tiles are evaluated with the sheet's mode selected (the desktop shows a mode's sub-settings only while it is selected); the two video keys show the desktop labels "Video Duration" / "Video Resolution" (the generated schema label is the neighbouring "Output Resolution:").
+- Audio: without `google-cloud-texttospeech` in the build, a ReasonChip says Google Cloud TTS voices need it (dependency rule; the REST fallback is a later tier-B item).
+- Vision: an image or CBZ is an attachment turn, so its responses sit in a JobCard; the card's collapsible "OCR (N)" section lists the OCR text the run cached in its workspace (`OCR/single`, `OCR/chunks`; `chat/media_model.ocr_entries`), and an image attachment's card shows the source image (the kept original).
 
 ### 2.7 Slash commands and quick-action chips
 
@@ -649,6 +656,7 @@ Every tap triggers `HapticFeedback.light_impact`.
 
 **Keys and the jump procedure.**
 - Each card has `key=ft.ScrollKey(mid)`, where `mid` is the 12-hex hash of the message fingerprint (Appendix B).
+  - As built (U7 review): the key sits on the card's `CardSlot` (`chat/transcript.py`), a `Container` that stays the same object across re-renders with the card as its `content`, and a card whose inputs did not change is passed again as the same object (`ChatView._card`). Flet 1.0.3 diffs a *new* control matched to an old one by key as an immutable copy and freezes it, so a card re-created under its key could never be updated in place (Copy ✓, the AudioCard, a Vision run's OCR section, Compare with original, the jump highlight, live job progress). The highlight pulses the slot.
 - A plain string key would become a `ValueKey`, which is not a scroll target.
 - `scroll_to(scroll_key=…)` only reaches items that are already built.
 
@@ -697,7 +705,7 @@ So Jump-to, search hits, deep links (`/chat/<cid>/m/<mid>`) and the Input/Output
    - **Long outputs** (> 6,000 characters or > 60 lines): show the first ~40 lines, then "Show full translation (N chars)". This opens a full-screen paged view: the paragraphs rendered in a `ListView`, never as one giant `Markdown`.
    - **Pending placeholder:** italic "Working on your translation …" with 3 shimmer lines.
 4. **Media** (from `[GENERATED_IMAGE|VIDEO|AUDIO:<path>]` markers and `storage.media_*`):
-   - **Image:** `Image(src=path, fit=CONTAIN)` at max 76% of the viewport width (280–980) and max height 760, radius 12. Tap opens the `MediaViewer` (full-screen `InteractiveViewer`) with Save / Share. If the file is missing: "Generated image unavailable." plus the file name.
+   - **Image:** `Image(src=path, fit=CONTAIN)` at max 76% of the viewport width (280–980) and max height 760 (a single image's height comes from its header size, `media_model.image_size`), radius 12. Tap opens the `MediaViewer` (full-screen `InteractiveViewer`) with Save / Share. If the file is missing: "Generated image unavailable." plus the file name.
    - **Video** (`VideoCard`): `flet_video.Video(playlist=[VideoMedia(path)], aspect_ratio=16/9)` with the package's default controls.
      - 1.0.3 has no `show_controls` or aspect parameter; `aspect_ratio` comes from `LayoutControl`.
      - ⋯: Save as… / Share / Open externally.
@@ -743,7 +751,7 @@ So Jump-to, search hits, deep links (`/chat/<cid>/m/<mid>`) and the Input/Output
 - Open in Reader (attachment chapter cards).
 - View as HTML.
 - Branch into new chat (new v2 session with messages up to here; folders are not copied).
-- Delete message (confirm). This is mobile-only; it re-indexes `expanded` and the sidecar.
+- Delete message (confirm). This is mobile-only; it re-indexes `expanded` and the sidecar. Deleting a user turn (its long-press sheet) removes the turn together with its responses (U7). The shared store names a response's `Chat Messages/NNNNNN-*` files after its message index, so the deleted responses' own body files are removed and every later response's files are renamed to its new index (otherwise the next response or an Edit translation at a reused index would overwrite a surviving one); attachment outputs stay on disk. Job cards stay on their turns: the turns of the chat's jobs are recorded by fingerprint in the sidecar `job_turns` (keyed by the run root, which Resume / Retry keep). The delete runs on the io pool and saves the history at once.
 
 **Refinement chips.** These sit under the latest *text-turn* reply in a scrolling row of `Chip`s:
 - "More natural" · "More literal" · "Keep honorifics" · "Fix names (glossary)" · "Retranslate with…"
@@ -753,6 +761,7 @@ Each one re-runs the same source text with a fixed instruction passed through th
 **Version switcher.**
 - Every retranslation, refinement chip or edit-and-resend appends a new assistant group.
 - The original turn shows "‹ 2/3 ›" (`Row[IconButton, Text labelMedium, IconButton]`) at the left of its action row, and only the selected version renders.
+  - As built (U7, `VersionSwitcher` in `chat/messages.py`): a version is a whole turn (the user message and its responses, recorded by Edit & resend / Retranslate / Translate again / Run again), so the switcher sits right under the visible member's user turn rather than in an action row; an attachment turn's responses live in a JobCard, which has no action row. The selected member renders at its own position; the others are hidden (`chat/chat_ops.version_view`).
 - Version groups live in the sidecar. Desktop, which does not know about versions, shows all of them as consecutive cards, which degrades gracefully.
 
 ### 2.11 Glossary approval card (`GlossaryApprovalCard`)
@@ -823,7 +832,7 @@ A Plan card is created when you send an attachment that is an EPUB, PDF, CBZ, ZI
 
 Switch **"Only for this run"** (default on): values go into JobSpec overrides. When off, they write config.
 
-**Buttons:** "Choose chapters" · "Review glossary" (when a glossary exists or is auto-mapped) · `FilledButton` **"Start"** · `TextButton` "Cancel" (removes the plan and the unsent user_file turn).
+**Buttons:** "Choose chapters" · "Review glossary" (when a glossary exists or is auto-mapped) · `FilledButton` **"Start"** · `TextButton` "Cancel" (removes the plan and the unsent user_file turn; the sidecar forgets that turn too, so a cancelled Run again / Retranslate leaves no version-group member behind).
 
 **Async variant.** A split ▾ on Start offers "Run as async batch (50% off)".
 
@@ -994,20 +1003,22 @@ Until then no Series UI exists: no drawer section, no "Move to Series…" items 
 ### 2.16 Scratch chat
 
 - It is not written to `direct_text_chats.json`. Its output folder lives under `cache/Direct Text Scratch/<uuid>/`.
+  - As built (U7): each scratch chat (id `s<uuid hex>`) is a `direct_text_store.ChatStore` of its own whose history file and output root are `cache/Direct Text Scratch/<uuid>/`, so its chat folder is `…/<uuid>/Direct Text/<title> - <ts>_<uuid8>/` and every shared folder rule (managed folder, attachments, Migrate) applies unchanged. The sidecar `scratch` list records the folders; a relaunch removes them (a scratch chat is never saved implicitly).
 - A banner at the top of the transcript reads "Scratch chat — not saved", with a **Save** action.
-- **Save:** assigns a v2 id, moves the folder into `Direct Text/<safe title> - <ts>_<uuid8>/` and rewrites paths through shared code.
-- **Leaving unsaved:** the confirm sheet "Discard scratch chat?" (Discard / Save). It is not shown when the chat is empty.
+- **Save:** assigns a v2 id, moves the folder into `Direct Text/<safe title> - <ts>_<uuid8>/` and rewrites paths through shared code (`_ensure_conversation_output_folder_for_session` names the folder, `_relocate_session_attachment_paths` rewrites the stored paths).
+- **Leaving unsaved:** the confirm sheet "Discard scratch chat?" (Discard / Save). It is not shown when the chat is empty (an empty scratch chat is discarded silently).
+- Entry points: drawer / header "New scratch chat", long-press Send › "Send as scratch", the drawer row's "Duplicate as scratch" (the messages are copied, off the UI loop; the copy gets its own copies of the original's `Chat Messages` body files, because Delete message or an edit in the original renames or rewrites those; attachment outputs and generated media stay shared by absolute path).
 
 ### 2.17 Attachments manager and Migrate (`/chat/<cid>/attachments`)
 
 - **Title:** "Attachments — {title}".
 - **Intro:** "Saved attachment workspaces for this conversation. Migrating one moves its complete output tree beside the Direct Text folder, or into the configured output override."
 - **Cards** (one per `Attachments/<stem>`):
-  - icon, name, size, and a mini progress line ("48/48 · EPUB ready", from `progress_core.compute_stats`);
+  - icon, name, size, and a mini progress line ("48/48 · EPUB ready"). As built (U7, `chat/chat_ops.workspace_summary`): a read-only count of the workspace's `translation_progress.json` chapter statuses plus the compiled EPUB / PDF Migrate keeps (`_preferred_attachment_compiled_documents`); `progress_core.compute_stats` needs the full Progress Manager view build, which may seed the workspace, so a list card does not run it (⋯ › Progress opens it);
   - **Migrate** (`FilledTonalButton`; long-press shows the destination);
   - ⋯ (`ActionSheet`): Open in Reader · Progress · Share output · Delete workspace (confirm).
 - **Empty state:** "No attachment workspaces remain in this conversation."
-- Migrating is blocked while a job is writing that workspace.
+- Migrating is blocked while a job is writing that workspace. As built (U7 review): Migrate and Delete workspace are disabled (ReasonChip) on a workspace while this chat's run is live or an active / queued job's folder is that workspace or inside it (the job card's Compile, ＋ › Retranslate chapters), and checked again when the collision / delete question is answered.
 
 ### 2.18 Jump-to, search in chat, export, text size
 
@@ -1051,7 +1062,7 @@ Mobile writes nothing else into this file. Every mobile extra goes into `direct_
 Paths in the JSON are relative to the history file's folder, with an absolute fallback.
 
 **Mobile-only mutations that stay v2-valid**
-- **Delete message:** removes the tuple, re-indexes `expanded`, remaps sidecar fingerprints.
+- **Delete message:** removes the tuple, renames the surviving responses' managed `Chat Messages/NNNNNN-*` files to their new indices (the removed responses' own files are deleted), re-indexes `expanded`, remaps sidecar fingerprints and `job_turns`.
 - **Versions:** appended assistant messages.
 - **Rename:** ≤ 120 characters.
 - **Auto-title:** the first 42 characters + "…" on the first send while the title is still "New chat".
@@ -1347,7 +1358,7 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 
 **Every write** goes through `mutate_progress` (lock → re-read → three-way merge → atomic replace).
 
-**Image-folder variant.** A thumbnail grid (`GridView`). Rows: "📄 Image n | base | ✅ Completed" and "🖼️ Cover | ⏭️ Skipped (cover)". Selection actions: **Select translated** · **Mark as Skipped** · **Delete Selected** (ported to the v2.1 structure).
+**Image-folder variant.** A thumbnail grid (`GridView`). Rows: "📄 Image n | base | ✅ Completed" and "🖼️ Cover | ⏭️ Skipped (cover)". Selection actions: **Select translated** · **Mark as Skipped** · **Delete Selected** through `progress_core.build_image_folder_progress` / `mark_image_folder_items_skipped` / `delete_image_folder_items` (the desktop view's shared code). Not ported to the v2.1 structure: the view still reads the pre-2.1 flat / `images` progress layout, so against a v2.1 `chapters` file no progress entry is removed (desktop bug kept verbatim; tests/parity/DISCREPANCIES.md U5 desktop bug 3 and U7); its progress writes go through `mutate_progress`.
 
 **Empty state.** "No chapters found yet" / "Start a translation to see chapter progress." and a **Translate…** button.
 
@@ -1697,7 +1708,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 
 - Book / piece selector (`Dropdown` on phone, side list on tablet).
 - Legend filter chips (status colours).
-- **Row cards:** source (bodySmall, muted), then an editable output `TextField`, with a status colour bar. Saves follow the shared manual-editing semantics.
+- **Row cards:** source (bodySmall, muted), then an editable output `TextField`, with a status colour bar. Saves follow the shared manual-editing semantics. A row saves on blur and only its own card (and the legend counts) is rebuilt, so the field being typed in keeps its focus and text; full re-renders (piece / book / filter / layout changes, an action's result) save typed text first.
 - **Machine translation sheet:**
   - provider Auto / Google / DeepL / Bing / Yandex;
   - Argos is shown disabled with a ReasonChip ("Offline engine (ctranslate2) not available on mobile"), and the google-translate-free fallback chain skips it;
@@ -1705,18 +1716,20 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
   - MT preview; **Inject MT**.
 - **Flag inaccurate** with "Set Score Threshold…" / "Reset Threshold".
 - Piece ⋯: Mark as Completed / Undo; Edit Output.
-- Refresh + sidecar regeneration; polling every 2 s while visible.
-- **Notepad layout:** CodeEditor (`CodeLanguage.XML`), tablets only. On phones the layout toggle is shown disabled with a ReasonChip "Tablet layout only".
+- Refresh + sidecar regeneration; polling every 2 s while visible: on top of the stack (not under its own Edit Output editor) and the app in the foreground (no reload while a field has focus or unsaved text, or the Notepad document is edited).
+- Edits are never dropped (the dialog's `closeEvent` captures the Notepad HTML and flushes its queued edits): leaving the reviewer saves an edited Notepad document and typed row text, and a re-render (piece / book / filter / layout / refresh / an action) saves them first.
+- **Notepad layout:** CodeEditor (`CodeLanguage.XML`), tablets only; the document is built on the io pool. On phones the layout toggle is shown disabled with a ReasonChip "Tablet layout only".
 
 ### 4.10 RPG Maker, File browser, Text editor
 
 - **RPG Maker (`/tools/rpgmaker`):**
   - Pick a game folder (`FilePicker.get_directory_path`) or a ZIP, instead of the desktop `.exe` Browse filter.
+    The shared entry `owner._register_rpgmaker_game_input(source, work_dir)` (`rpgmaker_job.prepare_rpgmaker_game`) makes the game writable (a ZIP is extracted once into `<work>/zips/<name>-<hash of its contents>`, a read-only folder copied once into `<work>/folders/<name>-<hash of its path>/`; each records its source in `.glossarion_rpg_source.json` and is reused only for that source, so another game with the same file name never resumes into it; resume progress stays in `<game>/GTool_Translation`) and registers it, then the job runs the desktop worker on `[game_dir]`, which dispatches it like a game `.exe`. Scan and Translate wait for a running scan (the shared entry also serialises them per folder).
   - The GTool scan prompt (PromptTile).
   - Run.
 - **FileBrowser (`/tools/files/<root>[/<fid>]`):**
   - Breadcrumbs. Roots: Output, Library, Inbox, Chat workspaces, or a workspace `oid`.
-  - Open with: Reader / image viewer / TextEditor / MediaViewer.
+  - Open with: Reader / image viewer / TextEditor / MediaViewer. As built: Text editor (text files) · Reader (books) · Media viewer (images, video, audio: the chat's full-screen MediaViewer with Share / Save to… / Open externally) · Another app… (Share).
   - Share · Save to… · Rename · Delete (safe-root guard).
   - It replaces Open Output Folder, Reveal and Open Library Folder.
 - **TextEditor (`/tools/text/<fid>?hit=<n>`):** `flet_code_editor.CodeEditor`, with the language chosen by extension. The package has no HTML or CSV language, so:
@@ -1730,6 +1743,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
   | csv, txt, srt, ass | `PLAINTEXT` |
 
   - It adds find, jump-to-term and a read-only mode. The term arrives in-process, never in the route.
+  - Unsaved edits ask "Unsaved changes" (Save / Discard / Cancel) before the screen is left: Back (Android back, the iOS swipe, the app-bar arrow and the tablet main-area back; the View cannot pop while the text is dirty) and every other navigation (the shell's leave guard) share the one question.
   - A plain `TextField` is the fallback.
   - It replaces Notepad / Notepad++.
 
@@ -1975,29 +1989,29 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `OutputModeRow` (`chat/output_mode_row.py`) | "Output: Text" label + six toggles 📝 👁️ 🖼️ 🎬 🔊 ✨ | selected mode · "· auto" · label hidden < 400 dp · text labels ≥ 900 dp · icons only at ≥ 160% | `Row`. Each toggle is `IconButton(icon=Text(emoji), selected=…, tooltip=…, size_constraints=48×48)`; on tablet a `Container(on_click=…)` pill with emoji + label; `Semantics(selected=…)` |
 | `ModeOptionsSheet` (`chat/mode_options_sheet.py`) | "Output: <mode>" title · "This chat only" switch · the mode's schema tiles · (Image/Video/Audio) "Generate from prompt (no input)" | per mode · Generate disabled with a reason (empty composer / attachment present) | `BottomSheet(scrollable=True)`, setting tiles (§5.7), `FilledTonalButton` |
 | `SendStopButton` (`chat/send_button.py`) | 40 dp circle (48 dp target), icon by state, long-press menu | `idle_empty` · `idle_ready` · `queue` · `blocked` · `running` · `finishing` · `stopping` (§2.4) | `AnimatedSwitcher` over `FilledIconButton` / `IconButton` / `ProgressRing`; `ContextMenu(primary_trigger=ContextMenuTrigger.LONG_PRESS, primary_items=[PopupMenuItem…])`; `HapticFeedback` |
-| `PlusSheet` (`chat/plus_sheet.py`) | Attach tiles · OutputModeRow + active options · Tools list · This chat | — | `BottomSheet(show_drag_handle=True, draggable=True, scrollable=True)`; tiles are `Container(on_click, on_long_press)`; `ListTile`; `FilePicker` |
+| `PlusSheet` (`sheets/plus_sheet.py`; `chat/plus_sheet.py` re-exports it) | Attach tiles · OutputModeRow + active options · Tools list · This chat | — | `BottomSheet(show_drag_handle=True, draggable=True, scrollable=True)`; tiles are `Container(on_click, on_long_press)`; `ListTile`; `FilePicker` |
 | `SlashCommandPopover` (`chat/slash.py`) | ≤ 6 matching commands above the composer | hidden · open · no match | `Container` in the root `Stack`, `ListView`, `ListTile` |
 | `QuickActionChips` (`chat/quick_chips.py`) | ≤ 5 contextual chips | per context · dismissed | `Row(scroll=AUTO)`, `Chip(on_click=…)` |
 | `Transcript` (`chat/transcript.py`) | Rendered window of message cards + loader rows + "↓ new" FAB | loading · window · streaming tail · scrolled up (FAB + badge) | `ListView(build_controls_on_demand=False, on_scroll=…)` over a Python window; items keyed `ft.ScrollKey(mid)`; `FloatingActionButton(mini=True)`; `Shimmer` |
-| `UserBubble` (`chat/message_user.py`) | Right-aligned bubble; collapses past 12 lines | collapsed · expanded | `Container`, `Text`; long-press `GestureDetector` → ActionSheet. "Select text" opens a `SelectableTextSheet` (no `SelectionArea` on the bubble, because touch long-press would start a selection) |
-| `UserFileCard` (`chat/message_user.py`) | Type icon, name, "EXT · size", role label + prompt | ready · missing file | `Container(on_click=…, on_long_press=…)` |
-| `AssistantMessage` (`chat/message_assistant.py`) | Header row · ThinkingDisclosure · content · media · MessageActionsRow | pending · streaming · done · long (truncated + "Show full translation") · missing body · error | `Column`, `Row`, `CircleAvatar`, `Markdown(selectable=True, extension_set=GITHUB_WEB)` |
+| `UserBubble` (`chat/messages.py`) | Right-aligned bubble; collapses past 12 lines | collapsed · expanded | `Container`, `Text`; long-press `GestureDetector` → ActionSheet. "Select text" opens a `SelectableTextSheet` (no `SelectionArea` on the bubble, because touch long-press would start a selection) |
+| `UserFileCard` (`chat/messages.py`) | Type icon, name, "EXT · size", role label + prompt | ready · missing file | `Container(on_click=…, on_long_press=…)` |
+| `AssistantMessage` (`chat/messages.py`) | Header row · ThinkingDisclosure · content · media · MessageActionsRow | pending · streaming · done · long (truncated + "Show full translation") · missing body · error | `Column`, `Row`, `CircleAvatar`, `Markdown(selectable=True, extension_set=GITHUB_WEB)` |
 | `ThinkingDisclosure` (`chat/thinking.py`) | "▸ Thinking (N tokens)" row → mono body (the last 50,000 chars) | live (shimmer) · collapsed summary · expanded · no stream | `GestureDetector` + `AnimatedSwitcher`, `Shimmer`, `Markdown` in a mono `Container` |
-| `MessageActionsRow` (`chat/actions.py`) | Copy · Retranslate · Show source · Share · ⋯ (18 dp icons, 48 dp targets) + VersionSwitcher | visible · auto-folded (older replies) · copied (✓ for 1.6 s) | `Row`, `IconButton(tooltip=…)`, `Clipboard`, `Share` |
-| `MessageMoreSheet` (`chat/actions.py`) | ActionSheet with the §2.10 items | items disabled with a reason when their file is missing | `ActionSheet` |
+| `MessageActionsRow` (`chat/messages.py`, the card's action row) | Copy · Retranslate · Show source · Share · ⋯ (18 dp icons, 48 dp targets) + VersionSwitcher | visible · auto-folded (older replies) · copied (✓ for 1.6 s) | `Row`, `IconButton(tooltip=…)`, `Clipboard`, `Share` |
+| `MessageMoreSheet` (`chat/chat_view.py` `_message_more`) | ActionSheet with the §2.10 items | items disabled with a reason when their file is missing | `ActionSheet` |
 | `RefinementChips` (`chat/actions.py`) | More natural · More literal · Keep honorifics · Fix names (glossary) · Retranslate with… | idle · running (disabled) | `Row(scroll=AUTO)`, `Chip` |
-| `VersionSwitcher` (`chat/actions.py`) | ‹ 2/3 › | first · middle · last | `Row[IconButton, Text, IconButton]` |
-| `GlossaryApprovalCard` (`chat/approval_card.py`) | Header, title, question, FileChip, 5-entry preview, ✏️ Edit / ✓ Yes / ■ No | waiting · no file (Edit disabled) · answered | `Card`, `Column`, `FilledTonalButton`, `FilledButton`, `OutlinedButton` |
+| `VersionSwitcher` (`chat/messages.py`) | ‹ 2/3 › | first · middle · last | `Row[IconButton, Text, IconButton]` |
+| `GlossaryApprovalCard` (`chat/cards.py`) | Header, title, question, FileChip, 5-entry preview, ✏️ Edit / ✓ Yes / ■ No | waiting · no file (Edit disabled) · answered | `Card`, `Column`, `FilledTonalButton`, `FilledButton`, `OutlinedButton` |
 | `PlanCard` (`chat/plan_card.py`) | Cover · facts line · chips (model · profile · → target · glossary · mode · range · Save to) · Run options · buttons | estimating · ready · invalid (Start disabled with a reason) · async variant | `Card`, `Image`, `Row(wrap=True)` of `Chip`s, `ExpansionTile`, `FilledButton` + a split `PopupMenuButton` |
 | `BatchPlanCard` (`chat/batch_plan.py`) | FileChip list with per-file glossary chips · Include subfolders · Start | same as PlanCard | `Card`, `Column`, `Switch` |
-| `JobCard` (`chat/job_card.py`) | Plan → Queued → Running (ring, progress, line, current item, Requests, Log, issue chips, buttons) → Result (status, ExtractionReportSection, output chips, AttachmentActionsRow) | `PLAN` · `QUEUED` · `RUNNING` · `STOPPING` · `FORCE_STOPPING` · `DONE` · `STOPPED` · `FAILED` · `INTERRUPTED` | `Card`, `ProgressRing`, `ProgressBar`, `ExpansionTile`, `Chip`, `Row(wrap=True)` |
-| `RequestSheet` (`chat/job_card.py`) | Full streaming content + thinking for one request | streaming · done | `BottomSheet(scrollable=True)`, `Markdown` |
+| `JobCard` (`chat/cards.py`) | Plan → Queued → Running (ring, progress, line, current item, Requests, Log, issue chips, buttons) → Result (status, ExtractionReportSection, output chips, AttachmentActionsRow) | `PLAN` · `QUEUED` · `RUNNING` · `STOPPING` · `FORCE_STOPPING` · `DONE` · `STOPPED` · `FAILED` · `INTERRUPTED` | `Card`, `ProgressRing`, `ProgressBar`, `ExpansionTile`, `Chip`, `Row(wrap=True)` |
+| `RequestSheet` (`chat/cards.py`) | Full streaming content + thinking for one request | streaming · done | `BottomSheet(scrollable=True)`, `Markdown` |
 | `PlanGlossarySheet` (`chat/plan_glossary_sheet.py`) | Effective mode line · Load file… · Use book glossary · Clear ✕ · Map glossaries (batch) · Review glossary | none loaded · file loaded · auto-mapped · policy manual | `BottomSheet`, `ListTile`s, `FilePicker` |
 | `ManualGlossarySheet` (`chat/manual_glossary.py`) | Mono paste box · Browse… · Use glossary | empty (Use disabled) · filled | `BottomSheet`, `TextField(multiline=True)`, `FilePicker`, `FilledButton` |
 | `ChatSettingsSheet` (`chat/chat_settings.py`) | Scope SegmentedButton · sections (§2.14) · Reset chat overrides | This chat / All chats; each row inherited or overridden | `BottomSheet` or `SidePanel`; `SegmentedButton`, `ExpansionTile`, `RadioGroup`, `Switch`, `Slider` |
 | `JumpToSheet` (`chat/jump_to.py`) | Step header (Input i/n ▲▼ · Output j/m ▲▼) · tabs Inputs / Outputs · rows | — | `BottomSheet`, `Tabs` / `TabBar` / `TabBarView`, `ListView`, `IconButton` |
 | `ChatSearchBar` (`chat/header.py`) | Header TextField · "3/17" · ▲ ▼ · ✕ + compact Input/Output step row | searching · no matches | `TextField`, `IconButton` |
-| `AttachmentsManagerView` (`chat/attachments.py`) | Intro + workspace cards (Migrate, ⋯) | empty · list · migrating · blocked (a job is writing the workspace) | `View`, `ListView`, `Card`, `FilledTonalButton`, `AlertDialog` |
+| `AttachmentsManagerView` (`chat/attachments.py`, `AttachmentsScreen`) | Intro + workspace cards (Migrate, ⋯) | empty · list · migrating · blocked (a job is writing the workspace) | `View`, `ListView`, `Card`, `FilledTonalButton`, `AlertDialog` |
 | `LibraryLinkCard` (`chat/job_card.py`) | Book cover + title + progress + Open | — | `Card`, `Image`, `ProgressBar` |
 | `ModelSheet` / `ModelPicker` (`settings/model_sheet.py`) | Tabs Model · Profile · Language; search; provider chips; sections; provider group headers with 🌐 refresh; title ⋯; Thinking & effort; route row; footer | loading catalog · polling a group (shimmer) · results · one-shot ("Use once") · field mode | phone: `BottomSheet(draggable=True, fullscreen=…)`; tablet: a custom overlay panel (`page.overlay` `Container`, 420 dp); `Tabs`, `SearchBar`, `Chip`, `ListView` (`first_item_prototype=True` only for the flat search-results list), `ExpansionTile`, `Switch`, `ListTile(on_long_press=…)` |
 | `PoeSetupSheet` (`settings/poe_setup.py`) | Warning (route deprecated) · p-b cookie SecretTile · link to the guide · Test | empty · saved · test passed · test failed | `BottomSheet`, `TextField(password=True, can_reveal_password=True)`, `UrlLauncher` |
@@ -2006,15 +2020,16 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 
 | Component (module) | Anatomy | States | Built from |
 |---|---|---|---|
-| `ImageCard` / `ImageGallery` (`chat/media_cards.py`) | Image(s) at ≤ 76% width, radius 12; tap → MediaViewer | loading · ready · missing ("Generated image unavailable.") | `Image(fit=CONTAIN, error_content=…)`, `GridView` |
+| `ImageCard` / `ImageGallery` (`chat/media_cards.py`) | Image(s) at ≤ 76% width, radius 12; tap → MediaViewer | loading · ready · missing ("Generated image unavailable.") | `Image(fit=CONTAIN, error_content=…)`; several images: a wrap of square thumbnails (a `GridView` needs a fixed height inside the transcript `ListView`) |
 | `VideoCard` (`chat/media_cards.py`) | 16:9 player + ⋯ Save as… / Share / Open externally | loading · playing · error (Open externally) | `flet_video.Video(playlist=[VideoMedia(path)], aspect_ratio=16/9)` with its default controls |
-| `AudioCard` (`chat/media_cards.py`) | "🔊 Generated audio" · play/pause · seek · "m:ss / m:ss" · volume (default 75%) · ⋯ Save / Share / Open externally | stopped · playing · paused · error ("Native audio playback is unavailable") | `flet_audio.Audio` service (`volume=0.75`, `on_position_change`, `on_duration_change`, `on_state_change`); `IconButton`, `Slider` |
-| `MediaViewer` (`components/media_viewer.py`) | Full-screen image viewer (pinch / pan) or video/audio player · Save / Share / Open externally | — | `View`, `InteractiveViewer`, `Image`, `flet_video.Video`, `Share`, `UrlLauncher` |
-| `HtmlView` (`components/html_view.py`) | Sanitized HTML ("View as HTML", QA report) | WebView (Android/iOS) · fallback (Windows/Linux dev: html2text → `Markdown` + "Open in browser") | `flet_webview.WebView`, or `Markdown` + `UrlLauncher` |
-| `FullScreenEditor` (`components/full_screen_editor.py`) | App bar (title, dirty dot, Save, Cancel) + editor + footer (token count / position) | clean · dirty · saving · read-only · file missing | `View`; `flet_code_editor.CodeEditor` (`MARKDOWN` / `XML` / `JSON` / `CSS` / `PLAINTEXT`), with a plain `TextField(multiline=True)` fallback |
-| `TextEditor` (`tools/text_editor.py`) | FullScreenEditor + find bar (hit i/n) | read-only · editing | as FullScreenEditor |
-| `FileBrowser` (`tools/file_browser.py`) | Breadcrumbs · root chips (Output, Library, Inbox, Chat workspaces) · rows (icon, name, size, date) · ⋯ (Open with · Share · Save to… · Rename · Delete) | loading · list · empty folder · outside the safe roots (blocked) | `View`, a `Row` of breadcrumbs, `ListView`, `ActionSheet`, `TextPromptDialog` |
-| `ExportSheet` (`components/export_sheet.py`) | Share · Save to… · Save to Downloads (Android) / Show in Files (iOS) · Open externally | per platform; unsupported items disabled with a reason | `ActionSheet`; `Share.share_files`, `FilePicker.save_file`, native `save_to_downloads`, `UrlLauncher` |
+| `AudioCard` + `AudioHub` (`chat/media_cards.py`) | "🔊 Generated audio" · play/pause · seek · "m:ss / m:ss" · volume (default 75%) · ⋯ Save / Share / Open externally | stopped · playing · paused · error ("Native audio playback is unavailable") | one `flet_audio.Audio` service per chat (`AudioHub`, created on the first Play). Playback belongs to the playing file: every AudioCard built for it (a transcript re-render, the MediaViewer) adopts the state / position / duration and gets `on_position_change` / `on_duration_change` / `on_state_change`; `IconButton`, `Slider` |
+| `CompareSheet` (`chat/media_cards.py`) | Refine "Compare with original": original paragraph above the refined one (`chat/media_model.compare_blocks`) | — | `BottomSheet`, tinted `Container`s |
+| `MediaViewer` (`components/media_viewer.py`) | Full-screen image viewer (pinch / pan, swipe between a response's images) or video/audio player · Save / Share / Open externally | — | `View`, `InteractiveViewer`, `Image`, `PageView`, `flet_video.Video`; actions are the chat's callbacks (`ChatFeature.export_file` / `share_files` / `open_external`) |
+| `HtmlView` (not built yet) | Sanitized HTML ("View as HTML", QA report) | WebView (Android/iOS) · fallback (Windows/Linux dev: html2text → `Markdown` + "Open in browser") | `flet_webview.WebView`, or `Markdown` + `UrlLauncher` |
+| Output editor (`screens/output_editor.py`, `OutputEditorScreen`; the `FullScreenEditor` role) | App bar (title, dirty dot, Save, Cancel) + editor + footer (token count / position) | clean · dirty · saving · read-only · file missing | `View`; `flet_code_editor.CodeEditor` (`MARKDOWN` / `XML` / `JSON` / `CSS` / `PLAINTEXT`), with a plain `TextField(multiline=True)` fallback |
+| `TextEditor` (`tools/text_editor.py`, `TextEditorScreen`) | FullScreenEditor + find bar (hit i/n) | read-only · editing | as FullScreenEditor |
+| `FileBrowser` (`screens/files.py`, `FileBrowserScreen`) | Breadcrumbs · root chips (Output, Library, Inbox, Chat workspaces) · rows (icon, name, size, date) · ⋯ (Open with · Share · Save to… · Rename · Delete) | loading · list · empty folder · outside the safe roots (blocked) | `View`, a `Row` of breadcrumbs, `ListView`, `ActionSheet`, `TextPromptDialog` |
+| `ExportSheet` (`chat/integration.py` `ChatFeature.export_file`: an `ActionSheet` over `services/files.FileBridge.export_options`) | Share · Save to… · Save to Downloads (Android) / Show in Files (iOS) · Open externally | per platform; unsupported items disabled with a reason | `ActionSheet`; `Share.share_files`, `FilePicker.save_file`, native `save_to_downloads`, `UrlLauncher` |
 | `SourcePicker` (`tools/source_picker.py`) | Segments Recent outputs · Library books · Chat workspaces · Browse; list with checkboxes (multi) | single · multi · empty segment | `BottomSheet`, `SegmentedButton`, `ListView`, `Checkbox`, `FilePicker` |
 | `SelectableTextSheet` (`components/dialogs.py`) | The full text, selectable, + Copy all | — | `BottomSheet`, `SelectionArea` around `Text` |
 
@@ -2298,10 +2313,14 @@ On tablets, sheets become SidePanel content (persistent tasks) or centered dialo
 ```
 theme/        theme.py tokens.py colors.py (semantic + status constants, §6.1)
 shell/        app_shell.py router.py boot_view.py drawer.py sidebar.py side_panel.py job_strip.py launch_banner.py
-chat/         chat_view.py header.py transcript.py composer.py output_mode_row.py mode_options_sheet.py send_button.py
-              plus_sheet.py slash.py quick_chips.py message_user.py message_assistant.py thinking.py media_cards.py
-              actions.py approval_card.py job_card.py plan_card.py plan_glossary_sheet.py batch_plan.py chat_settings.py
-              manual_glossary.py attachments.py jump_to.py output_editor.py series_page.py (U9, optional)
+chat/         chat_view.py header.py (+ ChatSearchBar) transcript.py composer.py output_mode_row.py
+              mode_options_sheet.py send_button.py messages.py (UserBubble, UserFileCard, AssistantMessage,
+              VersionSwitcher) cards.py (GlossaryApprovalCard, JobCard, RequestSheet) media_cards.py media_model.py
+              attachments.py jump_to.py chat_ops.py integration.py context.py; the pure models output_modes.py
+              send_state.py direct_text_rules.py run_request.py run_controller.py stream_bridge.py job_binding.py
+              transcript_model.py; series_page.py (U9, optional)
+sheets/       plus_sheet.py (chat/plus_sheet.py re-exports it) chat_settings.py manual_glossary.py model_sheet.py
+screens/      output_editor.py (Edit output) files.py (FileBrowser) and the settings / jobs / accounts screens
 library/      library_view.py book_card.py filter_sheet.py selection.py delete_confirm.py scan_raw.py
               book_page.py overview_tab.py chapters_pane.py glossary_pane.py output_tab.py metadata_editor.py translate_sheet.py
 reader/       reader_view.py webview_reader.py native_reader.py chrome.py aa_sheet.py toc_drawer.py search_sheet.py live_panel.py
@@ -2312,9 +2331,10 @@ tools/        tools_home.py source_picker.py progress_view.py qa.py qa_report.py
               box_sheet.py models.py)
 settings/     settings_home.py search.py section_page.py tiles.py model_sheet.py poe_setup.py model_manager.py keys.py
               key_editor.py accounts.py login_sheet.py profiles.py prompt_editor.py endpoints.py data_*.py about.py welcome.py
-components/   shared components of §5: action_sheet.py dialogs.py reason_chip.py info_sheet.py error_card.py empty_state.py
-              skeleton.py file_chip.py status.py log_console.py windowed_list.py html_view.py media_viewer.py
-              export_sheet.py full_screen_editor.py pull_to_refresh.py master_detail.py
+components/   shared components of §5: action_sheet.py dialogs.py reason_chip.py info_sheet.py empty_state.py
+              status.py log_console.py section_card.py media_viewer.py (U7); planned: error_card.py skeleton.py
+              file_chip.py windowed_list.py html_view.py pull_to_refresh.py master_detail.py (the ExportSheet is
+              ChatFeature.export_file, the full-screen editor is screens/output_editor.py)
 ```
 
 ## Appendix B: Mobile-only data files (under `FLET_APP_STORAGE_DATA`, written atomically; never read by desktop)
@@ -2333,7 +2353,8 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
   overrides:{model, profile, target_language, output_mode, attachment_prompt_role, glossary_override_mode,
              manual_glossary_path, force_multipass_off, disable_thinking, skip_prompt_profile, disable_auto_scroll, thinking:{…}},
   versions:{"<anchor fp>":{members:[fp…], selected:int}},
-  pending_plan:{spec…}, add_only:[fp…]}},
+  pending_plan:{spec…}, add_only:[fp…],
+  job_turns:{"run:<run root>": fp | null}}},
  scratch:[…]}
 ```
 
@@ -2375,7 +2396,7 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 | Series | Optional, U9 | §2.15 |
 | Routes | Opaque ids only: `/tools/text/<fid>`, `/tools/files/<root>`, `/settings/keys/<pool>`, `/chat/<cid>/m/<mid>` | §1.4 |
 | Library keys | `epub_details_*` persisted; all 11 card-size presets mapped | §3.1, §3.7 |
-| Generative-only prompt | The composer text (through a run_env hook) | §2.6 |
+| Generative-only prompt | The composer text (owner attribute `_generative_prompt_override`, read by `image_job`'s prompt-source hook; U7 moved the hook from the planned `run_env` to the runner's module) | §2.6 |
 | Reader positions and bookmarks | `mobile_state.json` (Prefs), not config.json | §3.11, Appendix B |
 | Default model | `authgpt/gpt-6-luna`; Sign in with ChatGPT in Welcome step 1 and in the Send `blocked` state | §2.4, §4.17 |
 | Paste-link tile | Dropped (no desktop feature fetches web pages); the Clipboard tile replaces it | §2.5 |
@@ -2393,9 +2414,19 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 - The Book page uses the Progress Manager status vocabulary. The Library-only "✔ Translated" / "⏳ Working" badges are not shown.
 - **Paging.** Chapter and library lists append pages instead of showing pager buttons. The page-size keys still round-trip and set the append increment.
 - Desktop default disagreements found during extraction are preserved, and mobile shows the owner-effective value. Desktop bugs found while extracting (for example the Glossary Progress plain dumps) are recorded and fixed only in separate, user-approved commits.
+- **U7 (recorded at the U7 integration).**
+  - Retranslate (Book page › Chapters) and Resolve QA's Partial.b branch run as jobs (`retranslate`, `resolve_qa`), so they queue behind a running job; the desktop applies Retranslate Selected at once. The confirmation, the RECYCLED three-button choice and the result texts are the desktop's.
+  - Resolve QA follows the desktop row menu: an LLM-token issue is repaired in place, otherwise the raw foreign-text issue runs the single-entry Partial.b job (U5 had tried the job first).
+  - "🔊 Open Audio File" hands the file to another app (Share) instead of an inline player.
+  - RPG Maker: a picked game folder is copied into the Inbox and a ZIP game is extracted into `<output root>/RPG Maker` (the shared entry `rpgmaker_job.prepare_rpgmaker_game`; the run patches the game's `data` folder, so it needs a writable copy); "Share game as ZIP" afterwards is mobile-only.
+  - Google Cloud TTS voices: `google-cloud-texttospeech` has no Android / iOS build (grpcio >= 1.84 has no cp313 mobile wheel, and its requests floor conflicts with the pinned requests), so the Audio options show a ReasonChip; the REST fallback is a U9 tier-B item (dependency rule).
+  - The text editor and the SDLXLIFF Notepad layout use a monospace text field while `flet-code-editor` is not in the build.
+  - SDLXLIFF reviewer: Mark as Completed updates the reviewer session's copy of the progress; the Book page reads the change from disk on its next 2 s poll.
+  - Not built yet (disabled with a ReasonChip or absent until the shared helpers exist): source-only SDLXLIFF sidecars for Not Translated rows in Manual editing (they need Retranslation_GUI's `_progress_manager_untranslated_entries` closure); the "✏️ Edit file" jump to the QA issue's line (the search-term extraction is a Progress Manager row-menu closure; the editor opens at the top with Find).
 
 **Flet 1.0.3 constraints applied.** These came from source verification; details are in §5.0. In summary:
 - `scroll_to` needs an `ft.ScrollKey` and only reaches built items.
+- A control re-created under the key of the control it replaces in a list is frozen after the diff (setting a property raises "Frozen controls cannot be updated"); identity matches and a swapped `Container.content` are not. Cards that are updated in place stay the same objects (the chat's `CardSlot`s, the SDLXLIFF reviewer's per-build row keys).
 - `Chip` has no long-press event.
 - `PopupMenuButton` cannot be opened from code, so long-press menus use `ContextMenu`.
 - There is no Material action sheet and no anchored popover.

@@ -11,11 +11,12 @@ with the dialog's constructor arguments and the adapter is proven to read and wr
 the exact desktop ``direct_text_chats.json`` v2 format.
 
 The chat calls the shared rules (glossary policy, attachment size, rendered-card
-window, auto-title, timestamp, tokens, request cards, finishing); the tests check it
-delegates. The few rules still inline in the dialog's Qt handlers (rename, glossary
-override writes, the manual-glossary sniffing, the repaint cadence, the settings
-reads of its ``__init__``, the history window, the welcome cards) are compared with
-the dialog source, so they cannot drift.
+window, auto-title, timestamp, tokens, request cards, finishing; since U7 also the
+rename rule, the glossary override writes / read and the manual-glossary sniffing, which
+moved out of the dialog's Qt handlers into ``direct_text_store``); the tests check it
+delegates. The few rules still inline in the dialog (the repaint cadence, the other
+settings reads of its ``__init__``, the history window, the welcome cards) are compared
+with the dialog source, so they cannot drift.
 """
 
 from __future__ import annotations
@@ -414,21 +415,37 @@ def test_rules_call_the_shared_desktop_code():
         assert (rules.auto_title(current, text) or current) == expected
 
 
+def test_dialog_rules_moved_to_the_shared_store_are_the_ones_the_chat_calls():
+    """U7: ``_rename_chat``, ``_on_glossary_override_toggled``, the ``__init__`` override read and the
+    "Provide Manual Glossary" ``_accept`` call ``direct_text_store`` functions; the chat calls the same."""
+    if not (SRC_DIR / "translator_gui.py").is_file():
+        pytest.skip("src/translator_gui.py not present")
+    import direct_text_store as dts
+
+    assert "chat_rename_title(new_title)" in _method_source("_rename_chat")
+    assert "glossary_override_config_updates(mode)" in _method_source("_on_glossary_override_toggled")
+    assert "configured_glossary_override_mode(" in _method_source("__init__")
+    manual = _method_source("_request_direct_text_manual_glossary")
+    assert "manual_glossary_source_record(" in manual and "MANUAL_GLOSSARY_EXTENSIONS" in manual
+    for text in ("  Renamed   chat  " + "x" * 200, "", "a\tb", None):
+        assert rules.rename_title(text) == dts.chat_rename_title(text)
+    for mode in ("none", "attachments_only", "no_glossary", "manual", "Manual", "bogus", ""):
+        assert rules.glossary_override_updates(mode or "none") == dts.glossary_override_config_updates(mode or "none")
+        assert rules.normalize_glossary_override_mode(mode) == dts.configured_glossary_override_mode(mode)
+    assert rules.GLOSSARY_OVERRIDE_MODES == dts.GLOSSARY_OVERRIDE_MODES
+    assert rules.MANUAL_GLOSSARY_EXTENSIONS == dts.MANUAL_GLOSSARY_EXTENSIONS
+    for content in ('{"a": "b"}', "[not json", "raw,translated\n김,Kim", "plain", "a,b"):
+        record = dts.manual_glossary_source_record(content)
+        assert rules.manual_glossary_source(content).as_dict() == record
+    # the mirrors are gone: nothing in the chat re-implements the sniffing
+    source = (APP_DIR / "glossarion_mobile" / "ui" / "chat" / "direct_text_rules.py").read_text(encoding="utf-8")
+    assert "nonempty_lines" not in source and "_sniff_glossary_extension" not in source
+
+
 def test_dialog_inline_rules_the_chat_mirrors_match_the_dialog():
     """Rules still inline in the dialog's Qt handlers (no shared function to call yet)."""
     if not (SRC_DIR / "translator_gui.py").is_file():
         pytest.skip("src/translator_gui.py not present")
-    rename = _method_source("_rename_chat")
-    assert 'new_title = " ".join(str(new_title or "").split())[:120]' in rename
-    for text in ("  Renamed   chat  " + "x" * 200, "", "a\tb"):
-        assert rules.rename_title(text) == " ".join(str(text or "").split())[:120]
-    toggled = _method_source("_on_glossary_override_toggled")
-    for line in ("config['direct_text_glossary_override_mode'] = mode",
-                 "config['direct_text_force_no_glossary'] = mode == 'no_glossary'",
-                 "config['direct_text_manual_glossary'] = mode == 'manual'"):
-        assert line in toggled
-    manual = _method_source("_request_direct_text_manual_glossary")
-    assert "len(nonempty_lines) > 1 and ',' in nonempty_lines[0]" in manual and "extension = '.json'" in manual
     render = _method_source("_schedule_stream_render")  # the dialog's Qt override (the mixin's is a hook)
     assert "interval = min(900, 280 + active_characters // 350)" in render and "interval = max(interval, 450)" in render
     for chars in (0, 1, 349, 350, 10_000, 1_000_000):
@@ -438,7 +455,6 @@ def test_dialog_inline_rules_the_chat_mirrors_match_the_dialog():
     for snippet in ("translator.config.get('direct_text_force_simple_mode', True)",
                     "'direct_text_force_multipass_off', legacy_simple_mode",
                     "'direct_text_skip_system_prompt_profile', False",
-                    "configured_glossary_override = 'attachments_only'",
                     "translator.config.get('direct_text_attachment_prompt_role', 'user')"):
         assert snippet in init, snippet
     text = _desktop_source()["text"]
@@ -1248,10 +1264,10 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             assert app.state.chats is adapter and set(app.drawer.chat_rows) == {"2", "5"}
             assert app.state.current_chat.value == "2" and view.header.title_text.value == "My novel"
             assert view.composer.text == "half-typed"  # draft restored
-            kinds = [type(c).__name__ for c in view.transcript.messages]
+            kinds = [type(c).__name__ for c in view.transcript.cards]
             assert kinds == ["UserBubble", "AssistantMessage", "UserFileCard", "JobCard"]
-            assert view.transcript.messages[1].content_md.value == "안녕 → **Hello**"
-            assert view.transcript.messages[1].thinking_body.visible  # expanded index 1 persisted
+            assert view.transcript.cards[1].content_md.value == "안녕 → **Hello**"
+            assert view.transcript.cards[1].thinking_body.visible  # expanded index 1 persisted
             # blocked until ChatGPT sign-in (default model authgpt/gpt-6-luna)
             assert view.composer.send_state is SendState.BLOCKED
             assert view.caption.fix_button.content == "Sign in with ChatGPT"
@@ -1298,7 +1314,7 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             assert view.composer.send_button.tap() is SendAction.SEND
             plan = adapter.meta("2").get("pending_plan")
             assert plan and adapter.messages("2")[plan["user_index"]][0] == "user_file"
-            assert type(view.transcript.messages[-1]).__name__ == "JobCard" and view.transcript.messages[-1].phase.name == "plan"
+            assert type(view.transcript.cards[-1]).__name__ == "JobCard" and view.transcript.cards[-1].phase.name == "plan"
             count = len(adapter.messages("2"))
             view.cancel_plan()
             assert len(adapter.messages("2")) == count - 1 and view.composer.attachment["name"] == "book2.epub"
@@ -1342,7 +1358,14 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             assert app.config_store.get("vision_ocr_skip_translation") is True
             refine = view.open_mode_options("refinement")
             assert "multipass_refinement_mode" in refine.tiles
-            assert not view.open_mode_options("image").tiles  # Image / Video / Audio options arrive in U7
+            # U7: Image / Video / Audio options (UI_SPEC §2.6), no milestone ReasonChip any more
+            image = view.open_mode_options("image")
+            assert {"image_output_resolution", "vision_ocr_batch_translation", "vision_ocr_batch_size"} <= set(image.tiles)
+            assert image.generate_button is not None and image.generate_button.disabled  # empty composer
+            video = view.open_mode_options("video")
+            assert video.tiles["nanogpt_video_duration"].label == "Video Duration"
+            assert "tts_voice" in view.open_mode_options("audio").tiles
+            assert view.open_mode_options("text").generate_button is None
             # sheets and screens
             settings_sheet = view.open_chat_settings()
             settings_sheet.set_value("glossary_override_mode", "manual")
@@ -1445,6 +1468,7 @@ def test_pure_chat_modules_do_not_import_flet():
         "import glossarion_mobile.ui.chat.stream_bridge, glossarion_mobile.ui.chat.job_binding\n"
         "import glossarion_mobile.ui.chat.run_controller, glossarion_mobile.ui.chat.transcript_model\n"
         "import glossarion_mobile.ui.screens.welcome_flow\n"
+        "import glossarion_mobile.ui.chat.media_model, glossarion_mobile.ui.chat.chat_ops\n"
         "print(json.dumps(sorted(m for m in ('flet', 'PySide6', 'translator_gui', 'TransateKRtoEN') if m in sys.modules)))\n"
     ) % str(APP_DIR)
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=120)

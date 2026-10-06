@@ -13,6 +13,8 @@ dependencies = [
   "flet-secure-storage==1.0.3",
   "flet-permission-handler==1.0.3",
   "flet-webview==1.0.3",             # Reader (U5); Android/iOS/macOS only, native fallback elsewhere
+  "flet-audio==1.0.3",               # chat AudioCard / MediaViewer (U7)
+  "flet-video==1.0.3",               # chat VideoCard / MediaViewer (U7)
   "flet-glossarion-native==0.1.0",   # in-repo extension (see dev_packages / tool.uv.sources)
 
   # EPUB / HTML
@@ -79,8 +81,7 @@ dependencies = [
 ]
 # Tier B (added in the milestone that enables the route; check_mobile_wheels.py must pass):
 #   "grpcio==1.81.0", "grpcio-status==1.81.0", "google-cloud-translate", "google-cloud-vision",
-#   "google-cloud-texttospeech", "azure-ai-documentintelligence",
-#   "flet-audio==1.0.3", "flet-video==1.0.3"
+#   "google-cloud-texttospeech", "azure-ai-documentintelligence"
 
 [dependency-groups]
 dev = ["flet[all]==1.0.3", "pytest>=8", "pytest-asyncio>=0.24"]

@@ -17,7 +17,11 @@ SecureStorage keys, and the settings feature provides ``app.config_store``):
    ``/chat/<cid>/m/<mid>/edit``; ``/chat/<cid>/settings`` opens the chat settings
    sheet; ``/chat/<cid>`` selects that chat; ``/oauth/return?p=authgpt`` reaches the
    bridge; the drawer's chat long-press gets Rename / Pin / Delete;
-5. lifecycle INACTIVE / HIDE / PAUSE / DETACH flush the chat history.
+5. lifecycle INACTIVE / HIDE / PAUSE / DETACH flush the chat history;
+6. U7: ``/chat/<cid>/attachments`` (the Attachments manager + Migrate), the drawer row's
+   Attachments / Export chat / Duplicate as scratch (Save / Discard for a scratch chat), scratch
+   chats under ``<cache>/Direct Text Scratch``, and the chat's hooks for the Progress manager
+   (Retranslate chapters), Open externally and the Library hand-off after Migrate.
 
 ``maybe_show_welcome()`` opens ``/welcome`` on a first run (no
 ``glossary_mode_dialog_shown`` in config.json and no completed mobile welcome); the
@@ -31,7 +35,7 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
-from glossarion_mobile.state.chat_store_adapter import ChatStoreAdapter, default_history_path
+from glossarion_mobile.state.chat_store_adapter import SCRATCH_DIR_NAME, ChatStoreAdapter, default_history_path
 from glossarion_mobile.ui.chat.context import ChatEnv
 from glossarion_mobile.ui.chat.job_binding import JobsAdapter
 from glossarion_mobile.ui.chat.run_controller import ChatRuns
@@ -42,7 +46,7 @@ __all__ = ["ChatFeature", "FLUSH_LIFECYCLE_STATES", "SCREEN_ROUTES"]
 log = logging.getLogger("glossarion.chat")
 
 FLUSH_LIFECYCLE_STATES = ("inactive", "hide", "pause", "detach")
-SCREEN_ROUTES = ("settings.accounts", "welcome", "chat.message.edit")
+SCREEN_ROUTES = ("settings.accounts", "welcome", "chat.message.edit", "chat.attachments")
 WELCOME_PREF = "welcome_completed"
 
 
@@ -110,7 +114,11 @@ class ChatFeature:
         platform = str(getattr(getattr(self.page, "platform", None), "value", "") or "")
         self.is_android = platform == "android"
         self.is_ios = platform == "ios"
-        self.chats = chats or ChatStoreAdapter(history_path=default_history_path())
+        cache_dir = getattr(paths, "cache", None)
+        scratch_dir = os.path.join(str(cache_dir), SCRATCH_DIR_NAME) if cache_dir else None
+        self.chats = chats or ChatStoreAdapter(history_path=default_history_path(), scratch_dir=scratch_dir)
+        self._temp_dir = str(getattr(paths, "temp", "") or "") or None
+        self._url_launcher: Any = None
         self.jobs = JobsAdapter(jobs if jobs is not None else (getattr(app, "jobs", None) or getattr(app, "job_service", None)))
         if oauth is None:
             from glossarion_mobile.services.oauth import OAuthBridge
@@ -196,6 +204,10 @@ class ChatFeature:
             import_file=self.import_file,
             push_overlay=self.push_overlay,
             pop_overlay=self.pop_overlay,
+            open_progress=self.open_progress,
+            open_external=self.open_external,
+            after_migrate=self.after_migrate,
+            temp_dir=self._temp_dir,
             languages=_target_languages(),
             mono=mono_family(self.page),
             is_android=self.is_android,
@@ -347,6 +359,15 @@ class ChatFeature:
                                   on_signed_in_changed=lambda _v: self._spawn(self.refresh_sign_in()))
         if match.name == "welcome":
             return self.welcome_screen(match)
+        if match.name == "chat.attachments":
+            chat_view = getattr(self.app, "chat_view", None)
+            cid = str(match.params.get("cid"))
+            if chat_view is None or not chat_view.bound or self.chats.session(cid) is None:
+                return None
+            self._select_chat(cid)
+            if chat_view.cid != cid:
+                chat_view.load_chat(cid)
+            return chat_view.attachments_screen(match)
         if match.name == "chat.message.edit":
             from glossarion_mobile.ui.screens.output_editor import OutputEditorScreen
 
@@ -581,6 +602,96 @@ class ChatFeature:
             return reader.open_book(found["book"])
         return reader.open_book(path=found["path"])
 
+    async def open_progress(self, folder: str, source: str = "") -> Optional[str]:
+        """A chat workspace in the Progress manager (``/tools/progress?out=<bid>``, Chapters tab): the
+        Book page over that output folder, where Retranslate / Resolve QA run (U7). Returns the route id."""
+        app = self.app
+        library = getattr(app, "library", None)
+        navigate = getattr(app, "navigate_to", None)
+        notify = getattr(app, "notify", None)
+        if library is None or not hasattr(library, "bid_for") or navigate is None:
+            if notify is not None:
+                notify("The Progress manager is not available in this session")
+            return None
+
+        def target() -> Optional[dict]:
+            workspace = _reader_workspace(str(folder or ""), str(source or ""))
+            if not workspace:
+                return None
+            name = os.path.basename(os.path.normpath(workspace))
+            progress = os.path.join(workspace, "translation_progress.json")
+            book = {"name": name, "folder_name": name, "path": workspace, "output_folder": workspace,
+                    "type": "in_progress", "is_in_progress": True, "in_library": False,
+                    "progress_file": progress if os.path.isfile(progress) else ""}
+            if source and os.path.isfile(str(source)):
+                book["raw_source_path"] = str(source)
+            return book
+
+        book = await self._run_io(target)
+        if book is None:
+            if notify is not None:
+                notify("No translation progress in this chat's workspace yet")
+            return None
+        bid = library.bid_for(book)
+        navigate("tools.progress", None, {"out": bid})
+        return bid
+
+    async def open_external(self, path: str) -> Any:
+        """Open externally: the system share / Open-in sheet on Android and iOS (no file:// launches
+        there); the default app through ``UrlLauncher`` on desktop dev, else the share sheet."""
+        if self.is_android or self.is_ios:
+            return await self.share_files([path])
+        try:
+            import pathlib
+
+            import flet as ft
+
+            if self._url_launcher is None:
+                self._url_launcher = ft.UrlLauncher()  # a page service: keep the reference
+            await self._url_launcher.launch_url(pathlib.Path(path).resolve().as_uri())
+            return True
+        except Exception as exc:
+            log.info("open externally failed (%s); sharing instead", exc)
+            return await self.share_files([path])
+
+    async def after_migrate(self, target: str, source: str = "") -> None:
+        """After the desktop Migrate: the raw file is recorded in the Library (the run set-up's
+        ``library_core.record_library_raw_inputs``) and the snackbar offers "Open book"."""
+        app = self.app
+        library = getattr(app, "library", None)
+        notify = getattr(app, "notify", None)
+        navigate = getattr(app, "navigate_to", None)
+
+        def record() -> None:
+            if not source or not os.path.isfile(str(source)):
+                return
+            try:
+                import library_core  # shared (U5)
+
+                library_core.record_library_raw_inputs([str(source)])
+            except Exception:
+                log.debug("recording the raw input failed", exc_info=True)
+
+        await self._run_io(record)
+        bid = None
+        if library is not None and target and hasattr(library, "bid_for"):
+            try:
+                library.mark_dirty()
+            except Exception:
+                pass
+            name = os.path.basename(os.path.normpath(target))
+            bid = library.bid_for({"name": name, "folder_name": name, "path": target, "output_folder": target,
+                                   "type": "in_progress", "is_in_progress": True, "in_library": True,
+                                   **({"raw_source_path": str(source)} if source else {})})
+        if notify is not None:
+            if bid and navigate is not None:
+                notify("Attachment migrated", "Open book", lambda: navigate("library.book", {"bid": bid}))
+            else:
+                notify("Attachment migrated")
+        chat_view = getattr(app, "chat_view", None)
+        if chat_view is not None:
+            chat_view.header.set_attachments(chat_view._attachment_count(chat_view.cid))
+
     def open_output(self, folder: str) -> None:
         opener = getattr(getattr(self.app, "files", None), "open_folder", None)
         if callable(opener):
@@ -627,17 +738,40 @@ class ChatFeature:
             if chat_view is not None:
                 chat_view.confirm_delete()
 
-        sheet = ActionSheet(
-            [
-                ActionItem("Rename", rename, icon="DRIVE_FILE_RENAME_OUTLINE"),
+        def attachments() -> None:
+            navigate = getattr(app, "navigate_to", None)
+            if navigate is not None:
+                navigate("chat.attachments", {"cid": chat.cid})
+
+        def export() -> None:
+            if chat_view is not None:
+                chat_view.open_export(chat.cid)
+
+        no_view = None if chat_view is not None else "The chat is not available"
+        scratch = bool(getattr(chat, "scratch", False))
+        items = [ActionItem("Rename", rename, icon="DRIVE_FILE_RENAME_OUTLINE")]
+        if scratch:
+            items += [
+                ActionItem("Save", (lambda: chat_view.save_scratch(chat.cid)) if chat_view is not None else None,
+                           icon="SAVE", disabled_reason=no_view),
+                ActionItem(f"Attachments ({chat.attachments})", attachments, icon="ATTACH_FILE"),
+                ActionItem("Export chat", export, icon="IOS_SHARE", disabled_reason=no_view),
+                ActionItem("Discard", delete, icon="DELETE_OUTLINE", destructive=True),
+            ]
+        else:
+            items += [
                 ActionItem("Unpin" if chat.pinned else "Pin", lambda: self.chats.set_pinned(chat.cid, not chat.pinned),
                            icon="PUSH_PIN"),
-                ActionItem(f"Attachments ({chat.attachments})", disabled_reason="Arrives in U7", icon="ATTACH_FILE"),
-                ActionItem("Export chat", disabled_reason="Arrives in U7", icon="IOS_SHARE"),
-                ActionItem("Duplicate as scratch", disabled_reason="Arrives in U7", icon="CONTENT_COPY"),
+                ActionItem(f"Attachments ({chat.attachments})", attachments, icon="ATTACH_FILE"),
+                ActionItem("Export chat", export, icon="IOS_SHARE", disabled_reason=no_view),
+                ActionItem("Duplicate as scratch",
+                           (lambda: chat_view.duplicate_as_scratch(chat.cid)) if chat_view is not None else None,
+                           icon="CONTENT_COPY", disabled_reason=no_view),
                 ActionItem("Delete", delete, icon="DELETE_OUTLINE", destructive=True,
                            disabled_reason=None if self.chats.can_delete(chat.cid) else "Nothing to delete"),
-            ],
+            ]
+        sheet = ActionSheet(
+            items,
             title=chat.title,
             tablet=bool(getattr(getattr(app, "shell", None), "tablet", False)),
         )

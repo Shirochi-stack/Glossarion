@@ -1836,7 +1836,7 @@ def test_epub_optional_filter_settings_default_off_and_propagate():
         encoding="utf-8",
     )
     gui_source = desktop_gui_source()
-    async_source = (root / "src" / "async_api_processor.py").read_text(
+    async_source = (root / "src" / "async_batch_core.py").read_text(
         encoding="utf-8",
     )
 

@@ -7,7 +7,7 @@ import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from _src_corpus import desktop_gui_source
+from _src_corpus import desktop_gui_source, progress_manager_source
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,13 +136,16 @@ def test_sdlxliff_image_asset_status_is_forwarded_to_translator_log(tmp_path, mo
 def test_html_sdlxliff_writer_is_shared_between_translation_and_review_paths():
     transate_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
     review_source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    # U7: the sidecar auto-generation moved to sdlxliff_review_core
+    core_source = (SRC / "sdlxliff_review_core.py").read_text(encoding="utf-8")
 
     assert _write_html_sdlxliff_sidecar is _shared_write_html_sdlxliff_sidecar
     assert "from sdlxliff_sidecar_writer import" in transate_source
     assert "from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar" in review_source
-    generator_body = review_source[
-        review_source.index("def _generate_sdlxliff_sidecars_from_completed_entries"):
-        review_source.index("def _open_or_reuse_sdlxliff_review", review_source.index("def _generate_sdlxliff_sidecars_from_completed_entries"))
+    assert "    _write_html_sdlxliff_sidecar,\n" in core_source.replace("\r\n", "\n")
+    generator_body = core_source[
+        core_source.index("def _generate_sdlxliff_sidecars_from_completed_entries"):
+        core_source.index("def _generate_sdlxliff_sidecars_from_untranslated_entries")
     ]
     assert "from TransateKRtoEN import _write_html_sdlxliff_sidecar" not in generator_body
 
@@ -2466,7 +2469,7 @@ def test_sdlxliff_review_window_has_maximize_and_f11_without_minimize(tmp_path, 
 
 
 def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
-    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    source = progress_manager_source()
 
     assert "🌐 Generate Machine Translation Preview" in source
     assert "MACHINE_TRANSLATION_PROVIDER_CONFIG_KEY" in source
@@ -2533,7 +2536,8 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "Undo All Edits" in source
     assert "Generate Preview" in source
     assert "Inject Machine Translation" in source
-    assert "return True" in source[source.index("def _review_two_column_layout_enabled"):source.index("def _set_review_two_column_layout")]
+    _layout_start = source.index("def _review_two_column_layout_enabled")  # U7: in sdlxliff_review_core
+    assert "return True" in source[_layout_start:source.index("\n    def ", _layout_start + 1)]
     assert "_promote_inaccurate_machine_translation_rows" in source
     assert "_show_flag_accuracy_context_menu" in source
     assert "_prompt_machine_translation_threshold" in source
@@ -3230,10 +3234,17 @@ def test_sdlxliff_review_machine_translation_ignores_changed_source_or_language(
     assert changed_language_piece["rows"][0].get("tooltip_translation", "") == ""
 
 
-def test_retranslation_cleanup_deletes_machine_translation_preview_with_sdlxliff_sidecars():
-    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+def _retranslate_selected_source(source):
+    """The Retranslate Selected generator plus its shared plan/apply (U7 split)."""
     retranslate_start = source.index("def retranslate_selected")
-    retranslate_body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
+    body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
+    shared = (SRC / "progress_actions.py").read_text(encoding="utf-8")
+    return body + shared[shared.index("def plan_retranslation("):shared.index("def retranslate_rows(")]
+
+
+def test_retranslation_cleanup_deletes_machine_translation_preview_with_sdlxliff_sidecars():
+    source = progress_manager_source()
+    retranslate_body = _retranslate_selected_source(source)
 
     assert '"Machine_Translation"' in source
     assert "_machine_translation_path_for_output_file" in retranslate_body
@@ -3392,8 +3403,7 @@ def test_parallel_retranslation_progress_updates_merge_disjoint_selections(tmp_p
 
 def test_retranslate_selected_uses_manual_sidecar_reset_only_when_toggle_is_on():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
-    retranslate_start = source.index("def retranslate_selected")
-    retranslate_body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
+    retranslate_body = _retranslate_selected_source(source)
 
     assert "manual_editing_retranslation = _manual_editing_enabled()" in retranslate_body
     assert "_bulk_retranslation_sidecar_updates(" in retranslate_body
@@ -3444,7 +3454,7 @@ def test_dynamic_request_splitting_defaults_off(tmp_path, monkeypatch):
 
     glossary_gui = (SRC / "GlossaryManager_GUI.py").read_text(encoding="utf-8")
     translator_gui = desktop_gui_source()
-    async_processor = (SRC / "async_api_processor.py").read_text(encoding="utf-8")
+    async_processor = (SRC / "async_batch_core.py").read_text(encoding="utf-8")
     txt_extractor = (SRC / "extract_glossary_from_txt.py").read_text(encoding="utf-8")
     epub_extractor = (SRC / "extract_glossary_from_epub.py").read_text(encoding="utf-8")
     glossary_manager = (SRC / "GlossaryManager.py").read_text(encoding="utf-8")
@@ -6958,18 +6968,20 @@ def test_retranslation_bulk_sdlxliff_generation_flushes_manifest_in_chunks(tmp_p
         manifest_flush_sizes.append(len(updates))
         return True
 
+    # U7: the generator runs in sdlxliff_review_core (RetranslationMixin inherits it)
+    import sdlxliff_review_core as review_core_module
     monkeypatch.setattr(
-        retranslation_gui_module,
+        review_core_module,
         "_write_html_sdlxliff_sidecar",
         fake_writer,
     )
     monkeypatch.setattr(
-        retranslation_gui_module,
+        review_core_module,
         "_sdlxliff_manifest_freshness_record",
         lambda output_name, *_args: {"output_name": output_name},
     )
     monkeypatch.setattr(
-        retranslation_gui_module,
+        review_core_module,
         "_update_sdlxliff_sidecar_manifest",
         fake_manifest_update,
     )

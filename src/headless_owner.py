@@ -39,7 +39,9 @@ auto-mapping), ``TextJobsMixin`` (``_process_text_file``,
 inputs); their hooks (``_backend_entry``, ``_ui_request``, ``_ui_message``,
 ``_notify_compile_result``, ...) use the GUI-free defaults of
 ``translation_pipeline.PipelineHooksMixin`` / ``job_runner.JobHooksMixin``, which report
-to ``host.emit`` and ask ``host.ask`` (glossary approval).
+to ``host.emit`` and ask ``host.ask`` (glossary approval). U7: ``TranslationPipelineMixin``
+also brings the image / video and generative-only runners (``image_job.ImageJobMixin``) and
+the RPG Maker runner (``rpgmaker_job.RpgMakerJobMixin``), exactly as TranslatorGUI gets them.
 
 Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup.
 """
@@ -592,6 +594,9 @@ OWNER_CONTRACT_MODULES = (
     ("text_jobs", "TextJobsMixin"),
     ("input_preparation", "InputPreparationMixin"),
     ("job_runner", "JobHooksMixin"),
+    # U7: the image / generative-only and RPG Maker runners (TranslationPipelineMixin's bases)
+    ("image_job", "ImageJobMixin"),
+    ("rpgmaker_job", "RpgMakerJobMixin"),
 )
 
 

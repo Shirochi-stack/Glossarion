@@ -817,7 +817,7 @@ def test_book_page_tabs_render_progress_glossary_and_overview(real_env):
         chapters.on_row_long_press(chapters.visible[0])
         primary, more = chapters.bulk_actions(chapters.selected_rows())
         assert [a.label for a in primary] == ["Retranslate", "Remove QA mark"]
-        assert [a.id for a in more][-1] == "edit_translation" and more[-1].disabled_reason
+        assert [a.id for a in more][-1] == "edit_translation" and more[-1].disabled_reason is None  # U7
         sheet = await chapters.show_row_sheet(next(r for r in chapters.visible if r.status == "qa_failed"))
         enabled = {i.label for i in sheet.items if i.disabled_reason is None}
         assert "\U0001f9f9 Remove QA Failed Mark" in enabled and "\U0001f4d6 Open in reader" in enabled
@@ -1008,7 +1008,7 @@ def test_app_start_installs_the_library_and_the_reader(app_env):
             feature = app.library_feature
             assert isinstance(feature, LibraryFeature) and app.library is feature.service
             assert isinstance(app.reader, ReaderFeature) and app.reader.library is app.library
-            assert "U5" in SHIPPED_MILESTONES
+            assert "U5" in SHIPPED_MILESTONES and "U7" in SHIPPED_MILESTONES
             handlers = app.intents.handlers
             assert handlers[ACTION_OPEN_IN_READER] == feature.open_shared_in_reader
             assert handlers[ACTION_ADD_TO_LIBRARY] == feature.add_shared_to_library

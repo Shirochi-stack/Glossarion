@@ -429,7 +429,7 @@ def test_file_browser_lists_guards_roots_and_exports(tmp_path):
         sheet = folder._on_entry(folder.entries[0])
         labels = [item.label for item in sheet.items]
         assert labels[:3] == ["Share…", "Save to…", "Save to Downloads"] and "Delete" in labels
-        assert sheet.item("Delete").disabled_reason
+        assert sheet.item("Delete").disabled_reason is None  # U7 file tools
         blocked = FileBrowserScreen(parse_route(f"/tools/files/output/{outside}"), roots=roots,
                                     resolve_ref=prefs.resolve_file_ref)
         body = blocked.get_body()

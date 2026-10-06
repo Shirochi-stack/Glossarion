@@ -24,12 +24,23 @@ Selection (long-press): "N selected · Select all · Select ▾ (Completed / QA
 Failed / Failed group)" and the bottom bar Retranslate (Reset TTS in audio mode) ·
 Remove QA mark · More ▾. Every write is a ``progress_actions`` call (lock,
 re-read, three-way merge, atomic replace); confirmations use the desktop copy.
-Retranslate needs ``plan_retranslation`` (U7) and says so until it exists.
+
+**Retranslate** plans with ``progress_actions.plan_retranslation`` (its refusals and
+confirmation copy verbatim; the RECYCLED TOC/header pair asks "Delete Both Linked
+Files" / "Keep <counterpart>" / "Cancel"), then the confirmed plan runs as a
+``retranslate`` job and its result text comes back as a snackbar (a sheet for the
+"Chunk HTML Not Updated" warning). **Resolve QA** keeps the in-place LLM-token repair
+and runs the raw foreign-text case as a single-entry ``resolve_qa`` (Partial.b) job.
+**Manual editing** and **🔍 Edit Translation** open the SDLXLIFF reviewer; **✏️ Edit
+file** opens the text editor at the QA issue; **🔊 Open Audio File** hands the audio to
+a player app. Image-folder workspaces show the thumbnail grid of the desktop
+"Progress Manager - Images" (Select Translated · Mark as Skipped · Delete Selected).
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 from typing import Any, Mapping, Optional, Sequence
@@ -48,22 +59,26 @@ from glossarion_mobile.ui.library.models import PAGE_SIZES, page_size_value
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
 
-__all__ = ["ChaptersTab", "RETRANSLATE_U7", "confirm_copy", "row_palette_status"]
+__all__ = ["ChaptersTab", "confirm_copy", "image_confirm_copy", "is_image_folder_book", "row_palette_status"]
 
 log = logging.getLogger("glossarion.library.ui")
 
-RETRANSLATE_U7 = ("Retranslating selected chapters (deleting their outputs and resetting their progress, with the "
-                  "Progress Manager's confirmation) arrives in U7. Until then, start a translation from the "
-                  "Overview tab: chapters that are not translated are picked up automatically.")
 EMPTY_TITLE = "No chapters found yet"
 EMPTY_BODY = "Start a translation to see chapter progress."
-EDIT_TRANSLATION_REASON = "The SDLXLIFF reviewer arrives in U7"
-TEXT_EDITOR_REASON = "The text editor arrives in U7"
-ENGINE_REASON = "Needs the translation engine job (arrives in U7)"
 # Desktop Book Details "Translate chapter" (BookDetailsDialog._translate_single_chapter)
 RETRANSLATE_TITLE = "Retranslate chapter"
 ALREADY_RUNNING = "A translation is already running.\nPlease wait for it to finish (or stop it) first."
 UNTRACKED_STATUSES = ("", "not_translated")  # rows with no progress entry to reset
+# Desktop _start_single_progress_qa_resolution / prepare_single_qa_resolution "Process Running"
+PROCESS_RUNNING_TITLE = "Process Running"
+PROCESS_RUNNING = "Wait for the current translation or glossary process to finish first."
+RETRANSLATE_QUEUED = "Queued: resetting {count} row(s) for retranslation · runs after the current job"
+RETRANSLATE_FAILED = "Retranslation Reset Failed"
+#: Desktop row menu: "🔍 Edit Translation" is offered when Manual editing is on for an HTML
+#: row, or when the source exists and the row has a translated output.
+EDIT_TRANSLATION_REASON = "No translated output for this row (turn on Manual editing to edit it)"
+NO_OUTPUT_REASON = "No output file yet"
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
 
 
 def retranslate_now_question(title: str) -> str:
@@ -97,6 +112,37 @@ def confirm_copy(action: str, count: int, extra: Optional[Mapping[str, Any]] = N
     return None
 
 
+def image_confirm_copy(action: str, items: Sequence[Any]) -> Optional[tuple]:
+    """Desktop "Progress Manager - Images" confirmations (title, body); None: nothing to confirm."""
+    if action == "mark_skipped":
+        count = sum(1 for item in items if getattr(item, "kind", "") != "cover")
+        if not count:
+            return None
+        return ("Confirm Mark as Skipped",
+                f"Move {count} translated image(s) to the images folder?\n\n"
+                "This will:\n"
+                "• Delete the translated HTML files\n"
+                "• Copy source images to the images folder\n"
+                "• Skip these images in future translations")
+    if action == "delete":
+        # the body is the shared ``progress_core.image_folder_delete_confirmation`` text
+        return ("Confirm Deletion", "") if items else None
+    return None
+
+
+def is_image_folder_book(book: Mapping[str, Any], source: str = "") -> bool:
+    """An image-folder workspace (the desktop router's image-folder view): Library kind "image",
+    or a raw source that is a folder of images."""
+    if str(book.get("workspace_kind") or "").lower() == "image":
+        return True
+    if source and os.path.isdir(source):
+        try:
+            return any(name.lower().endswith(IMAGE_EXTENSIONS) for name in os.listdir(source))
+        except OSError:
+            return False
+    return False
+
+
 class ChaptersTab:
     def __init__(self, page: Any, *, initial_filter: Optional[str] = None) -> None:
         self.page = page
@@ -124,7 +170,15 @@ class ChaptersTab:
         self.jump_cursor: dict = {}  # group -> last jumped visible index
         self.list_view: Optional[ft.ListView] = None
         self.last_result: Any = None
+        self.last_message: Optional[tuple] = None  # (title, text) of the last desktop message box shown
         self.titles: dict = {}  # source file name -> (raw title, translated title)
+        self.manual_editing = bool(cfg(pm.MANUAL_EDITING_KEY, False))
+        self.job_watch: dict = {}  # job id -> callback(snapshot) when it ends (retranslate / resolve_qa)
+        self._unsub_jobs: Any = None
+        self.image_folder = is_image_folder_book(page.book)
+        self.image_view: Optional[pm.ImageFolderView] = None
+        self.image_selected: set = set()
+        self._image_loading = False
 
     # ---- build ----------------------------------------------------------------------------------
 
@@ -139,13 +193,8 @@ class ChaptersTab:
                                    on_change=self._on_search, key="ch-search")
         self.filter_menu = ft.PopupMenuButton(icon=ft.Icons.FILTER_LIST, tooltip="Filters", key="ch-filter-menu",
                                               items=self._filter_items())
-        self.more_menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", key="ch-more-menu", items=[
-            ft.PopupMenuItem(content="Manual editing · with the SDLXLIFF reviewer (U7)", disabled=True),
-            ft.PopupMenuItem(content="\U0001f50d Edit Translation · arrives in U7", disabled=True),
-            ft.PopupMenuItem(content="\U0001f4ca Glossary Progress", on_click=lambda e: self.page.set_tab("glossary")),
-            ft.PopupMenuItem(content="⟳ Refresh", on_click=lambda e: self.ctx.spawn(self.page.full_refresh())),
-            ft.PopupMenuItem(content="Files", on_click=lambda e: self.page.open_files()),
-        ])
+        self.more_menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", key="ch-more-menu",
+                                            items=self._more_items())
         self.selection_bar = SelectionTopBar(on_close=self.exit_selection, on_select_all=self.select_all,
                                              select_menu=[("Completed", lambda: self.select_group("completed")),
                                                           ("QA Failed", lambda: self.select_status("qa_failed")),
@@ -158,6 +207,8 @@ class ChaptersTab:
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="ch-bulk")
         header = ft.Row([self.folder_chip, self.mode], spacing=8, wrap=True)
+        if self.image_folder:
+            return self._build_image_folder(header)
         self.root = ft.Column([
             ft.Container(content=ft.Column([header, self.stats_row, self.total_text,
                                             ft.Row([self.search, self.filter_menu, self.more_menu], spacing=0),
@@ -173,6 +224,185 @@ class ChaptersTab:
 
     def dispose(self) -> None:
         self.list_view = None
+        unsub, self._unsub_jobs = self._unsub_jobs, None
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
+
+    # ---- image-folder variant (desktop "Progress Manager - Images") ----------------------------------
+
+    def _build_image_folder(self, header: ft.Control) -> ft.Control:
+        self.image_count = ft.Text("Selected: 0", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, key="img-count")
+        self.image_grid = ft.GridView(max_extent=168, child_aspect_ratio=0.72, spacing=8, run_spacing=8,
+                                      padding=ft.Padding.only(left=12, right=12, bottom=24), expand=True,
+                                      key="img-grid")
+
+        def button(label: str, handler: Any, key: str, destructive: bool = False) -> ft.Control:
+            style = ft.ButtonStyle(color=ft.Colors.ERROR) if destructive else None
+            return ft.FilledTonalButton(content=label, on_click=lambda e: handler(), key=key, style=style)
+
+        self.image_actions = ft.Row([
+            button("Select All", self.select_all_images, "img-select-all"),
+            button("Clear Selection", self.clear_images, "img-clear"),
+            button("Select Translated", self.select_translated_images, "img-select-translated"),
+            button("Mark as Skipped", lambda: self.ctx.spawn(self.run_image_action("mark_skipped")), "img-skip"),
+            button("Delete Selected", lambda: self.ctx.spawn(self.run_image_action("delete")), "img-delete",
+                   destructive=True),
+        ], wrap=True, spacing=6, run_spacing=6, key="img-actions")
+        self.root = ft.Column([
+            ft.Container(content=ft.Column([header, self.image_actions, self.image_count, self.banner], spacing=6,
+                                           tight=True),
+                         padding=ft.Padding.only(left=12, right=12, top=8)),
+            self.loading,
+            self.list_holder,
+        ], spacing=4, expand=True, key="chapters")
+        self.list_holder.content = self.image_grid
+        if self.page.progress is not None:
+            self.apply(self.page.progress)
+        return self.root
+
+    def _apply_image_header(self, view: pm.ProgressView) -> None:
+        folder = view.output_dir or str(self.page.book.get("output_folder") or "")
+        self.folder_chip.label = ft.Text(f"\U0001f4c1 {os.path.basename(folder) if folder else '—'}")
+        self.mode.content.value = pm.mode_label(view.mode)
+
+    def _image_source(self) -> str:
+        service = self.page.service
+        try:
+            source = service.raw_source(self.page.book)
+        except Exception:
+            source = ""
+        return source or str(self.page.book.get("output_folder") or "")
+
+    async def reload_images(self) -> Optional[pm.ImageFolderView]:
+        if self._image_loading:
+            return self.image_view
+        self._image_loading = True
+        try:
+            source = await self.ctx.io(self._image_source)
+            view = await self.ctx.io(pm.load_image_folder_view, self.page.service, source)
+        finally:
+            self._image_loading = False
+        self.image_view = view
+        keys = {item.key for item in view.items}
+        self.image_selected &= keys
+        self.loading.visible = False
+        if view.error:
+            self.banner.content = ft.Text(view.error, color=ft.Colors.ON_ERROR_CONTAINER)
+            self.banner.visible = True
+        else:
+            self.banner.visible = False
+        self._render_images()
+        self.ctx.push(self.root)
+        return view
+
+    def _render_images(self) -> None:
+        view = self.image_view
+        items = list(view.items) if view is not None else []
+        if not items:
+            self.list_holder.content = EmptyState(icon="IMAGE", title="No translated images found",
+                                                  body="Translate the image folder to see its progress.",
+                                                  key="img-empty")
+        else:
+            self.image_grid.controls = [self._image_tile(item) for item in items]
+            self.list_holder.content = self.image_grid
+        self.image_count.value = f"Selected: {len(self.image_selected)}"
+
+    def _image_tile(self, item: pm.ImageItemVM) -> ft.Control:
+        selected = item.key in self.image_selected
+        is_image = item.path.lower().endswith(IMAGE_EXTENSIONS) and os.path.isfile(item.path)
+        thumb: ft.Control = (ft.Image(src=item.path, fit=ft.BoxFit.COVER, expand=True, border_radius=6)
+                             if is_image else ft.Icon(ft.Icons.DESCRIPTION if item.kind != "cover" else ft.Icons.IMAGE,
+                                                      size=40, color=ft.Colors.ON_SURFACE_VARIANT))
+        return ft.Container(
+            content=ft.Column([
+                ft.Container(content=thumb, expand=True, alignment=ft.Alignment.CENTER),
+                ft.Text(item.title, theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(item.label, size=11, weight=ft.FontWeight.W_600,
+                        color=status_color(row_palette_status(item.status), self.ctx.dark)),
+            ], spacing=2, tight=True),
+            padding=6,
+            border_radius=tokens.RADII["card"],
+            bgcolor=ft.Colors.SECONDARY_CONTAINER if selected else ft.Colors.SURFACE_CONTAINER_LOW,
+            border=ft.Border.all(2, ft.Colors.PRIMARY) if selected else None,
+            on_click=lambda e, k=item.key: self.toggle_image(k),
+            ink=True,
+            key=f"img-{item.key}",
+        )
+
+    def toggle_image(self, key: str) -> None:
+        if key in self.image_selected:
+            self.image_selected.discard(key)
+        else:
+            self.image_selected.add(key)
+        self._render_images()
+        self.ctx.push(self.list_holder, self.image_count)
+
+    def select_all_images(self) -> None:
+        self.image_selected = {item.key for item in (self.image_view.items if self.image_view else ())}
+        self._render_images()
+        self.ctx.push(self.list_holder, self.image_count)
+
+    def clear_images(self) -> None:
+        self.image_selected = set()
+        self._render_images()
+        self.ctx.push(self.list_holder, self.image_count)
+
+    def select_translated_images(self) -> None:
+        self.image_selected = {item.key for item in (self.image_view.items if self.image_view else ())
+                               if item.kind == "translated"}
+        self._render_images()
+        self.ctx.push(self.list_holder, self.image_count)
+
+    async def run_image_action(self, action: str) -> Optional[str]:
+        """Mark as Skipped / Delete Selected (desktop selection checks and confirmations)."""
+        view = self.image_view
+        items = [item for item in (view.items if view is not None else ()) if item.key in self.image_selected]
+        if not items:
+            self.ctx.say("Please select at least one image to mark as skipped." if action == "mark_skipped"
+                         else "Please select at least one file.")
+            return None
+        copy_text = image_confirm_copy(action, items)
+        if copy_text is None:
+            self.ctx.say("Selected items are already in the images folder (skipped).")
+            return None
+        if action == "delete":
+            shared = await self.ctx.io(pm.image_delete_confirmation, self.page.service, view, items)
+            if not shared:
+                self.ctx.say("Not available in this build (progress_core.image_folder_delete_confirmation)")
+                return None
+            copy_text = (copy_text[0], shared)
+        if not await self._confirm(copy_text[0], copy_text[1], destructive=True):
+            return None
+        try:
+            title, message = await self.ctx.io(pm.image_folder_action, self.page.service, view, action, items)
+        except CoreMissing as exc:
+            self.ctx.say(f"Not available in this build ({exc.name})")
+            return None
+        except Exception as exc:
+            log.exception("image-folder action %s failed", action)
+            self.ctx.say(f"Could not update the images: {exc}")
+            return None
+        self.image_selected = set()
+        self.show_message(title, message)
+        await self.reload_images()
+        return message
+
+    def _more_items(self) -> list:
+        """⋯: Manual editing (checkable, persisted) · 🔍 Edit Translation · 📊 Glossary Progress ·
+        ⟳ Refresh · Files."""
+        return [
+            ft.PopupMenuItem(content="Manual editing", checked=self.manual_editing, key="m-manual",
+                             on_click=lambda e: self.ctx.spawn(self.toggle_manual_editing())),
+            ft.PopupMenuItem(content="\U0001f50d Edit Translation", key="m-edit-translation",
+                             on_click=lambda e: self.ctx.spawn(self.open_reviewer())),
+            ft.PopupMenuItem(content="\U0001f4ca Glossary Progress", on_click=lambda e: self.page.set_tab("glossary")),
+            ft.PopupMenuItem(content="⟳ Refresh", on_click=lambda e: self.ctx.spawn(self.page.full_refresh())),
+            ft.PopupMenuItem(content="Files", on_click=lambda e: self.page.open_files()),
+        ]
 
     def _filter_items(self) -> list:
         def check(label: str, value: bool, handler: Any, key: str) -> ft.PopupMenuItem:
@@ -202,6 +432,10 @@ class ChaptersTab:
         """New progress model: header, chips, rows (in place when the visible keys are unchanged)."""
         self.view = view
         if getattr(self, "root", None) is None:
+            return
+        if self.image_folder:
+            self._apply_image_header(view)
+            self.ctx.spawn(self.reload_images())
             return
         self.loading.visible = False
         folder = view.output_dir or str(self.page.book.get("output_folder") or "")
@@ -694,9 +928,111 @@ class ChaptersTab:
             more.append(BulkAction(action, pm.ACTION_LABELS[action], "CHEVRON_RIGHT",
                                    (lambda a=action: self.ctx.spawn(self.run_action(a, rows))),
                                    self._reason(action, rows)))
+        first = rows[0] if rows else None
         more.append(BulkAction("edit_translation", "\U0001f50d Edit Translation", "RATE_REVIEW",
-                               disabled_reason=EDIT_TRANSLATION_REASON))
+                               lambda r=first: self.ctx.spawn(self.open_reviewer(r)),
+                               self.edit_translation_reason(first) if first is not None else None))
         return primary, more
+
+    # ---- SDLXLIFF reviewer, text editor, audio -------------------------------------------------------
+
+    def edit_translation_reason(self, row: Optional[pm.RowVM]) -> Optional[str]:
+        """Desktop row menu rule for "🔍 Edit Translation" (None: offered)."""
+        if row is None:
+            return None
+        if self.manual_editing and (row.filename or row.output_file):
+            return None
+        return None if row.output_file else EDIT_TRANSLATION_REASON
+
+    def _progress_guard(self) -> asyncio.Lock:
+        """The Book page's progress lock: its reloads refresh the loaded progress in place on the io
+        pool, so a deep copy of it (Retranslate's plan, the reviewer's progress) runs under it."""
+        lock = getattr(self.page, "_progress_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            try:
+                self.page._progress_lock = lock
+            except Exception:
+                pass
+        return lock
+
+    async def open_reviewer(self, row: Optional[pm.RowVM] = None) -> Optional[str]:
+        """Tools › SDLXLIFF reviewer on this book's output folder (focused on ``row``'s output)."""
+        from glossarion_mobile.ui.tools import sdlxliff
+
+        folder = (self.view.output_dir if self.view is not None else "") or str(
+            self.page.book.get("output_folder") or "")
+        if not folder:
+            self.ctx.say("This book has no output folder yet")
+            return None
+        source = ""
+        progress = None
+        state = self.view.state if self.view is not None else None
+        data = getattr(state, "data", None) if state is not None else None
+        if isinstance(data, dict):
+            source = str(data.get("file_path") or "")
+            # the reviewer's copy (desktop: the dialog's loaded progress, kept in sync by Mark as
+            # Completed), copied on the io pool while no reload refreshes it
+            async with self._progress_guard():
+                prog = data.get("prog")
+                try:
+                    progress = await self.ctx.io(copy.deepcopy, prog) if isinstance(prog, dict) else None
+                except Exception:
+                    progress = None
+        return sdlxliff.open_reviewer(self.ctx, folder, source=source or None,
+                                      focus=(row.output_file or None) if row is not None else None,
+                                      manual_editing=self.manual_editing, progress_data=progress)
+
+    async def toggle_manual_editing(self) -> bool:
+        """⋯ › Manual editing: persisted ``retranslation_manual_editing`` (Retranslate keeps the
+        SDLXLIFF sidecars and clears their targets while it is on; the reviewer creates the
+        source-only sidecars of the Not Translated rows)."""
+        enabled = not self.manual_editing
+        self.manual_editing = enabled
+        await self.ctx.io(pm.set_manual_editing, self.page.service, self.view, enabled)
+        self.more_menu.items = self._more_items()
+        self.ctx.push(self.more_menu)
+        self.ctx.say("Manual editing on: the SDLXLIFF reviewer edits the outputs" if enabled
+                     else "Manual editing off")
+        return enabled
+
+    def output_path(self, row: pm.RowVM) -> str:
+        folder = self.view.output_dir if self.view is not None else ""
+        return os.path.join(folder, row.output_file) if folder and row.output_file else ""
+
+    def edit_file(self, row: pm.RowVM) -> Optional[str]:
+        """✏️ Edit file (find QA issue): the text editor on the output, at the QA issue's term when the
+        shared lookup (``progress_actions.qa_issue_search_target``) gives one."""
+        from glossarion_mobile.ui.tools import text_editor
+
+        path = self.output_path(row)
+        if not path or not os.path.isfile(path):
+            self.ctx.say(f"File not found:\n{path or row.output_file or row.filename}")
+            return None
+        term = None
+        finder = self.page.service.core.fn("progress_actions", "qa_issue_search_target", "notepad_qa_search_term")
+        issues = list(row.entry.get("qa_issues_found") or row.qa_lines or ())
+        if finder is not None and issues:
+            try:
+                found = finder(path, issues)
+                term = found[0] if isinstance(found, (tuple, list)) else found
+            except Exception:
+                log.debug("QA issue search term lookup failed", exc_info=True)
+        return text_editor.open_text_editor(self.ctx, path, find=str(term) if term else None)
+
+    async def open_audio(self, row: pm.RowVM) -> bool:
+        """🔊 Open Audio File: the generated audio goes to a player app (desktop: the OS default player)."""
+        if self.view is None:
+            return False
+        path = await self.ctx.io(pm.audio_path_for, self.page.service, self.view, row)
+        files = self.ctx.files
+        if not path:
+            self.ctx.say("No audio file was found for this chapter.")
+            return False
+        if files is None:
+            self.ctx.say(path)
+            return False
+        return bool(await files.share([path]))
 
     def open_row_sheet(self, row: pm.RowVM) -> Any:
         return self.ctx.spawn(self.show_row_sheet(row))
@@ -732,18 +1068,17 @@ class ChaptersTab:
                        disabled_reason=gate("open_reader", "Not an HTML chapter") if allowed is not None else (
                            None if row.filename else "No source file for this row"), key="row-reader"),
             ActionItem("\U0001f4c2 Open file", lambda: self.ctx.spawn(self.share_output(row)), icon="FOLDER_OPEN",
-                       disabled_reason=None if row.output_file else "No output file yet", key="row-open-file"),
+                       disabled_reason=None if row.output_file else NO_OUTPUT_REASON, key="row-open-file"),
             ActionItem("✏️ Edit file (find QA issue)" if row.qa_lines else "✏️ Edit file",
-                       icon="EDIT", disabled_reason=TEXT_EDITOR_REASON, key="row-edit-file"),
-            ActionItem("\U0001f50d Edit Translation", icon="RATE_REVIEW", disabled_reason=EDIT_TRANSLATION_REASON,
-                       key="row-edit-translation"),
+                       lambda: self.edit_file(row), icon="EDIT",
+                       disabled_reason=None if row.output_file else NO_OUTPUT_REASON, key="row-edit-file"),
+            ActionItem("\U0001f50d Edit Translation", lambda: self.ctx.spawn(self.open_reviewer(row)), icon="RATE_REVIEW",
+                       disabled_reason=self.edit_translation_reason(row), key="row-edit-translation"),
             ActionItem("\U0001f4cb Copy QA issue", lambda: self.copy_qa(row), icon="CONTENT_COPY",
                        disabled_reason=gate("copy_qa", "No QA issue on this row") if allowed is not None else (
                            None if row.qa_lines else "No QA issue on this row"), key="row-copy-qa"),
-            ActionItem("\U0001f50a Open Audio File", icon="PLAY_CIRCLE",
-                       disabled_reason=("Inline audio arrives with the media players (U7)"
-                                        if allowed is None or "open_audio" in allowed else "No audio file"),
-                       key="row-open-audio"),
+            ActionItem("\U0001f50a Open Audio File", lambda: self.ctx.spawn(self.open_audio(row)), icon="PLAY_CIRCLE",
+                       disabled_reason=gate("open_audio", "No audio file"), key="row-open-audio"),
             ActionItem(pm.ACTION_LABELS["delete_audio"], lambda: self.ctx.spawn(self.run_action("delete_audio", rows)),
                        icon="DELETE_OUTLINE", disabled_reason=gate("delete_audio", "No audio file"),
                        key="row-delete-audio"),
@@ -835,17 +1170,173 @@ class ChaptersTab:
         return job_id
 
     async def retranslate(self, rows: Sequence[pm.RowVM]) -> Any:
-        """Retranslate (Reset TTS in audio mode). The retranslation plan/apply arrives in U7."""
-        if self._audio_mode():
-            return await self.run_action("reset_tts", rows)
-        core = self.page.service.core
-        if not (core.available("progress_actions", "plan_retranslation")
-                and core.available("progress_actions", "apply_retranslation")):
-            sheet = InfoSheet(title="Retranslate", body=RETRANSLATE_U7)
-            self.ctx.show(sheet)
-            return sheet
-        self.ctx.say("Retranslate is wired in U7")
+        """Retranslate Selected (desktop ``retranslate_selected``): plan -> refusal or confirmation
+        (verbatim copy; RECYCLED pair: three buttons) -> a ``retranslate`` job; in Audio output
+        mode the plan is the TTS reset (``reset_tts``)."""
+        service = self.page.service
+        core = service.core
+        if not core.available("progress_actions", "plan_retranslation"):
+            if self._audio_mode():
+                return await self.run_action("reset_tts", rows)
+            self.ctx.say("Retranslate needs progress_actions.plan_retranslation (not in this build)")
+            return None
+        if self.view is None or self.view.state is None:
+            self.ctx.say("The progress could not be read")
+            return None
+        try:
+            async with self._progress_guard():  # the plan deep-copies the loaded progress
+                vm = await self.ctx.io(pm.plan_retranslation, service, self.view, list(rows))
+        except Exception as exc:
+            log.exception("planning the retranslation failed")
+            self.ctx.say(f"{RETRANSLATE_FAILED}: {exc}")
+            return None
+        self.last_result = vm
+        if vm.mode == "refused":
+            _kind, title, message = (tuple(vm.refusal or ()) + ("", "Retranslate", ""))[:3]
+            self.show_message(title, message)
+            return vm
+        if vm.mode == "reset_tts":
+            if not await self._confirm(vm.title, vm.message, destructive=True):
+                return None
+            plan = pm.ActionPlan("reset_tts", list(getattr(vm.plan, "selected_chapters", []) or []), vm.count)
+            return await self._apply_planned(plan)
+        linked_choice = None
+        if vm.needs_choice:
+            linked_choice = await self._choose(vm.title, vm.message, vm.choices)
+            if linked_choice in (None, "cancel"):
+                return None
+        elif not await self._confirm(vm.title or "Confirm Retranslation", vm.message, destructive=True):
+            return None
+        if not service.has_job_kind("retranslate"):
+            self.ctx.say("Retranslate jobs are not available in this build")
+            return None
+        spec = pm.retranslate_spec(service, self.page.book, vm, linked_choice)
+        busy = self._jobs_busy()
+        job_id = await service.submit(spec)
+        if not job_id:
+            from glossarion_mobile.job_kinds import retranslate as retranslate_kind
+
+            retranslate_kind.discard(spec.params.get("plan"))
+            self.ctx.say("The job service is not running")
+            return None
+        self.exit_selection()
+        self.watch_job(job_id, self._on_retranslate_end)
+        if busy:
+            self.ctx.say(RETRANSLATE_QUEUED.format(count=vm.count), "Jobs", lambda: self.ctx.go("jobs"))
+        return job_id
+
+    def _jobs_busy(self) -> bool:
+        jobs = getattr(self.page.service, "jobs", None)
+        busy = getattr(jobs, "busy", False) if jobs is not None else False
+        if callable(busy):
+            busy = busy()
+        return bool(busy)
+
+    def show_message(self, title: str, message: str) -> Any:
+        """A desktop message box: short texts as a snackbar, long ones in a sheet."""
+        self.last_message = (title, message)
+        if len(message) <= 160 and "\n" not in message:
+            self.ctx.say(message)
+            return message
+        sheet = InfoSheet(title=title, body=message)
+        self.ctx.show(sheet)
+        return sheet
+
+    async def _choose(self, title: str, body: str, choices: Sequence[tuple]) -> Optional[str]:
+        """A three-button desktop dialog (``choices``: ``(value, label)``); scripted in host tests
+        through ``ctx.extras["answers"]``."""
+        scripted = self.ctx.extras.get("answers")
+        if isinstance(scripted, list):
+            self.ctx.extras.setdefault("asked", []).append((title, body))
+            return scripted.pop(0) if scripted else None
+        if self.ctx.page is None:
+            return None
+        from glossarion_mobile.ui.tools.common import ChoiceDialog
+
+        kinds = {"both": "destructive", "cancel": "text"}
+        dialog = ChoiceDialog(title, body, [(value, label, kinds.get(value, "filled")) for value, label in choices],
+                              key="ch-linked")
+        dialog.show(self.ctx.page)
+        return await dialog.wait()
+
+    # ---- job hand-off (retranslate / resolve_qa) ----------------------------------------------------
+
+    def watch_job(self, job_id: str, on_end: Any) -> None:
+        self.job_watch[job_id] = on_end
+        if self._unsub_jobs is not None:
+            return
+        jobs = getattr(self.page.service, "jobs", None)
+        on_transition = getattr(jobs, "on_transition", None) if jobs is not None else None
+        if callable(on_transition):
+            try:
+                self._unsub_jobs = on_transition(self._on_job_transition)
+            except Exception:
+                log.debug("watching the chapter jobs failed", exc_info=True)
+
+    def _on_job_transition(self, snap: Any, previous: Any = None) -> None:
+        job_id = getattr(snap, "id", None)
+        if job_id not in self.job_watch or not getattr(snap, "is_terminal", False):
+            return
+        callback = self.job_watch.pop(job_id)
+        try:
+            result = callback(snap)
+            if asyncio.iscoroutine(result):
+                self.ctx.spawn(result)
+        except Exception:
+            log.exception("chapter job end handler failed")
+
+    async def _on_retranslate_end(self, snap: Any) -> Optional[str]:
+        """The reset finished: no cleanup pass on the next refreshes (desktop ``skip_cleanup``), reload,
+        then the desktop result text."""
+        state = self.view.state if self.view is not None else None
+        data = getattr(state, "data", None)
+        if isinstance(data, dict):
+            data["skip_cleanup"] = True
+        result = dict(getattr(snap, "result", {}) or {})
+        try:
+            await self.page.reload_progress(force=True)
+        except Exception:
+            log.debug("reloading after the retranslation failed", exc_info=True)
+        state_value = getattr(getattr(snap, "state", None), "value", getattr(snap, "state", None))
+        if getattr(snap, "error", None) and str(state_value or "").upper() == "FAILED":  # JobState.FAILED
+            self.show_message(RETRANSLATE_FAILED, str(snap.error))
+            return str(snap.error)
+        message = str(result.get("retranslate_message") or "")
+        if message:
+            self.show_message(str(result.get("retranslate_title") or "Retranslate"), message)
+        return message or None
+
+    async def _on_resolve_qa_end(self, snap: Any) -> Optional[str]:
+        refusal = dict(getattr(snap, "result", {}) or {}).get("resolve_qa_refusal")
+        try:
+            await self.page.reload_progress(force=True)
+        except Exception:
+            log.debug("reloading after Resolve QA failed", exc_info=True)
+        if isinstance(refusal, Mapping) and refusal.get("message"):
+            self.show_message(str(refusal.get("title") or "Resolve QA issue"), str(refusal["message"]))
+            return str(refusal["message"])
         return None
+
+    async def resolve_qa_job(self, plan: pm.ActionPlan) -> Optional[str]:
+        """Resolve QA's raw foreign-text branch: a single-entry Partial.b ``resolve_qa`` job (desktop
+        refuses while a translation or glossary run is going)."""
+        service = self.page.service
+        if not service.has_job_kind("resolve_qa"):
+            self.ctx.say("Single-entry QA resolution jobs are not available in this build")
+            return None
+        if self._jobs_busy():
+            self.show_message(PROCESS_RUNNING_TITLE, PROCESS_RUNNING)
+            return None
+        spec = pm.resolve_qa_spec(service, self.page.book, plan)
+        job_id = await service.submit(spec)
+        if not job_id:
+            self.ctx.say("The job service is not running")
+            return None
+        self.exit_selection()
+        self.watch_job(job_id, self._on_resolve_qa_end)
+        self.ctx.say(f"⚠️ Queued Partial.b QA resolution for {spec.params.get('label')} only", "Jobs",
+                     lambda: self.ctx.go("jobs"))
+        return job_id
 
     async def _confirm(self, title: str, body: str, *, destructive: bool = False) -> bool:
         if self.ctx.page is None:
@@ -878,13 +1369,19 @@ class ChaptersTab:
         if plan.refusal:
             self.ctx.say(plan.refusal)
             return None
+        if action == "resolve_qa" and plan.extra.get("partial_b") is not None:
+            return await self.resolve_qa_job(plan)
         copy = confirm_copy(action, plan.count, plan.extra)
         if copy is not None and not await self._confirm(copy[0], copy[1], destructive=action in _DESTRUCTIVE):
             return None
+        return await self._apply_planned(plan)
+
+    async def _apply_planned(self, plan: pm.ActionPlan) -> Optional[str]:
+        """Apply a confirmed plan on the io pool; the desktop result text as a snackbar."""
         try:
-            message = await self.ctx.io(pm.apply_action, service, self.view, plan)
+            message = await self.ctx.io(pm.apply_action, self.page.service, self.view, plan)
         except Exception as exc:
-            log.exception("progress action %s failed", action)
+            log.exception("progress action %s failed", plan.action)
             self.ctx.say(f"Could not update progress: {exc}")
             return None
         self.last_result = message

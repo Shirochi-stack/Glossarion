@@ -369,6 +369,18 @@ all = [
 ]
 
 [[package]]
+name = "flet-audio"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/65/fd/4f7b8dda12fb88ffe0560bc2f126596e8ffd612a4491d60225b3d0d55737/flet_audio-1.0.3.tar.gz", hash = "sha256:2b7fcf46f13f8b810aca7e5cfe1a3b404d407324b97c75826056345aafbf8f50", size = 11721, upload-time = "2026-09-30T02:13:53.481Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/3a/db7a85f52166c123284f31c357f19e1a5238c504da3e68f3c0a3a192deb8/flet_audio-1.0.3-py3-none-any.whl", hash = "sha256:0343a87aa823b125eb85569722f432887dc7e74bda35c5bfd00fa9a72f6ef741", size = 13495, upload-time = "2026-09-30T02:13:52.625Z" },
+]
+
+[[package]]
 name = "flet-cli"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -449,6 +461,18 @@ wheels = [
 ]
 
 [[package]]
+name = "flet-video"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d6/01/d5709d998bcda035f626240730191293134389163a5d0ea6c5334b6287a2/flet_video-1.0.3.tar.gz", hash = "sha256:5a00bc1f9a852dd65e3ad2c39220ea5b798f83922bdff9b56e24e34f9b162244", size = 24097, upload-time = "2026-09-30T02:14:36.099Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/98/2faacdabb0d7dc5e2576d1f4f6beae9dc43589e5795fe9b9225b8c20ea64/flet_video-1.0.3-py3-none-any.whl", hash = "sha256:7a6e3f8f57a2f69cee3f54d34afa5bd1ec3e8dbb21e7a68fc06df27f23beab07", size = 25832, upload-time = "2026-09-30T02:14:35.15Z" },
+]
+
+[[package]]
 name = "flet-web"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -494,9 +518,11 @@ dependencies = [
     { name = "ebooklib" },
     { name = "flatbuffers" },
     { name = "flet" },
+    { name = "flet-audio" },
     { name = "flet-glossarion-native" },
     { name = "flet-permission-handler" },
     { name = "flet-secure-storage" },
+    { name = "flet-video" },
     { name = "flet-webview" },
     { name = "google-auth" },
     { name = "google-genai" },
@@ -556,9 +582,11 @@ requires-dist = [
     { name = "ebooklib", specifier = "==0.18" },
     { name = "flatbuffers" },
     { name = "flet", specifier = "==1.0.3" },
+    { name = "flet-audio", specifier = "==1.0.3" },
     { name = "flet-glossarion-native", editable = "extensions/flet_glossarion_native" },
     { name = "flet-permission-handler", specifier = "==1.0.3" },
     { name = "flet-secure-storage", specifier = "==1.0.3" },
+    { name = "flet-video", specifier = "==1.0.3" },
     { name = "flet-webview", specifier = "==1.0.3" },
     { name = "google-auth", specifier = "==2.49.1" },
     { name = "google-genai", specifier = ">=1.73.1,<2" },

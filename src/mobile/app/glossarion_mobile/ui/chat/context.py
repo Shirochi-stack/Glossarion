@@ -31,6 +31,12 @@ class ChatEnv(SettingsContext):
     import_file: Optional[Callable[[str], Any]] = None  # picked path -> app-owned copy (FileBridge); blocking
     push_overlay: Optional[Callable[[Any], Any]] = None  # full-screen ft.View
     pop_overlay: Optional[Callable[[Any], Any]] = None
+    # U7: a workspace in the Progress manager (Chapters: Retranslate / Resolve QA), a file handed to
+    # the system (Open externally), FileBridge "Save to…", and the Library hand-off after Migrate.
+    open_progress: Optional[Callable[..., Any]] = None  # (workspace folder, attachment path) -> route id
+    open_external: Optional[Callable[[str], Any]] = None
+    save_file: Optional[Callable[[str], Any]] = None  # async: FileBridge save_as
+    after_migrate: Optional[Callable[..., Any]] = None  # (target folder, attachment path)
     profiles: Callable[[], list] = field(default=lambda: [])
     languages: tuple = ()
     mono: str = "monospace"

@@ -12,8 +12,10 @@ Run from src/mobile (3.13 venv, or the desktop Python with the backend dependenc
   ``FLET_APP_STORAGE_*`` dirs, then ``selftest.run_selftest("e2e")`` exactly as the deep link
   ``glossarion://app/__selftest__?suite=e2e`` does on a phone): a chat attachment with the Balanced
   glossary and its approval card, glossary Off + Compile EPUB, graceful stop + Resume, force stop
-  + kill/relaunch + Resume, and process hygiene, all through the real JobService, HeadlessOwner
-  and shared pipeline. CI (build-mobile.yml prepare) also runs the suite on the collected bundle.
+  + kill/relaunch + Resume, the Chapters tab's Retranslate (plan / apply) + Resolve QA and a Vision
+  image + Generate from prompt in the chat (U7), and process hygiene, all through the real
+  JobService, HeadlessOwner and shared pipeline. CI (build-mobile.yml prepare) also runs the suite
+  on the collected bundle.
 """
 
 from __future__ import annotations
@@ -45,12 +47,16 @@ from glossarion_mobile.diagnostics.fake_llm_server import (  # noqa: E402
     DEFAULT_GLOSSARY,
     FAKE_MARKER,
     FAKE_MODEL,
+    FAKE_OCR_TEXT,
+    FAKE_PNG,
     FakeLLMServer,
     applied_entries,
     chapter_numbers,
     classify_request,
     fake_translate,
     glossary_csv,
+    has_image_part,
+    png_bytes,
     romanize_hangul,
 )
 
@@ -119,6 +125,39 @@ def test_requests_are_classified_from_the_real_prompts():
     assert classify_request(extraction) == "glossary"
     assert classify_request(translation) == "translation"  # an injected glossary is not an extraction request
     assert classify_request(parts) == "translation"
+
+
+def test_server_answers_vision_image_generation_and_leaves_raw_text_once():
+    """U7: an ``image_url`` part is a vision request (the OCR text back), ``/v1/images/generations``
+    returns the fake PNG as ``b64_json``, ``leave_raw_once`` keeps Korean in one chapter answer once."""
+    import base64
+
+    picture = "data:image/png;base64," + base64.b64encode(png_bytes(4, 4)).decode("ascii")
+    vision = {"model": FAKE_MODEL, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Translate the text in this image."},
+        {"type": "image_url", "image_url": {"url": picture}}]}]}
+    assert has_image_part(vision) and classify_request(vision) == "vision"
+    assert png_bytes(2, 2).startswith(b"\x89PNG\r\n\x1a\n") and FAKE_PNG.startswith(b"\x89PNG")
+    with FakeLLMServer() as server:
+        def post(path, payload):
+            request = urllib.request.Request(server.url + path, data=json.dumps(payload).encode("utf-8"),
+                                             headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read())
+
+        assert post("/chat/completions", vision)["choices"][0]["message"]["content"] == FAKE_OCR_TEXT
+        generated = post("/images/generations", {"model": FAKE_MODEL, "prompt": "a red fox", "n": 1})
+        assert base64.b64decode(generated["data"][0]["b64_json"]) == FAKE_PNG
+        server.leave_raw_once[1] = "남은 문장"
+        chapter = {"model": FAKE_MODEL, "messages": [{"role": "user", "content": CHAPTER}]}
+        first = post("/chat/completions", chapter)["choices"][0]["message"]["content"]
+        again = post("/chat/completions", chapter)["choices"][0]["message"]["content"]
+        assert "<p>남은 문장 " in first and not any("가" <= ch <= "힣" for ch in again)
+        assert not server.leave_raw_once
+        records = server.records()
+        assert [(r.kind, r.status) for r in records] == [("vision", "ok"), ("image_generation", "ok"),
+                                                         ("translation", "ok"), ("translation", "ok")]
+        assert records[1].preview == "a red fox" and records[1].reply_chars == len(FAKE_PNG)
 
 
 def test_the_server_only_listens_on_loopback():
@@ -447,9 +486,19 @@ def test_offline_e2e_suite(tmp_path):
     forced = checks["e2e_force_stop_kill_resume"]["detail"]
     assert forced["parked_at_stop"] >= 1  # the model was stalled when Stop was pressed
     assert sorted(forced["saved_before_resume"] + forced["resumed"]) == list(range(1, e2e.CHAPTERS + 1))
+    # U7: Chapters tab Retranslate (only the two reset chapters are sent again) + Resolve QA (Partial.b).
+    retranslated = checks["e2e_retranslate_resolve_qa"]["detail"]
+    assert retranslated["retranslated"] == retranslated["resent"] == list(e2e.E2ESession.RETRANSLATE_CHAPTERS)
+    assert retranslated["confirm_title"] == "Confirm Retranslation" and retranslated["resolve_requests"] >= 1
+    assert retranslated["qa_flagged"] == e2e.E2ESession.RAW_QA_CHAPTER and retranslated["resolved_status"] == "completed"
+    assert retranslated["book"]["completed"] == e2e.CHAPTERS
+    # U7: Vision on an image attachment + Generate from prompt (Image) in the chat.
+    media = checks["e2e_vision_and_generate"]["detail"]
+    assert media["vision"]["requests"] == 1 and media["vision"]["responses"]
+    assert media["generate"]["requests"] == 1 and media["generate"]["image"].startswith("Direct Text ")
     hygiene = checks["e2e_process_hygiene"]["detail"]
     assert hygiene["spawn_attempts"] == 0 and hygiene["writes_outside"] == 0 and hygiene["network_attempts"] == 0
-    assert all(not job["process_diff"] for job in hygiene["jobs"]) and len(hygiene["jobs"]) == 11
+    assert all(not job["process_diff"] for job in hygiene["jobs"]) and len(hygiene["jobs"]) == 18
 
     # The sandbox is gone after a pass; the user's own chats, settings, jobs and outputs were never touched.
     sandboxes = storage["temp"] / "glossarion-e2e"

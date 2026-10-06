@@ -151,8 +151,11 @@ def test_retranslation_gui_closures_call_the_shared_actions():
     for call in ("restore_in_progress(", "plan_remove_qa_marks(", "remove_qa_marks(",
                  "refinement_status_keys(", "_progress_remove_refinement_status(", "reset_tts(",
                  "find_row_audio(", "resolve_llm_token_qa(", "insert_missing_images(",
-                 "_partial_b_target(", "_partial_b_request("):
+                 "prepare_single_qa_resolution("):
         assert call in source, call
+    # U7: the single-entry Partial.b preflight is shared (progress_actions)
+    preflight = _top_level(_source("progress_actions"))["prepare_single_qa_resolution"]
+    assert "_partial_b_target(" in preflight and "_partial_b_request(" in preflight
     # the plain whole-file progress dumps of these actions are gone
     assert "json.dump(data['prog'], f, ensure_ascii=False, indent=2)" not in source.split(
         "def retranslate_selected():")[0].split("def _add_retranslation_buttons_opf(")[1]

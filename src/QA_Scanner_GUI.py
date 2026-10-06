@@ -374,20 +374,8 @@ class QAScannerMixin:
                 return
 
             # Reset global cancel flags in case of a previous stop
-            try:
-                import os
-                import unified_api_client
-                os.environ['TRANSLATION_CANCELLED'] = '0'
-                os.environ.pop('GRACEFUL_STOP', None)
-                os.environ.pop('GRACEFUL_STOP_COMPLETED', None)
-                if hasattr(unified_api_client, 'UnifiedClient'):
-                    unified_api_client.UnifiedClient._global_cancelled = False
-                if hasattr(unified_api_client, '_cancel_event'):
-                    unified_api_client._cancel_event.clear()
-                if hasattr(unified_api_client, 'set_stop_flag'):
-                    unified_api_client.set_stop_flag(False)
-            except Exception:
-                pass
+            from qa_scan_runtime import reset_qa_cancel_flags
+            reset_qa_cancel_flags()
             # Reset stop phase state machine for the new scan
             self._qa_stop_phase = 'idle'
 
@@ -427,15 +415,8 @@ class QAScannerMixin:
             # Load and normalize QA scanner settings through the shared runtime so
             # post-translation scans and worker-side Failed multipass scans use the
             # same defaults, target-language handling, and word-count multipliers.
-            try:
-                from qa_scan_runtime import normalize_qa_scan_settings
-                main_lang = self.config.get('output_language') or os.getenv('OUTPUT_LANGUAGE', '')
-                return normalize_qa_scan_settings(
-                    self.config.get('qa_scanner_settings', {}),
-                    target_language=main_lang,
-                )
-            except Exception:
-                return dict(self.config.get('qa_scanner_settings', {}) or {})
+            from qa_scan_runtime import load_current_qa_settings
+            return load_current_qa_settings(self.config)
 
         qa_settings = _load_current_qa_settings()
 
@@ -2089,218 +2070,28 @@ class QAScannerMixin:
 
         def run_scan():
             try:
-                from qa_scan_runtime import run_qa_scan_path
+                # The bulk loop is qa_scan_runtime.run_bulk_qa_scan (shared with Glossarion Mobile)
+                from qa_scan_runtime import run_bulk_qa_scan
 
-                # Loop through all selected folders for bulk scanning
-                successful_scans = 0
-                failed_scans = 0
+                def _remember_report(report_path):
+                    # Record last generated report path for quick access
+                    self.last_qa_report_path = report_path
 
-                for i, current_folder in enumerate(folders_to_scan):
-                    if self.stop_requested:
-                        self.append_log(f"⚠️ Bulk scan stopped by user at folder {i+1}/{len(folders_to_scan)}")
-                        break
-
-                    folder_name = os.path.basename(current_folder)
-                    if len(folders_to_scan) > 1:
-                        self.append_log(f"\n📁 [{i+1}/{len(folders_to_scan)}] Scanning folder: {folder_name}")
-
-                    # Determine the correct EPUB path for this specific folder
-                    current_epub_path = epub_path
-                    latest_qa_settings = _load_current_qa_settings()
-                    if selected_mode_value == "custom" and 'custom_mode_settings' in qa_settings:
-                        latest_qa_settings['custom_mode_settings'] = qa_settings['custom_mode_settings']
-                    current_qa_settings = latest_qa_settings.copy()
-                    qa_settings.update(latest_qa_settings)
-                    if disable_word_count_for_run:
-                        current_qa_settings['check_word_count_ratio'] = False
-
-                    # Any EPUB-dependent check needs per-folder matching
-                    _needs_epub = (
-                        current_qa_settings.get('check_word_count_ratio', False)
-                        or current_qa_settings.get('check_ai_truncation_detection', False)
-                        or current_qa_settings.get('check_silent_truncation', False)
-                    )
-
-                    # For bulk scanning, try to find a matching EPUB for each folder
-                    # First try the user-selected EPUB list, then fall back to filesystem search
-                    if len(folders_to_scan) > 1 and _needs_epub:
-                        # Try to find EPUB file matching this specific folder
-                        folder_basename = os.path.basename(current_folder.rstrip('/\\'))
-                        self.append_log(f"  🔍 Searching for EPUB matching folder: {folder_basename}")
-
-                        # --- Priority 1: Match against user-selected EPUB list ---
-                        folder_epub_path = None
-                        if _epub_basename_map:
-                            # Direct match: folder name == EPUB basename (no extension)
-                            if folder_basename in _epub_basename_map:
-                                folder_epub_path = _epub_basename_map[folder_basename]
-                                self.append_log(f"      ✅ Matched from selected files: {os.path.basename(folder_epub_path)}")
-                            else:
-                                # Try stripping common output suffixes from folder name
-                                stripped_name = folder_basename
-                                common_suffixes = ['_output', '_translated', '_en']
-                                for suffix in common_suffixes:
-                                    if stripped_name.endswith(suffix):
-                                        stripped_name = stripped_name[:-len(suffix)]
-                                        break
-                                if stripped_name != folder_basename and stripped_name in _epub_basename_map:
-                                    folder_epub_path = _epub_basename_map[stripped_name]
-                                    self.append_log(f"      ✅ Matched from selected files (suffix-stripped): {os.path.basename(folder_epub_path)}")
-
-                        # --- Priority 2: Fall back to filesystem search ---
-                        if not folder_epub_path:
-                            # Look for EPUB in various locations
-                            folder_parent = os.path.dirname(current_folder)
-
-                            # Simple exact matching first, with minimal suffix handling
-                            base_name = folder_basename
-
-                            # Only handle the most common output suffixes
-                            common_suffixes = ['_output', '_translated', '_en']
-                            for suffix in common_suffixes:
-                                if base_name.endswith(suffix):
-                                    base_name = base_name[:-len(suffix)]
-                                    break
-
-                            # Simple EPUB search - focus on exact matching
-                            search_names = [folder_basename]  # Start with exact folder name
-                            if base_name != folder_basename:  # Add base name only if different
-                                search_names.append(base_name)
-
-                            potential_epub_paths = [
-                                # Most common locations in order of priority
-                                os.path.join(folder_parent, f"{folder_basename}.epub"),  # Same directory as output folder
-                                os.path.join(folder_parent, f"{base_name}.epub"),        # Same directory with base name
-                                os.path.join(current_folder, f"{folder_basename}.epub"), # Inside the output folder
-                                os.path.join(current_folder, f"{base_name}.epub"),       # Inside with base name
-                            ]
-
-                            # Find the first existing EPUB
-                            for potential_path in potential_epub_paths:
-                                if os.path.isfile(potential_path):
-                                    folder_epub_path = potential_path
-                                    self.append_log(f"      Found matching EPUB on disk: {os.path.basename(potential_path)}")
-                                    break
-
-                        if folder_epub_path:
-                            current_epub_path = folder_epub_path
-                            if len(folders_to_scan) > 1:  # Only log for bulk scans
-                                self.append_log(f"  📖 Using EPUB: {os.path.basename(current_epub_path)}")
-                        else:
-                            # NO FALLBACK TO GLOBAL EPUB FOR BULK SCANS - This prevents wrong EPUB usage!
-                            if len(folders_to_scan) > 1:
-                                self.append_log(f"  ⚠️ No matching EPUB found for folder '{folder_name}' - disabling EPUB-dependent checks")
-                                # Build expected names list from what we searched
-                                _expected = [folder_basename]
-                                try:
-                                    if search_names:
-                                        _expected = search_names
-                                except NameError:
-                                    pass
-                                expected_names = ', '.join([f"{name}.epub" for name in _expected])
-                                self.append_log(f"      Expected EPUB names: {expected_names}")
-                                if _epub_basename_map:
-                                    self.append_log(f"      Selected EPUBs: {', '.join(os.path.basename(p) for p in _epub_basename_map.values())}")
-                                current_epub_path = None
-                            elif current_epub_path:  # Single folder scan can use global EPUB
-                                self.append_log(f"  📖 Using global EPUB: {os.path.basename(current_epub_path)} (no folder-specific EPUB found)")
-                            else:
-                                current_epub_path = None
-
-                            # Disable all EPUB-dependent checks when no matching EPUB is found
-                            if not current_epub_path:
-                                current_qa_settings = current_qa_settings.copy()
-                                current_qa_settings['check_word_count_ratio'] = False
-                                current_qa_settings['check_ai_truncation_detection'] = False
-                                current_qa_settings['check_silent_truncation'] = False
-
-                    # Interactive source/folder mismatch handling is completed on the GUI
-                    # thread before this worker starts.  Re-check here only to
-                    # record bulk/non-interactive mismatches; never create Qt
-                    # widgets from the executor thread.
-                    if current_epub_path and current_qa_settings.get('check_word_count_ratio', False) and current_qa_settings.get('warn_name_mismatch', True):
-                        epub_name = os.path.splitext(os.path.basename(current_epub_path))[0]
-                        folder_name_for_check = os.path.basename(current_folder.rstrip('/\\'))
-
-                        if not check_epub_folder_match(epub_name, folder_name_for_check, current_qa_settings.get('custom_output_suffixes', '')):
-                            self.append_log(f"  ⚠️ Warning: source/folder name mismatch - {epub_name} vs {folder_name_for_check}")
-
-                    try:
-                        # Determine selected_files for this folder
-                        current_selected_files = None
-                        if global_selected_files and len(folders_to_scan) == 1:
-                            current_selected_files = global_selected_files
-
-                        # Auto-detect PDF source file if not already set
-                        # Check if the folder name matches a .pdf file in the parent directory
-                        if not current_epub_path or not os.path.exists(current_epub_path):
-                            folder_basename = os.path.basename(current_folder)
-                            parent_dir = os.path.dirname(current_folder)
-
-                            # Try to find a matching PDF file
-                            potential_pdf = os.path.join(parent_dir, folder_basename + ".pdf")
-                            if os.path.exists(potential_pdf):
-                                current_epub_path = potential_pdf
-                                self.append_log(f"   📄 Auto-detected PDF source: {os.path.basename(potential_pdf)}")
-                            else:
-                                # Also try without folder suffix if it has one
-                                potential_pdf_alt = os.path.join(parent_dir, folder_basename.replace("_output", "") + ".pdf")
-                                if os.path.exists(potential_pdf_alt):
-                                    current_epub_path = potential_pdf_alt
-                                    self.append_log(f"   📄 Auto-detected PDF source: {os.path.basename(potential_pdf_alt)}")
-
-                        # Run through the shared configured QA scan path used by worker-side scans too.
-                        # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path.
-                        run_qa_scan_path(
-                            current_folder,
-                            log=self.append_log,
-                            stop_flag=lambda: self.stop_requested,
-                            mode=mode,
-                            qa_settings=current_qa_settings,
-                            epub_path=current_epub_path,
-                            selected_files=current_selected_files,
-                            text_file_mode=None,
-                            owner=self,
-                        )
-
-                        successful_scans += 1
-                        # Record last generated report path for quick access
-                        report_folder_name = os.path.basename(current_folder.rstrip('/\\')) + "_Scan Report"
-                        report_path = os.path.join(
-                            current_folder,
-                            report_folder_name,
-                            "validation_results.html",
-                        )
-                        if os.path.exists(report_path):
-                            self.last_qa_report_path = report_path
-                        if len(folders_to_scan) > 1:
-                            self.append_log(f"✅ Folder '{folder_name}' scan completed successfully")
-
-                    except Exception as folder_error:
-                        failed_scans += 1
-                        self.append_log(f"❌ Folder '{folder_name}' scan failed: {folder_error}")
-                        if len(folders_to_scan) == 1:
-                            # Re-raise for single folder scans
-                            raise
-
-                # Final summary for bulk scans
-                if len(folders_to_scan) > 1:
-                    self.append_log(f"\n📋 Bulk scan summary: {successful_scans} successful, {failed_scans} failed")
-
-                # If show_stats is enabled, log cache statistics
-                if qa_settings.get('cache_show_stats', False):
-                    from scan_html_folder import get_cache_info
-                    cache_stats = get_cache_info()
-                    self.append_log("\n📊 Cache Performance Statistics:")
-                    for name, info in cache_stats.items():
-                        if info:  # Check if info exists
-                            hit_rate = info.hits / (info.hits + info.misses) if (info.hits + info.misses) > 0 else 0
-                            self.append_log(f"  {name}: {info.hits} hits, {info.misses} misses ({hit_rate:.1%} hit rate)")
-
-                if len(folders_to_scan) == 1:
-                    self.append_log("✅ QA scan completed successfully.")
-                else:
-                    self.append_log("✅ Bulk QA scan completed.")
+                run_bulk_qa_scan(
+                    folders_to_scan,
+                    mode=mode,
+                    epub_path=epub_path,
+                    qa_settings=qa_settings,
+                    load_settings=_load_current_qa_settings,
+                    selected_mode_value=selected_mode_value,
+                    disable_word_count_for_run=disable_word_count_for_run,
+                    epub_basename_map=_epub_basename_map,
+                    global_selected_files=global_selected_files,
+                    log=self.append_log,
+                    stop_flag=lambda: self.stop_requested,
+                    owner=self,
+                    on_report=_remember_report,
+                )
 
             except Exception as e:
                 self.append_log(f"❌ QA scan error: {e}")

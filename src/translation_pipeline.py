@@ -52,7 +52,12 @@ Edits made while moving (everything else is byte-for-byte):
 ``PipelineHooksMixin`` holds the GUI-free defaults of the hooks and of the desktop GUI
 methods the moved code calls (TranslatorGUI's own methods take precedence over every
 mixin, so the desktop keeps its originals). The image / RPG Maker / generative-prompt
-runners are placeholders until their modules move (U7: ``image_job``, ``rpgmaker_job``).
+runners ``run_translation_direct`` dispatches to moved out of TranslatorGUI in U7:
+``TranslationPipelineMixin`` inherits ``image_job.ImageJobMixin`` and
+``rpgmaker_job.RpgMakerJobMixin`` (they replaced the U3 placeholders of
+``PipelineHooksMixin``). U7 edit of ``run_translation_direct``: a folder registered by the
+mobile RPG Maker entry (``rpgmaker_job.RPGMAKER_GAME_INPUTS_ATTR``) is dispatched like a
+game ``.exe``; nothing on the desktop registers one.
 
 Mobile composition (JobService, one job at a time)::
 
@@ -75,7 +80,9 @@ from dataclasses import dataclass, field
 
 from app_paths import _get_app_dir
 from epub_package import find_epub_opf_member, find_opf_path
+from image_job import ImageJobMixin
 from job_runner import JobHooksMixin
+from rpgmaker_job import RPGMAKER_GAME_INPUTS_ATTR, RpgMakerJobMixin
 from run_env import RunEnvMixin
 from stop_control import clear_client_cancellation, make_run_id, prepare_glossary_stop_file, reset_stop_env
 from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
@@ -87,7 +94,6 @@ __all__ = [
     "PipelineHooksMixin",
     "RunRequest",
     "TranslationPipelineMixin",
-    "U7_PLACEHOLDERS",
     "UI_QUESTION_FIELDS",
     "UNSHARED_UI_REQUESTS",
 ]
@@ -104,10 +110,6 @@ IMAGE_ATTACHMENT_EXTENSIONS = {
 UI_QUESTION_FIELDS = {
     "direct_text_glossary_approval": ("path", "request"),
 }
-
-#: Runners still living in TranslatorGUI until U7 moves them (image_job / rpgmaker_job):
-#: PipelineHooksMixin's placeholders must go when the real mixins arrive.
-U7_PLACEHOLDERS = ("_process_image_file", "_process_rpgmaker_game", "_run_generative_prompt_mode")
 
 #: ``_ui_request`` kinds whose desktop handler (a GUI method) is not shared yet: the GUI-free
 #: default logs this line before emitting the event, so the log never promises work that
@@ -126,7 +128,7 @@ PIPELINE_HOOKS = (
     "_start_autoscroll_delay",
     "_update_manual_glossary_status",
     "_record_library_raw_inputs",
-) + U7_PLACEHOLDERS
+)
 
 
 @dataclass
@@ -250,25 +252,6 @@ class PipelineHooksMixin(JobHooksMixin):
         (``epub_library``, a Qt module). Skipped here: mobile imports inputs into Library/Raw
         through its FileBridge, and the run set-up must not import Qt."""
         return None
-
-    # ---- U7 placeholders (the desktop runners stay in TranslatorGUI until image_job /
-    # rpgmaker_job move; then these go) ----------------------------------------------------
-    def _process_image_file(self, image_path, combined_output_dir=None):
-        """Image / video input (desktop: TranslatorGUI._process_image_file). Not shared yet."""
-        self.append_log(
-            f"⚠️ Image/video translation is not available in this build yet: {os.path.basename(str(image_path))}")
-        return False
-
-    def _process_rpgmaker_game(self, exe_path):
-        """RPG Maker game (desktop: TranslatorGUI._process_rpgmaker_game). Not shared yet."""
-        self.append_log(
-            f"⚠️ RPG Maker translation is not available in this build yet: {os.path.basename(str(exe_path))}")
-        return False
-
-    def _run_generative_prompt_mode(self):
-        """Prompt-only image/video generation (desktop: TranslatorGUI._run_generative_prompt_mode). Not shared yet."""
-        self.append_log("⚠️ Generating from a prompt without an input file is not available in this build yet")
-        return False
 
 
 class GlossaryPipelineMixin(PipelineHooksMixin):
@@ -2970,9 +2953,12 @@ Important rules:
         return copied
 
 
-class TranslationPipelineMixin(GlossaryPipelineMixin):
+class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJobMixin):
     """The translation run (set-up, worker, run_translation_direct) and QA-failure /
-    multipass refinement planning (moved verbatim; see the module docstring)."""
+    multipass refinement planning (moved verbatim; see the module docstring).
+
+    The image / video, generative-only and RPG Maker runners ``run_translation_direct``
+    dispatches to come from ``ImageJobMixin`` / ``RpgMakerJobMixin`` (U7)."""
 
     def _clear_automatic_glossary_for_non_epub_selection(self, input_paths):
         """Drop a stale auto-selected glossary when switching away from EPUB input."""
@@ -4492,7 +4478,7 @@ class TranslationPipelineMixin(GlossaryPipelineMixin):
                             successful += 1
                         else:
                             failed += 1
-                    elif ext == '.exe':
+                    elif ext == '.exe' or file_path in (getattr(self, RPGMAKER_GAME_INPUTS_ATTR, None) or ()):
                         # Process as RPG Maker game via GTool
                         if self._process_rpgmaker_game(file_path):
                             successful += 1

@@ -44,6 +44,16 @@ from translation_artifacts import (
     update_translation_artifact_progress,
 )
 from epub_package import find_epub_opf_member, find_opf_path
+# U7: GUI-free cores of the output-folder tools (Load Font, Validate EPUB Structure,
+# Delete Header Files / Delete TOC.txt); the mobile Converter / Headers screens run them too.
+from output_tools_core import (
+    ARTIFACT_DELETE_TEXTS,
+    artifact_delete_result,
+    delete_planned_artifact_caches,
+    import_custom_fonts,
+    plan_artifact_cache_delete,
+    validate_epub_outputs,
+)
 from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 
@@ -8704,34 +8714,8 @@ def _create_prompt_management_section(self, parent):
                 "Fonts & Archives (*.ttf *.otf *.woff *.woff2 *.zip);;Font Files (*.ttf *.otf *.woff *.woff2);;ZIP Archives (*.zip);;All Files (*.*)"
             )
             if files:
-                import shutil
-                import zipfile
-                copied = 0
-                for src in files:
-                    ext = _os.path.splitext(src)[1].lower()
-                    if ext == '.zip':
-                        # Extract all font files from the zip (including subfolders)
-                        try:
-                            with zipfile.ZipFile(src, 'r') as zf:
-                                for entry in zf.namelist():
-                                    entry_ext = _os.path.splitext(entry)[1].lower()
-                                    if entry_ext in _FONT_EXTS:
-                                        font_name = _os.path.basename(entry)
-                                        if not font_name:
-                                            continue
-                                        dst = _os.path.join(gdir, font_name)
-                                        with zf.open(entry) as zin, open(dst, 'wb') as zout:
-                                            zout.write(zin.read())
-                                        copied += 1
-                        except Exception:
-                            pass
-                    elif ext in _FONT_EXTS:
-                        dst = _os.path.join(gdir, _os.path.basename(src))
-                        try:
-                            shutil.copy2(src, dst)
-                            copied += 1
-                        except Exception:
-                            pass
+                # Font files and the fonts inside ZIPs (output_tools_core, shared with mobile)
+                copied = import_custom_fonts(files, gdir, _FONT_EXTS)
                 _refresh_font_label()
                 if copied:
                     load_font_btn.setText(f"✅ {copied} loaded")
@@ -15036,125 +15020,10 @@ def run_standalone_translate_headers(self):
         # Define the thread function
         def translation_thread():
             try:
-                # Use existing API client if available (it has multi-key support)
-                # Otherwise create a new one with proper config
-                original_client = getattr(self, 'api_client', None)
-                
-                if original_client:
-                    # Use existing client - it already has multi-key mode configured
-                    self.append_log("✅ Using existing API client (with multi-key support)")
-                    api_client = original_client
-                else:
-                    # Initialize new API client with current settings
-                    # Multi-key mode is configured via environment variables (not constructor params)
-                    from unified_api_client import UnifiedClient
-                    import json
-                    
-                    # Set environment variables for multi-key mode if configured
-                    if hasattr(self, 'config'):
-                        if self.config.get('use_multi_api_keys', False):
-                            multi_keys = self.config.get('multi_api_keys', [])
-                            os.environ['USE_MULTI_API_KEYS'] = '1'
-                            os.environ['USE_MULTI_KEYS'] = '1'
-                            os.environ['FORCE_KEY_ROTATION'] = '1' if self.config.get('force_key_rotation', True) else '0'
-                            os.environ['ROTATION_FREQUENCY'] = str(self.config.get('rotation_frequency', 1))
-
-                            # Avoid Windows env var length limit by keeping keys in memory
-                            try:
-                                from unified_api_client import UnifiedClient
-                                UnifiedClient.set_in_memory_multi_keys(
-                                    multi_keys,
-                                    force_rotation=self.config.get('force_key_rotation', True),
-                                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                                )
-                            except Exception:
-                                pass
-
-                            self.append_log(f"🔑 Multi-key mode enabled ({len(multi_keys)} keys)")
-                    
-                    api_client = UnifiedClient(
-                        model=model, 
-                        api_key=api_key
-                    )
-                    self.append_log("✅ Created new API client")
-                    
-                    # Set it temporarily
-                    self.api_client = api_client
-                
-                try:
-                    # Import and run the translation GUI
-                    from translate_headers_standalone import run_translate_headers_gui
-                    run_translate_headers_gui(self)
-                    
-                    # After translation completes, run EPUB converter to rebuild the EPUB
-                    # with the updated HTML files
-                    self.append_log("\n📦 Rebuilding EPUB with translated headers...")
-                    try:
-                        from epub_converter import fallback_compile_epub
-                        
-                        # Find the output directory for the current EPUB
-                        epub_path = self.get_current_epub_path() if hasattr(self, 'get_current_epub_path') else None
-                        if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
-                            # Get first EPUB from selection
-                            epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
-                            if epub_files:
-                                epub_path = epub_files[0]
-                        
-                        if epub_path:
-                            epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                            current_dir = os.getcwd()
-                            script_dir = os.path.dirname(os.path.abspath(__file__))
-                            
-                            # Find output directory (same logic as header translation)
-                            candidates = [
-                                os.path.join(current_dir, epub_base),
-                                os.path.join(script_dir, epub_base),
-                                os.path.join(current_dir, 'src', epub_base),
-                            ]
-                            
-                            # Add output directory override if configured
-                            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                            if override_dir:
-                                candidates.insert(0, os.path.join(override_dir, epub_base))
-                            
-                            output_dir = None
-                            for candidate in candidates:
-                                if os.path.isdir(candidate):
-                                    files = os.listdir(candidate)
-                                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                                    if html_files:
-                                        output_dir = candidate
-                                        break
-                            
-                            if output_dir:
-                                # Set EPUB_PATH env var for the converter
-                                os.environ['EPUB_PATH'] = epub_path
-                                
-                                self.append_log(f"📂 Output directory: {output_dir}")
-                                fallback_compile_epub(
-                                    output_dir,
-                                    log_callback=self.append_log,
-                                    api_client=api_client,
-                                )
-                                self.append_log("✅ EPUB rebuilt successfully with translated headers!")
-                            else:
-                                self.append_log("⚠️ Could not find output directory to rebuild EPUB")
-                        else:
-                            self.append_log("⚠️ No EPUB file selected - skipping EPUB rebuild")
-                    except Exception as epub_error:
-                        self.append_log(f"⚠️ Failed to rebuild EPUB: {epub_error}")
-                        import traceback as tb
-                        self.append_log(tb.format_exc())
-                finally:
-                    # Restore original client
-                    if original_client is not None:
-                        self.api_client = original_client
-                    elif hasattr(self, 'api_client'):
-                        delattr(self, 'api_client')
-                
-            except Exception as e:
-                error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
-                self.append_log(f"❌ {error_msg}")
+                # API client set-up, header translation and the EPUB rebuild
+                # (translate_headers_standalone.run_translate_headers_now, shared with mobile)
+                from translate_headers_standalone import run_translate_headers_gui, run_translate_headers_now
+                run_translate_headers_now(self, model, api_key, headers_runner=run_translate_headers_gui)
             finally:
                 # Reset button to initial state when thread completes
                 # Just set flags - the monitoring timer will handle UI updates
@@ -15222,63 +15091,12 @@ def validate_epub_structure_gui(self):
         msg_box.exec()
         return
 
-    current_dir = os.getcwd()
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    override_dir = os.environ.get('OUTPUT_DIRECTORY') or (self.config.get('output_directory') if hasattr(self, 'config') else None)
-
-    all_passed = True
-    all_results = []
-
-    for epub_path in epub_files_to_process:
-        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-        self.append_log(f"🔍 Validating EPUB structure for: {epub_base}")
-
-        candidates = [
-            os.path.join(current_dir, epub_base),
-            os.path.join(script_dir, epub_base),
-            os.path.join(current_dir, 'src', epub_base),
-        ]
-        if override_dir:
-            candidates.insert(0, os.path.join(override_dir, epub_base))
-
-        output_dir = None
-        for candidate in candidates:
-            if os.path.isdir(candidate):
-                try:
-                    files = os.listdir(candidate)
-                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                    if html_files:
-                        output_dir = candidate
-                        break
-                except Exception:
-                    continue
-
-        if not output_dir:
-            self.append_log(f"  ⚠️ No output directory found for {epub_base}")
-            all_results.append(f"⚠️ {epub_base}: No output directory found")
-            all_passed = False
-            continue
-
-        try:
-            from TransateKRtoEN import validate_epub_structure, check_epub_readiness
-            structure_ok = validate_epub_structure(output_dir)
-            readiness_ok = check_epub_readiness(output_dir)
-
-            if structure_ok and readiness_ok:
-                self.append_log(f"  ✅ {epub_base}: PASSED")
-                all_results.append(f"✅ {epub_base}: All structure files present")
-            elif structure_ok:
-                self.append_log(f"  ⚠️ {epub_base}: Structure OK, some issues")
-                all_results.append(f"⚠️ {epub_base}: Structure OK, some issues found")
-                all_passed = False
-            else:
-                self.append_log(f"  ❌ {epub_base}: Missing critical files")
-                all_results.append(f"❌ {epub_base}: Missing critical EPUB files")
-                all_passed = False
-        except Exception as e:
-            self.append_log(f"  ❌ Validation error for {epub_base}: {e}")
-            all_results.append(f"❌ {epub_base}: {e}")
-            all_passed = False
+    # Output folder lookup, validation and the log / result wording (output_tools_core)
+    all_passed, all_results = validate_epub_outputs(
+        epub_files_to_process,
+        config=self.config if hasattr(self, 'config') else None,
+        log=self.append_log,
+    )
 
     if all_passed and all_results:
         # Success — animate inline, no messagebox
@@ -15329,24 +15147,25 @@ def validate_epub_structure_gui(self):
         """)
         msg_box.exec()
 
-def delete_translated_headers_file(self):
-    """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
+def _delete_translation_cache_files(self, kind, error_label):
+    """Delete Header Files / Delete TOC.txt: the EPUB selection and the dialogs around output_tools_core."""
+    texts = ARTIFACT_DELETE_TEXTS[kind]
 
     # Get icon path
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-    
+
     try:
         # Get all selected EPUB files using the same logic as QA scanner
         epub_files_to_process = []
-        
+
         # First check if current selection actually contains EPUBs
         if hasattr(self, 'selected_files') and self.selected_files:
             current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
             if current_epub_files:
                 epub_files_to_process = current_epub_files
                 self.append_log(f"📚 Found {len(epub_files_to_process)} EPUB files in current selection")
-        
+
         # If no EPUBs in selection, try single EPUB methods
         if not epub_files_to_process:
             epub_path = self.get_current_epub_path()
@@ -15359,10 +15178,10 @@ def delete_translated_headers_file(self):
                         entry_path = self.entry_epub.get().strip()
                 if entry_path and entry_path != "No file selected" and os.path.exists(entry_path):
                     epub_path = entry_path
-            
+
             if epub_path:
                 epub_files_to_process = [epub_path]
-        
+
         if not epub_files_to_process:
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Critical)
@@ -15372,77 +15191,17 @@ def delete_translated_headers_file(self):
             _center_messagebox_buttons(msg_box)
             msg_box.exec()
             return
-        
-        # Process each EPUB file to find and delete translated_headers.txt
-        files_found = []
-        files_not_found = []
-        files_deleted = []
-        errors = []
-        linked_counterparts = {}
-        deleted_file_count = 0
-        
-        current_dir = os.getcwd()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # First pass: scan for files
-        for epub_path in epub_files_to_process:
-            try:
-                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                self.append_log(f"🔍 Processing EPUB: {epub_base}")
-                
-                # Check the most common locations in order of priority (same as QA scanner)
-                candidates = [
-                    os.path.join(current_dir, epub_base),        # current working directory
-                    os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
-                    os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
-                ]
-                
-                # Add output directory override if configured (matches QA scanner behavior)
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                if override_dir:
-                    candidates.insert(0, os.path.join(override_dir, epub_base))
-                    self.append_log(f"  🔍 Checking override directory: {override_dir}")
-                
-                output_dir = None
-                for candidate in candidates:
-                    if os.path.isdir(candidate):
-                        # Verify the folder actually contains HTML/XHTML files
-                        try:
-                            files = os.listdir(candidate)
-                            html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                            if html_files:
-                                output_dir = candidate
-                                break
-                        except Exception:
-                            continue
-                
-                if not output_dir:
-                    self.append_log(f"  ⚠️ No output directory found for {epub_base}")
-                    files_not_found.append((epub_base, "No output directory found"))
-                    continue
-                
-                # Look for translated_headers.txt in the output directory
-                headers_file = os.path.join(output_dir, "translated_headers.txt")
-                
-                if os.path.exists(headers_file):
-                    files_found.append((epub_base, headers_file))
-                    progress = load_translation_artifact_progress(output_dir)
-                    if translation_artifacts_are_recycled_linked(progress):
-                        linked_counterparts[os.path.normcase(headers_file)] = (
-                            translation_artifact_path(output_dir, "toc")
-                        )
-                    self.append_log(f"  ✓ Found translated_headers.txt in {os.path.basename(output_dir)}")
-                else:
-                    files_not_found.append((epub_base, "translated_headers.txt not found"))
-                    self.append_log(f"  ⚠️ No translated_headers.txt in {os.path.basename(output_dir)}")
-                    
-            except Exception as e:
-                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                errors.append((epub_base, str(e)))
-                self.append_log(f"  ❌ Error processing {epub_base}: {e}")
-        
+
+        # First pass: find each EPUB's output folder and cache file (output_tools_core)
+        plan = plan_artifact_cache_delete(
+            kind, epub_files_to_process, config=self.config, log=self.append_log,
+        )
+        files_found = plan.files_found
+        errors = plan.errors
+        linked_counterparts = plan.linked_counterparts
+
         # Show summary and get user confirmation
-        if not files_found and not files_not_found and not errors:
+        if plan.nothing_processed:
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setWindowTitle("No Files")
@@ -15451,30 +15210,10 @@ def delete_translated_headers_file(self):
             _center_messagebox_buttons(msg_box)
             msg_box.exec()
             return
-        
-        summary_text = f"Summary for {len(epub_files_to_process)} EPUB file(s):\n\n"
-        
+
+        summary_text = plan.summary_text()
+
         if files_found:
-            summary_text += f"✅ Files to delete ({len(files_found)}):\n"
-            for epub_base, file_path in files_found:
-                summary_text += f"  • {epub_base}\n"
-            summary_text += "\n"
-        
-        if files_not_found:
-            summary_text += f"⚠️ Files not found ({len(files_not_found)}):\n"
-            for epub_base, reason in files_not_found:
-                summary_text += f"  • {epub_base}: {reason}\n"
-            summary_text += "\n"
-        
-        if errors:
-            summary_text += f"❌ Errors ({len(errors)}):\n"
-            for epub_base, error in errors:
-                summary_text += f"  • {epub_base}: {error}\n"
-            summary_text += "\n"
-        
-        if files_found:
-            summary_text += "This will allow headers to be re-translated on the next run."
-            
             # RECYCLED caches form a dependency pair. Let the user choose
             # whether the manually requested deletion should break both sides.
             msg_box = QMessageBox()
@@ -15482,21 +15221,13 @@ def delete_translated_headers_file(self):
             msg_box.setWindowTitle("Confirm Deletion")
             delete_linked = False
             if linked_counterparts:
-                msg_box.setText(
-                    summary_text
-                    + "\n\nRECYCLED link detected: one of TOC.txt and "
-                    "translated_headers.txt was created by reusing the other. "
-                    "Deleting only translated_headers.txt leaves TOC.txt available, "
-                    "so the header cache may be rebuilt from it without a new API "
-                    "translation.\n\nDelete both linked files to force fresh TOC and "
-                    "header translation, or delete only the header file?"
-                )
+                msg_box.setText(plan.question_text())
                 delete_both_button = msg_box.addButton(
-                    "Delete Both Linked Files",
+                    texts["delete_both"],
                     QMessageBox.ButtonRole.DestructiveRole,
                 )
                 delete_only_button = msg_box.addButton(
-                    "Delete Only Header Files",
+                    texts["delete_only"],
                     QMessageBox.ButtonRole.AcceptRole,
                 )
                 cancel_button = msg_box.addButton(QMessageBox.Cancel)
@@ -15519,66 +15250,26 @@ def delete_translated_headers_file(self):
                 delete_linked = clicked_button is delete_both_button
 
             if should_delete:
-                # Delete the files
-                for epub_base, headers_file in files_found:
-                    try:
-                        os.remove(headers_file)
-                        files_deleted.append(epub_base)
-                        deleted_file_count += 1
-                        update_translation_artifact_progress(
-                            os.path.dirname(headers_file),
-                            "headers",
-                            "pending",
-                            clear_model_name=True,
-                        )
-                        self.append_log(f"✅ Deleted translated_headers.txt from {epub_base}")
-                    except Exception as e:
-                        errors.append((epub_base, f"Delete failed: {e}"))
-                        self.append_log(f"❌ Failed to delete translated_headers.txt from {epub_base}: {e}")
-                
-                    counterpart = linked_counterparts.get(
-                        os.path.normcase(headers_file)
-                    )
-                    if delete_linked and counterpart:
-                        try:
-                            if os.path.exists(counterpart):
-                                os.remove(counterpart)
-                                deleted_file_count += 1
-                                self.append_log(
-                                    f"Deleted linked {os.path.basename(counterpart)} "
-                                    f"from {epub_base}"
-                                )
-                            update_translation_artifact_progress(
-                                os.path.dirname(headers_file),
-                                "toc",
-                                "pending",
-                                clear_model_name=True,
-                            )
-                        except Exception as e:
-                            errors.append((epub_base, f"Linked delete failed: {e}"))
-                            self.append_log(
-                                f"Failed to delete linked TOC.txt from "
-                                f"{epub_base}: {e}"
-                            )
+                # Delete the files (progress entries reset to pending)
+                files_deleted, deleted_file_count = delete_planned_artifact_caches(
+                    plan, delete_linked=delete_linked, log=self.append_log,
+                )
 
                 # Show final results
-                if files_deleted:
-                    success_msg = f"Successfully deleted {deleted_file_count} file(s):\n"
-                    success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
-                    if errors:
-                        success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."
+                ok, title, message = artifact_delete_result(files_deleted, deleted_file_count, errors)
+                if ok:
                     msg_box = QMessageBox()
                     msg_box.setIcon(QMessageBox.Information)
-                    msg_box.setWindowTitle("Success")
-                    msg_box.setText(success_msg)
+                    msg_box.setWindowTitle(title)
+                    msg_box.setText(message)
                     msg_box.setWindowIcon(icon)
                     _center_messagebox_buttons(msg_box)
                     msg_box.exec()
                 else:
                     msg_box = QMessageBox()
                     msg_box.setIcon(QMessageBox.Critical)
-                    msg_box.setWindowTitle("Error")
-                    msg_box.setText("No files were successfully deleted.")
+                    msg_box.setWindowTitle(title)
+                    msg_box.setText(message)
                     msg_box.setWindowIcon(icon)
                     _center_messagebox_buttons(msg_box)
                     msg_box.exec()
@@ -15596,9 +15287,9 @@ def delete_translated_headers_file(self):
                 min_button_height=46,
             )
             msg_box.exec()
-        
+
     except Exception as e:
-        self.append_log(f"❌ Error deleting translated_headers.txt: {e}")
+        self.append_log(f"❌ Error deleting {error_label}: {e}")
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setWindowTitle("Error")
@@ -15606,287 +15297,16 @@ def delete_translated_headers_file(self):
         msg_box.setWindowIcon(icon)
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
+
+
+def delete_translated_headers_file(self):
+    """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
+    return _delete_translation_cache_files(self, "headers", "translated_headers.txt")
 
 
 def delete_toc_txt_file(self):
     """Delete the TOC.txt (toc.txt) file from the output directory for all selected EPUBs"""
-
-    # Get icon path
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-    
-    try:
-        # Get all selected EPUB files using the same logic as QA scanner
-        epub_files_to_process = []
-        
-        # First check if current selection actually contains EPUBs
-        if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
-            if current_epub_files:
-                epub_files_to_process = current_epub_files
-                self.append_log(f"📚 Found {len(epub_files_to_process)} EPUB files in current selection")
-        
-        # If no EPUBs in selection, try single EPUB methods
-        if not epub_files_to_process:
-            epub_path = self.get_current_epub_path()
-            if not epub_path:
-                entry_path = ''
-                if hasattr(self, 'entry_epub'):
-                    if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
-                        entry_path = self.entry_epub.text().strip()
-                    elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
-                        entry_path = self.entry_epub.get().strip()
-                if entry_path and entry_path != "No file selected" and os.path.exists(entry_path):
-                    epub_path = entry_path
-            
-            if epub_path:
-                epub_files_to_process = [epub_path]
-        
-        if not epub_files_to_process:
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setWindowTitle("Error")
-            msg_box.setText("No EPUB file(s) selected. Please select EPUB file(s) first.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
-            return
-        
-        # Process each EPUB file to find and delete TOC.txt
-        files_found = []
-        files_not_found = []
-        files_deleted = []
-        errors = []
-        linked_counterparts = {}
-        deleted_file_count = 0
-        
-        current_dir = os.getcwd()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # First pass: scan for files
-        for epub_path in epub_files_to_process:
-            try:
-                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                self.append_log(f"🔍 Processing EPUB: {epub_base}")
-                
-                # Check the most common locations in order of priority (same as QA scanner)
-                candidates = [
-                    os.path.join(current_dir, epub_base),        # current working directory
-                    os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
-                    os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
-                ]
-                
-                # Add output directory override if configured (matches QA scanner behavior)
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                if override_dir:
-                    candidates.insert(0, os.path.join(override_dir, epub_base))
-                    self.append_log(f"  🔍 Checking override directory: {override_dir}")
-                
-                output_dir = None
-                for candidate in candidates:
-                    if os.path.isdir(candidate):
-                        # Verify the folder actually contains HTML/XHTML files
-                        try:
-                            files = os.listdir(candidate)
-                            html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                            if html_files:
-                                output_dir = candidate
-                                break
-                        except Exception:
-                            continue
-                
-                if not output_dir:
-                    self.append_log(f"  ⚠️ No output directory found for {epub_base}")
-                    files_not_found.append((epub_base, "No output directory found"))
-                    continue
-                
-                # Look for TOC.txt (case-insensitive)
-                toc_upper = os.path.join(output_dir, "TOC.txt")
-                toc_lower = os.path.join(output_dir, "toc.txt")
-                toc_file = toc_upper if os.path.exists(toc_upper) else (toc_lower if os.path.exists(toc_lower) else None)
-                
-                if toc_file:
-                    files_found.append((epub_base, toc_file))
-                    progress = load_translation_artifact_progress(output_dir)
-                    if translation_artifacts_are_recycled_linked(progress):
-                        linked_counterparts[os.path.normcase(toc_file)] = (
-                            translation_artifact_path(output_dir, "headers")
-                        )
-                    self.append_log(f"  ✓ Found {os.path.basename(toc_file)} in {os.path.basename(output_dir)}")
-                else:
-                    files_not_found.append((epub_base, "TOC.txt not found"))
-                    self.append_log(f"  ⚠️ No TOC.txt in {os.path.basename(output_dir)}")
-                    
-            except Exception as e:
-                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                errors.append((epub_base, str(e)))
-                self.append_log(f"  ❌ Error processing {epub_base}: {e}")
-        
-        # Show summary and get user confirmation
-        if not files_found and not files_not_found and not errors:
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Information)
-            msg_box.setWindowTitle("No Files")
-            msg_box.setText("No EPUB files were processed.")
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            msg_box.exec()
-            return
-        
-        summary_text = f"Summary for {len(epub_files_to_process)} EPUB file(s):\n\n"
-        
-        if files_found:
-            summary_text += f"✅ Files to delete ({len(files_found)}):\n"
-            for epub_base, file_path in files_found:
-                summary_text += f"  • {epub_base}\n"
-            summary_text += "\n"
-        
-        if files_not_found:
-            summary_text += f"⚠️ Files not found ({len(files_not_found)}):\n"
-            for epub_base, reason in files_not_found:
-                summary_text += f"  • {epub_base}: {reason}\n"
-            summary_text += "\n"
-        
-        if errors:
-            summary_text += f"❌ Errors ({len(errors)}):\n"
-            for epub_base, error in errors:
-                summary_text += f"  • {epub_base}: {error}\n"
-            summary_text += "\n"
-        
-        if files_found:
-            summary_text += "This will allow TOC entries to be re-translated on the next run."
-            
-            # RECYCLED caches form a dependency pair. Let the user choose
-            # whether the manually requested deletion should break both sides.
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Question)
-            msg_box.setWindowTitle("Confirm Deletion")
-            delete_linked = False
-            if linked_counterparts:
-                msg_box.setText(
-                    summary_text
-                    + "\n\nRECYCLED link detected: one of TOC.txt and "
-                    "translated_headers.txt was created by reusing the other. "
-                    "Deleting only TOC.txt leaves translated_headers.txt available, "
-                    "so the TOC cache may be rebuilt from it without a new API "
-                    "translation.\n\nDelete both linked files to force fresh TOC and "
-                    "header translation, or delete only the TOC file?"
-                )
-                delete_both_button = msg_box.addButton(
-                    "Delete Both Linked Files",
-                    QMessageBox.ButtonRole.DestructiveRole,
-                )
-                delete_only_button = msg_box.addButton(
-                    "Delete Only TOC Files",
-                    QMessageBox.ButtonRole.AcceptRole,
-                )
-                cancel_button = msg_box.addButton(QMessageBox.Cancel)
-                msg_box.setDefaultButton(cancel_button)
-            else:
-                msg_box.setText(summary_text)
-                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-                msg_box.setDefaultButton(QMessageBox.No)
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
-            result = msg_box.exec()
-
-            should_delete = result == QMessageBox.Yes
-            if linked_counterparts:
-                clicked_button = msg_box.clickedButton()
-                should_delete = (
-                    clicked_button is delete_both_button
-                    or clicked_button is delete_only_button
-                )
-                delete_linked = clicked_button is delete_both_button
-
-            if should_delete:
-                # Delete the files
-                for epub_base, toc_file in files_found:
-                    try:
-                        os.remove(toc_file)
-                        files_deleted.append(epub_base)
-                        deleted_file_count += 1
-                        update_translation_artifact_progress(
-                            os.path.dirname(toc_file),
-                            "toc",
-                            "pending",
-                            clear_model_name=True,
-                        )
-                        self.append_log(f"✅ Deleted {os.path.basename(toc_file)} from {epub_base}")
-                    except Exception as e:
-                        errors.append((epub_base, f"Delete failed: {e}"))
-                        self.append_log(f"❌ Failed to delete TOC.txt from {epub_base}: {e}")
-                
-                    counterpart = linked_counterparts.get(
-                        os.path.normcase(toc_file)
-                    )
-                    if delete_linked and counterpart:
-                        try:
-                            if os.path.exists(counterpart):
-                                os.remove(counterpart)
-                                deleted_file_count += 1
-                                self.append_log(
-                                    f"Deleted linked {os.path.basename(counterpart)} "
-                                    f"from {epub_base}"
-                                )
-                            update_translation_artifact_progress(
-                                os.path.dirname(toc_file),
-                                "headers",
-                                "pending",
-                                clear_model_name=True,
-                            )
-                        except Exception as e:
-                            errors.append((epub_base, f"Linked delete failed: {e}"))
-                            self.append_log(
-                                f"Failed to delete linked translated_headers.txt "
-                                f"from {epub_base}: {e}"
-                            )
-
-                # Show final results
-                if files_deleted:
-                    success_msg = f"Successfully deleted {deleted_file_count} file(s):\n"
-                    success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
-                    if errors:
-                        success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."
-                    msg_box = QMessageBox()
-                    msg_box.setIcon(QMessageBox.Information)
-                    msg_box.setWindowTitle("Success")
-                    msg_box.setText(success_msg)
-                    msg_box.setWindowIcon(icon)
-                    _center_messagebox_buttons(msg_box)
-                    msg_box.exec()
-                else:
-                    msg_box = QMessageBox()
-                    msg_box.setIcon(QMessageBox.Critical)
-                    msg_box.setWindowTitle("Error")
-                    msg_box.setText("No files were successfully deleted.")
-                    msg_box.setWindowIcon(icon)
-                    _center_messagebox_buttons(msg_box)
-                    msg_box.exec()
-        else:
-            # No files to delete
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Information)
-            msg_box.setWindowTitle("No Files to Delete")
-            msg_box.setText(summary_text)
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(
-                msg_box,
-                min_button_width=180,
-                min_button_height=46,
-            )
-            msg_box.exec()
-        
-    except Exception as e:
-        self.append_log(f"❌ Error deleting TOC.txt: {e}")
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle("Error")
-        msg_box.setText(f"Failed to delete file: {e}")
-        msg_box.setWindowIcon(icon)
-        _center_messagebox_buttons(msg_box)
-        msg_box.exec()
+    return _delete_translation_cache_files(self, "toc", "TOC.txt")
 
 # Prompt profile actions. The profile semantics live in the shared GUI-free prompt_profiles
 # module (the mobile app runs the same functions); these handlers supply the combobox name,

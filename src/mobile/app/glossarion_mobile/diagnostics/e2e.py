@@ -52,7 +52,19 @@ Scenarios (one self-test check each, in this order):
    before the stop is then handed to a fresh JobService (an app killed and relaunched):
    it is adopted as an Interrupted job, ``recover()`` restores its progress rows, and
    Resume finishes only the missing chapters.
-6. ``e2e_process_hygiene``: after every job ``os.environ``, ``sys.argv``,
+6. ``e2e_retranslate_resolve_qa`` (U7): a ``translate`` job whose model leaves part of one
+   chapter in Korean; the Book page's Chapters tab selects two other chapters and plans
+   Retranslate (``progress_actions.plan_retranslation``: the desktop confirmation), the
+   ``retranslate`` job applies the plan (only those chapter files and rows are reset), and the
+   next ``translate`` run sends exactly those two chapters; a QA quick scan then flags the
+   partly Korean chapter, and the row's "Resolve QA issue" runs the single-entry Partial.b
+   ``resolve_qa`` job, which sends only that chapter's text and leaves no Korean behind.
+7. ``e2e_vision_and_generate`` (U7): a chat image attachment in the Vision output mode sends one
+   vision request (the image as an ``image_url`` part) and the fake model's OCR text reaches the
+   response file and the chat; "Generate from prompt" in the Image output mode sends the
+   composer text to the Images API (``/v1/images/generations``) and the returned PNG is the
+   response's image in the chat folder (``[GENERATED_IMAGE:...]``, ``message_media``).
+8. ``e2e_process_hygiene``: after every job ``os.environ``, ``sys.argv``,
    ``sys.stdout``/``sys.stderr``, the cwd, the ``large_env`` store and the
    ``UnifiedClient`` key pools are what they were before it; Glossarion code asked for
    no process (tripwire on the spawn APIs, as in ``tools/host_smoke.py``; a stdlib
@@ -1439,7 +1451,264 @@ class E2ESession:
         return {"stop_secs": round(stop_secs, 1), "parked_at_stop": taps.get("parked"), "parked_after": still_parked,
                 "saved_before_resume": sorted(done), "resumed": sorted(again), "book": book}
 
-    # ---- scenario 6: hygiene ----------------------------------------------------------------------------------------
+    # ---- scenario 6: Chapters tab Retranslate (plan / apply) + Resolve QA (U7) ----------------------------------
+
+    #: The chapters the Chapters tab retranslates, and the one the model leaves partly in Korean.
+    RETRANSLATE_CHAPTERS = (3, 7)
+    RAW_QA_CHAPTER = 5
+    #: An untranslated Korean sentence inside a long English answer. QA skips the foreign-character
+    #: check of chapters under 500 words (except their headings, which the run rewrites from the
+    #: translated headers), and a mostly Korean text is reported as a language mismatch instead of
+    #: raw Korean text, so the answer is padded with English to ~600 words.
+    RAW_LEFTOVER = ("아직 번역되지 않은 원문 문장이 남아 있었다. "
+                    + "The bell of the black tower rang across the silent valley. " * 60)
+
+    def retranslate_resolve_qa(self) -> dict:
+        from glossarion_mobile.diagnostics import library_check
+        from glossarion_mobile.diagnostics.fake_llm_server import FAKE_MARKER
+        from glossarion_mobile.services.jobs import JobSpec
+        from glossarion_mobile.ui.library import progress_model as pm
+
+        self.setup()
+        self.configure("off")
+        server = self.server
+        name = "e2e-retranslate.epub"
+        path = self.import_epub(name)
+
+        # 1. Translate; the model leaves part of one chapter in Korean
+        server.leave_raw_once[self.RAW_QA_CHAPTER] = self.RAW_LEFTOVER
+        mark = server.mark()
+        first = self.run_job(self.service, self.translate_spec(path, name), "translate (for Retranslate)")
+        _check(first.state == "DONE", f"translate job ended {first.state}: {first.error}")
+        _check(sorted(_chapter_requests(server.records(since=mark))) == list(range(1, CHAPTERS + 1)),
+               f"chapter requests {sorted(_chapter_requests(server.records(since=mark)))}")
+        _check(not server.leave_raw_once, "the model never answered the chapter it should leave partly untranslated")
+        output_dir = first.output_dir
+        _check(output_dir and _under(_norm(output_dir), [_norm(self.root / "Output")]),
+               f"output folder {output_dir!r} is not under the sandbox Output")
+        files = {n: Path(output_dir) / f"response_chapter{n:04d}.html" for n in range(1, CHAPTERS + 1)}
+        _check(all(p.is_file() for p in files.values()), "the translate job did not write every chapter file")
+        stamps = {n: p.stat().st_mtime_ns for n, p in files.items()}
+        picked = self.RETRANSLATE_CHAPTERS
+
+        try:
+            with library_check.isolated_library(self.root, self.store.snapshot()) as service:
+                book = self._library_book(service, output_dir)
+
+                # 2. Chapters tab › select two rows › Retranslate: plan -> confirmation -> retranslate job
+                view = pm.load_progress_view(service, book, show_special=False, show_model_info=True)
+                _check(view.error is None, f"Chapters tab failed: {view.error}")
+                rows = self._chapter_rows(view)
+                vm = pm.plan_retranslation(service, view, [rows[n] for n in picked])
+                _check(vm.mode == "retranslate" and vm.refusal is None and not vm.needs_choice,
+                       f"Retranslate planned {vm.mode} (refusal {vm.refusal}, choices {vm.choices})")
+                _check(vm.count == len(picked) and vm.title and vm.message,
+                       f"Retranslate confirmation {vm.title!r} / {vm.message!r} for {vm.count} row(s)")
+                reset = self.run_job(self.service, pm.retranslate_spec(service, book, vm, None),
+                                     "retranslate (Chapters tab)")
+                _check(reset.state == "DONE", f"retranslate job ended {reset.state}: {reset.error}")
+                result = dict(self.service.snapshot(reset.job_id).result or {})
+                _check(result.get("retranslate_message"), f"the retranslate job recorded no result message: {result}")
+                chapters = _progress_chapters(output_dir)
+                _check(all(chapters.get(n) != "completed" for n in picked),
+                       f"retranslated chapters still completed: {chapters}")
+                _check(all(not files[n].exists() for n in picked), "the retranslated chapter files were not removed")
+                untouched = [n for n in files if n not in picked]
+                _check(all(chapters.get(n) == "completed" and files[n].stat().st_mtime_ns == stamps[n] for n in untouched),
+                       f"Retranslate touched other chapters: {chapters}")
+
+                # 3. Translate again: only the two reset chapters reach the model
+                mark = server.mark()
+                again = self.run_job(self.service, self.translate_spec(path, name), "translate (after Retranslate)")
+                _check(again.state == "DONE", f"translate job ended {again.state}: {again.error}")
+                resent = sorted(_chapter_requests(server.records(since=mark)))
+                _check(resent == list(picked), f"after Retranslate the run sent chapters {resent}, expected {list(picked)}")
+                # (requests without a chapter heading are the book metadata, translated on every run)
+                extra = [r for r in server.records(since=mark) if r.kind == "translation" and len(r.chapters) > 1]
+                _check(not extra, "after Retranslate the run sent other chapter requests: "
+                                  + "; ".join(f"ch{r.chapters} {r.preview[:80]!r}" for r in extra[:4]))
+                _check(all(files[n].stat().st_mtime_ns == stamps[n] for n in untouched),
+                       "the run after Retranslate rewrote chapters that were not reset")
+                chapters = _progress_chapters(output_dir)
+                _check(_completed(chapters) == set(range(1, CHAPTERS + 1)), f"after Retranslate: chapter rows {chapters}")
+                book_after = {k: v for k, v in _progress_summary(output_dir).items()
+                              if k in ("total", "completed", "in_progress", "failed")}
+
+                # 4. QA quick scan flags the chapter the model left partly in Korean
+                seed_before = _seed_langdetect(0)
+                try:
+                    qa = self.run_job(self.service, JobSpec(
+                        kind="qa_scan", title=os.path.basename(output_dir), inputs=(output_dir,),
+                        params={"mode": "quick-scan", "targets": [{"folder": output_dir, "source": path}]},
+                        origin={"type": "e2e", "label": "E2E"}), "QA quick scan (Resolve QA)")
+                finally:
+                    _seed_langdetect(seed_before)
+                _check(qa.state == "DONE", f"QA job ended {qa.state}: {qa.error}")
+                chapters = _progress_chapters(output_dir)
+                _check(chapters.get(self.RAW_QA_CHAPTER) == "qa_failed",
+                       f"QA did not flag chapter {self.RAW_QA_CHAPTER}: {chapters}")
+
+                # 5. Chapters tab › that row › Resolve QA issue: a single-entry Partial.b resolve_qa job
+                view = pm.load_progress_view(service, book, show_special=False, show_model_info=True, full=True)
+                _check(view.error is None, f"Chapters tab failed: {view.error}")
+                row = self._chapter_rows(view)[self.RAW_QA_CHAPTER]
+                _check(any("korean_text_found" in line.lower() for line in row.qa_lines),
+                       f"the row shows the QA issues {row.qa_lines}")
+                plan = pm.plan_action(service, view, "resolve_qa", [row])
+                _check(plan.refusal is None and plan.extra.get("partial_b") is not None,
+                       f"Resolve QA planned {plan.refusal or plan.extra}")
+                mark = server.mark()
+                before_raw = files[self.RAW_QA_CHAPTER].stat().st_mtime_ns
+                resolved = self.run_job(self.service, pm.resolve_qa_spec(service, book, plan), "resolve QA (Partial.b)")
+                _check(resolved.state == "DONE", f"resolve_qa job ended {resolved.state}: {resolved.error}")
+                records = [r for r in server.records(since=mark) if r.kind == "translation"]
+                _check(records, "Resolve QA sent no request to the model")
+                other = sorted({n for r in records for n in r.chapters if n != self.RAW_QA_CHAPTER})
+                _check(not other, f"Resolve QA sent other chapters {other}")
+                fixed = files[self.RAW_QA_CHAPTER]
+                _check(fixed.stat().st_mtime_ns != before_raw, "Resolve QA did not rewrite the chapter file")
+                text = _TAG.sub(" ", fixed.read_text(encoding="utf-8").split("<body", 1)[-1])
+                _check(not _HANGUL.findall(text), f"chapter {self.RAW_QA_CHAPTER} still holds Korean after Resolve QA")
+                _check(FAKE_MARKER in text, "the resolved chapter lost its translation")
+                chapters = _progress_chapters(output_dir)
+                _check(all(chapters.get(n) == "completed" for n in untouched if n != self.RAW_QA_CHAPTER),
+                       f"Resolve QA changed other chapters: {chapters}")
+                return {"retranslated": list(picked), "confirm_title": vm.title,
+                        "result": str(result.get("retranslate_title") or ""), "resent": resent,
+                        "qa_flagged": self.RAW_QA_CHAPTER, "resolve_requests": len(records),
+                        "resolved_status": chapters.get(self.RAW_QA_CHAPTER), "book": book_after}
+        except library_check.LibraryCheckFailure as exc:
+            raise E2EFailure(f"Library / Chapters tab: {exc}") from exc
+
+    def _library_book(self, service: Any, output_dir: str) -> dict:
+        """The workspace's Library book (scan + shelves), as the Book page opens it."""
+        from glossarion_mobile.diagnostics import library_check
+
+        snapshot = service.scan_blocking()
+        _check(snapshot.ok, f"Library scan failed: {snapshot.error}")
+        _shelf, book = library_check._find_book(snapshot, Path(output_dir))
+        _check(book is not None, f"the Library did not list {os.path.basename(output_dir)}")
+        return book
+
+    @staticmethod
+    def _chapter_rows(view: Any) -> dict:
+        """``{chapter number: RowVM}`` of the Chapters tab (``response_chapterNNNN.html`` rows)."""
+        rows: dict = {}
+        for row in view.rows:
+            match = re.match(r"response_chapter(\d+)\.html$", os.path.basename(str(row.output_file or "")))
+            if row.kind == "chapter" and match:
+                rows[int(match.group(1))] = row
+        _check(sorted(rows) == list(range(1, CHAPTERS + 1)), f"Chapters tab rows {sorted(rows)}")
+        return rows
+
+    # ---- scenario 7: Vision on an image, Generate from prompt (Image) in the chat (U7) --------------------------
+
+    VISION_IMAGE = "e2e-page.png"
+    GENERATE_PROMPT = "A lighthouse on a cliff at dawn, watercolor"
+
+    def vision_and_generate(self) -> dict:
+        from glossarion_mobile.diagnostics.fake_llm_server import FAKE_OCR_TEXT, FAKE_PNG, png_bytes
+        from glossarion_mobile.state.chat_store_adapter import ChatStoreAdapter, ChatStoreBinding
+        from glossarion_mobile.ui.chat.direct_text_rules import DirectTextSettings
+        from glossarion_mobile.ui.chat.job_binding import JobsAdapter
+        from glossarion_mobile.ui.chat.run_controller import ChatRuns
+        from glossarion_mobile.ui.chat.run_request import attachment_record
+
+        self.setup()
+        self.configure("off")
+        server = self.server
+        history = str(self.root / "direct_text_chats.json")
+        chats = ChatStoreAdapter(ChatStoreBinding(history_path=history, output_root=str(self.root / "Output")),
+                                 history_path=history, save_delay=0.05)
+        _check(chats.load(), f"the chat history could not be loaded: {chats.load_error}")
+        runs = ChatRuns(chats, JobsAdapter(self.service), temp_dir=str(self.root / "runs"),
+                        model_name=lambda: self.store.get("model"))
+        runs.attach()
+        try:
+            # 1. Vision: an image attachment in the Vision output mode -> one vision request, the OCR text back
+            picture = self.root / "Inbox" / self.VISION_IMAGE
+            picture.write_bytes(png_bytes(64, 48, (240, 240, 235)))
+            imported = self.files.import_paths([str(picture)], names=[self.VISION_IMAGE])
+            _check(imported, "FileBridge did not import the test image")
+            record = attachment_record(imported[0].path)
+            _check(record is not None, "the imported image is not a file")
+            cid = chats.new_chat()
+            mark = server.mark()
+            vision = self._chat_run(runs, "vision (image attachment)", lambda: runs.send(
+                cid, text="", attachment=record, settings=DirectTextSettings(), output_mode="vision"))
+            records = server.records(since=mark)
+            seen = [r for r in records if r.kind == "vision"]
+            _check(len(seen) == 1, f"{len(seen)} vision request(s) reached the model ({[r.kind for r in records]})")
+            _check(not [r for r in records if r.kind not in ("vision",)],
+                   f"the Vision run sent other requests: {[r.kind for r in records]}")
+            folder = vision.output_folder
+            _check(folder and os.path.isdir(folder), f"no chat attachment folder ({folder!r})")
+            htmls = sorted(Path(folder).rglob("response_*.html"))
+            _check(any(FAKE_OCR_TEXT in p.read_text(encoding="utf-8", errors="replace") for p in htmls),
+                   f"no response file in {folder} holds the OCR text ({[p.name for p in htmls]})")
+            texts = self._assistant_texts(chats, cid)
+            _check(any(FAKE_OCR_TEXT in t for t in texts), "the chat's response does not show the OCR text")
+
+            # 2. Generate from prompt (Image output mode): the composer text is the prompt, the PNG lands in the chat
+            gid = chats.new_chat()
+            mark = server.mark()
+            generated = self._chat_run(runs, "generate image (prompt)", lambda: runs.generate(
+                gid, prompt=self.GENERATE_PROMPT, output_mode="image", settings=DirectTextSettings()))
+            records = server.records(since=mark)
+            images = [r for r in records if r.kind == "image_generation"]
+            _check(len(images) == 1 and len(records) == 1,
+                   f"Generate sent {[r.kind for r in records]} (expected one image generation)")
+            _check(images[0].preview == self.GENERATE_PROMPT,
+                   f"the generation prompt was {images[0].preview!r}, not the composer text")
+            messages = chats.messages(gid)
+            index = len(messages) - 1
+            _check(messages and messages[-1][0] == "assistant", "Generate left no assistant response")
+            media = chats.message_media(gid, index)
+            _check(media and media[0][0] == "image" and os.path.isfile(media[0][1]),
+                   f"the response shows no generated image: {media}")
+            saved = Path(media[0][1])
+            _check(saved.read_bytes() == FAKE_PNG, f"{saved.name} is not the generated PNG")
+            out = chats.output_folder(gid)
+            _check(out and _under(_norm(str(saved)), [_norm(out)]), f"the image {saved} is outside the chat folder {out}")
+            content = chats.message_text(gid, index, "content")
+            _check(f"[GENERATED_IMAGE:{saved}]" in content, "the response's [GENERATED_IMAGE] marker does not point at it")
+            return {"vision": {"requests": len(seen), "responses": [p.name for p in htmls], "secs": round(vision.secs, 1)},
+                    "generate": {"requests": len(images), "image": saved.name, "bytes": saved.stat().st_size,
+                                 "secs": round(generated.secs, 1)}}
+        finally:
+            runs.detach()
+            chats.close()
+
+    def _chat_run(self, runs: Any, label: str, start: Callable[[], Any]) -> Any:
+        """Start a chat run (``ChatRuns.send`` / ``generate``), wait for it and its finish; the outcome."""
+        before = process_state()
+        t0 = time.monotonic()
+        run = asyncio.run(start())
+        deadline = time.monotonic() + self.job_timeout
+        while run.live and time.monotonic() < deadline:
+            time.sleep(0.05)
+        _check(not run.live, f"{label}: the chat run did not finish within {self.job_timeout:.0f} s (state {run.state})")
+        for thread in list(runs.finish_threads):
+            thread.join(60)
+        snap = self.wait(self.service, run.job_id)
+        outcome = self._outcome(label, run.job_id, snap, t0, before)
+        _check(outcome.state == "DONE", f"{label}: job ended {outcome.state}: {outcome.error}")
+        _check(run.state == "done" and run.error is None, f"{label}: chat run ended {run.state}: {run.error}")
+        outcome.output_folder = getattr(run, "output_folder", None)
+        return outcome
+
+    @staticmethod
+    def _assistant_texts(chats: Any, cid: str) -> list:
+        texts = []
+        for index, message in enumerate(chats.messages(cid)):
+            if message and message[0] == "assistant":
+                try:
+                    texts.append(str(chats.message_text(cid, index, "content") or ""))
+                except Exception:
+                    texts.append(str(message[1] if len(message) > 1 else ""))
+        return texts
+
+    # ---- scenario 8: hygiene ----------------------------------------------------------------------------------------
 
     def process_hygiene(self) -> dict:
         self.setup()
@@ -1492,6 +1761,8 @@ SCENARIOS = (
     ("e2e_glossary_edit_qa_pdf", "glossary_edit_qa_pdf"),
     ("e2e_graceful_stop_resume", "graceful_stop_resume"),
     ("e2e_force_stop_kill_resume", "force_stop_kill_resume"),
+    ("e2e_retranslate_resolve_qa", "retranslate_resolve_qa"),
+    ("e2e_vision_and_generate", "vision_and_generate"),
     ("e2e_process_hygiene", "process_hygiene"),
 )
 

@@ -7,6 +7,7 @@ and sends a single API call to generate a review/summary.
 
 import os
 import sys
+import platform
 import json
 import time
 import zipfile
@@ -1340,3 +1341,476 @@ def generate_chunked_review(
         review_output_paths=review_output_paths,
     )
     return final_text.strip()
+
+
+# ─── Review run orchestration (U7: moved from review_dialog.ReviewDialog) ──
+# ReviewDialog._on_start_review / _on_generate_all used to gather the run
+# parameters, reset the stop flags, apply the streaming toggle, route the log
+# and call generate_review / generate_chunked_review inline in the Qt dialog.
+# Those steps live here, so the desktop dialog and the mobile Review job run
+# the same code. The dialog keeps its widgets, confirmation boxes, the
+# append_log / stdout redirection bookkeeping, its queue and its poll timer.
+
+
+def review_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
+def review_output_dir_for_file(file_path, config) -> str:
+    """Return the normal per-file output directory on every supported OS."""
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
+                   config.get('output_directory')
+    if override_dir:
+        return os.path.join(os.path.abspath(os.path.expanduser(override_dir)), stem)
+    return os.path.join(review_app_dir(), stem)
+
+
+def review_paths_for(file_path, volume_paths, volume_mode, config) -> List[str]:
+    """Return every path that should contain the active review."""
+    if volume_mode:
+        paths = [
+            os.path.join(
+                review_output_dir_for_file(path, config),
+                "review",
+                "combined_review",
+                "review.md",
+            )
+            for path in volume_paths
+        ]
+    else:
+        paths = [
+            os.path.join(
+                review_output_dir_for_file(file_path, config),
+                "review",
+                "review.md",
+            )
+        ]
+    return list(dict.fromkeys(paths))
+
+
+# ─── 🗑️ Delete / ↩️ Restore (ReviewDialog._on_delete / _on_restore, U7 integration) ─────────
+# The file moves of the two buttons; the dialog keeps its button feedback, the overwrite
+# question box and the UI reload, and Glossarion Mobile's Review screen calls the same helpers.
+
+
+def review_backups_dir(review_path):
+    """``ReviewDialog._get_backups_dir``: the ``backups`` folder next to the primary review."""
+    if not review_path:
+        return None
+    return os.path.join(os.path.dirname(review_path), "backups")
+
+
+def review_backups(backups_dir) -> List[str]:
+    """The ``.md`` backups in ``backups_dir``, newest first (the Restore order)."""
+    return sorted(
+        [f for f in os.listdir(backups_dir) if f.endswith('.md')],
+        reverse=True
+    )
+
+
+def move_review_to_backups(review_paths, timestamp=None) -> str:
+    """🗑️ Delete: move every review file to ``<its folder>/backups/review_<timestamp>.md``.
+
+    ``review_paths`` are the existing review files; returns the backup file name.
+    """
+    import shutil
+    from datetime import datetime
+
+    # Timestamped backup filename
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_name = f"review_{timestamp}.md"
+    for review_path in review_paths:
+        review_dir = os.path.dirname(review_path)
+        backups_dir = os.path.join(review_dir, "backups")
+        os.makedirs(backups_dir, exist_ok=True)
+        backup_path = os.path.join(backups_dir, backup_name)
+        shutil.move(review_path, backup_path)
+    return backup_name
+
+
+def review_restore_question(backup_name) -> str:
+    """↩️ Restore's warning when a current review would be overwritten."""
+    return (
+        "Your current review will be overwritten.\n\n"
+        "Restoring will replace it with the previous backup:\n"
+        f"{backup_name}\n\n"
+        "Are you sure you want to restore?"
+    )
+
+
+def copy_review_backup(latest, review_paths) -> str:
+    """↩️ Restore: copy the backup ``latest`` over every review path; returns the restored text."""
+    import shutil
+
+    for review_path in review_paths:
+        os.makedirs(os.path.dirname(review_path), exist_ok=True)
+        shutil.copy2(latest, review_path)
+
+    # Load restored content into UI
+    with open(review_paths[0], 'r', encoding='utf-8') as f:
+        content = f.read()
+    return content
+
+
+def latest_review_backup(review_paths):
+    """``(backups_dir, name)`` of the newest backup of the primary review, or None."""
+    backups_dir = review_backups_dir(review_paths[0] if review_paths else None)
+    if not backups_dir or not os.path.isdir(backups_dir):
+        return None
+    backups = review_backups(backups_dir)
+    if not backups:
+        return None
+    return backups_dir, backups[0]
+
+
+def restore_review_backup(review_paths):
+    """↩️ Restore without the dialog (mobile; it asks ``review_restore_question`` first when a review
+    exists): the newest backup over every review path. Returns the text, or False without a backup."""
+    found = latest_review_backup(review_paths)
+    if not found:
+        return False
+    backups_dir, name = found
+    return copy_review_backup(os.path.join(backups_dir, name), review_paths)
+
+
+class ReviewRunParams:
+    """The parameters one review run freezes from the GUI state (both Start paths)."""
+
+    __slots__ = ("api_key", "model", "endpoint", "temperature", "config", "token_limit",
+                 "system_prompt", "output_lang", "spoiler_mode", "final_review_prompt")
+
+    def __init__(self, **values):
+        for name in self.__slots__:
+            setattr(self, name, values[name])
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name in self.__slots__}
+
+
+def review_run_params(gui, prompt: str, spoiler_mode: bool,
+                      final_review_prompt: str = DEFAULT_FINAL_REVIEW_PROMPT) -> ReviewRunParams:
+    """Gather the run parameters from the GUI (``prompt`` is the prompt editor's text)."""
+    # Gather parameters from the GUI
+    api_key = gui.api_key_entry.text().strip() if hasattr(gui, 'api_key_entry') else ''
+    model = getattr(gui, 'model_var', os.getenv('MODEL', 'gemini-2.0-flash'))
+    endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
+    temperature = float(gui.config.get('translation_temperature', 0.3))
+    config = dict(gui.config)
+    # The non-modal key manager and settings controls update live GUI state.
+    # Freeze that effective state for this run instead of relying on a
+    # potentially older config snapshot.
+    config['use_multi_api_keys'] = bool(
+        gui.config.get('use_multi_api_keys', False)
+    )
+
+    # Get input token limit
+    try:
+        token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
+    except (ValueError, AttributeError):
+        token_limit = 200000
+
+    system_prompt = prompt.strip()
+    # Replace {target_lang} placeholder with the selected target language
+    output_lang = getattr(gui, 'lang_var', 'English')
+    system_prompt = system_prompt.replace('{target_lang}', output_lang)
+    # Replace {target_lang} in final prompt too
+    final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
+    return ReviewRunParams(
+        api_key=api_key, model=model, endpoint=endpoint, temperature=temperature, config=config,
+        token_limit=token_limit, system_prompt=system_prompt, output_lang=output_lang,
+        spoiler_mode=spoiler_mode, final_review_prompt=final_review_prompt,
+    )
+
+
+def single_review_batch_size(gui, chunk_mode: bool) -> int:
+    """Parallel chunk workers of one review (Start Review): batch size in chunk mode with batch translation on."""
+    # Compute batch size for parallel chunk processing
+    chunk_batch_size = 1
+    if chunk_mode:
+        batch_on = bool(getattr(gui, 'batch_translation_var', False))
+        if batch_on:
+            try:
+                chunk_batch_size = int(getattr(gui, 'batch_size_var', 1))
+                if chunk_batch_size < 1:
+                    chunk_batch_size = 1
+            except (ValueError, TypeError):
+                chunk_batch_size = 1
+    return chunk_batch_size
+
+
+def review_all_batch_size(gui) -> int:
+    """Reviews run in parallel by Generate All (and each one's chunk workers): batch size when batch translation is on."""
+    # Respect batch mode toggle for parallelism
+    # batch_translation_var is the on/off toggle; batch_size_var is the worker count
+    batch_on = bool(getattr(gui, 'batch_translation_var', False))
+    if batch_on:
+        try:
+            batch_size = int(getattr(gui, 'batch_size_var', 1))
+            if batch_size < 1:
+                batch_size = 1
+        except (ValueError, TypeError):
+            batch_size = 1
+    else:
+        batch_size = 1  # Sequential when batch mode is OFF
+    return batch_size
+
+
+def reset_review_stop_flags():
+    """Clear any lingering cancellation from a previous force stop."""
+    try:
+        from unified_api_client import UnifiedClient
+        UnifiedClient.set_global_cancellation(False)
+    except Exception:
+        pass
+    try:
+        import unified_api_client
+        unified_api_client.global_stop_flag = False
+    except Exception:
+        pass
+    try:
+        import extract_glossary_from_epub
+        extract_glossary_from_epub.set_stop_flag(False)
+    except Exception:
+        pass
+    try:
+        import TransateKRtoEN
+        TransateKRtoEN.set_stop_flag(False)
+    except Exception:
+        pass
+
+
+def apply_review_streaming_env(gui) -> bool:
+    """Respect the streaming toggle from settings (``ENABLE_STREAMING`` for this run)."""
+    # ── Respect the streaming toggle from settings ──
+    stream_on = bool(getattr(
+        gui,
+        'enable_streaming_var',
+        gui.config.get('enable_streaming', False),
+    ))
+    os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+    return stream_on
+
+
+def review_log_fn(gui) -> Callable:
+    """The run's log function: ``[Review]``-prefixed lines through ``gui.append_log`` (print on failure)."""
+    def _log(msg):
+        # Send through the hijacked append_log (reaches both main GUI and review dialog)
+        # Prefix each line with [Review], but skip separator-only and blank lines
+        lines = str(msg).split('\n')
+        prefixed = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or all(c in '─═' for c in stripped):
+                prefixed.append(line)
+            else:
+                prefixed.append(f"[Review] {line}")
+        full = '\n'.join(prefixed)
+        try:
+            gui.append_log(full)
+        except Exception:
+            print(full)
+    return _log
+
+
+class ReviewStdoutWriter:
+    """``sys.stdout`` while a review runs: non-blank print() output goes to the run's queue as ('log', text)."""
+
+    def __init__(self, review_queue, active_flag):
+        self._review_queue_ref = review_queue
+        self._active_flag = active_flag  # reference to the owner of ``_review_log_active``
+
+    def write(self, text):
+        if text and text.strip() and getattr(self._active_flag, '_review_log_active', False):
+            self._review_queue_ref.put(('log', text.strip()))
+
+    def flush(self):
+        pass
+
+
+def run_review(params: ReviewRunParams, review_input, output_dir, *, chunk_mode: bool, wrap_chunks: bool,
+               batch_size: int, log_fn: Callable, stop_check_fn: Callable, review_output_paths=None):
+    """One review: ``generate_chunked_review`` in chunk mode, else ``generate_review``."""
+    if chunk_mode:
+        result = generate_chunked_review(
+            epub_path=review_input,
+            output_dir=output_dir,
+            api_key=params.api_key,
+            model=params.model,
+            endpoint=params.endpoint,
+            system_prompt=params.system_prompt,
+            final_review_prompt=params.final_review_prompt,
+            input_token_limit=params.token_limit,
+            spoiler_mode=params.spoiler_mode,
+            wrap_chunks=wrap_chunks,
+            temperature=params.temperature,
+            config=params.config,
+            batch_size=batch_size,
+            log_fn=log_fn,
+            stop_check_fn=stop_check_fn,
+            review_output_paths=review_output_paths,
+        )
+    else:
+        result = generate_review(
+            epub_path=review_input,
+            output_dir=output_dir,
+            api_key=params.api_key,
+            model=params.model,
+            endpoint=params.endpoint,
+            system_prompt=params.system_prompt,
+            input_token_limit=params.token_limit,
+            spoiler_mode=params.spoiler_mode,
+            temperature=params.temperature,
+            config=params.config,
+            log_fn=log_fn,
+            stop_check_fn=stop_check_fn,
+            review_output_paths=review_output_paths,
+        )
+    return result
+
+
+def review_all_output_dir(epub_path, config) -> str:
+    """Output folder of one input in Generate All (``OUTPUT_DIRECTORY`` / ``output_directory``, else the app folder)."""
+    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+    override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
+    if override_dir:
+        return os.path.join(os.path.abspath(override_dir), epub_base)
+    return os.path.join(review_app_dir(), epub_base)
+
+
+def run_all_reviews(params: ReviewRunParams, all_paths, *, chunk_mode: bool, wrap_chunks: bool, batch_size: int,
+                    put: Callable, stop_check: Callable):
+    """Generate All: one review per input, sequential or ``batch_size`` at a time.
+
+    ``put((kind, data))`` receives what the dialog's queue carried: ``('log', text)``,
+    ``('nav', index)`` (the input being reviewed) and finally ``('all_done', None)``.
+    ``stop_check()`` is the Stop flag. Returns ``(completed, errors)``.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    all_paths = list(all_paths)
+    total = len(all_paths)
+    config = params.config
+
+    def _generate_single(idx, epub_path):
+        basename = os.path.basename(epub_path)
+        put(('log', f"\n{'═'*50}\n📖 [{idx+1}/{total}] {basename}\n{'═'*50}"))
+        put(('nav', idx))  # Navigate dropdown to this EPUB
+
+        if stop_check():
+            put(('log', f"⏹️ Skipped (stopped): {basename}"))
+            return idx, None, None
+
+        out_dir = review_all_output_dir(epub_path, config)
+        try:
+            _log_single = lambda msg, _bn=basename: put(('log', f"[{_bn}] {msg}"))
+            # (Generate All never passes review_output_paths: one review per input)
+            if chunk_mode:
+                result = generate_chunked_review(
+                    epub_path=epub_path,
+                    output_dir=out_dir,
+                    api_key=params.api_key,
+                    model=params.model,
+                    endpoint=params.endpoint,
+                    system_prompt=params.system_prompt,
+                    final_review_prompt=params.final_review_prompt,
+                    input_token_limit=params.token_limit,
+                    spoiler_mode=params.spoiler_mode,
+                    wrap_chunks=wrap_chunks,
+                    temperature=params.temperature,
+                    config=params.config,
+                    batch_size=batch_size,
+                    log_fn=_log_single,
+                    stop_check_fn=stop_check,
+                )
+            else:
+                result = generate_review(
+                    epub_path=epub_path,
+                    output_dir=out_dir,
+                    api_key=params.api_key,
+                    model=params.model,
+                    endpoint=params.endpoint,
+                    system_prompt=params.system_prompt,
+                    input_token_limit=params.token_limit,
+                    spoiler_mode=params.spoiler_mode,
+                    temperature=params.temperature,
+                    config=params.config,
+                    log_fn=_log_single,
+                    stop_check_fn=stop_check,
+                )
+            put(('log', f"✅ Done: {basename}"))
+            return idx, result, None
+        except Exception as e:
+            put(('log', f"❌ Error [{basename}]: {e}"))
+            return idx, None, str(e)
+
+    workers = min(batch_size, total)
+    completed = 0
+    errors = 0
+
+    if workers <= 1:
+        # Sequential
+        for i, path in enumerate(all_paths):
+            if stop_check():
+                break
+            idx, result, err = _generate_single(i, path)
+            completed += 1
+            if err:
+                errors += 1
+    else:
+        # Parallel
+        put(('log', f"🔄 Running {workers} reviews in parallel...\n"))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_generate_single, i, p): i for i, p in enumerate(all_paths)}
+            for future in as_completed(futures):
+                if stop_check():
+                    break
+                try:
+                    idx, result, err = future.result()
+                    completed += 1
+                    if err:
+                        errors += 1
+                except Exception as e:
+                    completed += 1
+                    errors += 1
+                    put(('log', f"❌ Future error: {e}"))
+
+    put(('log', f"\n{'═'*50}\n📊 Finished: {completed}/{total} reviews ({errors} errors)\n{'═'*50}"))
+    put(('all_done', None))
+    return completed, errors
+
+
+def run_review_session(gui, *, prompt: str, spoiler_mode: bool = False, chunk_mode: bool = False,
+                       wrap_chunks: bool = True, final_review_prompt: str = DEFAULT_FINAL_REVIEW_PROMPT,
+                       file_path=None, volume_paths=None, volume_mode: bool = False,
+                       stop_check_fn: Callable = None, log_fn: Callable = None):
+    """Start Review without Qt (Glossarion Mobile): the dialog's steps in its order.
+
+    ``gui`` is the desktop-shaped owner (``headless_owner.HeadlessOwner`` on mobile); the
+    single input is ``file_path``, Volume Mode reviews ``volume_paths`` as one book. The log
+    goes through ``review_log_fn(gui)`` unless ``log_fn`` is given. Returns the review text
+    (None when stopped or empty), like the dialog's 'done' message.
+    """
+    params = review_run_params(gui, prompt, spoiler_mode, final_review_prompt)
+    review_input = list(volume_paths or []) if volume_mode else file_path
+    config = getattr(gui, 'config', {})
+    primary = (list(volume_paths or []) or [file_path])[0] if volume_mode else file_path
+    output_dir = review_output_dir_for_file(primary, config)
+    review_output_paths = review_paths_for(file_path, list(volume_paths or []), True, config) if volume_mode else None
+    reset_review_stop_flags()
+    apply_review_streaming_env(gui)
+    return run_review(
+        params, review_input, output_dir,
+        chunk_mode=chunk_mode,
+        wrap_chunks=wrap_chunks,
+        batch_size=single_review_batch_size(gui, chunk_mode),
+        log_fn=log_fn or review_log_fn(gui),
+        stop_check_fn=stop_check_fn or (lambda: False),
+        review_output_paths=review_output_paths,
+    )

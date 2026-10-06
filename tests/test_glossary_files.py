@@ -455,9 +455,16 @@ def _changed_spans(legacy, current):
                  difflib.SequenceMatcher(None, legacy, current, autojunk=False).get_opcodes() if tag != "equal")
 
 
+#: The U6 commit: the spans above are what U6 changed in translator_gui.py. Later milestones
+#: (U7: the image / RPG Maker runners moved to image_job / rpgmaker_job, the Direct Text rules
+#: and the GCP project rule to direct_text_store / authgem_auth) pin their own translator_gui
+#: edits (tests/test_image_job.py::test_translator_gui_changed_only_in_the_u7_spans).
+U6_COMMIT_SHA = "41814faa95e273e956870bd3aac5a2c6fb7d66b1"
+
+
 def test_translator_gui_changed_only_in_rewired_spans():
     legacy = git_text(TG).split("\n")
-    current = current_text("translator_gui.py").split("\n")
+    current = git_text(TG, sha=U6_COMMIT_SHA).split("\n")
     assert _changed_spans(legacy, current) == TG_REWIRE_SPANS
 
 

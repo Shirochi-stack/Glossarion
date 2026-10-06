@@ -64,7 +64,7 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
     "OAuthBridge",
@@ -834,6 +834,43 @@ class OAuthBridge:
         billed, unbilled, unknown = result
         return ([(str(pid), "billed") for pid in billed] + [(str(pid), "unknown") for pid in unknown]
                 + [(str(pid), "unbilled") for pid in unbilled])
+
+    @staticmethod
+    def _split_projects(projects: Sequence[Any]) -> tuple:
+        """``[(project_id, status)]`` -> the shared ``(billed, unbilled, unknown)`` lists."""
+        billed: list = []
+        unbilled: list = []
+        unknown: list = []
+        for pid, status in projects or ():
+            target = billed if status == "billed" else unbilled if status == "unbilled" else unknown
+            target.append(str(pid))
+        return billed, unbilled, unknown
+
+    def gemini_project_items(self, projects: Sequence[Any]) -> Optional[list]:
+        """``[(label, project_id)]`` of the picker in the desktop dropdown order
+        (``authgem_auth.authgem_project_items``: ✅ billed, ❔ unknown, ⚠️ … (no billing)), or None
+        when this build's authgem_auth has no shared item builder."""
+        items = getattr(self.module("authgem"), "authgem_project_items", None)
+        if not callable(items):
+            return None
+        billed, unbilled, unknown = self._split_projects(projects)
+        return [(str(label), str(pid)) for label, pid in items(billed, unbilled, unknown)]
+
+    def gemini_project_choice(self, projects: Sequence[Any], saved: str = "") -> Optional[str]:
+        """The project the picker selects after listing (desktop ``_authgem_projects_loaded``, shared
+        as ``authgem_auth.choose_authgem_project_index``): the saved one unless it is known unbilled,
+        else the first billed, else the first unknown. None: keep the current selection."""
+        choose = getattr(self.module("authgem"), "choose_authgem_project_index", None)
+        if not callable(choose):
+            return None
+        billed, unbilled, unknown = self._split_projects(projects)
+        index = choose(str(saved or ""), billed, unbilled, unknown)
+        ordered = billed + unknown + unbilled  # authgem_project_items order
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return None
+        return ordered[index] if 0 <= index < len(ordered) else None
 
     def set_gemini_project(self, project_id: str, account_id: int = 0) -> None:
         """Desktop ``_authgem_project_changed`` minus the env write: the job's HeadlessOwner sets

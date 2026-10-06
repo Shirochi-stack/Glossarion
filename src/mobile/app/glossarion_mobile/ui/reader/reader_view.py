@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -135,6 +136,40 @@ class LiveRun:
     active: bool = True
     unsub_log: Optional[Callable[[], None]] = None
     unsub_transition: Optional[Callable[[], None]] = None
+    flush_log: Optional[Callable[[], None]] = None  # whole-message listener: feed what is queued now
+
+
+class _LiveMessages:
+    """The live panel's whole-message feed (``JobService.add_log_listener``, desktop parity).
+
+    The job thread queues each message (blank ones included, so plain-text paragraph breaks
+    survive) and posts one flush to the UI loop at a time; the flush feeds the queued
+    messages to the panel's ``LiveLineClassifier`` in order."""
+
+    def __init__(self, panel: Any, dispatcher: Any) -> None:
+        self.panel = panel
+        self.dispatcher = dispatcher
+        self.pending: list = []
+        self.posted = False
+        self.lock = threading.Lock()
+
+    def on_message(self, message: str) -> None:
+        with self.lock:
+            self.pending.append(message)
+            if self.posted:
+                return
+            self.posted = True
+        dispatcher = self.dispatcher
+        if dispatcher is not None and getattr(dispatcher, "bound", False) and dispatcher.post(self.flush):
+            return
+        self.flush()  # host tests without a bound dispatcher
+
+    def flush(self) -> None:
+        with self.lock:
+            self.posted = False
+            batch, self.pending = self.pending, []
+        if batch:
+            self.panel.add_lines(batch)
 
 
 class ReaderScreen(Screen):
@@ -1699,6 +1734,16 @@ class ReaderScreen(Screen):
             return
         jobs = self.deps.jobs
         dispatcher = self.deps.dispatcher
+        add_listener = getattr(jobs, "add_log_listener", None) if jobs is not None else None
+        if callable(add_listener):
+            # Whole messages (desktop add_log_listener): the job's LogBuffer drops blank lines,
+            # which are the paragraph breaks of a plain-text stream.
+            feed = _LiveMessages(live.panel, dispatcher)
+            remove = add_listener(live.job_id, feed.on_message)
+            if remove is not None:
+                live.unsub_log = remove
+                live.flush_log = feed.flush
+                return
         buffer = jobs.log_buffer(live.job_id) if jobs is not None and hasattr(jobs, "log_buffer") else None
         if buffer is None:
             return
@@ -1759,6 +1804,8 @@ class ReaderScreen(Screen):
             # The final drain (desktop _finish_live_translation): the dispatcher delivers the
             # last lines on its next pump tick (120 ms), after the terminal transition.
             await asyncio.sleep(LIVE_FINAL_DRAIN)
+            if live.flush_log is not None:
+                live.flush_log()  # whole-message feed: whatever is still queued
         self._detach_live_listeners(live)
         session = self.session
         folder = self._live_output_folder(live, snap)

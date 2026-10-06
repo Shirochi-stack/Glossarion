@@ -54,6 +54,14 @@ KIND_MODULES = {
     "rename_outputs": "compile",
     "translate_headers": "headers",
     "metadata": "metadata",
+    # U7 (Book page Retranslate / Resolve QA, Tools › Async batch / Review / RPG Maker, chat media modes)
+    "retranslate": "retranslate",
+    "resolve_qa": "resolve_qa",
+    "async_batch": "async_batch",
+    "review": "review",
+    "rpgmaker": "rpgmaker",
+    "generate_media": "generate_media",
+    "translate_image": "image",
 }
 
 

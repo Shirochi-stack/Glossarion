@@ -120,7 +120,8 @@ HOOK_NAMES = frozenset({
     "_hook_context_mode_layout",
     # U3 pipelines (translation_pipeline.PipelineHooksMixin): message box hook, and GUI-free
     # defaults of the TranslatorGUI GUI methods the moved pipelines call (desktop keeps its
-    # own, which win), incl. the U7 placeholders (image / RPG Maker / generative runners)
+    # own, which win). (U7: the image / RPG Maker / generative placeholders are gone: the real
+    # runners moved into image_job / rpgmaker_job, which TranslationPipelineMixin inherits.)
     "_ui_message",
     "_lazy_load_modules",
     "_attach_gui_logging_handlers",
@@ -130,9 +131,6 @@ HOOK_NAMES = frozenset({
     # U3 fix pass: the set-up's Library raw-input registry write (desktop: epub_library;
     # U5: HeadlessOwner records through library_core, the mixin default stays a no-op)
     "_record_library_raw_inputs",
-    "_process_image_file",
-    "_process_rpgmaker_game",
-    "_run_generative_prompt_mode",
 })
 
 #: Every flat GUI-free module of the shared core (tier I: import hygiene + Python 3.10 parse).
@@ -189,6 +187,22 @@ SHARED_MODULES = (
     "glossary_files",
     "parallel_epub_core",
     "qa_scan_runtime",
+    # U7 (image / RPG Maker): the image / generative-only and RPG Maker runners moved out of
+    # TranslatorGUI (TranslationPipelineMixin's bases; tests/test_image_job.py and
+    # tests/test_rpgmaker_job.py pin the moves)
+    "image_job",
+    "rpgmaker_job",
+    # U7 (retranslate / SDLXLIFF): the SDLXLIFF reviewer + sidecar auto-generation core moved
+    # out of Retranslation_GUI (tests/test_sdlxliff_review_core.py pins the move; Retranslate
+    # Selected's plan/apply went into the existing progress_actions)
+    "sdlxliff_review_core",
+    # U7 (async batch / tools): the async batch core (async_api_processor + its dialog workflow),
+    # the output tools core (other_settings) and the Review run orchestration moved into the
+    # existing review_generator (tests/test_async_batch_core.py, test_u7_tool_cores.py and
+    # test_review_run_core.py pin the moves)
+    "async_batch_core",
+    "output_tools_core",
+    "review_generator",
 )
 
 _RUN_ENV = ("run_env", "RunEnvMixin")

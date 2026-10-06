@@ -92,6 +92,41 @@ GUI_REEXPORTS = MOVED_HELPERS + ("find_latest_qa_report", "DEFAULT_AI_TRUNCATION
 RUNTIME_NEW_NAMES = {"MOBILE_QA_MAX_WORKERS", "mobile_qa_forcing_active", "mobile_qa_max_workers",
                      "mobile_qa_env_overrides", "find_latest_qa_report", "DEFAULT_AI_TRUNCATION_PROMPT",
                      "DEFAULT_CUSTOM_MODE_SETTINGS"}
+#: U7 additions (QA_Scanner_GUI's bulk loop / loader / reset and translator_gui's QA stop flags;
+#: pinned against the frozen code by tests/test_u7_tool_cores.py)
+U7_BASE_SHA = "41814faa95e273e956870bd3aac5a2c6fb7d66b1"
+RUNTIME_U7_NAMES = {"load_current_qa_settings", "reset_qa_cancel_flags", "next_qa_stop_phase",
+                    "apply_qa_graceful_stop_flags", "apply_qa_force_stop_flags", "clear_qa_stop_flags",
+                    "run_bulk_qa_scan"}
+
+
+def _mask_u7_run_qa_scan(method):
+    """``run_qa_scan`` with the three U7-edited spots blanked: the cancel-flag reset (try block before,
+    import + call after), the ``_load_current_qa_settings`` body and the ``run_scan`` worker body."""
+    import copy
+
+    method = copy.deepcopy(method)
+    for node in ast.walk(method):
+        if isinstance(node, ast.FunctionDef) and node.name in ("_load_current_qa_settings", "run_scan"):
+            node.body = [ast.Pass()]
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            kept = []
+            for stmt in stmts:
+                src = ast.unparse(stmt) if isinstance(stmt, ast.stmt) else ""
+                if isinstance(stmt, ast.Try) and any(
+                        ast.unparse(s) == "os.environ['TRANSLATION_CANCELLED'] = '0'" for s in stmt.body):
+                    kept.append(ast.Pass())
+                    continue
+                if src in ("from qa_scan_runtime import reset_qa_cancel_flags", "reset_qa_cancel_flags()"):
+                    if src.startswith("from"):
+                        kept.append(ast.Pass())
+                    continue
+                kept.append(stmt)
+            setattr(node, field, kept)
+    return ast.dump(method)
 MOBILE_ENV_KEYS = ("GLOSSARION_MOBILE", "GLOSSARION_NO_PROCESSES", "FLET_PLATFORM")
 
 
@@ -268,9 +303,14 @@ def test_gui_changed_only_in_the_documented_places(legacy_gui_tree, new_gui_tree
                     and isinstance(n.targets[0], ast.Name) and n.targets[0].id == target)
 
     old_run, new_run = _member(old_cls, "run_qa_scan"), _member(new_cls, "run_qa_scan")
+    # U6 edit, checked on the U7 base (U7 moved three more spots of this method; see below)
+    u7_base_cls = _class(ast.parse(git_text("src/QA_Scanner_GUI.py", U7_BASE_SHA)), "QAScannerMixin")
+    u7_base_run = _member(u7_base_cls, "run_qa_scan")
     expected = _replace_stmt(ast.unparse(old_run), assign(old_run, "custom_settings"),
                              "custom_settings = dict(DEFAULT_CUSTOM_MODE_SETTINGS)")
-    assert ast.unparse(new_run) == expected
+    assert ast.unparse(u7_base_run) == expected
+    # U7: only the documented spots changed since the U7 base
+    assert _mask_u7_run_qa_scan(new_run) == _mask_u7_run_qa_scan(u7_base_run)
     old_set, new_set = _member(old_cls, "show_qa_scanner_settings"), _member(new_cls, "show_qa_scanner_settings")
     expected = _replace_stmt(ast.unparse(old_set), assign(old_set, "_ai_trunc_default_prompt"),
                              "_ai_trunc_default_prompt = DEFAULT_AI_TRUNCATION_PROMPT")
@@ -284,7 +324,7 @@ def test_runtime_changed_only_in_the_documented_places(legacy_runtime):
     legacy_tree = ast.parse(git_text("src/qa_scan_runtime.py"))
     new_tree = ast.parse(src_text("qa_scan_runtime.py"))
     legacy, new = _top_defs(legacy_tree), _top_defs(new_tree)
-    assert set(new) - set(legacy) == RUNTIME_NEW_NAMES | set(MOVED_HELPERS)
+    assert set(new) - set(legacy) == RUNTIME_NEW_NAMES | set(MOVED_HELPERS) | RUNTIME_U7_NAMES
     assert not set(legacy) - set(new)
     edited = {"apply_qa_scan_env_from_settings", "prepare_qa_scan_settings"}
     for name, node in legacy.items():

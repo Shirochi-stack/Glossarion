@@ -20,6 +20,11 @@ shared code the dialog inherits (``direct_text_store`` / ``direct_text_stream``)
   ``direct_text_glossary_approval`` question freezes the cards into the chat
   (``ChatStore.commit_request_phase`` = ``_commit_active_request_phase``) and shows the
   approval card; a terminal state schedules ``finish()``.
+* ``generate()`` (U7, UI_SPEC §2.6 "Generate from prompt (no input)"): the same run for the
+  desktop generative-only path - the composer text is recorded as ``["user", prompt]`` and a
+  ``generate_media`` job runs the shared ``_run_generative_prompt_mode`` with it as the prompt;
+  the generated image / video / audio lands in the run root and ``finish_run`` promotes it into
+  the chat folder like any Direct Text media response.
 * ``finish()`` (worker thread): ``ChatStore.finish_run`` (the dialog's
   ``_finish_translation``: final drain, translated file, run tree persisted into the
   chat folder, cards + "Extraction report" / "Attachment actions" committed, history
@@ -30,6 +35,12 @@ shared code the dialog inherits (``direct_text_store`` / ``direct_text_stream``)
 Runs are keyed by chat id; a resumed job (same params after a kill) is re-attached
 from its ``params["run"]``. Listeners (``subscribe``) are told the chat id that changed;
 the chat feature marshals them to the UI loop.
+
+A job belongs to the user turn at its submitted ``params["user_index"]`` until a message
+before it is deleted: Delete message records the turn of every job the chat knows
+(``chat_job_turns``) by fingerprint under the run's key (``turn_key``: its run root, shared
+by Resume / Retry of the same run), and ``turn_index`` / ``persisted_job`` / ``resubmit``
+resolve turns through the recorded ``ChatStoreAdapter.job_turns``.
 """
 
 from __future__ import annotations
@@ -54,6 +65,8 @@ from glossarion_mobile.ui.chat.job_binding import (
 )
 from glossarion_mobile.ui.chat.run_request import (
     DIRECT_TEXT_JOB_KIND,
+    GENERATE_MEDIA_JOB_KIND,
+    GENERATIVE_SENTINEL,
     DirectTextRun,
     job_params,
     job_title,
@@ -62,7 +75,7 @@ from glossarion_mobile.ui.chat.run_request import (
 )
 from glossarion_mobile.ui.chat.stream_bridge import RunStream
 
-__all__ = ["ChatRun", "ChatRuns", "STATUS"]
+__all__ = ["CHAT_JOB_KINDS", "ChatRun", "ChatRuns", "STATUS", "turn_key"]
 
 log = logging.getLogger("glossarion.chat.runs")
 
@@ -83,6 +96,8 @@ STATUS = {
 }
 
 _GLOSSARY_QUESTION_KINDS = ("glossary_approval", "direct_text_glossary_approval")
+#: JobService kinds a chat run can be (Direct Text send, generative-only run).
+CHAT_JOB_KINDS = (DIRECT_TEXT_JOB_KIND, GENERATE_MEDIA_JOB_KIND)
 
 
 def is_glossary_question(kind: Any) -> bool:
@@ -94,6 +109,16 @@ def is_glossary_question(kind: Any) -> bool:
 def _now_iso() -> str:
     """Desktop ``_direct_response_timestamp`` format (timezone-aware, seconds)."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def turn_key(params: Any, job_id: Any = None) -> Optional[str]:
+    """The key a chat job's turn is recorded under: its run root (``params["run"]["temp_root"]``,
+    the same for every Resume / Retry of that run), else its job id."""
+    run = params.get("run") if isinstance(params, Mapping) else None
+    root = str(run.get("temp_root") or "") if isinstance(run, Mapping) else ""
+    if root:
+        return "run:" + root
+    return f"job:{job_id}" if job_id is not None else None
 
 
 def _snapshot_time(snapshot: Any) -> float:
@@ -125,6 +150,7 @@ class ChatRun:
     params: dict = field(default_factory=dict)  # the JobSpec params (Resume / Retry failed resubmit them)
     title: str = ""
     started: float = field(default_factory=time.time)
+    kind: str = DIRECT_TEXT_JOB_KIND  # the JobSpec kind (Resume resubmits the same kind)
 
     @property
     def live(self) -> bool:
@@ -300,6 +326,76 @@ class ChatRuns:
         self._emit(cid)
         return chat_run
 
+    async def generate(
+        self,
+        cid: Any,
+        *,
+        prompt: str,
+        output_mode: str,
+        settings: DirectTextSettings,
+        overrides: Optional[Mapping[str, Any]] = None,
+    ) -> ChatRun:
+        """"Generate from prompt (no input)" (UI_SPEC §2.6): record ``["user", prompt]`` and submit a
+        ``generate_media`` job (the desktop generative-only run, the composer text as the prompt)."""
+        cid = str(cid)
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise ValueError("Type a prompt in the composer first")
+        user_index = self.store.record_user_turn(cid, user_turn(prompt, None, settings.attachment_prompt_role), prompt)
+        self._emit(cid)
+        try:
+            run = await self._io(
+                lambda: prepare_direct_text_run(text=prompt, attachment=None, output_mode=output_mode,
+                                                attachment_prompt_role=settings.attachment_prompt_role,
+                                                temp_dir=self.temp_dir)
+            )
+        except Exception as exc:
+            self._could_not_start(cid, exc)
+            raise
+        chat_run = ChatRun(cid=cid, run=run, stream=RunStream(auto_scroll_disabled=settings.disable_auto_scroll),
+                           user_index=int(user_index), kind=GENERATE_MEDIA_JOB_KIND)
+        chat_run.stream.provider = self._stream_provider(chat_run)
+        with self._lock:
+            self.runs[cid] = chat_run
+            self.status.pop(cid, None)
+        self.store.set_running(cid, True)
+        await self._io(self.store.flush)
+        params = job_params(chat_id=self._chat_id_value(cid), user_index=user_index, run=run, settings=settings,
+                            overrides=overrides)
+        params["options"]["selected_files"] = [GENERATIVE_SENTINEL]
+        params["options"]["force_no_glossary"] = True
+        params["prompt"] = prompt
+        params["request_number"] = self.store.request_count(cid) + 1
+        model = (params.get("config_overrides") or {}).get("model") or self.model_name()
+        if model:
+            params["model"] = str(model)
+        title = str((self.store.session(cid) or {}).get("title") or "Chat")
+        try:
+            job_id = await self.jobs.submit(GENERATE_MEDIA_JOB_KIND, title, (), params,
+                                            {"type": "chat", "cid": cid, "label": f"Chat · {title}"})
+        except Exception as exc:
+            with self._lock:
+                chat_run.finished = True
+            self.store.set_running(cid, False)
+            self._could_not_start(cid, exc)
+            raise
+        with self._lock:
+            chat_run.job_id = job_id
+            chat_run.params = dict(params)
+            chat_run.title = title
+            if chat_run.state == "preparing":
+                snapshot = self.jobs.snapshot()
+                same = snapshot is not None and getattr(snapshot, "id", None) == job_id
+                chat_run.state = "running" if same and state_name(snapshot) in RUNNING_STATES else "queued"
+        self._emit(cid)
+        return chat_run
+
+    def _store_for(self, cid: Any) -> Any:
+        """The shared ChatStore that owns chat ``cid`` (a scratch chat has its own)."""
+        binding_for = getattr(self.store, "binding_for", None)
+        binding = binding_for(cid) if callable(binding_for) else getattr(self.store, "binding", None)
+        return getattr(binding, "store", None)
+
     def _stream_provider(self, chat_run: ChatRun) -> Callable[[], Any]:
         """The job's ``direct_text_stream.DirectTextStream`` (JobService feeds it every raw line)."""
         return lambda: self.jobs.request_stream(chat_run.job_id)
@@ -330,7 +426,7 @@ class ChatRuns:
     # ---- job events -------------------------------------------------------------------------
 
     def _run_for_snapshot(self, snapshot: Any) -> Optional[ChatRun]:
-        if snapshot is None or job_kind(snapshot) not in ("", DIRECT_TEXT_JOB_KIND):
+        if snapshot is None or job_kind(snapshot) not in ("",) + CHAT_JOB_KINDS:
             return None
         job_id = getattr(snapshot, "id", None)
         cid = chat_id_of(snapshot)
@@ -351,14 +447,16 @@ class ChatRuns:
                 return None
             # A resumed / recovered job: re-attach a stream to it.
             resumed = DirectTextRun.from_dict(run_dict)
+            turn = self._turn_of(cid, params, job_id)
             chat_run = ChatRun(
                 cid=cid,
                 run=resumed,
                 stream=RunStream(),
-                user_index=int(params.get("user_index") or 0),
+                user_index=-1 if turn is None else turn,  # -1: its turn was deleted (no card)
                 job_id=job_id,
                 params=dict(params),
                 title=str(getattr(spec, "title", "") or ""),
+                kind=job_kind(snapshot) or DIRECT_TEXT_JOB_KIND,
             )
             chat_run.stream.provider = self._stream_provider(chat_run)
             self.runs[cid] = chat_run
@@ -437,43 +535,108 @@ class ChatRuns:
         except Exception:
             return []
         entries = [(snap, interrupted) for snap, interrupted in entries
-                   if job_kind(snap) == DIRECT_TEXT_JOB_KIND and chat_id_of(snap) == cid]
+                   if job_kind(snap) in CHAT_JOB_KINDS and chat_id_of(snap) == cid]
         entries.sort(key=lambda entry: _snapshot_time(entry[0]), reverse=True)
         return entries
 
+    def _turn_resolver(self, cid: str) -> Callable[..., Optional[int]]:
+        """``resolve(params, job_id=None, fallback=None)``: the current index of the turn a job ran
+        for, or None once that turn was deleted (see the module docstring). The chat's
+        fingerprints are computed at most once per resolver."""
+        reader = getattr(self.store, "job_turns", None)
+        turns = reader(cid) if callable(reader) else {}
+        fingerprints: list = []
+
+        def resolve(params: Any, job_id: Any = None, fallback: Any = None) -> Optional[int]:
+            params = params if isinstance(params, Mapping) else {}
+            submitted = params.get("user_index") if fallback is None else fallback
+            key = turn_key(params, job_id)
+            if key is None or key not in turns:
+                try:
+                    return int(submitted)
+                except (TypeError, ValueError):
+                    return None
+            fp = turns.get(key)
+            if not fp:
+                return None
+            if not fingerprints:
+                fingerprints.append(self.store.fingerprints(cid))
+            try:
+                return fingerprints[0].index(fp)
+            except ValueError:
+                return None
+
+        return resolve
+
+    def _turn_of(self, cid: str, params: Any, job_id: Any = None, fallback: Any = None) -> Optional[int]:
+        """The current index of the turn a job ran for (None: deleted)."""
+        return self._turn_resolver(cid)(params, job_id, fallback)
+
+    def turn_index(self, cid: Any, run: Optional[ChatRun]) -> Optional[int]:
+        """The current index of ``run``'s user turn (a live run's turn cannot move: Delete waits)."""
+        if run is None:
+            return None
+        if run.live:
+            return run.user_index
+        params = run.params or {"run": run.run.as_dict()}
+        return self._turn_of(str(cid), params, run.job_id, run.user_index)
+
+    def chat_job_turns(self, cid: Any) -> list:
+        """``[(turn key, submitted user index)]`` of every job this chat knows (Delete message
+        records their turns before it moves the messages)."""
+        cid = str(cid)
+        entries: list = []
+        run = self.run_for(cid)
+        if run is not None:
+            entries.append((run.params or {"run": run.run.as_dict()}, run.job_id, run.user_index))
+        for snap, _interrupted in self._chat_jobs(cid):
+            params = getattr(getattr(snap, "spec", None), "params", None) or {}
+            entries.append((params, getattr(snap, "id", None), params.get("user_index")))
+        out, seen = [], set()
+        for params, job_id, index in entries:
+            key = turn_key(params, job_id)
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            out.append((key, index))
+        return out
+
     def persisted_job(self, cid: Any, user_index: Any) -> Any:
-        """The newest JobService snapshot of one chat turn (``params["user_index"]``), or None.
+        """The newest JobService snapshot of one chat turn, or None.
 
         After a relaunch ``runs`` is empty; the JobCard of an ended turn reads its real state
         (Interrupted, Stopped, Failed, Done and the chapter counts) from here instead of
-        guessing it from the committed cards."""
+        guessing it from the committed cards. A job's turn is its ``params["user_index"]``
+        moved by any Delete message since (``_turn_of``)."""
         cid = str(cid)
+        try:
+            wanted = int(user_index)
+        except (TypeError, ValueError):
+            return None
+        resolve = self._turn_resolver(cid)
         for snap, _interrupted in self._chat_jobs(cid):
             params = getattr(getattr(snap, "spec", None), "params", None) or {}
-            try:
-                if int(params.get("user_index")) == int(user_index):
-                    return snap
-            except (TypeError, ValueError):
-                continue
+            if resolve(params, getattr(snap, "id", None)) == wanted:
+                return snap
         return None
 
     def _last_job(self, cid: str) -> tuple:
-        """(params, title, interrupted job id) of the chat's last direct_text job: this session's
+        """(params, title, interrupted job id, kind) of the chat's last chat job: this session's
         run, else the newest JobService entry (the id is set when that entry is an unresolved
         Interrupted job, which Resume must resolve)."""
         run = self.run_for(cid)
         if run is not None and run.params:
-            return dict(run.params), run.title, None
+            return dict(run.params), run.title, None, run.kind
         for snap, interrupted in self._chat_jobs(cid):
             spec = getattr(snap, "spec", None)
             pending = interrupted and getattr(snap, "resolution", None) is None
             return (dict(getattr(spec, "params", {}) or {}), str(getattr(spec, "title", "") or ""),
-                    getattr(snap, "id", None) if pending else None)
-        return {}, "", None
+                    getattr(snap, "id", None) if pending else None, job_kind(snap) or DIRECT_TEXT_JOB_KIND)
+        return {}, "", None, DIRECT_TEXT_JOB_KIND
 
     def _last_params(self, cid: str) -> tuple:
-        """(params, title) of the chat's last direct_text job (see ``_last_job``)."""
-        params, title, _interrupted_id = self._last_job(cid)
+        """(params, title) of the chat's last chat job (see ``_last_job``)."""
+        params, title, _interrupted_id, _kind = self._last_job(cid)
         return params, title
 
     async def resubmit(self, cid: Any) -> Optional[ChatRun]:
@@ -485,15 +648,20 @@ class ChatRuns:
         cid = str(cid)
         if self.live_run(cid) is not None:
             return None
-        params, title, interrupted_id = self._last_job(cid)
+        params, title, interrupted_id, kind = self._last_job(cid)
         run_dict = params.get("run") if isinstance(params, Mapping) else None
         if not isinstance(run_dict, Mapping):
             return None
+        user_index = self._turn_of(cid, params, interrupted_id)
+        if user_index is None:
+            return None  # the run's turn was deleted: nothing to resume into
+        params = dict(params)
+        params["user_index"] = user_index  # a new submission records the turn where it is now
         resumed = DirectTextRun.from_dict(run_dict)
         chat_run = ChatRun(
-            cid=cid, run=resumed, user_index=int(params.get("user_index") or 0),
+            cid=cid, run=resumed, user_index=user_index,
             stream=RunStream(),
-            params=dict(params), title=title or job_title(resumed),
+            params=params, title=title or job_title(resumed), kind=kind,
         )
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
@@ -503,7 +671,8 @@ class ChatRuns:
         job_id = self.jobs.resume(interrupted_id) if interrupted_id else None
         if not job_id:
             session_title = str((self.store.session(cid) or {}).get("title") or "Chat")
-            job_id = await self.jobs.submit(DIRECT_TEXT_JOB_KIND, chat_run.title, (resumed.source_path,), params,
+            inputs = () if kind == GENERATE_MEDIA_JOB_KIND else (resumed.source_path,)
+            job_id = await self.jobs.submit(kind, chat_run.title, inputs, params,
                                             {"type": "chat", "cid": cid, "label": f"Chat · {session_title}"})
         with self._lock:
             chat_run.job_id = job_id
@@ -556,8 +725,7 @@ class ChatRuns:
         cards into the chat, like the dialog's ``_commit_active_request_phase``."""
         model = run.stream.model()
         session = self.store.session(run.cid)
-        commit = getattr(getattr(self.store, "binding", None), "store", None)
-        commit = getattr(commit, "commit_request_phase", None)
+        commit = getattr(self._store_for(run.cid), "commit_request_phase", None)
         if model is None or session is None or not callable(commit):
             return []
         try:
@@ -654,7 +822,7 @@ class ChatRuns:
 
     def _finish_with_store(self, run: ChatRun, snapshot: Any, state: str, cancelled: bool) -> str:
         session = self.store.session(run.cid)
-        store = getattr(getattr(self.store, "binding", None), "store", None)
+        store = self._store_for(run.cid)
         if cancelled or session is None or store is None:
             # cancelled while queued: nothing ran, nothing to commit
             return STATUS["stopped"] if cancelled else STATUS["ready"]

@@ -9,21 +9,22 @@ and token counting - so the chat and the desktop run the same code. The shared
 modules are imported lazily (the backend loads off the UI loop; the warm import has
 them in memory before the first send).
 
-What stays here is mobile UI (icons, Plan cards, token hint, long-output preview)
-or a small rule that is still inline in a Qt handler of the dialog: the rename
-prompt (``_rename_chat``), the glossary-override radio writes
-(``_on_glossary_override_toggled``), the "Provide Manual Glossary" dialog's
-extension sniffing (``_request_direct_text_manual_glossary``), the repaint cadence
-(``_schedule_stream_render``) and the settings reads of the dialog ``__init__``.
-``tests_host/test_chat.py`` compares each of those with the dialog source, so they
-cannot drift.
+Since U7 the rules that were still inline in the dialog's Qt handlers are shared too
+(``direct_text_store``: ``chat_rename_title`` = ``_rename_chat``,
+``glossary_override_config_updates`` = ``_on_glossary_override_toggled``,
+``configured_glossary_override_mode`` = the ``__init__`` read,
+``manual_glossary_source_record`` / ``sniff_manual_glossary_extension`` = the "Provide
+Manual Glossary" dialog's ``_accept``, ``GLOSSARY_OVERRIDE_MODES`` /
+``MANUAL_GLOSSARY_EXTENSIONS``); the chat calls them. What stays here is mobile UI
+(icons, Plan cards, token hint, long-output preview), the repaint cadence of the
+dialog's Qt ``_schedule_stream_render`` override and the other settings reads of the
+dialog ``__init__``; ``tests_host/test_chat.py`` compares those with the dialog source.
 
 Nothing here touches the UI, ``os.environ`` or the backend pipeline.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -159,7 +160,6 @@ def needs_plan(extension: str, text_chars: int = 0, *, skip_plan: bool = False) 
 # Glossary policy (desktop _force_no_glossary_for_mode / _on_glossary_override_toggled)
 # ---------------------------------------------------------------------------
 
-GLOSSARY_OVERRIDE_MODES = ("none", "attachments_only", "no_glossary", "manual")
 #: The desktop radio labels (Direct Text Settings tab).
 GLOSSARY_OVERRIDE_LABELS = {
     "none": "No Override",
@@ -169,10 +169,18 @@ GLOSSARY_OVERRIDE_LABELS = {
 }
 
 
+def __getattr__(name: str) -> Any:
+    """``GLOSSARY_OVERRIDE_MODES`` / ``MANUAL_GLOSSARY_EXTENSIONS``: the shared constants, read lazily
+    (the backend loads off the UI loop; the sheets that use them import this module late)."""
+    if name in ("GLOSSARY_OVERRIDE_MODES", "MANUAL_GLOSSARY_EXTENSIONS"):
+        return getattr(_store(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def normalize_glossary_override_mode(mode: Any) -> str:
-    """Desktop: unknown or empty values fall back to ``attachments_only``."""
-    value = str(mode or "").strip().lower()
-    return value if value in GLOSSARY_OVERRIDE_MODES else "attachments_only"
+    """The dialog ``__init__`` read (``configured_glossary_override_mode``): unknown or empty values
+    fall back to ``attachments_only``."""
+    return str(_store().configured_glossary_override_mode(mode))
 
 
 def force_no_glossary_for_mode(mode: Any, has_attachment: Any) -> bool:
@@ -212,16 +220,9 @@ def effective_glossary_label(mode: Any, config_get: Callable[..., Any], has_atta
 
 
 def glossary_override_updates(mode: Any) -> dict:
-    """Config writes of the dialog's ``_on_glossary_override_toggled`` (enum + the two legacy booleans)."""
-    mode = normalize_glossary_override_mode(mode)
-    return {
-        "direct_text_glossary_override_mode": mode,
-        "direct_text_force_no_glossary": mode == "no_glossary",
-        "direct_text_manual_glossary": mode == "manual",
-    }
-
-
-MANUAL_GLOSSARY_EXTENSIONS = frozenset({".csv", ".json", ".txt", ".md"})
+    """Config writes of the dialog's ``_on_glossary_override_toggled`` (``glossary_override_config_updates``:
+    the enum + the two legacy booleans)."""
+    return dict(_store().glossary_override_config_updates(mode))
 
 
 @dataclass(frozen=True)
@@ -239,23 +240,6 @@ class ManualGlossarySource:
         return {"kind": "content", "content": self.content, "extension": self.extension}
 
 
-def _sniff_glossary_extension(content: str) -> str:
-    """The extension the "Provide Manual Glossary" dialog's ``_accept`` picks for pasted contents."""
-    extension = '.txt'
-    stripped = content.lstrip()
-    if stripped.startswith(('{', '[')):
-        try:
-            json.loads(content)
-            extension = '.json'
-        except (TypeError, ValueError):
-            extension = '.txt'
-    else:
-        nonempty_lines = [line for line in content.splitlines() if line.strip()]
-        if len(nonempty_lines) > 1 and ',' in nonempty_lines[0]:
-            extension = '.csv'
-    return extension
-
-
 def manual_glossary_source(
     content: str,
     *,
@@ -263,19 +247,23 @@ def manual_glossary_source(
     source_text: Optional[str] = None,
     source_extension: str = "",
 ) -> Optional[ManualGlossarySource]:
-    """Accept logic of the desktop "Provide Manual Glossary" dialog.
+    """Accept logic of the desktop "Provide Manual Glossary" dialog (``manual_glossary_source_record``).
 
     A file loaded with Browse… and left unedited is used by path; edited or pasted
     contents are written by the run into its temp folder with a sniffed extension.
     Returns None when the box is empty ("Glossary required").
     """
     content = str(content or "")
-    if not content.strip():
+    extension = (source_extension or os.path.splitext(str(source_path or ""))[1] or ".txt").lower()
+    record = _store().manual_glossary_source_record(
+        content, source_path or "", content if source_text is None else source_text, extension,
+    )
+    if record is None:
         return None
-    if source_path and content == (source_text if source_text is not None else content):
-        extension = (source_extension or os.path.splitext(source_path)[1]).lower()
-        return ManualGlossarySource("path", path=source_path, extension=extension)
-    return ManualGlossarySource("content", content=content, extension=_sniff_glossary_extension(content))
+    if record.get("kind") == "path":
+        return ManualGlossarySource("path", path=str(record.get("path") or ""), extension=str(record.get("extension") or extension))
+    return ManualGlossarySource("content", content=str(record.get("content") or ""),
+                                extension=str(record.get("extension") or ".txt"))
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +296,8 @@ def auto_title(current_title: Any, text: Any) -> Optional[str]:
 
 
 def rename_title(text: Any) -> str:
-    """The dialog's ``_rename_chat`` rule: whitespace collapsed, at most 120 characters."""
-    return " ".join(str(text or "").split())[:120]
+    """The dialog's ``_rename_chat`` rule (``chat_rename_title``): whitespace collapsed, at most 120 characters."""
+    return str(_store().chat_rename_title(text))
 
 
 # The dialog's rendered-card limits (ChatStoreMixin._DEFAULT/_MIN/_MAX_RENDERED_CARD_LIMIT;

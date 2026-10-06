@@ -16,7 +16,13 @@ explains what is missing. With a ``ChatEnv`` it is the Direct Text chat:
 * Send/Stop follows the chat's run (``ChatRuns``) and JobService: send records the
   turn and submits a ``direct_text`` job; Stop is graceful, a second tap forces;
 * sheets: ＋ (attach), output-mode options, chat settings, the minimal model sheet,
-  the manual glossary sheet and the ChatGPT LoginSheet.
+  the manual glossary sheet and the ChatGPT LoginSheet;
+* U7: generated media in the cards (image gallery / VideoCard / AudioCard, the full-screen
+  MediaViewer), "Generate from prompt (no input)" (a ``generate_media`` job), Refine's
+  "Compare with original", message versions ‹2/3› (Edit & resend, Retranslate), Delete
+  message, scratch chats (New / Send as scratch / Duplicate as scratch, Save / Discard), the
+  Attachments manager + Migrate, Jump to…, Search in chat, Export chat, and the ＋ sheet's
+  "Retranslate chapters" (the Progress manager's Chapters on this chat's workspace).
 
 All Flet mutation happens on the UI loop; worker-thread notifications arrive
 through ``ChatEnv.on_ui``.
@@ -42,6 +48,14 @@ from glossarion_mobile.ui.chat.cards import (
     RequestSheet,
     glossary_preview,
 )
+from glossarion_mobile.ui.chat.chat_ops import (
+    build_chat_export_zip,
+    jump_entries,
+    safe_file_stem,
+    search_matches,
+    transcript_markdown,
+    version_view,
+)
 from glossarion_mobile.ui.chat.composer import Composer, StatusCaption
 from glossarion_mobile.ui.chat.direct_text_rules import (
     TOKEN_HINT_MIN_CHARS,
@@ -65,9 +79,16 @@ from glossarion_mobile.ui.chat.job_binding import (
     running_label,
     state_name,
 )
-from glossarion_mobile.ui.chat.messages import AssistantMessage, UserBubble, UserFileCard
-from glossarion_mobile.ui.chat.mode_options_sheet import ModeOptionsSheet
-from glossarion_mobile.ui.chat.output_modes import OutputModeState, is_vision_attachment, normalize_mode
+from glossarion_mobile.ui.chat.media_cards import AudioHub, CompareSheet, MediaActions, media_section
+from glossarion_mobile.ui.chat.media_model import GENERATIVE_MODES, find_unrefined_backup, media_items, ocr_entries
+from glossarion_mobile.ui.chat.messages import AssistantMessage, UserBubble, UserFileCard, VersionSwitcher
+from glossarion_mobile.ui.chat.mode_options_sheet import ModeOptionsContent, ModeOptionsSheet
+from glossarion_mobile.ui.chat.output_modes import (
+    IMAGE_ATTACHMENT_EXTENSIONS,
+    OutputModeState,
+    is_vision_attachment,
+    normalize_mode,
+)
 from glossarion_mobile.ui.chat.run_request import attachment_record
 from glossarion_mobile.ui.chat.send_state import (
     BLOCK_ATTACHMENT_MISSING,
@@ -101,15 +122,14 @@ TOOL_ROUTES: dict[str, Optional[str]] = {
     "async": "tools.async",
     "progress": "tools.progress",
     "glossary_progress": "tools.progress.glossary",
-    "retranslate": None,
+    "retranslate": None,  # the Progress manager's Chapters on this chat's workspace (open_retranslate)
 }
 _NOT_YET = {
     "extract_glossary": "Glossary extraction is not available in this session",
-    "retranslate": "Retranslating chapters arrives in U7",
 }
-_LATER = {
-    SendAction.SEND_AS_SCRATCH: "Scratch chats arrive in U7",
-}
+_LATER: dict = {}
+SCRATCH_BANNER = "Scratch chat — not saved"
+HIGHLIGHT_SECONDS = 1.5
 # ModelSheet field -> chat override key (run_request.OVERRIDE_CONFIG_KEYS maps them to config keys)
 _SHEET_OVERRIDE_KEYS = {"model": "model", "profile": "profile", "language": "target_language"}
 _ATTACH_EXTENSIONS = [
@@ -166,6 +186,25 @@ class ChatView:
         self._token_text = ""
         self.last_manual_glossary: Optional[ManualGlossarySource] = None
         self.sent: list = []  # (cid, text, attachment) of submitted sends (diagnostics/tests)
+        self.audio_hub = AudioHub()  # one flet_audio service for every AudioCard of the chat
+        self.media_viewer: Any = None
+        self.jump_sheet: Any = None
+        self.version_anchor: Optional[int] = None  # Edit & resend / Retranslate: the turn the next send versions
+        self.hidden_indices: set = set()
+        self.search_hits: list = []
+        self.search_position = -1
+        self._search_task: Any = None
+        self.focus_index: Optional[int] = None
+        # Card extras that need file I/O (a Vision run's OCR texts, the Refine backup): looked up
+        # on the io pool once per key and cached, never read on the loop during a render.
+        self._extras: dict = {}
+        self._extras_pending: set = set()
+        self._extra_targets: dict = {}  # key -> (render generation, [(apply, card)])
+        self._render_gen = 0
+        # Saved cards of the latest render, slot key -> (signature, card): a card whose inputs did not
+        # change is passed again as the same object (Transcript.CardSlot: never a frozen copy).
+        self._cards: dict = {}
+        self._next_cards: dict = {}
 
         chat = state.chats.get(state.current_chat.value)
         self.header = ChatHeader(
@@ -177,6 +216,10 @@ class ChatView:
             on_new_scratch=self._on_new_scratch,
             on_menu_action=self._on_menu_action,
             on_rename=lambda e: self.open_rename(),
+            on_save_scratch=lambda e: self.save_scratch(),
+            on_search=self._on_search_query,
+            on_search_step=self.step_search,
+            on_search_close=self.close_search,
         )
         self.transcript = Transcript(
             on_suggestion=self._on_suggestion,
@@ -348,15 +391,23 @@ class ChatView:
     def load_chat(self, cid: Any) -> None:
         """Show chat ``cid``: draft, attachment, mode, header, transcript tail (``_load_chat_session``)."""
         cid = str(cid)
+        previous = self.cid
         self.cid = cid
         if not self.bound:
             self._on_current_chat(cid)
             return
         chats = self.env.chats
+        if previous != cid:
+            self._left_chat(previous)
         chats.select(cid)
         session = chats.session(cid)
         title = str((session or {}).get("title") or "New chat")
         self.header.set_title(title)
+        self.header.set_scratch(self._is_scratch(cid))
+        self.header.set_attachments(self._attachment_count(cid))
+        if self.header.searching:
+            self.close_search()
+        self.version_anchor = None
         self.composer.set_text(chats.draft(cid))
         record = chats.attachment(cid)
         if record and not os.path.isfile(str(record.get("path") or "")):
@@ -374,6 +425,7 @@ class ChatView:
         self.live_job_card = None
         self.approval_card = None
         self._approval_key = None
+        self._cards = {}
         self.render_transcript(follow=True)
         self.refresh_send()
         self._ensure_stream_task()
@@ -397,6 +449,7 @@ class ChatView:
     def render_transcript(self, *, follow: bool = False) -> None:
         if not self.bound:
             return
+        self._render_gen += 1  # card extras still loading go to this render's cards
         messages = self._messages()
         settings = self.settings()
         expanded = self.env.chats.expanded(self.cid)
@@ -405,7 +458,23 @@ class ChatView:
             self.window = tail_window(messages, settings.rendered_card_limit, expanded)
         start, end = self.window
         run = self.env.runs.live_run(self.cid) if self.env.runs is not None else None
-        controls = [self._item_control(item, messages, expanded, run) for item in build_items(messages, start, end)]
+        versions = self._version_view(messages)
+        self.hidden_indices = set(versions.hidden)
+        controls: list = []
+        if self._is_scratch(self.cid):
+            controls.append(self._scratch_banner())
+        self._next_cards = {}
+        for item in build_items(messages, start, end):
+            if item.index in versions.hidden or (item.kind == "job" and item.index < 0 and item.requests
+                                                 and set(item.requests) <= versions.hidden):
+                continue
+            controls.append(self._item_control(item, messages, expanded, run))
+            switcher = versions.switchers.get(item.index) if item.kind in ("user", "user_file") else None
+            if switcher is not None:
+                anchor, selected, count = switcher
+                controls.append(VersionSwitcher(anchor, selected, count, on_select=self.select_version,
+                                                key=f"versions-{item.index}"))
+        self._cards, self._next_cards = self._next_cards, {}
         self.transcript.set_messages([c for c in controls if c is not None], hidden_before=start,
                                      hidden_after=max(0, total - end))
         self.transcript.set_tail(self._tail_controls(run))
@@ -425,14 +494,21 @@ class ChatView:
     def _item_control(self, item: Any, messages: list, expanded: set, run: Any) -> Optional[ft.Control]:
         message = messages[item.index] if 0 <= item.index < len(messages) else None
         if item.kind == "user":
-            return UserBubble(message[1], index=item.index, available_width=self.layout.width or 400,
-                              on_long_press=self._user_actions, key=ft.ScrollKey(self._mid(item.index) or item.key))
+            width = self.layout.width or 400
+            return self._card(self._mid(item.index) or item.key, ("user", self.cid, item.index, message[1], width),
+                              lambda: UserBubble(message[1], index=item.index, available_width=width,
+                                                 on_long_press=self._user_actions))
         if item.kind == "user_file":
-            return UserFileCard(
-                message[1], message[2] if len(message) > 2 else "", message[3] if len(message) > 3 else 0,
-                message[4] if len(message) > 4 else "", message[5] if len(message) > 5 else "user",
-                index=item.index, missing=not os.path.isfile(str(message[2] if len(message) > 2 else "")),
-                key=ft.ScrollKey(self._mid(item.index) or item.key),
+            missing = not os.path.isfile(str(message[2] if len(message) > 2 else ""))
+            thumbnail = os.path.splitext(str(message[1] or ""))[1].lower() in IMAGE_ATTACHMENT_EXTENSIONS
+            return self._card(
+                self._mid(item.index) or item.key,
+                ("user_file", self.cid, item.index, tuple(message[1:6]), missing, thumbnail),
+                lambda: UserFileCard(
+                    message[1], message[2] if len(message) > 2 else "", message[3] if len(message) > 3 else 0,
+                    message[4] if len(message) > 4 else "", message[5] if len(message) > 5 else "user",
+                    index=item.index, missing=missing, on_long_press=self._user_file_actions, thumbnail=thumbnail,
+                ),
             )
         if item.kind == "assistant":
             return self._assistant_control(item.index, messages[item.index], expanded)
@@ -440,51 +516,96 @@ class ChatView:
             return self._job_control(item, messages, run)
         return None
 
+    def _card(self, key: Any, signature: Any, build: Callable[[], ft.Control]) -> Any:
+        """The ``CardSlot`` of one saved card: the previous render's card object while ``signature``
+        (everything the card is built from) is unchanged, otherwise a new card from ``build``."""
+        key = str(key)
+        cached = self._cards.get(key)
+        card = cached[1] if cached is not None and cached[0] == signature else build()
+        self._next_cards[key] = (signature, card)
+        return self.transcript.slot(key, card)
+
     def _mid(self, index: int) -> Optional[str]:
         try:
             return self.env.chats.mid_for_index(self.cid, index)
         except Exception:
             return None
 
-    def _assistant_control(self, index: int, message: tuple, expanded: set) -> AssistantMessage:
+    def _assistant_control(self, index: int, message: tuple, expanded: set) -> Any:
         cid = self.cid
         chats = self.env.chats
         storage = message[6] if len(message) > 6 and isinstance(message[6], dict) else {}
-        return AssistantMessage(
-            index=index,
-            request_label=str(message[5] if len(message) > 5 else ""),
-            created_at=str(storage.get("created_at") or ""),
-            processing_label=str(message[3] if len(message) > 3 else "Processing") or "Processing",
-            content=lambda i=index: chats.message_text(cid, i, "content"),
-            thinking=lambda i=index: chats.message_text(cid, i, "thinking"),
-            expanded=index in expanded,
-            on_toggle_thinking=lambda card, value: chats.set_expanded(cid, card.index, value),
-            on_copy=self._copy_message,
-            on_retranslate=self._retranslate,
-            on_more=self._message_more,
-            on_show_full=self._show_full,
-            key=ft.ScrollKey(self._mid(index) or f"m-{index}"),
+        items = self._media_for(index)
+        width = self.layout.width or 400
+        is_expanded = index in expanded
+        signature = (
+            "assistant", cid, index, tuple(message[3:6]), storage.get("created_at"),
+            chats.message_text(cid, index, "content"),  # bodies are cached by the store
+            chats.message_text(cid, index, "thinking") if is_expanded else None,
+            is_expanded, tuple(items), width, bool(self.layout.persistent_sidebar),
         )
 
-    def _job_control(self, item: Any, messages: list, run: Any) -> JobCard:
+        def build() -> AssistantMessage:
+            media_control = media_section(items, actions=self.media_actions(), hub=self.audio_hub,
+                                          available_width=width, spawn=self._spawn) if items else None
+            return AssistantMessage(
+                media=items,
+                media_control=media_control,
+                index=index,
+                request_label=str(message[5] if len(message) > 5 else ""),
+                created_at=str(storage.get("created_at") or ""),
+                processing_label=str(message[3] if len(message) > 3 else "Processing") or "Processing",
+                content=lambda i=index: chats.message_text(cid, i, "content"),
+                thinking=lambda i=index: chats.message_text(cid, i, "thinking"),
+                expanded=is_expanded,
+                on_toggle_thinking=lambda card, value: chats.set_expanded(cid, card.index, value),
+                on_copy=self._copy_message,
+                on_retranslate=self._retranslate,
+                on_more=self._message_more,
+                on_show_full=self._show_full,
+            )
+
+        slot = self._card(self._mid(index) or f"m-{index}", signature, build)
+        card = slot.card
+        folder = str(message[4] or "") if len(message) > 4 else ""
+        if folder:  # Refine › "Compare with original" when the workspace kept the unrefined backup
+            label = str(message[5] if len(message) > 5 else "")
+            self._io_extra(("refine", cid, folder, label), lambda m=message: self._refine_backup(m),
+                           lambda backup, c=card: c.set_compare(
+                               (lambda target, b=backup: self.open_compare(target, b)) if backup else None),
+                           card)
+        return slot
+
+    def _job_control(self, item: Any, messages: list, run: Any) -> Any:
         file_message = messages[item.index] if item.index >= 0 else None
         record = None
         if file_message is not None:
             name = str(file_message[1])
             record = {"name": name, "path": str(file_message[2] if len(file_message) > 2 else ""),
                       "extension": os.path.splitext(name)[1].lower(), "size": file_message[3] if len(file_message) > 3 else 0}
+        slot_key = f"job-{item.index}"
         live = run is not None and run.user_index == item.index
         plan = self._pending_plan()
         if plan is not None and plan.get("user_index") == item.index and not live:
-            card = JobCard(attachment=record, phase=CardPhase("plan"), on_action=self._on_job_action, key=f"job-{item.index}")
-            card.set_plan(self._plan_controls(plan))
-            return card
+            context = self.state.chat_context.value
+            glossary = self._plan_glossary_label()
+
+            def build_plan() -> JobCard:
+                card = JobCard(attachment=record, phase=CardPhase("plan"), on_action=self._on_job_action)
+                card.set_plan(self._plan_controls(plan))
+                return card
+
+            return self._card(slot_key, ("plan", self.cid, item.index, record, dict(plan), context, glossary),
+                              build_plan)
         if live:
-            card = JobCard(attachment=record, phase=CardPhase("running"), on_action=self._on_job_action,
-                           on_open_request=self._open_request, key=f"job-{item.index}")
-            self.live_job_card = card
+            # The running card stays the same object for the whole run: progress, phase and its
+            # live request rows are updated in place (here and on every job snapshot).
+            slot = self._card(slot_key, ("live", self.cid, item.index, record),
+                              lambda: JobCard(attachment=record, phase=CardPhase("running"), on_action=self._on_job_action,
+                                              on_open_request=self._open_request))
+            self.live_job_card = slot.card
             self._update_live_job_card(run)
-            return card
+            return slot
         status = ""
         if item.report is not None:
             status = "Done"
@@ -496,7 +617,7 @@ class ChatView:
         runs = self.env.runs
         last = runs.run_for(self.cid) if runs is not None else None
         ended = None
-        if last is not None and not last.live and last.user_index == item.index:
+        if last is not None and not last.live and self._run_turn(last) == item.index:
             ended = ended_card(last.state if last.state in ("stopped", "failed") else "done", last.last_snapshot)
         elif runs is not None:
             # After a relaunch (no run in this session) JobService still knows how the turn's
@@ -507,9 +628,6 @@ class ChatView:
                 ended = ended_card(ended_kind(remembered), remembered)
         if ended is not None:
             phase, status = CardPhase(ended[0]), ended[1]
-        card = JobCard(attachment=record, phase=phase, on_action=lambda a, it=item: self._on_job_action(a, it),
-                       on_open_request=self._open_request, key=f"job-{item.index}")
-        card.set_phase(phase, status=status)
         segments = []
         for index in item.requests:
             msg = messages[index]
@@ -521,10 +639,80 @@ class ChatView:
                 "complete": True,
                 "index": index,
             })
-        card.set_requests(segments)
-        if item.report is not None:
-            card.set_report(self.env.chats.message_text(self.cid, item.report, "content"))
-        return card
+        report = self.env.chats.message_text(self.cid, item.report, "content") if item.report is not None else None
+
+        def build() -> JobCard:
+            card = JobCard(attachment=record, phase=phase, on_action=lambda a, it=item: self._on_job_action(a, it),
+                           on_open_request=self._open_request)
+            card.set_phase(phase, status=status)
+            card.set_requests(segments)
+            if report is not None:
+                card.set_report(report)
+            return card
+
+        slot = self._card(slot_key, ("job", self.cid, item, record, phase, status, segments, report), build)
+        card = slot.card
+        if item.requests:  # Vision: the run's cached OCR texts (its workspace's OCR folder)
+            key = ("ocr", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report)
+            self._io_extra(key, lambda it=item: self._ocr_for(it),
+                           lambda entries, c=card: c.set_ocr(entries or []), card)
+        return slot
+
+    def _ocr_for(self, item: Any) -> list:
+        """Blocking: ``[(name, text)]`` of a job card's cached OCR (empty when its run had none)."""
+        workspace = self._job_workspace(item)
+        if workspace and os.path.isdir(os.path.join(workspace, "OCR")):
+            return ocr_entries(workspace)
+        return []
+
+    def _io_extra(self, key: tuple, compute: Callable[[], Any], apply: Callable[[Any], Any], card: Any) -> None:
+        """Put a blocking lookup's result on a card without file I/O on the loop.
+
+        ``compute`` runs on the io pool once per ``key`` and the result is cached (a render
+        applies a cached value at once); ``apply`` sets it on the cards the newest render built
+        for ``key``, which are then updated. A run of this chat that ends drops the chat's cache.
+        """
+        if key in self._extras:
+            apply(self._extras[key])
+            return
+        generation = getattr(self, "_render_gen", 0)
+        known = self._extra_targets.get(key)
+        targets = known[1] if known is not None and known[0] == generation else []
+        targets.append((apply, card))
+        self._extra_targets[key] = (generation, targets)
+        if key in self._extras_pending or self.env is None:
+            return
+        self._extras_pending.add(key)
+        cid = self.cid
+
+        async def load() -> None:
+            try:
+                value = await self.env.run_io(compute)
+            except Exception:
+                log.debug("card extra %s failed", key[0], exc_info=True)
+                value = None
+            finally:
+                self._extras_pending.discard(key)
+            if self.cid != cid:
+                self._extra_targets.pop(key, None)
+                return
+            if len(self._extras) > 512:
+                self._extras.clear()
+            self._extras[key] = value
+            _generation, targets = self._extra_targets.pop(key, (0, []))
+            for fn, target_card in targets:
+                try:
+                    fn(value)
+                    target_card.update()
+                except Exception:  # the card left the transcript meanwhile
+                    pass
+
+        self._spawn(load())
+
+    def _drop_extras(self, cid: Any) -> None:
+        """A run of chat ``cid`` ended: its OCR / Refine lookups may have changed."""
+        for key in [k for k in self._extras if len(k) > 1 and k[1] == str(cid)]:
+            self._extras.pop(key, None)
 
     def _tail_controls(self, run: Any) -> list:
         controls: list = []
@@ -583,6 +771,7 @@ class ChatView:
         run = self.env.runs.run_for(cid)
         if run is not None and not run.live:
             # finished: show the committed cards from the store
+            self._drop_extras(cid)
             self.live_cards = {}
             self.live_job_card = None
             self.approval_card = None
@@ -769,6 +958,9 @@ class ChatView:
         if action is SendAction.STOP_CURRENT_AND_SEND:
             self.confirm_stop_current_and_send()
             return
+        if action is SendAction.SEND_AS_SCRATCH:
+            self.send_as_scratch()
+            return
         message = _LATER.get(action)
         if message:
             self.notify(message)
@@ -818,12 +1010,14 @@ class ChatView:
         env = self.env
         cid = self.cid
         output_mode = self.state.output_mode.value.mode
+        anchor, self.version_anchor = self.version_anchor, None
         if record and needs_plan(record.get("extension") or "", len(text), skip_plan=settings.skip_plan):
             from glossarion_mobile.ui.chat.run_request import user_turn
 
             index = env.chats.record_user_turn(
                 cid, user_turn(text, record, settings.attachment_prompt_role), record.get("name") or text
             )
+            self._link_version(cid, anchor, index)
             env.chats.set_meta(cid, "pending_plan", {
                 "user_index": index, "text": text, "attachment": dict(record), "output_mode": output_mode,
                 "manual_glossary": manual.as_dict() if manual else None, "created": time.time(),
@@ -833,7 +1027,7 @@ class ChatView:
             return
         self._after_send_ui(output_mode)
         self.sent.append((cid, text, dict(record) if record else None))
-        self._spawn(self._submit(cid, text, record, settings, output_mode, manual, None, once))
+        self._spawn(self._submit(cid, text, record, settings, output_mode, manual, None, once, anchor))
 
     def _after_send_ui(self, output_mode: str) -> None:
         """Clear the composer and restore the mode non-automatically (desktop after recording the turn)."""
@@ -845,10 +1039,11 @@ class ChatView:
 
     async def _submit(self, cid: str, text: str, record: Optional[dict], settings: DirectTextSettings,
                       output_mode: str, manual: Optional[ManualGlossarySource], user_index: Optional[int],
-                      once: Optional[dict] = None) -> Any:
+                      once: Optional[dict] = None, anchor: Optional[int] = None) -> Any:
         overrides = self.env.chats.overrides(cid)
         if once:
             overrides = {**overrides, **{k: v for k, v in once.items() if v}}
+        expected = len(self.env.chats.messages(cid)) if user_index is None else None
         try:
             run = await self.env.runs.send(
                 cid, text=text, attachment=record, settings=settings, output_mode=output_mode,
@@ -857,8 +1052,10 @@ class ChatView:
         except Exception as exc:
             log.warning("chat send failed: %s", exc)
             self.notify(f"Could not start: {exc}")
+            self._link_version(cid, anchor, expected)
             self._on_run_changed(cid)
             return None
+        self._link_version(cid, anchor, getattr(run, "user_index", expected))
         self._on_run_changed(cid)
         return run
 
@@ -891,11 +1088,13 @@ class ChatView:
         plan = self.env.chats.meta(self.cid).get("pending_plan")
         return plan if isinstance(plan, dict) else None
 
+    def _plan_glossary_label(self) -> str:
+        return effective_glossary_label(self.settings().glossary_override_mode,
+                                        self.env.config_get if self.env is not None else (lambda k, d=None: d))
+
     def _plan_controls(self, plan: dict) -> list:
         context = self.state.chat_context.value
-        settings = self.settings()
-        glossary = effective_glossary_label(settings.glossary_override_mode,
-                                            self.env.config_get if self.env is not None else (lambda k, d=None: d))
+        glossary = self._plan_glossary_label()
         chips = [
             ft.Chip(label=ft.Text(context.model), on_click=lambda e: self.open_model_sheet("model")),
             ft.Chip(label=ft.Text(context.profile), on_click=lambda e: self.open_model_sheet("profile")),
@@ -979,7 +1178,7 @@ class ChatView:
         elif action == "compile":
             self._spawn(self._compile())
         elif action == "migrate":
-            self.notify("Migrating attachment workspaces arrives with the attachments manager (U7)")
+            self.migrate_job_workspace(item)
         elif action in ("read", "open_reader"):
             self._spawn(self._open_reader(item))
         elif action == "open_output":
@@ -991,7 +1190,7 @@ class ChatView:
         elif action in ("resume", "retry"):
             self._resume_last()
         else:
-            self.notify("This action arrives in a later milestone")
+            self.notify("This action is not available here")
 
     async def _open_reader(self, item: Any = None) -> None:
         """Job card Read / Open reader (U5): the turn's workspace in the Reader."""
@@ -1004,13 +1203,21 @@ class ChatView:
         if hasattr(result, "__await__"):
             await result
 
+    def _run_turn(self, run: Any) -> Optional[int]:
+        """The current index of ``run``'s user turn (Delete message may have moved it)."""
+        if run is None:
+            return None
+        fn = getattr(self.env.runs, "turn_index", None) if self.env is not None else None
+        return fn(self.cid, run) if callable(fn) else getattr(run, "user_index", None)
+
     def _reader_target(self, item: Any = None) -> tuple:
         """(workspace folder, attachment path) of the job card's turn (default: the chat's run)."""
         runs = self.env.runs if self.bound else None
         run = runs.run_for(self.cid) if runs is not None else None
+        run_turn = self._run_turn(run)
         index = getattr(item, "index", None)
         if index is None and run is not None:
-            index = run.user_index
+            index = run_turn
         source = ""
         messages = self._messages()
         if index is not None and 0 <= int(index) < len(messages):
@@ -1018,7 +1225,7 @@ class ChatView:
             if message and len(message) > 2 and str(message[0]) == "user_file":
                 source = str(message[2] or "")
         folder = ""
-        if run is not None and (index is None or run.user_index == index):
+        if run is not None and (index is None or run_turn == index):
             folder = str(run.output_dir or run.output_folder or "")
         return folder or self._last_output_folder(), source
 
@@ -1309,8 +1516,14 @@ class ChatView:
         else:
             self.load_chat(cid)
 
-    def _on_new_scratch(self, e: Any = None) -> None:
-        self.notify("Scratch chats arrive in U7")
+    def _on_new_scratch(self, e: Any = None) -> Optional[str]:
+        """Drawer / header "New scratch chat" (UI_SPEC §2.16): an unsaved chat."""
+        if not self.bound or not hasattr(self.env.chats, "new_scratch"):
+            self.notify("Scratch chats need the chat store")
+            return None
+        cid = self.env.chats.new_scratch()
+        self._switch_to(cid)
+        return cid
 
     def _on_menu_action(self, action: str) -> None:
         cid = self.state.current_chat.value
@@ -1320,13 +1533,19 @@ class ChatView:
             else:
                 self.navigate("chat.settings", {"cid": cid})
         elif action == "attachments":
-            self.navigate("chat.attachments", {"cid": cid})
+            self.navigate("chat.attachments", {"cid": self.cid if self.bound else cid})
         elif action == "delete":
             self.confirm_delete()
         elif action == "text_size":
             self.open_chat_settings()
+        elif action == "jump_to":
+            self.open_jump_to()
+        elif action == "search":
+            self.open_search()
+        elif action == "export":
+            self.open_export()
         else:
-            self.notify("This chat action arrives in U7")
+            self.notify("This chat action is not available here")
 
     def _on_suggestion(self, suggestion: str) -> None:
         if suggestion == "open_library":
@@ -1359,6 +1578,7 @@ class ChatView:
             return None
         title, body = self.env.chats.delete_notice(self.cid)
         cid = self.cid
+        scratch = self._is_scratch(cid)
 
         async def confirm() -> None:
             ok, error = await self.env.run_io(self.env.chats.delete, cid)
@@ -1366,11 +1586,12 @@ class ChatView:
                 self.notify(error or "Could not delete chat output")
                 return
             new_cid = self.env.chats.current_cid()
+            self.cid = new_cid  # the deleted chat is gone: nothing to confirm on leaving it
             self.state.current_chat.set(new_cid)
             self.load_chat(new_cid)
 
-        dialog = ConfirmDialog(title=title, body=body, confirm_label="Delete", cancel_label="Cancel",
-                               destructive=True, on_confirm=confirm)
+        dialog = ConfirmDialog(title=title, body=body, confirm_label="Discard" if scratch else "Delete",
+                               cancel_label="Cancel", destructive=True, on_confirm=confirm)
         dialog.show(self.page)
         return dialog
 
@@ -1418,7 +1639,15 @@ class ChatView:
                 return message
         return None
 
+    def _source_index(self, index: int) -> Optional[int]:
+        messages = self._messages()
+        for position in range(min(index, len(messages)) - 1, -1, -1):
+            if messages[position] and messages[position][0] in ("user", "user_file"):
+                return position
+        return None
+
     def _retranslate(self, card: AssistantMessage) -> None:
+        """Retranslate: the source turn again, recorded as a new version of it (UI_SPEC §2.10)."""
         source = self._source_for(card.index)
         if source is None:
             self.notify("The source of this response is no longer in the chat")
@@ -1429,6 +1658,7 @@ class ChatView:
             if not self.attach_file(str(source[2])):
                 return
             self.composer.set_text(str(source[4] or "") if len(source) > 4 else "")
+        self.version_anchor = self._source_index(card.index)
         self.on_send_action(SendAction.SEND)
 
     def _message_more(self, card: AssistantMessage) -> ActionSheet:
@@ -1450,7 +1680,9 @@ class ChatView:
                        and self.env.open_output is not None) else None, icon="FOLDER_OPEN",
                        disabled_reason=None if folder else "No output folder for this response"),
             self._add_term_item(folder),
-            ActionItem("Delete message", disabled_reason="Arrives in U7", icon="DELETE_OUTLINE", destructive=True),
+            *self._media_menu_items(card.index),
+            ActionItem("Delete message", lambda: self.confirm_delete_messages([card.index]), icon="DELETE_OUTLINE",
+                       destructive=True, disabled_reason=self._delete_reason()),
         ]
         sheet = ActionSheet(items, title=card.request_label or "Response", tablet=bool(self.layout.persistent_sidebar))
         sheet.show(self.page)
@@ -1472,14 +1704,36 @@ class ChatView:
         sheet = ActionSheet(
             [
                 ActionItem("Copy", lambda: self._spawn_copy(bubble.text), icon="CONTENT_COPY"),
-                ActionItem("Translate again", lambda: (self.composer.set_text(bubble.text),
-                                                       self.on_send_action(SendAction.SEND)), icon="REFRESH"),
-                ActionItem("Edit & resend", disabled_reason="Arrives in U7", icon="EDIT"),
+                ActionItem("Translate again", lambda: self.translate_again(bubble.index, bubble.text), icon="REFRESH"),
+                ActionItem("Edit & resend", lambda: self.edit_and_resend(bubble.index, bubble.text), icon="EDIT"),
+                ActionItem("Delete", lambda: self.confirm_delete_messages(self._turn_indices(bubble.index)),
+                           icon="DELETE_OUTLINE", destructive=True, disabled_reason=self._delete_reason()),
             ],
             title="Message",
         )
         sheet.show(self.page)
         return sheet
+
+    def _user_file_actions(self, card: UserFileCard) -> ActionSheet:
+        sheet = ActionSheet(
+            [
+                ActionItem("Copy instruction", lambda: self._spawn_copy(card.prompt), icon="CONTENT_COPY",
+                           disabled_reason=None if card.prompt else "No instruction"),
+                ActionItem("Run again", lambda: self._run_file_again(card), icon="REFRESH",
+                           disabled_reason=None if os.path.isfile(card.path) else "The attached file is missing"),
+                ActionItem("Delete", lambda: self.confirm_delete_messages(self._turn_indices(card.index)),
+                           icon="DELETE_OUTLINE", destructive=True, disabled_reason=self._delete_reason()),
+            ],
+            title=card.name,
+        )
+        sheet.show(self.page)
+        return sheet
+
+    def _run_file_again(self, card: UserFileCard) -> None:
+        if self.attach_file(card.path):
+            self.composer.set_text(card.prompt)
+            self.version_anchor = card.index
+            self.on_send_action(SendAction.SEND)
 
     def _spawn_copy(self, text: str) -> None:
         if self.env is not None and self.env.copy_text is not None:
@@ -1510,6 +1764,7 @@ class ChatView:
             on_this_chat=self._on_this_chat,
             on_open_mode_options=self.open_mode_options,
             on_dismiss=lambda e: self.composer.set_plus_open(False),
+            mode_content=lambda mode: self.mode_options_content(mode, inline=True).column,
         )
         self._haptic("light_impact")
         self.composer.set_plus_open(True)
@@ -1548,6 +1803,9 @@ class ChatView:
 
     def _on_tool(self, tool_id: str) -> None:
         self.composer.set_plus_open(False)
+        if tool_id == "retranslate":
+            self._spawn(self.open_retranslate())
+            return
         route = TOOL_ROUTES.get(tool_id)
         if route is not None:
             self.navigate(route)
@@ -1562,12 +1820,56 @@ class ChatView:
             else:
                 self.navigate("chat.settings", {"cid": self.state.current_chat.value})
 
+    def _mode_options_kwargs(self) -> dict:
+        overrides = self.env.chats.overrides(self.cid) if self.bound else {}
+        return {
+            "this_chat": overrides.get("output_mode") is not None,
+            "on_this_chat": self.set_mode_scope if self.bound else None,
+            "has_text": bool(self.composer.send_text()),
+            "has_attachment": bool(self.composer.attachment),
+            "on_generate": self.generate_from_prompt,
+            "on_open_keys": lambda slug: self.navigate("settings.keys.pool", {"pool": slug}),
+            "on_open_endpoints": lambda: self.navigate("settings.endpoints"),
+            "config_get": self.env.config_get if self.env is not None else None,
+        }
+
+    def mode_options_content(self, mode_id: str, inline: bool = False) -> ModeOptionsContent:
+        """The options of ``mode_id`` (the ＋ sheet shows them inline, §2.5; its actions close it first)."""
+        from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+        kwargs = self._mode_options_kwargs()
+        if inline:
+            for name in ("on_generate", "on_open_keys", "on_open_endpoints"):
+                handler = kwargs.get(name)
+                if handler is not None:
+                    kwargs[name] = (lambda *a, h=handler: (self._close_plus(), h(*a))[1])
+        return ModeOptionsContent(mode_id, ctx=sheet_env().ctx, show_header=not inline, **kwargs)
+
+    def _close_plus(self) -> None:
+        if self.plus_sheet is not None:
+            self.plus_sheet.close()
+        self.composer.set_plus_open(False)
+
     def open_mode_options(self, mode_id: str) -> ModeOptionsSheet:
         from glossarion_mobile.ui.sheets.model_sheet import sheet_env
 
-        self.mode_sheet = ModeOptionsSheet(mode_id, ctx=sheet_env().ctx)  # ctx: the settings tiles (U4)
+        self.mode_sheet = ModeOptionsSheet(mode_id, ctx=sheet_env().ctx,  # ctx: the settings tiles (U4)
+                                           **self._mode_options_kwargs())
         self.mode_sheet.show(self.page)
         return self.mode_sheet
+
+    def set_mode_scope(self, this_chat: bool) -> None:
+        """Mode options "This chat only": the mode lives in the chat override, else in the global
+        ``direct_text_output_mode`` (never the global ``output_mode``, UI_SPEC §2.6)."""
+        if not self.bound:
+            return
+        mode = normalize_mode(self.state.output_mode.value.mode)
+        if this_chat:
+            self.env.chats.set_override(self.cid, "output_mode", mode)
+        else:
+            self.env.chats.set_override(self.cid, "output_mode", None)
+            if self.env.config_get("direct_text_output_mode", None) != mode:
+                self.env.config_set_many({"direct_text_output_mode": mode})
 
     def _profiles(self) -> list:
         if self.env is None:
@@ -1717,3 +2019,637 @@ class ChatView:
                                       on_done=lambda status: self._on_signin_changed())
         self.login_sheet.show(self.page)
         return self.login_sheet
+
+    # ---- U7: generate from prompt ------------------------------------------------------------------
+
+    def generate_from_prompt(self, mode: Optional[str] = None) -> Any:
+        """"Generate from prompt (no input)" (UI_SPEC §2.6): the composer text is the prompt; the user
+        turn is recorded as ``["user", prompt]`` and a ``generate_media`` job follows."""
+        mode = normalize_mode(mode or self.state.output_mode.value.mode)
+        if mode not in GENERATIVE_MODES:
+            self.notify("Generate from prompt is for the Image, Video and Audio modes")
+            return None
+        if not self.bound or self.env.runs is None or not hasattr(self.env.runs, "generate"):
+            self.notify("Generating needs the job service, which is not running in this build.")
+            return None
+        if self.composer.attachment:
+            self.notify("Remove the attachment to generate from a prompt")
+            return None
+        prompt = self.composer.send_text()
+        if not prompt:
+            self.notify("Type a prompt in the composer first")
+            return None
+        block = self._chat_block()
+        if block is not None:
+            self.notify(block.message, action_label=block.fix_label,
+                        on_action=(lambda a=block.fix_action: self.run_fix(a)) if block.fix_action else None)
+            return None
+        cid = self.cid
+        settings = self.settings(cid)
+        self._after_send_ui(self.state.output_mode.value.mode)
+        self.sent.append((cid, prompt, None))
+        return self._spawn(self._generate(cid, prompt, mode, settings))
+
+    async def _generate(self, cid: str, prompt: str, mode: str, settings: DirectTextSettings) -> Any:
+        try:
+            run = await self.env.runs.generate(cid, prompt=prompt, output_mode=mode, settings=settings,
+                                               overrides=self.env.chats.overrides(cid))
+        except Exception as exc:
+            log.warning("generate failed: %s", exc)
+            self.notify(f"Could not start: {exc}")
+            self._on_run_changed(cid)
+            return None
+        self._on_run_changed(cid)
+        return run
+
+    # ---- U7: media ----------------------------------------------------------------------------------------
+
+    def _media_for(self, index: int) -> list:
+        chats = self.env.chats if self.bound else None
+        if chats is None or not hasattr(chats, "message_media"):
+            return []
+        try:
+            return media_items(chats.message_media(self.cid, index))
+        except Exception:
+            log.debug("media lookup failed", exc_info=True)
+            return []
+
+    def media_actions(self) -> MediaActions:
+        return MediaActions(open_viewer=self.open_media_viewer, save=self.save_media, share=self.share_media,
+                            open_external=self.open_external, page=self.page,
+                            tablet=bool(self.layout.persistent_sidebar))
+
+    def open_media_viewer(self, items: Any, index: int = 0) -> Any:
+        from glossarion_mobile.ui.components.media_viewer import MediaViewer
+
+        viewer = MediaViewer(items, index, on_close=lambda: self._close_overlay(viewer.view), on_save=self.save_media,
+                             on_share=self.share_media, on_open_external=self.open_external, audio_hub=self.audio_hub,
+                             spawn=self._spawn)
+        self.media_viewer = viewer
+        if self.env is not None and self.env.push_overlay is not None:
+            self.env.push_overlay(viewer.view)
+        return viewer
+
+    def save_media(self, path: str) -> Any:
+        """Save as… (FileBridge "Save to…"; the export sheet when the app has no save hook)."""
+        saver = getattr(self.env, "save_file", None) if self.env is not None else None
+        if saver is not None:
+            return self._spawn(self._await(saver(path)))
+        return self._spawn(self._export_document(path))
+
+    def share_media(self, path: str) -> Any:
+        if self.env is None or self.env.share_files is None:
+            self.notify("Sharing is not available here")
+            return None
+        return self._spawn(self._await(self.env.share_files([path])))
+
+    def open_external(self, path: str) -> Any:
+        """Open externally: the app's hook (system viewer); otherwise the share sheet's Open in…."""
+        opener = getattr(self.env, "open_external", None) if self.env is not None else None
+        if opener is not None:
+            return self._spawn(self._await(opener(path)))
+        return self.share_media(path)
+
+    @staticmethod
+    async def _await(result: Any) -> Any:
+        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+            return await result
+        return result
+
+    def _media_menu_items(self, index: int) -> list:
+        items = [i for i in self._media_for(index) if i.exists]
+        if not items:
+            return []
+        first = items[0]
+        return [
+            ActionItem("Save media as…", lambda: self.save_media(first.path), icon="SAVE_ALT"),
+            ActionItem("Share file", lambda: self.share_media(first.path), icon="IOS_SHARE"),
+        ]
+
+    # ---- U7: refine compare -------------------------------------------------------------------------------
+
+    def _refine_backup(self, message: tuple) -> Optional[str]:
+        """Blocking: the ``unrefined_backup_file`` of a refined response's workspace (Refine › Compare
+        with original); ``_assistant_control`` runs it on the io pool."""
+        folder = str(message[4] or "") if len(message) > 4 else ""
+        if not folder or not os.path.isdir(os.path.join(folder, "unrefined_backup")):
+            return None
+        try:
+            return find_unrefined_backup(folder, str(message[5] if len(message) > 5 else ""))
+        except Exception:
+            return None
+
+    def open_compare(self, card: AssistantMessage, backup: str) -> Any:
+        async def run() -> None:
+            def read() -> str:
+                with open(backup, "r", encoding="utf-8", errors="replace") as handle:
+                    return handle.read()
+
+            try:
+                original = await self.env.run_io(read)
+            except Exception as exc:
+                self.notify(f"Could not read the original: {exc}")
+                return
+            CompareSheet(original, card.content_text).show(self.page)
+
+        return self._spawn(run())
+
+    # ---- U7: versions, delete message -----------------------------------------------------------------
+
+    def _version_view(self, messages: list) -> Any:
+        chats = self.env.chats
+        groups = chats.version_groups(self.cid) if hasattr(chats, "version_groups") else {}
+        if not groups:
+            return version_view(messages, [], {})
+        from glossarion_mobile.state.chat_store_adapter import message_fingerprints
+
+        return version_view(messages, message_fingerprints(messages), groups)
+
+    def _link_version(self, cid: str, anchor: Optional[int], index: Optional[int]) -> None:
+        if anchor is None or index is None or not self.bound or not hasattr(self.env.chats, "add_version"):
+            return
+        messages = self.env.chats.messages(cid)
+        if 0 <= int(index) < len(messages) and messages[int(index)][0] in ("user", "user_file"):
+            self.env.chats.add_version(cid, int(anchor), int(index))
+
+    def select_version(self, anchor: str, selected: int) -> None:
+        if self.bound and self.env.chats.select_version(self.cid, anchor, selected):
+            self.render_transcript()
+
+    def edit_and_resend(self, index: int, text: str) -> None:
+        """Edit & resend: refill the composer; the next send becomes a version of this turn."""
+        self.composer.set_text(text)
+        self.version_anchor = index
+        self.caption.show("Editing a message · send to add a version")
+        try:
+            asyncio.ensure_future(self.composer.text_field.focus())
+        except Exception:
+            pass
+        self._push(self.caption)
+
+    def translate_again(self, index: int, text: str) -> None:
+        self.composer.set_text(text)
+        self.version_anchor = index
+        self.on_send_action(SendAction.SEND)
+
+    def _turn_indices(self, index: int) -> list:
+        from glossarion_mobile.ui.chat.chat_ops import turn_span
+
+        return turn_span(self._messages(), index) or [index]
+
+    def _delete_reason(self) -> Optional[str]:
+        if self.bound and self.env.runs is not None and self.env.runs.live_run(self.cid) is not None:
+            return "Stop or finish the current translation first"
+        return None
+
+    def confirm_delete_messages(self, indices: list) -> Optional[ConfirmDialog]:
+        """Delete message (mobile-only, UI_SPEC §2.10): removes the tuple(s) from the v2 history."""
+        if not self.bound:
+            return None
+        reason = self._delete_reason()
+        if reason:
+            self.notify(reason)
+            return None
+        indices = sorted(set(int(i) for i in indices))
+        count = len(indices)
+        cid = self.cid
+
+        async def go() -> None:
+            # Blocking (managed response files are renamed, the history saved): off the loop.
+            runs = self.env.runs
+            jobs = runs.chat_job_turns(cid) if runs is not None and hasattr(runs, "chat_job_turns") else ()
+            chats = self.env.chats
+            try:
+                deleted = await self.env.run_io(lambda: chats.delete_messages(cid, indices, jobs=jobs))
+            except Exception as exc:
+                log.exception("deleting messages failed")
+                self.notify(f"Could not delete the message: {exc}")
+                return
+            if deleted and self.cid == cid:
+                self.window = None
+                self.render_transcript()
+                self.refresh_send()
+
+        body = ("Delete this message from the conversation?" if count == 1 else
+                f"Delete this message and its {count - 1} response{'s' if count > 2 else ''} from the conversation?")
+        dialog = ConfirmDialog(title="Delete message?", body=body + " Saved output files stay on disk.",
+                               confirm_label="Delete", cancel_label="Cancel", destructive=True, on_confirm=go)
+        if self.page is None:
+            self._spawn(go())
+            return dialog
+        dialog.show(self.page)
+        return dialog
+
+    # ---- U7: scratch chats ------------------------------------------------------------------------------
+
+    def _is_scratch(self, cid: Any) -> bool:
+        chats = self.env.chats if self.env is not None else None
+        return bool(chats is not None and hasattr(chats, "is_scratch") and chats.is_scratch(cid))
+
+    def _attachment_count(self, cid: Any) -> int:
+        chats = self.env.chats if self.env is not None else None
+        try:
+            return int(chats.attachment_count(cid)) if chats is not None and hasattr(chats, "attachment_count") else 0
+        except Exception:
+            return 0
+
+    def _switch_to(self, cid: str) -> None:
+        if self.state.current_chat.value != cid:
+            self.state.current_chat.set(cid)  # the attached view loads it from the signal
+        if self.cid != str(cid):
+            self.load_chat(cid)
+
+    def _scratch_banner(self) -> ft.Control:
+        return ft.Container(
+            content=ft.Row([ft.Icon(ft.Icons.EDIT_NOTE, color=ft.Colors.ON_TERTIARY_CONTAINER),
+                            ft.Text(SCRATCH_BANNER, expand=True, color=ft.Colors.ON_TERTIARY_CONTAINER),
+                            ft.TextButton(content="Save", on_click=lambda e: self.save_scratch(),
+                                          key="scratch-banner-save")],
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=ft.Colors.TERTIARY_CONTAINER, border_radius=12, padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+            key="scratch-banner",
+        )
+
+    def save_scratch(self, cid: Optional[str] = None) -> Any:
+        """Save a scratch chat into the history (UI_SPEC §2.16)."""
+        cid = str(cid or self.cid)
+        if not self.bound or not self._is_scratch(cid):
+            return None
+        if self.env.runs is not None and self.env.runs.live_run(cid) is not None:
+            self.notify("Stop or finish the current translation before saving this chat.")
+            return None
+
+        async def go() -> None:
+            try:
+                new_cid = await self.env.run_io(self.env.chats.save_scratch, cid)
+            except Exception as exc:
+                self.notify(f"Could not save the scratch chat: {exc}")
+                return
+            if not new_cid:
+                self.notify("Could not save the scratch chat")
+                return
+            if self.cid == cid:
+                self.cid = new_cid  # it is no longer a scratch chat: no leave confirmation
+                if self.state.current_chat.value != new_cid:
+                    self.state.current_chat.set(new_cid)
+                self.load_chat(new_cid)
+            self.notify("Scratch chat saved")
+
+        return self._spawn(go())
+
+    def discard_scratch(self, cid: str) -> Any:
+        async def go() -> None:
+            await self.env.run_io(self.env.chats.discard_scratch, cid)
+
+        return self._spawn(go())
+
+    def _left_chat(self, previous: Optional[str]) -> Optional[ConfirmDialog]:
+        """Leaving a scratch chat: empty -> discarded; otherwise "Discard scratch chat?" (Discard / Save)."""
+        if not previous or not self._is_scratch(previous):
+            return None
+        chats = self.env.chats
+        runs = self.env.runs
+        if runs is not None and runs.live_run(previous) is not None:
+            return None  # its run finishes into it; the drawer still lists it
+        if not chats.messages(previous) and not chats.draft(previous):
+            self.discard_scratch(previous)
+            return None
+        dialog = ConfirmDialog(title="Discard scratch chat?",
+                               body="This scratch chat was never saved. Save it to keep its messages.",
+                               confirm_label="Discard", cancel_label="Save", destructive=True,
+                               on_confirm=lambda: self.discard_scratch(previous),
+                               on_cancel=lambda: self.save_scratch(previous))
+        if self.page is not None:
+            dialog.show(self.page)
+        return dialog
+
+    def send_as_scratch(self) -> Optional[str]:
+        """Long-press Send › Send as scratch: a scratch chat with this content, sent there."""
+        if not self.bound or not hasattr(self.env.chats, "new_scratch"):
+            self.notify("Scratch chats need the chat store")
+            return None
+        text = self.composer.send_text()
+        record = self.composer.attachment
+        if not text and not record:
+            return None
+        cid = self.env.chats.new_scratch()
+        if record:
+            self.env.chats.set_attachment(self.cid, None)
+        self.env.chats.set_draft(self.cid, "")
+        self._switch_to(cid)
+        self.composer.set_text(text)
+        if record:
+            self.attach_file(str(record.get("path") or ""))
+        self.on_send_action(SendAction.SEND)
+        return cid
+
+    def duplicate_as_scratch(self, cid: Optional[str] = None) -> Any:
+        """Drawer › Duplicate as scratch: the copy gets its own response body files (blocking: off the
+        loop), then the chat switches to it. Returns the task (its result: the scratch chat id)."""
+        if not self.bound or not hasattr(self.env.chats, "duplicate_as_scratch"):
+            self.notify("Scratch chats need the chat store")
+            return None
+        source = str(cid or self.cid)
+
+        async def go() -> Optional[str]:
+            try:
+                new_cid = await self.env.run_io(self.env.chats.duplicate_as_scratch, source)
+            except Exception as exc:
+                log.exception("duplicating the chat failed")
+                self.notify(f"Could not duplicate the chat: {exc}")
+                return None
+            if new_cid:
+                self._switch_to(new_cid)
+            return new_cid
+
+        return self._spawn(go())
+
+    # ---- U7: attachments / migrate / retranslate ------------------------------------------------------
+
+    def attachments_screen(self, match: Any = None) -> Any:
+        from glossarion_mobile.ui.chat.attachments import AttachmentsScreen
+
+        env = self.env
+        cid = self.cid
+        return AttachmentsScreen(
+            match, chats=env.chats, cid=cid, run_io=env.run_io, notify=self.notify, page=self.page,
+            busy=lambda folder: self._workspace_busy(cid, folder),
+            open_reader=(lambda folder, source: self._spawn(self._await(env.open_reader(folder, source))))
+            if env.open_reader is not None else None,
+            open_progress=(lambda folder, source: self._spawn(self._await(env.open_progress(folder, source))))
+            if env.open_progress is not None else None,
+            share_output=lambda folder: self._spawn(self._share_workspace(folder)),
+            on_migrated=self._after_migrate, spawn=self._spawn, tablet=bool(self.layout.persistent_sidebar),
+        )
+
+    def _workspace_busy(self, cid: str, folder: str) -> bool:
+        """Attachments manager guard (UI_SPEC §2.17): chat ``cid``'s run, or an active / queued job
+        whose folder is the workspace or inside it (the job card's Compile, ＋ Retranslate chapters)."""
+        from glossarion_mobile.ui.chat.attachments import job_writes_into
+
+        env = self.env
+        if env is None:
+            return False
+        if env.runs is not None and env.runs.live_run(cid) is not None:
+            return True
+        pending = getattr(env.jobs, "pending", None) if env.jobs is not None else None
+        try:
+            snapshots = pending() if callable(pending) else []
+        except Exception:
+            snapshots = []
+        return any(job_writes_into(snap, folder) for snap in snapshots)
+
+    def _after_migrate(self, target: str, source: str) -> None:
+        self.render_transcript()  # the turn's stored paths now point at the migrated folder
+        hook = getattr(self.env, "after_migrate", None)
+        if hook is not None:
+            try:
+                result = hook(target, source)
+                if asyncio.iscoroutine(result):
+                    self._spawn(result)
+                    return
+            except Exception:
+                log.exception("after-migrate hook failed")
+        self.notify("Attachment migrated")
+        self.header.set_attachments(self._attachment_count(self.cid))
+
+    async def _share_workspace(self, folder: str) -> None:
+        def pick() -> list:
+            from direct_text_store import ChatStoreMixin  # shared (U3)
+
+            preferred = ChatStoreMixin._preferred_attachment_compiled_documents(folder)
+            return [os.path.join(folder, preferred[ext]) for ext in (".epub", ".pdf") if preferred.get(ext)]
+
+        documents = await self.env.run_io(pick)
+        if not documents:
+            self.notify("No compiled EPUB or PDF in this workspace yet")
+            return
+        await self._export_document(documents[0])
+
+    def _job_workspace(self, item: Any = None) -> str:
+        """The ``Attachments/<stem>`` workspace of a job card's turn (its request cards' folder)."""
+        messages = self._messages()
+        indices = list(getattr(item, "requests", None) or []) + [getattr(item, "report", None), getattr(item, "actions", None)]
+        for index in indices:
+            if index is None or not (0 <= index < len(messages)):
+                continue
+            folder = str(messages[index][4] or "") if len(messages[index]) > 4 else ""
+            while folder and os.path.basename(os.path.dirname(folder)).lower() != "attachments":
+                parent = os.path.dirname(folder)
+                if parent == folder:
+                    folder = ""
+                    break
+                folder = parent
+            if folder and os.path.isdir(folder):
+                return folder
+        _folder, source = self._reader_target(item)
+        stem = os.path.splitext(os.path.basename(source))[0].lower()
+        for folder in self.env.chats.attachment_folders(self.cid) if self.bound else []:
+            if os.path.basename(os.path.normpath(folder)).lower() == stem:
+                return folder
+        return ""
+
+    def _latest_workspace(self) -> tuple:
+        """(the chat's most recently written ``Attachments/<stem>`` workspace, its attachment path)."""
+        folders = self.env.chats.attachment_folders(self.cid) if self.bound else []
+        if not folders:
+            return "", ""
+
+        def written(path: str) -> float:
+            progress = os.path.join(path, "translation_progress.json")
+            try:
+                return os.path.getmtime(progress if os.path.isfile(progress) else path)
+            except OSError:
+                return 0.0
+
+        folder = max(folders, key=written)
+        stem = os.path.basename(os.path.normpath(folder)).lower()
+        source = ""
+        for message in reversed(self._messages()):
+            if message and str(message[0]) == "user_file" and len(message) > 2:
+                if os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower() == stem:
+                    source = str(message[2] or "")
+                    break
+        return folder, source
+
+    def migrate_job_workspace(self, item: Any = None) -> Any:
+        """Job card › Migrate: the desktop Migrate of this turn's workspace (collision dialog first)."""
+        if not self.bound:
+            return None
+        folder = self._job_workspace(item)
+        if not folder:
+            self.notify("This turn has no attachment workspace to migrate")
+            return None
+        return self.attachments_screen().migrate(folder)
+
+    async def open_retranslate(self) -> Optional[str]:
+        """＋ › Retranslate chapters: the Progress manager's Chapters on this chat's attachment workspace."""
+        if self.env is None or self.env.open_progress is None:
+            self.navigate("tools.progress")
+            return None
+        folder, source = self._latest_workspace()
+        if not folder:
+            folder, source = self._reader_target(None)
+        if not folder:
+            self.notify("Attach a book and translate it first: Retranslate works on its chapters")
+            return None
+        return await self._await(self.env.open_progress(folder, source))
+
+    # ---- U7: jump to, search, export ---------------------------------------------------------------------
+
+    def _scroll_key_for(self, index: int) -> Any:
+        """The ScrollKey of the card that shows message ``index`` (a job card for an attachment's responses)."""
+        messages = self._messages()
+        for item in build_items(messages, 0, len(messages)):
+            if item.kind == "job" and (item.index == index or index in item.requests
+                                       or index in (item.report, item.actions)):
+                if item.index >= 0 and index != item.index:
+                    return ft.ScrollKey(f"job-{item.index}")
+        return ft.ScrollKey(self._mid(index) or f"m-{index}")
+
+    async def jump_to(self, index: int) -> None:
+        """The jump procedure (UI_SPEC §2.8): re-centre the window, then ``scroll_to(scroll_key=)``."""
+        if not self.bound:
+            return
+        from glossarion_mobile.ui.chat.transcript_model import window_around
+
+        messages = self._messages()
+        if not (0 <= index < len(messages)):
+            return
+        limit = self.settings().rendered_card_limit
+        start, end = self.window or tail_window(messages, limit, self.env.chats.expanded(self.cid))
+        if not (start <= index < end):
+            self.window = window_around(len(messages), limit, index)
+            self.render_transcript()
+        self.focus_index = index
+        await asyncio.sleep(0)
+        key = self._scroll_key_for(index)
+        try:
+            await self.transcript.scroll_to(scroll_key=key, duration=250)
+        except Exception:
+            log.debug("scroll_to failed", exc_info=True)
+        await self._highlight(key)
+
+    async def _highlight(self, key: Any) -> None:
+        """The jumped-to card pulses for 1.5 s (UI_SPEC §2.8 step 3): its slot (never a frozen copy)."""
+        control = self.transcript.slot_for(key)
+        if control is None:
+            return
+        control.opacity = 0.5
+        self._push(control)
+        await asyncio.sleep(HIGHLIGHT_SECONDS)
+        control.opacity = 1.0
+        self._push(control)
+
+    def open_jump_to(self) -> Any:
+        if not self.bound:
+            self.notify("Jump to needs the chat store")
+            return None
+        from glossarion_mobile.ui.chat.jump_to import JumpToSheet
+
+        inputs, outputs = jump_entries(self._messages(), self.hidden_indices)
+        self.jump_sheet = JumpToSheet(inputs, outputs, on_jump=lambda i: self._spawn(self.jump_to(i)),
+                                      current=self.focus_index)
+        self.jump_sheet.show(self.page)
+        return self.jump_sheet
+
+    def open_search(self) -> Any:
+        if not self.bound:
+            self.notify("Search needs the chat store")
+            return None
+        bar = self.header.open_search()
+        self.search_hits, self.search_position = [], -1
+        self._push(self.header.wrapper)
+        return bar
+
+    def close_search(self) -> None:
+        self.header.close_search()
+        self.search_hits, self.search_position = [], -1
+        self._push(self.header.wrapper)
+
+    def _on_search_query(self, query: str) -> None:
+        self._search_query = query
+        if self._search_task is None or self._search_task.done():
+            self._search_task = self._spawn(self._run_search())
+
+    async def _run_search(self) -> list:
+        await asyncio.sleep(0.25)  # debounce typing
+        query = getattr(self, "_search_query", "")
+        cid = self.cid
+        hidden = set(self.hidden_indices)
+        messages = self._messages()
+        hits = await self.env.run_io(
+            search_matches, messages, query, lambda i: self.env.chats.message_text(cid, i, "content"), hidden)
+        if getattr(self, "_search_query", "") != query:
+            self._search_task = None
+            self._on_search_query(self._search_query)
+            return hits
+        self.search_hits = list(hits)
+        self.search_position = len(self.search_hits) - 1 if self.search_hits else -1
+        self._show_search_position()
+        if self.search_hits:
+            self._spawn(self.jump_to(self.search_hits[self.search_position]))
+        return hits
+
+    def _show_search_position(self) -> None:
+        total = len(self.search_hits)
+        self.header.search_bar.set_count(self.search_position + 1 if total else 0, total)
+
+    def step_search(self, delta: int) -> Optional[int]:
+        if not self.search_hits:
+            return None
+        self.search_position = (self.search_position + int(delta)) % len(self.search_hits)
+        self._show_search_position()
+        target = self.search_hits[self.search_position]
+        self._spawn(self.jump_to(target))
+        return target
+
+    def open_export(self, cid: Optional[str] = None) -> Optional[ActionSheet]:
+        """Export chat (UI_SPEC §2.18): a Markdown transcript or a ZIP of the chat folder + its v2 JSON."""
+        if not self.bound:
+            self.notify("Exporting needs the chat store")
+            return None
+        cid = str(cid or self.cid)
+        items = [
+            ActionItem("Markdown transcript", lambda: self._spawn(self.export_chat(cid, "markdown")), icon="DESCRIPTION"),
+            ActionItem("ZIP (chat folder + history)", lambda: self._spawn(self.export_chat(cid, "zip")),
+                       icon="FOLDER_ZIP"),
+        ]
+        sheet = ActionSheet(items, title="Export chat", tablet=bool(self.layout.persistent_sidebar))
+        if self.page is not None:
+            sheet.show(self.page)
+        return sheet
+
+    def _export_dir(self) -> str:
+        import tempfile
+
+        base = getattr(self.env, "temp_dir", None) or tempfile.gettempdir()
+        folder = os.path.join(str(base), "chat_exports")
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def build_export(self, cid: str, kind: str) -> str:
+        """Blocking: write the export file and return its path."""
+        chats = self.env.chats
+        session = chats.session(cid) or {}
+        title = str(session.get("title") or "Chat")
+        stem = safe_file_stem(title)
+        if kind == "markdown":
+            path = os.path.join(self._export_dir(), f"{stem}.md")
+            text = transcript_markdown(title, chats.messages(cid), lambda i: chats.message_text(cid, i, "content"))
+            temp = path + ".part"
+            with open(temp, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+            os.replace(temp, path)
+            return path
+        binding = chats.binding_for(cid) if hasattr(chats, "binding_for") else chats.binding
+        return build_chat_export_zip(session, binding.resolve_reference, os.path.join(self._export_dir(), f"{stem}.zip"))
+
+    async def export_chat(self, cid: str, kind: str) -> Optional[str]:
+        try:
+            path = await self.env.run_io(self.build_export, cid, kind)
+        except Exception as exc:
+            self.notify(f"Could not export the chat: {exc}")
+            return None
+        await self._export_document(path)
+        return path

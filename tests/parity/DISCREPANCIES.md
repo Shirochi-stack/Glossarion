@@ -377,7 +377,9 @@ tests/test_translation_pipeline.py (every moved text = legacy text + the edits b
    waits until Stop).
 5. **Generative-mode sentinel on an empty selection.** With an image/video model and nothing
    selected the set-up runs on `["__generative_mode__"]` (desktop: prompt-only generation).
-   Mobile reaches `_run_generative_prompt_mode`'s U7 placeholder (logged, run fails cleanly).
+   ~~Mobile reaches `_run_generative_prompt_mode`'s U7 placeholder (logged, run fails cleanly).~~
+   U7: the placeholder is gone; mobile runs the moved desktop runner (`image_job`, see
+   "U7 image / RPG Maker runners" below).
 
 ### Behaviour deltas introduced by U3 step 2 (intentional, golden-neutral)
 
@@ -410,10 +412,11 @@ tests/test_translation_pipeline.py (every moved text = legacy text + the edits b
 - GUI-free defaults (`PipelineHooksMixin`, overridden by TranslatorGUI's own methods):
   `_lazy_load_modules` (imports the backend entries through `_backend_entry`),
   `_attach_gui_logging_handlers`, `_create_watchdog_snapshot`, `_start_autoscroll_delay`,
-  `_update_manual_glossary_status` (no-ops), and U7 placeholders `_process_image_file`,
-  `_process_rpgmaker_game`, `_run_generative_prompt_mode` (log "not available in this build
-  yet", return False; they must go when image_job / rpgmaker_job move:
-  tests/test_translation_pipeline.py::test_u7_placeholders_shadow_no_real_runner trips then).
+  `_update_manual_glossary_status` (no-ops). (Until U7 also the placeholders
+  `_process_image_file`, `_process_rpgmaker_game`, `_run_generative_prompt_mode`, which logged
+  "not available in this build yet" and returned False; U7 removed them with `U7_PLACEHOLDERS`
+  when the real runners moved into image_job / rpgmaker_job, which `TranslationPipelineMixin`
+  now inherits; tests/test_translation_pipeline.py::test_u7_runners_replaced_the_placeholders.)
 - Mobile divergences (by design): the model check (`_require_model_selection`, a message box)
   stays in the desktop preflight, mobile relies on `run_translation_direct`'s "no model is
   selected" stop; the antigravity proxy retry reset stays in the desktop thread launch
@@ -1213,6 +1216,8 @@ Not switched (left as they were): the two writes that create an empty progress f
 freshly created output folder (router cache reuse RG 20695, build RG 20832; no other writer can
 exist yet) and the image-folder view's retranslate / delete writes (RG 35406 / 35486; that view
 stays in Retranslation_GUI and Retranslate Selected's plan/apply is U7).
+(Superseded in U7: both image-folder writes now go through `mutate_progress`; see "U7 Retranslate
+Selected, ... / Writes switched to `mutate_progress` (image-folder view)".)
 
 Retry on a locked file (U5 review fix): the former refresh writer `_write_progress_json_safely`
 (RG 31394-31421) retried 20 times with backoff on `PermissionError` / `OSError` (sleeps
@@ -2441,3 +2446,608 @@ order normalised).
   synthetic-token fixture with edit · edit · undo · redo · resolve · resolve (the rng draw is kept,
   so later steps are unchanged) so `test_editor_operations_were_exercised` holds on the synthetic
   fixtures. Real-corpus runs are unchanged.
+
+## U7 image / RPG Maker runners (image_job, rpgmaker_job; translator_gui, translation_pipeline, direct_text_store, authgem_auth rewired)
+
+Parent commit (oracles re-frozen there: `legacy/`, `legacy_trace/`, `golden/`): 41814faa.
+
+### What moved (and how the desktop calls it)
+
+- `image_job.ImageJobMixin`: `_process_image_file` (23705-24851, incl. the nested
+  `ImageProgressManager` and `ImageClientWrapper`) and `_run_generative_prompt_mode`
+  (23578-23703), verbatim except the two edits below.
+- `rpgmaker_job.RpgMakerJobMixin`: `_process_rpgmaker_game` (24853-25279), verbatim except
+  `game_dir = rpgmaker_game_dir(exe_path)` (the `.exe`'s folder exactly as before; a folder path
+  is used as is).
+- `translation_pipeline.TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin,
+  RpgMakerJobMixin)`: the U3 placeholders (`PipelineHooksMixin._process_image_file` /
+  `_process_rpgmaker_game` / `_run_generative_prompt_mode`, `U7_PLACEHOLDERS`) are deleted, so
+  TranslatorGUI and HeadlessOwner both reach the real runners through the pipeline mixin (their
+  base lists are unchanged; MRO: ... `JobHooksMixin`, `ImageJobMixin`, `RpgMakerJobMixin`,
+  `SettingsPersistenceMixin` ...). The three bodies left TranslatorGUI.
+- `direct_text_store` module functions the Direct Text dialog now calls (verbatim lines):
+  `configured_glossary_override_mode` (`__init__`'s read of `direct_text_glossary_override_mode`),
+  `glossary_override_config_updates` (`_on_glossary_override_toggled`'s three writes, applied with
+  `config.update` in the same key order), `chat_rename_title` (`_rename_chat`),
+  `manual_glossary_source_record` / `sniff_manual_glossary_extension` (the "Provide Manual
+  Glossary" dialog's `_accept`; the info box for empty contents stays in the dialog) and
+  `MANUAL_GLOSSARY_EXTENSIONS` (its `allowed_extensions`). The mobile mirrors in
+  `ui/chat/direct_text_rules.py` can now call these (mobile-media-modes deletes the mirrors).
+- `authgem_auth.authgem_project_items(billed, unbilled, unknown)` and
+  `choose_authgem_project_index(saved, billed, unbilled, unknown)`: the GCP project picker's list
+  (✅ billed, ❔ unknown, ⚠️ unbilled) and the selection rule of `_authgem_projects_loaded` (keep the
+  saved project unless known unbilled, else the first billed, else the first unknown). The slot
+  fills the combo from them; `combo.findData(saved)` became the list index of the same items
+  (str data: identical; tests/test_mobile_auth_splits.py fuzzes 600 states against the parent).
+
+### Behaviour deltas (intentional, parity-neutral on desktop)
+
+- `run_translation_direct` (U7 edit): `elif ext == '.exe' or file_path in
+  (getattr(self, RPGMAKER_GAME_INPUTS_ATTR, None) or ()):`. Only `_register_rpgmaker_game_input`
+  (mobile) fills `_rpgmaker_game_inputs`; on the desktop a folder input still logs "Unsupported
+  file type" (tests/test_rpgmaker_job.py::test_unregistered_folder_input_stays_unsupported).
+- `_run_generative_prompt_mode` reads the prompt editor through `_generative_prompt_source()`:
+  the moved lines unless `_generative_prompt_override` (`image_job.GENERATIVE_PROMPT_ATTR`) holds
+  non-blank text. Desktop never sets it. Recorded in UI_SPEC §2.6 / Appendix C (the plan said a
+  `run_env` hook; the runner lives in image_job, so the hook does too).
+- `_run_generative_prompt_mode`'s `Generated_Media` is `mobile_runtime.data_dir(<module folder>)`:
+  unchanged on desktop (no `GLOSSARION_DATA_DIR`); `__file__` is image_job.py, the same folder as
+  translator_gui.py in source and frozen builds.
+
+### Mobile entry points (GUI-free, no desktop change)
+
+- Generate from prompt (UI_SPEC §2.6): set the output mode (`DirectTextRunOptions.output_mode`),
+  `owner._generative_prompt_override = <composer text>`, then
+  `_prepare_translation_run([image_job.GENERATIVE_MODE_SENTINEL])` + `_translation_worker`. The
+  sentinel is needed for Audio: `_is_generative_output_mode()` only looks at the image/video
+  toggles, so an empty selection in audio mode stops at "Please select file(s)" (desktop too).
+- RPG Maker (UI_SPEC §4.10): `game_dir = owner._register_rpgmaker_game_input(source, work_dir)`
+  (`prepare_rpgmaker_game`: a writable folder is used in place, a read-only one is copied once into
+  `<work_dir>/folders/<name>-<hash of its real path>/<name>`, a ZIP is extracted once into
+  `<work_dir>/zips/<zip name>-<hash of its member names, CRC-32s and sizes>` with a zip-slip guard;
+  each records its source fingerprint in `.glossarion_rpg_source.json` (written last) and is reused
+  only for that source (U7 review: two different games both named `game.zip` shared one extraction),
+  rebuilt with `fresh=True` or when the marker is missing; calls for one folder are serialised
+  (a scan and a job may prepare the same ZIP at once); the game root is the shallowest
+  folder `rpgmaker_handler.detect_version` recognises, so a web/Android `www` deployment without
+  `Game.exe` works), then the translate pair on `[game_dir]`. The result equals the desktop `.exe`
+  dispatch on the same game (tests/test_rpgmaker_job.py::test_headless_owner_folder_entry_matches_the_exe_path).
+- The progress manager of `_process_image_file` lives on the owner; a mobile job owner is new per
+  job, so each job starts a fresh `ImageProgressManager` (desktop: see bug 1).
+
+### Desktop bugs found (recorded, not fixed)
+
+1. **Image progress follows the first image of the session.** `_process_image_file` creates
+   `self.image_progress_manager` only `if not hasattr(self, 'image_progress_manager')` and nothing
+   resets it, so every later image run of the same desktop session writes its
+   `translation_progress.json` entries into the FIRST image's output folder (and checks resume
+   state there).
+2. **Generated video/audio from a prompt are saved as text.** `_run_generative_prompt_mode` only
+   recognises `[GENERATED_IMAGE:...]`; the client returns `[GENERATED_VIDEO:...]` /
+   `[GENERATED_AUDIO:...]` for video and speech, so those runs save
+   `generated_<model>_<ts>.txt` holding the marker and never log "Media saved to". Likewise
+   `_process_image_file` wraps a `[GENERATED_VIDEO:...]` / `[GENERATED_AUDIO:...]` response in the
+   translated-page HTML instead of moving the media file into the output folder.
+3. **Generative text results land in a temporary folder in one-file builds.** `Generated_Media` is
+   next to `__file__`; in a PyInstaller one-file build that is the `_MEIPASS` extraction folder,
+   deleted when the app exits.
+4. **Docstring vs code.** `_run_generative_prompt_mode`'s docstring says the prompt comes from
+   `translation_chunk_prompt` first; the code prefers the prompt editor / `system_prompt`, then a
+   non-template `image_chunk_prompt`, then a non-template `translation_chunk_prompt`.
+5. **"Image in skipped folder".** `check_image_status` skips any image whose name already exists in
+   `<output>/images/`, which is also where covers and skipped images are copied, so such a name
+   is never translated again in that folder.
+6. **Title translation needs three "no"s.** `skip_img_title = getattr(self,
+   'skip_image_title_translation_var', True) or config.get('skip_image_title_translation', True)
+   or SKIP_IMAGE_TITLE_TRANSLATION == '1'`: with the config default True the title is translated
+   only when the variable AND the config key are False.
+7. **Early progress errors are silent.** `ImageProgressManager._init_or_load` logs a corrupt
+   progress file only `if hasattr(self, 'append_log')`, but `append_log` is attached after the
+   constructor ran, so the first load's "Creating new progress file due to error" never shows.
+8. **RPG Maker: Vision mode translates images only.** `image_mode = ENABLE_IMAGE_TRANSLATION ==
+   '1' or enable_image_translation_var`; Vision (and Video) output modes also set
+   `enable_image_translation`, so a game run in Vision mode skips the text and runs the image
+   pipeline.
+9. **RPG Maker: dict-shaped image profile.** The image prompt is `prompt_profiles
+   ["RPGMaker_GTool_Image"]` as is; a profile saved in the new `{"prompt": ...}` shape is handed to
+   `translate_game_images` as a dict.
+10. **RPG Maker: a stopped run still patches the game.** After Stop the runner still writes the map
+    and calls `apply_translations` whenever any progress exists, so a partly translated game is
+    patched (resumable: the next run restores the originals first).
+
+### U7 parity harness additions
+
+- `tests/parity/runner_parity.py` (CI-capable, no frozen oracle, no PySide6): the legacy method
+  text at 41814faa (`git show`, compiled in a class body so multi-line strings keep their
+  indentation) and the new mixin method run the same scenario on a minimal owner in two
+  equal-length sandboxes with recording backends (`UnifiedClient` constructor / key pools /
+  `send` / `send_image` with the env each call saw, `TransateKRtoEN.send_with_interrupt`,
+  `rpgmaker_handler.translate_game_images`; real `rpgmaker_handler` extraction / apply with the
+  character token estimate; fixed `time.time` / `time.strftime` / `datetime.now`); logs (traceback
+  frames masked), calls, env delta, owner state and the whole tree (progress JSON, HTML, payloads,
+  media, patched game data) must be equal. tests/test_image_job.py: 48 image + 14 generative
+  scenarios; tests/test_rpgmaker_job.py: 20 game scenarios.
+- Tier T (`trace_scenarios`): `image_vision_translate`, `image_batch_combined_folder`,
+  `image_output_generated`, `video_input_generated`, `audio_mode_image_input`,
+  `generative_image_prompt`, `generative_video_prompt`, `generative_audio_prompt`,
+  `rpgmaker_exe_text`, `rpgmaker_exe_image_mode` (full desktop record and mobile projection both
+  MATCH the frozen desktop). `trace_harness`: client `send` / `send_image`,
+  `send_with_interrupt` (the real one waits on a thread with the frozen clock) and
+  `translate_game_images` stubs; `time.strftime` follows the trace clock (payload names and
+  timestamps); tiktoken off for `rpgmaker_handler`; `image_job` is a FILE_MODULE; the mobile
+  driver passes the generative sentinel unchanged.
+- `freeze_legacy.SHARED_HELPER_MODULES` += `image_job`, `rpgmaker_job` (oracles frozen at the U7
+  commit or later freeze them whole, like `job_runner`); `moved_functions.SHARED_MODULES` +=
+  both; the three placeholder names left `HOOK_NAMES`.
+- tests/test_direct_text_core.py: `U7_DIALOG_EDITS` (the dialog rewiring is exactly these edits)
+  and the rule functions replayed against the removed lines; tests/test_mobile_auth_splits.py:
+  the project picker slot vs its parent (600 random billing results).
+
+## U7 Async batch core (async_batch_core; async_api_processor's dialog rewired)
+
+Frozen source: async_api_processor.py at 41814faa (the U6 commit; "AAP n" below).
+tests/test_async_batch_core.py pins the move: verbatim AST tier, per-provider request and
+submit goldens with mocked HTTP and a fake google-genai SDK (equal to the frozen code's), the job
+file round trip (bytes equal to the frozen processor's), and an offscreen session of the frozen
+dialog vs the rewired dialog (17 scripted steps over OpenAI / Anthropic / Gemini / Mistral / Groq:
+estimate, submit, status, retrieve, retrieve again with "Create new" and with "Overwrite", cancel,
+delete, clear, unsupported model, AuthGPT without an sk- key, no file) that HeadlessAsyncBatch then
+reproduces (job files, provider and SDK calls, output workspaces).
+
+### What moved
+- AAP 48-107 (antigravity clamp fallback, optional tiktoken / txt_processor / google.generativeai /
+  anthropic / openai imports) and AAP 110-1454 (`AsyncAPIStatus`, `AsyncJobInfo`,
+  `AsyncAPIProcessor`) byte for byte. The only change: `AsyncAPIProcessor(gui_instance,
+  jobs_file=None)`; `jobs_file or <the old default>` keeps `async_jobs.json` next to the module.
+  The core keeps the logger name `async_api_processor` (the desktop log format prints `%(name)s`).
+- 30 `AsyncProcessingDialog` methods (the workflow: prepare env, extract chapters, build messages,
+  submit per provider, poll, status / retrieve / cancel / delete / clear handlers, estimate,
+  `_handle_completed_job`, the OPF spine map, the API key lookup) moved to `AsyncBatchJobMixin`.
+  Their bodies are the dialog's with 13 mechanical substitutions (QMessageBox / QTimer /
+  QApplication calls and the five widget reads become `_async_*` hooks, `QMessageBox.Yes/No/Cancel`
+  become `_MB_*`); the table is in the mixin docstring and `tests/test_async_batch_core.py`.
+  The dialog defines every hook with the original Qt statement (`_MB_*` are properties returning
+  the Qt enums), so the desktop runs the same calls in the same order.
+- Dialog view logic shared with the mobile list: `job_display_row` (`_refresh_jobs_list`'s row
+  texts), `selected_job_progress` (`_update_selected_job_progress`), `gui_model_name` /
+  `async_support_status` (the "Current Model" row of `_create_info_section` /
+  `_refresh_model_info`), `refresh_pending_job_statuses` (the `_start_auto_refresh` closure).
+- async_api_processor re-exports every module-level name it had (the core classes are the same
+  objects); its PySide6 import is guarded, so `import async_api_processor` works without Qt.
+
+### Behaviour deltas (intentional, parity-neutral)
+- Tracebacks that `_handle_completed_job` / the worker log name async_batch_core.py frames.
+- The `__file__`-relative defaults (job list, `GLOSSARY_SHARED_DIR` fallback, the default output
+  folder of `_handle_completed_job`) are now relative to async_batch_core.py: the same folder in
+  source runs and in every PyInstaller spec (both are flat `src` modules). The frozen exe still
+  switches the dialog's job list to the exe folder (dialog `__init__`, unchanged).
+- Seven source-scan tests that read async_api_processor.py for env / prompt strings now read
+  async_batch_core.py (test_epub_utils, test_glossary_match_toggle_wiring, test_translation_artifacts,
+  test_unified_glossary_gender_exclusion, test_unified_glossary_wiring, test_sdlxliff_support;
+  test_whole_term_scope checks both files).
+
+### Desktop bugs found (recorded, not fixed)
+1. **Estimate Cost Only never counts EPUB chapters.** The EPUB branch of `_estimate_cost` lost its
+   sampling loop header (`env_vars`, `chapter_text` and `i` are undefined). With the output token
+   limit enabled the NameError lands in "Failed to analyze EPUB" and the 50 x 15000-token fallback;
+   with it disabled no chapter is counted ("Average content tokens per chapter: 0", $0.00). The
+   automatic estimate after each submission writes that value into the job's cost column.
+2. **Chunked chapters are never split.** `_extract_chapters_for_async` calls `ChapterSplitter`, which
+   the module never imports: the NameError is logged as "Chunk splitting failed" and the chapter is
+   kept whole with `needs_chunking=True`, so the worker skips it.
+3. **Chapter-number regexes never match.** `r'chapter\\s*(\\d+)'` (AAP 3663, 4404) is a raw string with
+   doubled backslashes (literal backslashes); `_extract_chapter_number` looks for `chapter_N` while
+   the custom ids are `NNNN_<file stem>`, so it returns 0 (results are then ordered by spine only).
+4. **OpenAI model mapping by prefix.** `_prepare_openai_batch` walks its table in insertion order and
+   maps `gpt-4o-mini` to `gpt-4o` (a pricier model; also `gpt-4.1-mini` / `-nano` to `gpt-4.1`). The
+   request golden pins it.
+5. **Groq / Mistral jobs.** Groq batches are uploaded to OpenAI's Files / Batches endpoints with the
+   Groq key; `check_job_status` / `retrieve_results` have no Mistral or Groq branch ("Unknown
+   provider"), so those jobs stay pending; the Mistral request body is not the Mistral batch format.
+6. **Gemini results cannot be retrieved.** `_retrieve_gemini_results` compares the SDK's state enum
+   with the string `'JOB_STATE_SUCCEEDED'`, which is always unequal: "Batch job not completed".
+7. **"Wait for completion" polls once.** `_start_polling` runs on the submission thread; its
+   `QTimer.singleShot(interval, poll)` is created on a thread without an event loop and never fires.
+   HeadlessAsyncBatch polls until the job ends (the intended behaviour), stoppable (see below).
+8. **Cancel.** Anthropic jobs are marked cancelled locally without an API call; the
+   `_cancel_openai/anthropic/gemini/mistral/groq_job` helpers are unused; `submit_batch` (async) calls
+   coroutines that do not exist (dead code).
+9. **Frozen exe job list.** The dialog loads `async_jobs.json` from the module folder (`_internal`)
+   and again from the exe folder and keeps both sets.
+
+### GUI-free semantics (HeadlessAsyncBatch, Glossarion Mobile)
+- Questions (`QMessageBox.question` / a warning with buttons) go to
+  `host.ask('async_batch_question', level=, title=, text=, buttons=['yes','no'(,'cancel')],
+  default=)`; `answers={title: answer}` presets win (the mobile screen asks its own confirmation
+  first); without either the answer is "no" ("cancel" never by default), so nothing destructive
+  happens unasked. Notices are recorded in `messages` and emitted as `async_batch_message`; the cost
+  label as `async_batch_cost`; the job tree as `async_batch_jobs` rows (`job_display_row`).
+- `QTimer.singleShot(0, ...)` runs at once on the calling thread; a positive delay (polling) waits on
+  that thread and is queued, so polling never deepens the stack, and stops when the host's stop
+  latch is set ("⏹️ Async polling stopped"). The poll interval is `async_poll_interval` clamped to the
+  spin box's 10-600 s; "Wait for completion" is `async_wait_for_completion`.
+- The job list defaults to `<GLOSSARION_DATA_DIR>/async_jobs.json` (`default_jobs_file`; the module
+  folder on desktop). `retrieve()` returns the output folders `_handle_completed_job` reports.
+
+## U7 Review run orchestration (review_generator; review_dialog rewired)
+
+Frozen source: review_dialog.py at 41814faa. tests/test_review_run_core.py runs the frozen and the
+rewired dialog offscreen on 24 random GUI states per Start path (80 checked once) with recording
+generators and compares every generator argument, the dialog log, the main-log replay, the
+exported `ENABLE_STREAMING` and the restored `sys.stdout`; `run_review_session` (mobile) makes the
+dialog's call for the same states.
+
+### What moved (review_dialog keeps the widgets, boxes, queue, log redirection and poll timer)
+- The parameter gathering of both Start paths (API key field, `model_var`, `ENDPOINT` / endpoint,
+  temperature, the config copy with the live multi-key flag, input token limit, `{target_lang}` in
+  both prompts) -> `review_run_params`; the four stop-flag resets -> `reset_review_stop_flags`; the
+  streaming toggle -> `apply_review_streaming_env`; the `[Review]` log closure -> `review_log_fn`; the
+  stdout redirect class -> `ReviewStdoutWriter`; the generate calls -> `run_review`; Generate All's
+  worker (sequential / parallel, per-input output folder, nav / all_done messages) ->
+  `run_all_reviews` + `review_all_output_dir`; the batch-size rules -> `single_review_batch_size` /
+  `review_all_batch_size`; `_output_dir_for_file` / `_get_review_paths` / `_get_app_dir` ->
+  `review_output_dir_for_file` / `review_paths_for` / `review_app_dir` (review_dialog keeps the old
+  names as wrappers / alias).
+- `run_review_session` is Start Review without Qt in the dialog's order (mobile Review job).
+
+### Behaviour deltas (parity-neutral)
+- `review_app_dir` resolves from review_generator.py (same folder as review_dialog.py).
+- The final review prompt is read when the parameters are gathered (before the UI changes) instead of
+  just before the thread starts; nothing changes `_final_review_prompt` in between.
+
+### Desktop bugs found (recorded, not fixed)
+1. Start Review's output folder expands `~` in the output override (`_output_dir_for_file`), Generate
+   All's per-input folder does not: a `~/...` output directory yields two different folders.
+2. Start Review passes the batch size only in chunk mode with batch translation on; Generate All also
+   hands its parallel-review count to every chunked review as its chunk worker count.
+
+## U7 Output-folder tools, QA bulk scan, Translate Headers Now, metadata field rules
+
+Frozen sources at 41814faa: other_settings.py (OS), QA_Scanner_GUI.py (QG), translator_gui.py (TG),
+translate_headers_standalone.py (THS), metadata_batch_translator.py (MBT). tests/test_u7_tool_cores.py
+runs each frozen handler / closure body against the live module globals next to the rewired code
+(40 random sandboxes each) and compares logs, message boxes (title, text, buttons), scanner calls,
+the files left on disk and translation_progress.json.
+
+### What moved (the desktop handlers keep their selection logic and dialogs, and call these)
+- QG `run_qa_scan`'s `run_scan` worker body -> `qa_scan_runtime.run_bulk_qa_scan` (returns
+  `(successful, failed)`; `on_report` replaces `self.last_qa_report_path =`); its
+  `_load_current_qa_settings` closure -> `load_current_qa_settings(config)`; the run-start
+  cancel-flag reset -> `reset_qa_cancel_flags`.
+- The flag blocks of TG `stop_qa_scan` / `_do_qa_force_stop` / `_check_qa_stop_done` ->
+  `next_qa_stop_phase`, `apply_qa_graceful_stop_flags`, `apply_qa_force_stop_flags`,
+  `clear_qa_stop_flags` (same env / scanner / client flags, pinned against the frozen methods).
+  **Open item:** translator_gui is owned by another U7 workstream; its three methods still carry
+  their inline copies until that owner (or Integrate) replaces the flag blocks with these calls.
+- OS "Delete Header Files" / "Delete TOC.txt" (two near-identical functions) -> one desktop helper
+  `_delete_translation_cache_files(self, kind, error_label)` over `output_tools_core`
+  (`plan_artifact_cache_delete`, `ArtifactDeletePlan.summary_text / question_text`,
+  `delete_planned_artifact_caches`, `artifact_delete_result`, `ARTIFACT_DELETE_TEXTS`).
+- OS `validate_epub_structure_gui`'s loop -> `validate_epub_outputs`; the "Load Font…" copy loop ->
+  `import_custom_fonts`.
+- THS `run_translate_headers_gui` body -> `translate_headers_now(gui, *, show_error,
+  process_events, output_dir_for)` (returns `(successful, failed)`); the wrapper passes the message
+  box and the Qt event pump. OS `run_standalone_translate_headers`' worker body (API client and
+  multi-key set-up, the header run, the EPUB rebuild, client restore) ->
+  `run_translate_headers_now(gui, model, api_key, *, headers_runner, rebuild_epub=True)`.
+- MBT `configure_metadata_fields`' tables and rules -> module level: `METADATA_STANDARD_FIELDS`,
+  `METADATA_DEFAULT_ENABLED_FIELDS`, `saved_metadata_fields_for_epub`, `metadata_field_checked`,
+  `store_metadata_field_selection`, `final_metadata_fields_config`.
+
+### Behaviour deltas (parity-neutral)
+- Error tracebacks of the QA worker / header worker gain one frame (the shared function).
+- `run_qa_scan` no longer imports `os` / `unified_api_client` locally (the module-level `os` is the
+  same object; `unified_api_client` is imported where it is used).
+- `METADATA_DEFAULT_ENABLED_FIELDS` is a frozenset (the dialog only tests membership).
+
+### Mobile (these adapters now run the shared code; the rebuilt copies are gone)
+- QA scan job: `run_bulk_qa_scan` with the Library sources as the "selected EPUBs" keyed by folder
+  name (log: "✅ Matched from selected files"), the desktop file search next to / inside the folder
+  for books without a known source, PDF source auto-detection, the desktop QA Stop escalation and
+  the cleanup after a stopped scan.
+- Translate Headers job: `run_translate_headers_now` with `translate_headers_now` as the runner
+  (Library folders through `output_dir_for`, errors logged): an existing `translated_headers.txt` is
+  now reconciled / repaired / re-applied like the desktop, and PDF workspaces are handled. Recorded
+  divergence: the EPUB rebuild stays on the mobile compile path (`_run_epub_compile`, which lists
+  the EPUB as a job output) instead of `fallback_compile_epub` on a folder found by name.
+- Validate EPUB: `validate_epub_outputs` with each folder as its own book (`<folder>/<name>.epub`).
+- Converter Load Font, Headers screen cache deletion and metadata field rules delegate to the cores.
+
+### Desktop bugs found (recorded, not fixed)
+1. The output-folder search is copied five times (delete headers, delete TOC, validate, the
+   header run, the header rebuild) with small differences: only THS checks `<name>_PDF` folders,
+   validate does not log the override, the rebuild ignores PDFs.
+2. THS logs two mojibake lines for PDFs ("âœ… PDF headers complete", "âŒ PDF header translation
+   failed": UTF-8 emoji saved as cp1252 text).
+3. A stopped QA bulk scan still ends with "✅ QA scan completed successfully." / "✅ Bulk QA scan
+   completed.".
+
+## U7 Retranslate Selected, Resolve QA, image-folder view, manual glossary refinement and the SDLXLIFF reviewer core (progress_actions, progress_core, glossary_progress_core, sdlxliff_review_core; Retranslation_GUI rewired)
+
+Moved at BASE_SHA 41814faa (the U6 commit; the Progress Manager oracle was re-frozen there with
+`python tests/parity/progress_legacy.py --freeze --sha HEAD` into
+`tests/parity/legacy_progress/41814faa95e2/`). Line numbers refer to
+`git show 41814faa:src/Retranslation_GUI.py` (RG). Pinned by tests/test_retranslate_plan_apply.py and
+tests/test_sdlxliff_review_core.py (`*_verbatim` plus file-system goldens against the frozen dialogs).
+
+### What moved / split (and how the desktop calls it)
+
+- **Retranslate Selected** (the `retranslate_selected` generator of `_add_retranslation_buttons_opf`,
+  RG 21913-22959) is split into `progress_actions.plan_retranslation(book, rows, settings)` (selection
+  normalisation, the metadata / artifact / mixed-audio guards and every confirmation text incl. the
+  RECYCLED TOC/header pair, RG 21925-22253 verbatim blocks), `apply_retranslation(book, plan,
+  linked_choice, sidecar_workers)` (RG 22273-22850 verbatim; `sidecar_workers` overrides the owner's
+  extraction-worker count when given) and `retranslation_result_message(result)` (RG 22869-22959, the
+  three dialogs as `(kind, title, message)`). `book` is the desktop data dict (+ `owner=`) or a
+  `progress_core.BookProgress`; `rows` are list indices, `RowPresentation`s or display dicts. The
+  desktop generator is now plan -> its dialogs -> `yield "run_background"` -> apply on the worker ->
+  `yield "apply_ui"` -> refresh + message; the audio-mode TTS reset still runs `reset_tts` on the Qt
+  thread. The progress write is unchanged (`_merge_and_write_retranslation_progress` with the
+  authoritative chunk resets).
+- **Resolve QA issue (raw foreign text)**: the preflight of `_start_single_progress_qa_resolution`
+  (RG 16651-16713: target, refusals, `_single_qa_resolution_request` / `selected_files` /
+  `current_file_index` / `_metadata_only_run` / `_single_chapter_filter` / `_force_stream_all`) is
+  `progress_actions.prepare_single_qa_resolution(owner, data, info)`; the desktop method keeps the
+  messages, `entry_epub`, the log line and `run_translation_thread`.
+- **Image-folder Progress Manager**: output lookup (RG 26379-26415), the refresh scan (25240-25382),
+  row text (25400-25423), Mark as Skipped (26718-26801), Delete Selected confirmation / deletes
+  (26839-26850, 26857-26881) are `progress_core.image_folder_output_dir`, `scan_image_folder`,
+  `image_folder_row_text`, `mark_image_folder_items_skipped`, `image_folder_delete_confirmation`,
+  `delete_image_folder_items` (+ `image_folder_not_found_message`, `image_folder_mark_skipped_message`,
+  `build_image_folder_progress` for mobile). The dialog keeps its list, selection, confirmations and
+  timers. The initial list built at open (RG 26427-26600) stays in the dialog.
+- **Manual glossary refinement**: the plan step of the Glossary Progress confirm closure (RG
+  18239-18324) is `glossary_progress_core.prepare_manual_glossary_refinement` (returns a
+  `ManualRefinementPreview`; refusals as `(kind, title, message)`), its post-dialog step (RG
+  19046-19070) `finish_manual_glossary_refinement`, and `_run_manual_glossary_refinement` (RG
+  15100-15196) `run_manual_glossary_refinement(owner, ...)`; the desktop closure keeps the busy / model
+  checks and the preview dialog, the desktop method is a one-call wrapper.
+  `plan_manual_glossary_refinement` (mobile) stands in for the dialog.
+- **SDLXLIFF reviewer**: `sdlxliff_review_core` holds the module helpers (RG 342-668, 714-745 incl.
+  `_get_app_dir`), `SdlxliffAutogenMixin` (RetranslationMixin's sidecar auto-generation: RG
+  14979-14990 and 22 methods of 15199-16254) and `SdlxliffReviewCoreMixin` (the dialog constants RG
+  846-925 / 9378-9397 and 214 widget-free dialog methods, verbatim except class-qualified calls now
+  naming the mixin and three hook replacements: the Notepad page reload after a save
+  (`_refresh_notepad_page_after_save`) and the row-editor insert of inject / Undo all edits
+  (`_insert_into_review_editor`)). Split helpers the dialog now calls: `_init_review_state` (RG 939-958),
+  `_translate_tooltip_work` (RG 10145-10157 / 10220-10232), `_store_tooltip_translations` (RG
+  10316-10341), `_tooltip_translation_result_message` (RG 10361-10374), `_piece_header_text` (RG
+  7385-7395), `_apply_machine_translation_threshold` (RG 4296-4301). `SDLXLIFFReviewDialog(
+  SdlxliffReviewCoreMixin, QDialog)` overrides every GUI hook with its widget code;
+  `RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin)`; Retranslation_GUI re-exports the module
+  helpers. The Notepad WebEngine JS, page cache, menus, prompts and threads stay in the dialog.
+
+### Writes switched to `mutate_progress` (image-folder view)
+
+Mark as Skipped (RG 26806) and Delete Selected (RG 26886) wrote the view's whole snapshot
+(`json.dump(progress_data_current)`); they now remove the collected hash keys from the newest file
+through `progress_core.mutate_progress`. Consequences: a translator save made after the view's last
+refresh survives; nothing is written when nothing changed (Mark as Skipped used to rewrite the file
+whenever one was loaded -- always for a v2.1 file, where no hash key ever matches); a progress file
+deleted since the refresh is no longer recreated from the snapshot; Delete Selected's
+"Removed <hash> from progress_data[...]" prints now follow the per-file "Deleted:" prints. The pre-2.1
+shape bug (U5 desktop bug 3) is kept: against a v2.1 `chapters` file no hash key is found, so no
+entry is removed (test_retranslate_plan_apply.py::test_image_folder_progress_hash_removal_follows_the_layout).
+
+### Behaviour deltas (intentional, parity-neutral on the fixtures)
+
+- Machine Translation preview: both worker closures call `_translate_tooltip_work`; when parsing /
+  validating a response raises, the worker now reports no translations (before: the partially
+  processed ones) -- the error is reported either way.
+- `_apply_tooltip_translations` computes its status text through `_tooltip_translation_result_message`
+  before the `try` that sets it (same text).
+- Retranslate Selected reads the Manual editing checkbox before the guards (it read it after them).
+- Moved code that named its class (`SDLXLIFFReviewDialog._normalize_review_text`,
+  `RetranslationMixin._sdlxliff_is_extracted_epub_dir`, ...) now names the mixin: patching those names
+  on the desktop classes, or patching moved module helpers on Retranslation_GUI, no longer reaches the
+  moved callers (test_sdlxliff_support's manifest-flush test patches sdlxliff_review_core now).
+- `Retranslation_GUI._get_app_dir` is the moved function (same code; its `__file__` is now
+  sdlxliff_review_core in the same folder, so the result is identical).
+
+### Desktop bugs found (recorded, not fixed)
+
+1. The SDLXLIFF reviewer's progress writes (Mark as Completed / Undo, the manual-editing pending seed:
+   `_write_review_progress_data`) are unlocked read-modify-writes of `translation_progress.json`, not
+   `mutate_progress`: a translator save between the read and the replace is lost. Kept verbatim.
+2. Image-folder view: the list built at open (RG 26427-26600, flat layout only, root images included)
+   differs from the refresh that replaces it 0 ms later (RG 25240-25382: nested `images` or flat
+   layout, root images only when tracked). Mobile shows the refresh's list.
+3. Opening a Progress Manager prints "Failed to load icon: cannot access local variable 'sys'": an
+   `import sys` inside one branch of `_force_retranslation_epub_or_text` makes `sys` local, so the
+   dialog icon is never set when that branch is not taken.
+
+### GUI-free semantics for mobile
+
+- `plan_retranslation` / `apply_retranslation` on `progress_core.build_book_progress`: settings
+  `{'manual_editing': owner._get_retranslation_manual_editing_state()}`; a RECYCLED single-artifact
+  selection needs `linked_choice` (`plan.linked_choice_labels`); `retranslate_rows` plans and applies
+  without confirmation and refuses a needed-but-missing choice. Audio mode plans `reset_tts`.
+- `prepare_single_qa_resolution` sets the run state on the job's HeadlessOwner; the caller then
+  starts the translation run (the pipeline turns the request into a Partial.b run).
+- `SdlxliffReviewSession` / `open_sdlxliff_review`: `save_status_label` and `_edit_save_timer` are plain
+  stand-ins (edits are saved by `flush_edits`); `refresh` reloads every piece when sidecars changed
+  (the dialog rebuilds only changed pages); `_displayed_piece_row` is the selected piece; the Machine
+  Translation preview runs on the caller's thread; provider credentials are stored with
+  `set_machine_translation_credentials` (keys encrypted like the desktop's) and a provider without
+  them is refused with the desktop's message instead of a prompt; the default auto-generation owner
+  is `SdlxliffAutogenOwner(config)`; without a `context_parent` reviewer settings stay in `config`
+  (the dialog without a parent writes `<app dir>/config.json`).
+- `plan_manual_glossary_refinement`: the requested types / target chunk count are the preview's
+  answers; the model is `owner.model_var`; "Nothing to Refine" returns None.
+- `build_image_folder_progress`: the refresh's list and its "No translated files found" check.
+
+### Parity harness additions
+
+- tests/test_retranslate_plan_apply.py: verbatim tiers; 35 Retranslate Selected file-system goldens
+  through the real offscreen dialogs (frozen generator vs working tree, scripted Yes / No / RECYCLED
+  answers: chapters, merged children, refinement, manual editing with SDLXLIFF sidecars and Machine
+  Translation previews, chunk segments / every chunk / parent absorbing children / segment not found,
+  metadata phases, RECYCLED pairs, toggles off, audio TTS reset, >10 rows, PDF sections with compiled
+  HTML/PDF and API chunks, subtitles, plain text); mobile plan/apply vs the desktop trees; Resolve QA
+  preflight; image-folder dialogs (flat / nested / v2.1 / no progress x Mark as Skipped / Delete
+  Selected); manual refinement plan vs the frozen closure and the runner vs the frozen method.
+- tests/test_sdlxliff_review_core.py: verbatim tiers; reviewer goldens (open with sidecar
+  regeneration, row / Notepad / Manual-editing edits, Mark as Completed / Undo, Machine Translation
+  preview + Flag inaccurate + inject with a scripted translator, threshold / provider settings) on the
+  frozen dialog, the working-tree dialog and the mobile session; import hygiene.
+- `tests/_src_corpus.PROGRESS_MANAGER_MODULES` includes sdlxliff_review_core; retargeted source checks
+  in test_sdlxliff_support (+ its manifest-flush monkeypatch), test_progress_model_metadata,
+  test_progress_actions and test_glossary_refinement_status_display.
+
+## U7 Integrate (wiring, packaging, desktop QA Stop rewiring, offline E2E)
+
+The parity oracles stay frozen at 41814faa (the U6 commit; HEAD 5befbc80 differs from it only in
+`src/mobile/pyproject.toml` and the mobile E2E). All parity tiers pass on the integrated tree (494
+tests; the two skips are the GLOSSARION_PY310 probe, run separately with the 3.10 venv and passing,
+and the documented desktop-only trace race). The full desktop suite (167 files, per file, isolated
+Library) has no failure outside BASELINE_FAILURES.txt.
+
+### Desktop changes made by the integration (each pinned)
+
+- **QA Stop handlers call the shared stop helpers.** translator_gui's `stop_qa_scan` decides its
+  branch with `qa_scan_runtime.next_qa_stop_phase(current_phase, graceful_stop_enabled)` and sets
+  the graceful flags with `apply_qa_graceful_stop_flags()`; `_do_qa_force_stop` calls
+  `apply_qa_force_stop_flags()`; `_check_qa_stop_done._delayed_flag_cleanup` keeps its "only if no
+  new scan started" check and calls `clear_qa_stop_flags()`. The helpers hold the removed statements
+  in their order (stop_scan, GRACEFUL_STOP, TRANSLATION_CANCELLED, the client's fast-path flags);
+  button text / style, timers, logs and the background cleanup thread are unchanged. The mobile
+  `qa_scan` job already used the helpers, so the desktop and mobile Stop share one code path.
+  Pinned by tests/test_u7_tool_cores.py (the frozen 41814faa methods, the shared helpers and the
+  rewired methods side by side: 1-3 clicks with graceful stop on and off, then the delayed cleanup
+  with and without a new scan in between; env flags, client flags, stop_scan calls, phase and
+  `stop_requested` compared) and by tests/test_image_job.py `TG_U7_SPANS` (six new spans).
+- **Review generator Delete / Restore.** The file moves of `ReviewDialog._on_delete` (every existing
+  review file to `<its folder>/backups/review_<timestamp>.md`) and `_on_restore` (newest `.md` backup
+  of the primary review's `backups` folder over every review path, then the restored text) and
+  `_get_backups_dir` moved into review_generator (`move_review_to_backups`, `review_backups`,
+  `copy_review_backup`, `review_backups_dir`, `review_restore_question` for the overwrite box text);
+  the dialog keeps its button feedback, the question box and the UI reload. The mobile Review
+  screen's Delete / Restore (no longer disabled) call them plus `latest_review_backup` /
+  `restore_review_backup`. Pinned by tests/test_review_run_core.py (the frozen 41814faa handlers and
+  the rewired ones on five layouts: single review, volume reviews, no review, backup only, restore
+  declined; files, widget calls, the question text and the restored text compared).
+- **Settings schema generator** (src/mobile/tools/schema_extract.py). `image_job.py` and
+  `rpgmaker_job.py` are owner modules (TranslatorGUI mixins); `sdlxliff_review_core.py` is a dialog
+  module (UI site `progress`); `qa_scan_runtime.py` and `translate_headers_standalone.py` are scanned
+  for the moved functions only (new `DIALOG_MODULE_FUNCTIONS`: `run_bulk_qa_scan` /
+  `load_current_qa_settings` at QA_Scanner_GUI's `*` distance, with its nested-name hints;
+  `run_translate_headers_now` -> `other.meta_data`); the Direct Text rule functions now in
+  `direct_text_store` are `direct_text` UI roots, and the new `CONFIG_UPDATE_FUNCS` reads the dict
+  literal `glossary_override_config_updates` returns as config writes. With these, the regenerated
+  `settings_schema_data.py` equals HEAD except four keys whose records came from the manual glossary
+  refinement confirm closure, whose plan step moved into `glossary_progress_core` (a split, not a
+  verbatim move):
+  - `custom_entry_types`: loses the label "Exact total chunk count:" and the tooltip "This one-run
+    override never changes the saved Refinement settings.";
+  - `glossary_refinement_chunking_mode`: loses that label and tooltip and its dialog default `'all'`
+    (`default_source` dialog -> `env:translation`, origins lose `dialog`);
+  - `glossary_refinement_system_prompt`: loses the tooltip;
+  - `glossary_refinement_user_prompt`: loses the tooltip; its dialog default `''` becomes
+    `{'$expr': 'default_user'}`.
+  The label and tooltip belong to the closure's one-run chunk-count spin box, which edits none of
+  these keys (label proximity in the old closure); no effective default, type or section changes.
+- **Collector baseline.** `translate_headers_standalone->PySide6` allows 2 unguarded sites (was 1):
+  `run_translate_headers_gui`'s QMessageBox import and its `processEvents` hook, both inside the
+  desktop wrapper (the old in-loop QApplication imports were inside `try`). Mobile runs
+  `translate_headers_now` / `run_translate_headers_now`, which import no Qt.
+- **Packaging.** image_job, rpgmaker_job, async_batch_core, output_tools_core and
+  sdlxliff_review_core are in both blocks of all 14 specs (module-level imports of
+  translation_pipeline, async_api_processor, other_settings, Retranslation_GUI and progress_actions,
+  so every tier; their src-local imports are all shipped); tests/test_mobile_runtime.py enforces it
+  (`U7_SHARED_MODULES`, `U7_IMPORTERS`, no Qt / dialog / manga import). backend_manifest.toml lists
+  the five; python-app.yml runs the seven new U7 test files on 3.10 and adds them plus
+  review_generator to the PySide6-blocked import check; `moved_functions.SHARED_MODULES` gains
+  async_batch_core, output_tools_core and review_generator (3.10 import probe).
+
+### Mobile wiring (no desktop change)
+
+- Job kinds `retranslate`, `resolve_qa`, `async_batch`, `review`, `rpgmaker`, `generate_media` and
+  `translate_image` are registered (`job_kinds.KIND_MODULES` and `JobKind`); `SHIPPED_MILESTONES`
+  gains U7, so the U7 router entries (Tools hub tiles, `chat.attachments`, `tools.text`) open.
+- `ToolsFeature` builds `tools.async` / `tools.review` / `tools.sdlxliff` / `tools.rpgmaker`;
+  `JobsFeature` builds `tools.text` and hands the File browser's "Open with › Reader" to the Reader
+  feature; a JobStrip tap on a job waiting on an `async_batch_question` opens Tools › Async batch.
+- app.py: the drawer's "New scratch chat" opens a scratch chat (`ChatView._on_new_scratch`), like
+  the header button and Send as scratch.
+- Dependencies: flet-audio / flet-video 1.0.3 (pure `py3-none-any` wheels) pass
+  `check_mobile_wheels` for all five targets. `google-cloud-texttospeech` cannot be built for mobile:
+  it needs grpcio >= 1.84 (through google-api-core / grpcio-status), which has no android_24 or
+  ios_13 cp313 wheel (1.81 is the newest installable; the plan's grpcio trap), and its requests floor
+  conflicts with the pinned requests 2.32.5. Google Cloud TTS voices therefore show a ReasonChip in
+  the Audio options; the REST fallback stays a U9 tier-B item.
+
+### Self-test and offline E2E additions
+
+- Fake server: a request with an `image_url` part is a `vision` request answered with
+  `FAKE_OCR_TEXT`; `POST /v1/images/generations` (the client's Images API route for the Image
+  output mode) returns `FAKE_PNG` as `b64_json` and records the prompt; `leave_raw_once[chapter]`
+  keeps a Korean passage in that chapter's next single-chapter answer.
+- `e2e_retranslate_resolve_qa`: translate (the model leaves one Korean sentence in chapter 5), the
+  Chapters tab plans Retranslate for chapters 3 and 7 (`plan_retranslation`, the desktop
+  "Confirm Retranslation" copy), the `retranslate` job resets only those files / rows, the next
+  translate run sends exactly chapters 3 and 7 (plus the book-metadata request every run sends), a QA
+  quick scan flags chapter 5 (`korean_text_found_...`) and the row's Resolve QA runs the Partial.b
+  `resolve_qa` job, which sends only chapter 5 and leaves no Korean. Fixture note: the quick scan
+  skips the foreign-character check of chapters under 500 words except their headings (which the
+  run rewrites from the translated headers) and reports a mostly Korean text as a language
+  mismatch, not as raw Korean text, so the leftover is one sentence inside a ~600-word answer.
+- `e2e_vision_and_generate`: a chat PNG attachment in the Vision mode sends one vision request and
+  the OCR text reaches `response_001_<name>.html` and the chat; Generate from prompt (Image) sends
+  the composer text to the Images API and the PNG becomes the response's `Direct Text 1.png`
+  (`[GENERATED_IMAGE:...]`, `message_media`).
+- The suite has 8 checks and 18 jobs; it passes on the repo `src/` and on the collected bundle.
+
+### Desktop offscreen smoke (integration)
+
+The real `TranslatorGUI` offscreen, HEAD vs the working tree (isolated src copies and sandboxes), on
+the workspace the U7 E2E translated: Progress Manager › Retranslate Selected (chapters 3 and 7: the
+same confirmation and result boxes, rows, statistics, output tree and progress JSON), the SDLXLIFF
+reviewer (same pieces / rows / status; one row edit saved to the same sidecar bytes),
+`_process_image_file` on a PNG with `send_image` stubbed (same request, logs, output folder and
+progress file) and the Async Processing dialog with "Estimate Cost Only" (same widgets, labels and
+boxes). Every section is identical.
+
+### Desktop bug recorded (pending the user's decision; found by the U6 device E2E)
+
+`scan_html_folder.update_new_format_progress` uses `hashlib` at line 5971 (the artifact branch) but
+re-imports it locally at line 6023 (`import hashlib`), which makes `hashlib` a local name of the
+whole function: whenever QA flags TOC.txt / translated_headers.txt the scan ends with
+`UnboundLocalError: cannot access local variable 'hashlib'`. The scanner never seeds langdetect, so
+this hits about one run in ten. Fix (one line, not applied): drop the local import (the module
+imports hashlib at line 25). The mobile E2E pins the langdetect seed (5befbc80) so its QA checks are
+deterministic.
+
+## U7 review: second round (mobile and test-only, no desktop change)
+
+- **Transcript cards stay live.** Flet 1.0.3 freezes a new control that the diff matches to an old
+  one by key, and every re-render rebuilt every chat card under its `ScrollKey`: after any re-render
+  the AudioCard could not show playback (and position events raised), Copy ✓, the jump highlight and
+  the off-loop extras (a Vision run's OCR section, Refine's Compare with original) failed or were
+  swallowed. Each card now sits in a `CardSlot` kept across renders (the slot carries the
+  `ScrollKey`; a new card is swapped into its `content`), and a card whose inputs did not change is
+  passed again as the same object; the running JobCard stays one object for the whole run. The
+  AudioHub drops a card that cannot take an event instead of failing the playback.
+- **Unsaved text-editor edits.** The `tools.text` editor's View cannot pop while its text is dirty:
+  Back asks Save / Discard / Cancel (shared with the shell's leave guard) and leaves on Save or
+  Discard.
+- **SDLXLIFF reviewer.** Leaving it saves an edited Notepad document and typed row text (the
+  dialog's `closeEvent` captures the Notepad HTML and flushes its queued edits); a re-render saves
+  the document into its own piece first. The 2 s poll runs only while the reviewer is on top and the
+  app is in the foreground.
+- **Chat store.** Duplicate as scratch copies the original's `Chat Messages` body files into the
+  scratch chat (Delete message in the original renames or removes them; the copy showed another
+  response's text). Plan › Cancel's truncation remaps the sidecar like Delete message, so a
+  cancelled Run again / Retranslate turn no longer groups a later send of the same file.
+- **Attachments manager.** Migrate / Delete workspace are blocked for a workspace while any active or
+  queued job's folder is inside it (the job card's Compile, ＋ › Retranslate chapters), not only while
+  the chat's own run is live.
+- **RPG Maker.** A scan no longer marks the prepared copy as the translated game: "Share game as ZIP"
+  stays disabled after reopening the tool until a run applied the translation.
+- **File browser.** Open with › Media viewer shows images, video and audio in the chat's MediaViewer
+  (UI_SPEC §4.10).
+- **tests/test_sdlxliff_review_core.py (test-only).** `test_mobile_session_api` found chapter 1 at
+  piece 0, which holds only when `os.listdir` returns the SDLXLIFF folder sorted (NTFS). Without
+  spine positions the shared core keeps the folder's listing order (the desktop rule,
+  `Retranslation_GUI` `_load_pieces`), and ext4 lists in hash order, so the test now finds the piece
+  by its output name and asserts only the file-name part of the header. Verified with the listing
+  reversed. The core is unchanged.

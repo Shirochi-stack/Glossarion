@@ -20,7 +20,8 @@ What is checked here:
 * MRO and hooks: the pipeline mixin is TranslatorGUI's first base, the moved bodies left
   TranslatorGUI, the desktop keeps its own GUI methods (they win over every hook default),
   no GUI mixin shadows a pipeline name (GlossaryManagerMixin only re-exports the moved
-  ``_glossary_editor_input_sources``), the U7 placeholders shadow nothing;
+  ``_glossary_editor_input_sources``); the U7 runners (image_job / rpgmaker_job) replaced the
+  placeholders and come from TranslationPipelineMixin's bases;
 * the GUI-free hooks: the blocking glossary-approval question goes to ``host.ask`` and
   completes the desktop's Event handshake, other requests reach ``host.emit``;
 * a real ``HeadlessOwner`` runs the mobile composition end to end with stubbed backends:
@@ -119,6 +120,9 @@ EDITS = {
          "image_extensions = set(IMAGE_ATTACHMENT_EXTENSIONS)", 1),
         ("self.input_files_updated_signal.emit(list(self.selected_files))",
          "self._ui_request('input_files_updated', list(self.selected_files))", 1),
+        # U7: a game folder the mobile RPG Maker entry registered is dispatched like a game .exe
+        ("elif ext == '.exe':",
+         "elif ext == '.exe' or file_path in (getattr(self, RPGMAKER_GAME_INPUTS_ATTR, None) or ()):", 1),
     ],
     "_await_direct_text_glossary_approval": [
         ("self.direct_text_glossary_approval_signal.emit(", "self._ui_request(\n            'direct_text_glossary_approval',", 1),
@@ -489,7 +493,7 @@ def test_pipeline_classes_and_hook_registry():
     names = _pipeline_methods()
     hooks = {n for n, (c, _node, _t) in names.items() if c == "PipelineHooksMixin"}
     assert hooks == set(tp.PIPELINE_HOOKS)
-    assert set(tp.U7_PLACEHOLDERS) <= hooks
+    assert not hasattr(tp, "U7_PLACEHOLDERS")
     moved_or_new = {n for n, (c, _node, _t) in names.items() if c != "PipelineHooksMixin"}
     assert moved_or_new == set(MOVED) | set(NEW_METHODS) | {"_glossary_editor_input_sources"}
 
@@ -533,15 +537,23 @@ def test_headless_owner_composition():
     assert "log_text" not in contract  # read only inside try/except Exception (guarded)
 
 
-def test_u7_placeholders_shadow_no_real_runner():
-    """The image / RPG Maker / generative placeholders are the only shared definitions: when
-    U7 moves the real runners into shared mixins, this fails until the placeholders go."""
+#: The runners run_translation_direct dispatches to (U3 placeholders until U7 moved the real ones).
+U7_RUNNERS = {"_process_image_file": "ImageJobMixin", "_run_generative_prompt_mode": "ImageJobMixin",
+              "_process_rpgmaker_game": "RpgMakerJobMixin"}
+
+
+def test_u7_runners_replaced_the_placeholders():
+    """The image / RPG Maker / generative runners are defined once, by their U7 mixins, which
+    TranslationPipelineMixin inherits: no placeholder (or other shared definition) is left."""
     import headless_owner
     import translation_pipeline as tp
 
-    for name in tp.U7_PLACEHOLDERS:
-        owners = [k for k in headless_owner.HeadlessOwner.__mro__ if name in vars(k)]
-        assert owners == [tp.PipelineHooksMixin], (name, owners)
+    assert tp.TranslationPipelineMixin.__bases__[0] is tp.GlossaryPipelineMixin
+    assert [c.__name__ for c in tp.TranslationPipelineMixin.__bases__[1:]] == ["ImageJobMixin", "RpgMakerJobMixin"]
+    for name, mixin in U7_RUNNERS.items():
+        owners = [k.__name__ for k in headless_owner.HeadlessOwner.__mro__ if name in vars(k)]
+        assert owners == [mixin], (name, owners)
+        assert name not in tp.PIPELINE_HOOKS and name not in vars(tp.PipelineHooksMixin)
 
 
 def test_owner_contract_scanner_counts_try_guards_and_skips_nested_classes():
@@ -650,7 +662,7 @@ def test_await_direct_text_glossary_approval_asks_the_host(tmp_path):
                               ("direct_text_glossary_approval", {"path": ""})]
 
 
-def test_gui_method_defaults_and_placeholders():
+def test_gui_method_defaults():
     host = _Host()
     owner = _owner(host)
     assert owner._attach_gui_logging_handlers() is None
@@ -658,13 +670,11 @@ def test_gui_method_defaults_and_placeholders():
     assert owner._start_autoscroll_delay(0) is None
     assert owner._update_manual_glossary_status() is None
     assert owner._record_library_raw_inputs(["C:/x/book.epub"]) is None  # no Qt registry here
-    assert owner._process_image_file("C:/x/page.png") is False
-    assert owner._process_rpgmaker_game("C:/x/Game.exe") is False
-    assert owner._run_generative_prompt_mode() is False
-    assert [line.split(":")[0] for line in host.logs] == [
-        "⚠️ Image/video translation is not available in this build yet",
-        "⚠️ RPG Maker translation is not available in this build yet",
-        "⚠️ Generating from a prompt without an input file is not available in this build yet"]
+    # U7: the hook mixin no longer carries runner placeholders (tests/test_image_job.py and
+    # tests/test_rpgmaker_job.py cover the real runners)
+    for name in U7_RUNNERS:
+        assert not hasattr(owner, name), name
+    assert host.logs == []
 
 
 def test_lazy_load_modules_default_imports_the_backend_entries():

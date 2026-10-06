@@ -1,7 +1,7 @@
 # Glossarion Mobile (Android + iOS): Flet 1.0.3 build, device smoke tests and release.
 #
 #   prepare --+-- android -- android-smoke --+
-#             +-- ios -----------------------+-- release (tags v* only)
+#             +-- ios -----------------------+-- release (manual opt-in only, see below)
 #             +-- ios-signed (Apple secrets) +
 #             +-- ios-simulator-smoke (optional, non-blocking)
 #
@@ -14,6 +14,12 @@
 #       -> an additional signed IPA (ios-signed). The unsigned IPA (AltStore/SideStore) is always built.
 # Optional repository variables: IOS_EXPORT_METHOD (default release-testing), IOS_SIGNING_CERTIFICATE
 # (default "Apple Distribution", or "Apple Development" for the debugging/development export method).
+#
+# Publishing policy: this workflow never publishes on its own. It has no tag trigger, and
+# build-all.yml does not call it, so pushing a v* tag (by anyone holding a token) cannot ship the
+# mobile app. The release job runs only for a manual run on a tag with the publish_release input
+# ticked AND the repository variable MOBILE_RELEASE_ENABLED set to 'true' (not set by default).
+# The APK/IPA artifacts are kept for 7 days.
 #
 # Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
 # Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
@@ -37,8 +43,10 @@ on:
         description: iOS simulator smoke test (optional, non-blocking)
         type: boolean
         default: false
-  push:
-    tags: ['v*']
+      publish_release:
+        description: Publish the mobile assets to this tag's GitHub release (also needs repository variable MOBILE_RELEASE_ENABLED=true)
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       targets:
@@ -493,6 +501,7 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
 
       - name: Upload AAB
         if: env.HAS_KEYSTORE == 'true'
@@ -502,6 +511,7 @@ jobs:
           path: dist/*.aab
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
 
   # ==========================================================================
   # android-smoke: x86_64 API 35 emulator; launch markers + deep-link self-tests (blocking):
@@ -661,6 +671,7 @@ jobs:
           path: dist/*.ipa
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
 
   # ==========================================================================
   # ios-signed: temporary keychain + provisioning profile (only when the Apple secrets exist)
@@ -814,6 +825,7 @@ jobs:
           path: dist/*.ipa
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
 
       - name: Remove keychain and provisioning profile
         if: always()
@@ -898,6 +910,7 @@ jobs:
           path: dist/*_iOS_simulator.zip
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
 
       - name: Smoke test on the simulator
         run: |
@@ -996,14 +1009,17 @@ jobs:
           retention-days: 14
 
   # ==========================================================================
-  # release: tags only. Appends the mobile assets to the tag's GitHub release, like the desktop
-  # build-*.yml workflows do (softprops/action-gh-release, files + fail_on_unmatched_files).
+  # release: manual opt-in only (see the publishing policy at the top). Appends the mobile assets
+  # to the tag's GitHub release (softprops/action-gh-release, files + fail_on_unmatched_files).
   # ==========================================================================
   release:
     name: Publish mobile assets to the GitHub release
     needs: [prepare, android, android-smoke, ios, ios-signed]
     if: >-
       !cancelled()
+      && github.event_name == 'workflow_dispatch'
+      && inputs.publish_release == true
+      && vars.MOBILE_RELEASE_ENABLED == 'true'
       && needs.prepare.result == 'success'
       && needs.prepare.outputs.is_release == 'true'
       && needs.android.result == 'success'

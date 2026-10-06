@@ -10,7 +10,10 @@ Moved verbatim from ``git show 20b446b0:src/Retranslation_GUI.py`` (RG line numb
 * ``make_glossary_progress_model``: the data closures of ``_build_gp_panel``
   (RG 23524-24546, 24872-24896, 24932-25139, 25287-25412, 25575-25799, 26413,
   26443-26481) plus the data halves of the usage-input loader (25243-25285), the
-  footnote collection (25806-25842) and Remove from progress (26165-26236).
+  footnote collection (25806-25842) and Remove from progress (26165-26236);
+* U7 (``git show 41814faa:src/Retranslation_GUI.py``): the manual glossary refinement --
+  the plan step of the confirm closure (RG 18239-18324, 19046-19070) and the runner
+  ``_run_manual_glossary_refinement`` (RG 15092-15196).
 
 ``_build_gp_panel`` builds the model and binds the same names, so the desktop panel
 runs this code.  The two glossary-progress writes (Mark as Completed, Remove from
@@ -20,6 +23,7 @@ atomically (``glossary_refinement.locked_progress_file``; DISCREPANCIES U5).
 Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup.
 """
 
+import copy
 import html as html_lib
 import json
 import os
@@ -2835,14 +2839,392 @@ def write_glossary_summary(model, progress_callback=None):
     )
 
 
+# ---------------------------------------------------------------------------
+# Manual glossary refinement (mobile milestone U7)
+#
+# ``git show 41814faa:src/Retranslation_GUI.py``: the plan step of the Glossary
+# Progress confirm closure ``_confirm_manual_glossary_refinement`` (RG 18211-18296:
+# glossary lookup, entry types, the automatic refinement plan), its post-dialog step
+# (RG 19018-19042: the execution plan + RefinementRunOptions) and the runner
+# ``RetranslationMixin._run_manual_glossary_refinement`` (RG 15112-15208).  The desktop
+# closure keeps the busy / model checks and the preview dialog; the runner method is a
+# thin wrapper.  Mobile: ``plan_manual_glossary_refinement`` (no dialog: the requested
+# types and target chunk count are the dialog's answers) + ``run_manual_glossary_refinement``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ManualRefinementPreview:
+    """The confirm closure's state before its preview dialog (RG 18211-18296)."""
+
+    refusal: Optional[tuple] = None
+    glossary_path: Optional[str] = None
+    entries: Any = None
+    active_types: List[str] = dataclass_field(default_factory=list)
+    selected_types: List[str] = dataclass_field(default_factory=list)
+    model: str = ''
+    request_mode: str = 'all'
+    splitter: Any = None
+    safe_budget: Any = None
+    system_prompt: str = ''
+    user_prompt: str = ''
+    refinement_type_config: Any = None
+    automatic_plan: Any = None
+    entry_counts: Any = None
+    non_empty_types: List[str] = dataclass_field(default_factory=list)
+
+    def plan_for(self, selected_types, target_chunk_count=None):
+        """``plan_refinement`` with this preview's settings (the dialog's re-plans)."""
+        from glossary_refinement import plan_refinement
+
+        if target_chunk_count is None:
+            return plan_refinement(
+                self.entries,
+                selected_types=selected_types,
+                chunking_mode=self.request_mode,
+                chapter_splitter=self.splitter,
+                available_tokens=self.safe_budget,
+                system_prompt=self.system_prompt,
+                user_prompt=self.user_prompt,
+                custom_entry_types=self.refinement_type_config,
+            )
+        return plan_refinement(
+            self.entries,
+            selected_types=selected_types,
+            chunking_mode=self.request_mode,
+            chapter_splitter=self.splitter,
+            available_tokens=self.safe_budget,
+            target_chunk_count=target_chunk_count,
+            system_prompt=self.system_prompt,
+            user_prompt=self.user_prompt,
+            custom_entry_types=self.refinement_type_config,
+        )
+
+
+def prepare_manual_glossary_refinement(
+    self,
+    source_path,
+    progress_path,
+    selected_types,
+    model,
+    *,
+    find_glossary=None,
+    active_types_fn=None,
+):
+    """Find the glossary, its active entry types and the automatic refinement plan.
+
+    ``self``: the owner (``config``, ``custom_entry_types``); ``model``: the selected
+    model (the desktop asks for one first); ``find_glossary(source_path, progress_path)``
+    / ``active_types_fn()``: the Glossary Progress locator's closures (default: a
+    ``glossary_progress_locator`` for ``source_path``).  Sets ``GLOSSARY_CUSTOM_FIELDS``
+    like the desktop.  Returns a ``ManualRefinementPreview``; ``refusal`` is the
+    ``(kind, title, message)`` the desktop shows instead of the preview.
+    """
+    if find_glossary is None or active_types_fn is None:
+        _locator = glossary_progress_locator(self, source_path or '', None)
+        find_glossary = find_glossary or _locator._find_glossary_for_refinement
+        active_types_fn = active_types_fn or _locator._active_glossary_refinement_types
+    _find_glossary_for_refinement = find_glossary
+    _active_glossary_refinement_types = active_types_fn
+    _refinement_type_key = _glossary_refinement_type_key
+    preview = ManualRefinementPreview(model=model)
+
+    glossary_path = _find_glossary_for_refinement(source_path, progress_path)
+    if not glossary_path:
+        preview.refusal = (
+            'warning',
+            'Glossary Not Found',
+            'No saved glossary file was found for this book.',
+        )
+        return preview
+    try:
+        entries = parse_glossary_file(glossary_path)
+    except Exception as exc:
+        preview.refusal = ('error', 'Glossary Read Failed', str(exc))
+        return preview
+
+    active_types = _active_glossary_refinement_types()
+    requested_lc = {
+        _refinement_type_key(entry_type)
+        for entry_type in selected_types or []
+        if str(entry_type or '').strip()
+    }
+    selected_types = [
+        entry_type for entry_type in active_types
+        if _refinement_type_key(entry_type) in requested_lc
+    ]
+    entry_counts = Counter(
+        _refinement_type_key(entry.get('type'))
+        for entry in entries or []
+        if isinstance(entry, dict)
+    )
+    non_empty_types = [
+        entry_type for entry_type in selected_types
+        if entry_counts.get(_refinement_type_key(entry_type), 0) > 0
+    ]
+    if not non_empty_types:
+        preview.refusal = (
+            'info',
+            'Nothing to Refine',
+            'The selected entry type(s) contain no glossary entries.',
+        )
+        return preview
+
+    try:
+        import extract_glossary_from_epub as extractor
+        from chapter_splitter import ChapterSplitter
+        from glossary_refinement import (
+            RefinementRunOptions,
+            plan_refinement,
+        )
+        config = getattr(self, 'config', {}) or {}
+        effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
+        compression_factor = float(os.getenv(
+            'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',
+            os.getenv('COMPRESSION_FACTOR', str(config.get('compression_factor', 1.0))),
+        ))
+        safe_budget = extractor._compute_safe_input_tokens(
+            effective_output_tokens,
+            compression_factor,
+        )
+        splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
+        request_mode = str(config.get('glossary_refinement_chunking_mode', 'all') or 'all').lower()
+        request_mode = 'all' if request_mode in ('all', 'all_types', 'all_in_one') else 'separate'
+        system_prompt = config.get('glossary_refinement_system_prompt') or extractor.DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+        user_prompt = config.get('glossary_refinement_user_prompt', '')
+        custom_fields = config.get('custom_glossary_fields', config.get('manual_custom_fields', [])) or []
+        if isinstance(custom_fields, str):
+            try:
+                custom_fields = json.loads(custom_fields)
+            except Exception:
+                custom_fields = []
+        os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields)
+        refinement_type_config = config.get('custom_entry_types') or extractor.get_custom_entry_types()
+        automatic_plan = plan_refinement(
+            entries,
+            selected_types=selected_types,
+            chunking_mode=request_mode,
+            chapter_splitter=splitter,
+            available_tokens=safe_budget,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            custom_entry_types=refinement_type_config,
+        )
+    except Exception as exc:
+        preview.refusal = ('error', 'Refinement Preview Failed', str(exc))
+        return preview
+
+    preview.glossary_path = glossary_path
+    preview.entries = entries
+    preview.active_types = active_types
+    preview.selected_types = selected_types
+    preview.request_mode = request_mode
+    preview.splitter = splitter
+    preview.safe_budget = safe_budget
+    preview.system_prompt = system_prompt
+    preview.user_prompt = user_prompt
+    preview.refinement_type_config = refinement_type_config
+    preview.automatic_plan = automatic_plan
+    preview.entry_counts = entry_counts
+    preview.non_empty_types = non_empty_types
+    return preview
+
+
+def finish_manual_glossary_refinement(preview, selected_types, target_count, automatic_plan=None):
+    """The confirmed run: ``(options, execution_plan)``, or None when nothing is
+    selected (RG 19018-19042).  ``target_count``: the dialog's manual chunk count
+    (None = automatic); ``automatic_plan``: the dialog's last re-plan."""
+    from glossary_refinement import RefinementRunOptions
+
+    request_mode = preview.request_mode
+    selected_types = list(selected_types or [])
+    automatic_plan = automatic_plan or preview.automatic_plan
+    if not selected_types or not automatic_plan.total_chunks:
+        return None
+    execution_plan = automatic_plan
+    if target_count is not None:
+        execution_plan = preview.plan_for(selected_types, target_count)
+    options = RefinementRunOptions(
+        selected_types=list(selected_types),
+        chunking_mode=request_mode,
+        force=True,
+        run_when_disabled=True,
+        target_chunk_count=target_count,
+    )
+    return options, execution_plan
+
+
+def plan_manual_glossary_refinement(
+    self,
+    glossary_path=None,
+    progress_path=None,
+    source_path=None,
+    selected_types=None,
+    target_chunk_count=None,
+    log=None,
+):
+    """Plan a manual refinement without the preview dialog (mobile "✨ Refine").
+
+    The requested ``selected_types`` and ``target_chunk_count`` stand in for the
+    dialog's answers.  ``glossary_path`` (when given) replaces the lookup.  Returns
+    ``(options, plan)``, None when the selected types hold no entries; raises
+    RuntimeError with the desktop's message for the other refusals.
+    """
+    model = str(getattr(self, 'model_var', '') or '').strip()
+    if not model:
+        raise RuntimeError('Select or enter a model before refining glossary entries.')
+    locator = glossary_progress_locator(self, source_path or glossary_path or '', None)
+    find_glossary = locator._find_glossary_for_refinement
+    if glossary_path:
+        def find_glossary(_source_path, _progress_path=None, _path=glossary_path):
+            return _path if os.path.isfile(_path) else None
+    preview = prepare_manual_glossary_refinement(
+        self,
+        source_path,
+        progress_path,
+        selected_types,
+        model,
+        find_glossary=find_glossary,
+        active_types_fn=locator._active_glossary_refinement_types,
+    )
+    if preview.refusal is not None:
+        if preview.refusal[1] == 'Nothing to Refine':
+            return None
+        raise RuntimeError(preview.refusal[2])
+    if callable(log):
+        log(
+            f"✨ Refinement plan: {preview.automatic_plan.total_chunks} chunk(s), "
+            f"{preview.automatic_plan.total_payload_tokens:,} tokens"
+        )
+    return finish_manual_glossary_refinement(
+        preview,
+        preview.selected_types,
+        int(target_chunk_count) if target_chunk_count else None,
+        preview.automatic_plan,
+    )
+
+
+def run_manual_glossary_refinement(
+    self,
+    glossary_path,
+    progress_path,
+    options,
+    plan,
+):
+    """Execute and atomically persist one explicit refinement plan (RG 15092-15196).
+
+    ``self``: the owner (``config``, ``model_var``, ``api_key_entry`` / config
+    ``api_key``, ``append_log``, ``stop_requested``).  Blocking.
+    """
+    import extract_glossary_from_epub as extractor
+    from chapter_splitter import ChapterSplitter
+    from glossary_refinement import refine_glossary_entries
+
+    config = getattr(self, 'config', {}) or {}
+    custom_types = getattr(self, 'custom_entry_types', None) or config.get('custom_entry_types', {}) or {}
+    custom_fields = config.get('custom_glossary_fields', config.get('manual_custom_fields', [])) or []
+    if isinstance(custom_fields, str):
+        try:
+            custom_fields = json.loads(custom_fields)
+        except Exception:
+            custom_fields = []
+    env_updates = {
+        'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(custom_types),
+        'GLOSSARY_CUSTOM_FIELDS': json.dumps(custom_fields),
+        'GLOSSARY_REFINEMENT_SYSTEM_PROMPT': config.get('glossary_refinement_system_prompt') or extractor.DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT,
+        'GLOSSARY_REFINEMENT_USER_PROMPT': config.get('glossary_refinement_user_prompt', ''),
+        'GLOSSARY_REFINEMENT_CHUNKING_MODE': options.chunking_mode or 'all',
+        'GLOSSARY_REFINEMENT_SKIP_DEDUPE': '1' if config.get('glossary_refinement_skip_dedupe', False) else '0',
+        'GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE': '1' if config.get('glossary_refinement_reopen_on_source_change', False) else '0',
+        'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if config.get('glossary_output_legacy_json', False) else '0',
+    }
+    os.environ.update({key: str(value or '') for key, value in env_updates.items()})
+
+    entries = parse_glossary_file(glossary_path)
+    if not entries:
+        raise RuntimeError('The selected glossary contains no readable entries.')
+    model = str(getattr(self, 'model_var', '') or '').strip()
+    if not model:
+        raise RuntimeError('Glossary refinement stopped because no model is selected.')
+    api_key_widget = getattr(self, 'api_key_entry', None)
+    api_key = api_key_widget.text().strip() if api_key_widget is not None else str(config.get('api_key') or '')
+    output_dir = os.path.dirname(os.path.abspath(glossary_path))
+    client = extractor.create_client_with_multi_key_support(
+        api_key,
+        model,
+        output_dir,
+        config,
+        context='glossary_refinement',
+    )
+    effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
+    compression_factor = float(os.getenv(
+        'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',
+        os.getenv('COMPRESSION_FACTOR', str(config.get('compression_factor', 1.0))),
+    ))
+    available_tokens = extractor._compute_safe_input_tokens(
+        effective_output_tokens,
+        compression_factor,
+    )
+    splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
+    retry_timeout = os.getenv('RETRY_TIMEOUT', '1').strip().lower() not in ('0', 'false', 'off', '')
+    try:
+        timeout_value = float(os.getenv('CHUNK_TIMEOUT', str(config.get('chunk_timeout', 1800))))
+        chunk_timeout = timeout_value if retry_timeout and timeout_value > 0 else None
+    except (TypeError, ValueError):
+        chunk_timeout = None
+
+    def _check_stop():
+        return bool(getattr(self, 'stop_requested', False)) or extractor.is_stop_requested()
+
+    original_entries = copy.deepcopy(entries)
+    refined = refine_glossary_entries(
+        entries,
+        client=client,
+        temp=float(os.getenv('GLOSSARY_TEMPERATURE', str(config.get('temperature', 0.1)))),
+        mtoks=effective_output_tokens,
+        check_stop=_check_stop,
+        chapter_splitter=splitter,
+        available_tokens=available_tokens,
+        chunk_timeout=chunk_timeout,
+        parse_response_fn=extractor.parse_api_response,
+        dedupe_fn=extractor.skip_duplicate_entries,
+        custom_entry_types_fn=extractor.get_custom_entry_types,
+        send_fn=extractor.send_with_interrupt,
+        progress_file=progress_path,
+        output_path=glossary_path,
+        atomic_replace_fn=extractor._atomic_replace_file,
+        log=self.append_log if hasattr(self, 'append_log') else print,
+        options=options,
+        plan=plan,
+    )
+    stopped = _check_stop()
+    if stopped and refined == original_entries:
+        if hasattr(self, 'append_log'):
+            self.append_log('⏹️ Manual glossary refinement stopped; the saved glossary was left unchanged.')
+        return
+
+    json_path = glossary_path if glossary_path.lower().endswith('.json') else os.path.splitext(glossary_path)[0] + '.json'
+    extractor.save_glossary_csv(refined, json_path)
+    save_json = bool(config.get('glossary_output_legacy_json', False)) or os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') == '1'
+    if save_json:
+        extractor.save_glossary_json(refined, json_path)
+    if hasattr(self, 'append_log'):
+        if stopped:
+            self.append_log(f"⏹️ Manual glossary refinement stopped; completed entry types saved: {os.path.splitext(json_path)[0] + '.csv'}")
+        else:
+            self.append_log(f"✅ Manual glossary refinement saved: {os.path.splitext(json_path)[0] + '.csv'}")
+
+
 __all__ = [
     'GLOSSARY_STATUS_GROUPS',
     'GLOSSARY_STATUS_ICONS',
     'GlossaryIndex',
     'GlossaryRow',
+    'ManualRefinementPreview',
     'build_chapter_footnote',
     'find_glossary_file',
     'find_glossary_progress',
+    'finish_manual_glossary_refinement',
     'glossary_chapter_map',
     'glossary_footnotes',
     'glossary_progress_locator',
@@ -2854,7 +3236,10 @@ __all__ = [
     'make_glossary_progress_model',
     'mark_glossary_completed',
     'open_glossary_progress',
+    'plan_manual_glossary_refinement',
+    'prepare_manual_glossary_refinement',
     'reload_glossary_progress',
     'remove_glossary_progress',
+    'run_manual_glossary_refinement',
     'write_glossary_summary',
 ]

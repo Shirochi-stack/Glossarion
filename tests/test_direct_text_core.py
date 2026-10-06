@@ -1447,6 +1447,106 @@ QMESSAGEBOX_EDITS = (
 )
 
 
+#: U7: four rules that were inline in the dialog's Qt handlers moved to direct_text_store module
+#: functions the dialog calls (source indentation; tests/parity/DISCREPANCIES.md "U7 image / RPG Maker").
+U7_DIALOG_EDITS = {
+    "__init__": [(
+        "        configured_glossary_override = str(\n"
+        "            translator.config.get('direct_text_glossary_override_mode', '') or ''\n"
+        "        ).strip().lower()\n"
+        "        if configured_glossary_override not in {\n"
+        "            'none', 'attachments_only', 'no_glossary', 'manual'\n"
+        "        }:\n"
+        "            # Plain text keeps the safe No Glossary behavior, while attached\n"
+        "            # documents inherit the main translator by default.\n"
+        "            configured_glossary_override = 'attachments_only'\n",
+        "        # Plain text keeps the safe No Glossary behavior, while attached\n"
+        "        # documents inherit the main translator by default (direct_text_store).\n"
+        "        configured_glossary_override = configured_glossary_override_mode(\n"
+        "            translator.config.get('direct_text_glossary_override_mode', '')\n"
+        "        )\n")],
+    "_on_glossary_override_toggled": [(
+        "        mode = str(mode or 'none').strip().lower()\n"
+        "        if mode not in {\n"
+        "            'none', 'attachments_only', 'no_glossary', 'manual'\n"
+        "        }:\n"
+        "            mode = 'attachments_only'\n"
+        "        try:\n"
+        "            config = self.translator.config\n"
+        "            config['direct_text_glossary_override_mode'] = mode\n"
+        "            # Keep the previous keys synchronized for backward compatibility\n"
+        "            # with older builds that do not know about the enum setting.\n"
+        "            config['direct_text_force_no_glossary'] = mode == 'no_glossary'\n"
+        "            config['direct_text_manual_glossary'] = mode == 'manual'\n",
+        "        # The enum plus the two legacy booleans (direct_text_store, shared with mobile)\n"
+        "        updates = glossary_override_config_updates(mode)\n"
+        "        try:\n"
+        "            config = self.translator.config\n"
+        "            config.update(updates)\n")],
+    "_rename_chat": [(
+        '        new_title = " ".join(str(new_title or "").split())[:120]\n',
+        "        new_title = chat_rename_title(new_title)\n")],
+    "_request_direct_text_manual_glossary": [
+        ("        import json as json_lib\n", ""),
+        ("        allowed_extensions = {'.csv', '.json', '.txt', '.md'}\n",
+         "        allowed_extensions = set(MANUAL_GLOSSARY_EXTENSIONS)\n"),
+        ("            content = editor.toPlainText()\n"
+         "            if not content.strip():\n",
+         "            content = editor.toPlainText()\n"
+         "            # An unedited loaded file is used by path; edited/pasted contents\n"
+         "            # get a sniffed extension (direct_text_store, shared with mobile).\n"
+         "            record = manual_glossary_source_record(\n"
+         "                content,\n"
+         "                editor.source_path,\n"
+         "                editor.source_text,\n"
+         "                editor.source_extension,\n"
+         "            )\n"
+         "            if record is None:\n"),
+        ("                return\n"
+         "\n"
+         "            if editor.source_path and content == editor.source_text:\n"
+         "                result.update({\n"
+         "                    'kind': 'path',\n"
+         "                    'path': editor.source_path,\n"
+         "                    'extension': editor.source_extension,\n"
+         "                })\n"
+         "                dialog.accept()\n"
+         "                return\n"
+         "\n"
+         "            extension = '.txt'\n"
+         "            stripped = content.lstrip()\n"
+         "            if stripped.startswith(('{', '[')):\n"
+         "                try:\n"
+         "                    json_lib.loads(content)\n"
+         "                    extension = '.json'\n"
+         "                except (TypeError, ValueError):\n"
+         "                    # Keep malformed/non-JSON structured text as plain text;\n"
+         "                    # this avoids silently rewriting what the user pasted.\n"
+         "                    extension = '.txt'\n"
+         "            else:\n"
+         "                nonempty_lines = [line for line in content.splitlines() if line.strip()]\n"
+         "                if len(nonempty_lines) > 1 and ',' in nonempty_lines[0]:\n"
+         "                    extension = '.csv'\n"
+         "            result.update({\n"
+         "                'kind': 'content',\n"
+         "                'content': content,\n"
+         "                'extension': extension,\n"
+         "            })\n"
+         "            dialog.accept()\n",
+         "                return\n"
+         "            result.update(record)\n"
+         "            dialog.accept()\n"),
+    ],
+}
+
+
+def _apply_u7_dialog_edits(name, text):
+    for old, new in U7_DIALOG_EDITS.get(name, ()):
+        assert text.count(_dedent4(old)) == 1, (name, old[:80])
+        text = text.replace(_dedent4(old), _dedent4(new))
+    return text
+
+
 def _src_text(module):
     return (SRC / f"{module}.py").read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
 
@@ -1582,7 +1682,9 @@ def test_dialog_rewiring_is_exactly_the_documented_edits():
     end = init.index(end_marker, start) + len(end_marker)
     legacy_block = init[start:end].replace("    self._switching_chat = False\n", "")
     assert legacy_block in store["_init_chat_sessions"]
-    assert init[:start] + "    self._init_chat_sessions()\n    self._switching_chat = False\n" + init[end:] == current["__init__"]
+    assert _apply_u7_dialog_edits(
+        "__init__", init[:start] + "    self._init_chat_sessions()\n    self._switching_chat = False\n" + init[end:]
+    ) == current["__init__"]
 
     # _start_translation: temp-input block -> _prepare_direct_text_input, env block -> the shared helper
     send = legacy["_start_translation"]
@@ -1629,14 +1731,74 @@ def test_dialog_rewiring_is_exactly_the_documented_edits():
         "                if 'reader' in attachment_actions:\n")
     assert render == current["_render_output"]
 
+    # U7: the inline rules are direct_text_store calls (exactly the documented edits)
+    for name in sorted(set(U7_DIALOG_EDITS) - {"__init__"}):
+        assert _apply_u7_dialog_edits(name, legacy[name]) == current[name], name
+
     # every other dialog member is unchanged
     changed = {"__init__", "_start_translation", "_render_output", "_direct_text_notice", "_confirm_attachment_merge"}
+    changed |= set(U7_DIALOG_EDITS)
     moved = set(MOVED_STORE) | set(MOVED_STREAM)
     for name, text in current.items():
         if name in changed:
             continue
         assert legacy.get(name) == text or name == "_IMAGE_ATTACHMENT_EXTENSIONS", f"_InputOutputDialog.{name} changed"
     assert set(legacy) - moved - set(current) == set(), sorted(set(legacy) - moved - set(current))
+
+
+def test_u7_dialog_rule_functions_behave_like_the_removed_lines():
+    """direct_text_store's U7 rule functions give what the dialog's removed inline code gave."""
+    import types
+
+    import direct_text_store as dts
+
+    legacy = _member_texts(_legacy_tg_text(), "_InputOutputDialog")
+
+    # __init__'s read of direct_text_glossary_override_mode
+    init_block = _dedent4(U7_DIALOG_EDITS["__init__"][0][0])
+    assert init_block in legacy["__init__"]
+    read_ns = {}
+    exec("def read(translator):\n" + init_block + "    return configured_glossary_override\n", read_ns)
+    values = ["", None, "none", "NONE ", " manual", "no_glossary", "attachments_only", "bogus", 0, 1, False, True]
+    for value in values:
+        translator = types.SimpleNamespace(config={} if value is None else {"direct_text_glossary_override_mode": value})
+        assert dts.configured_glossary_override_mode(
+            translator.config.get("direct_text_glossary_override_mode", "")) == read_ns["read"](translator), value
+
+    # _on_glossary_override_toggled's config writes
+    toggled_ns = {}
+    exec(legacy["_on_glossary_override_toggled"], toggled_ns)
+    for mode in values:
+        config, saves = {"keep": 1}, []
+        owner = types.SimpleNamespace(translator=types.SimpleNamespace(
+            config=config, save_config=lambda show_message=True: saves.append(show_message)))
+        toggled_ns["_on_glossary_override_toggled"](owner, mode, True)
+        expected = {"keep": 1}
+        expected.update(dts.glossary_override_config_updates(mode))
+        assert config == expected and list(config) == list(expected) and saves == [False], mode
+
+    # _rename_chat's title rule
+    for title in ("  Renamed   chat  " + "x" * 200, "", None, "a\tb\nc", 42):
+        assert dts.chat_rename_title(title) == " ".join(str(title or "").split())[:120]
+
+    # the "Provide Manual Glossary" dialog's _accept (path record / sniffed content record)
+    manual = legacy["_request_direct_text_manual_glossary"]
+    start = manual.index("    def _accept():\n")
+    end = manual.index("    browse_button.clicked.connect(_browse)")
+    accept_src = textwrap.dedent(manual[start:end])
+    contents = ["", "   ", "[1, 2]", "{\"a\": 1}", "{not json", "[broken", "a,b\nc,d", "a,b", "\n\nraw,x\n\nr2",
+                "one line", "x\ny", "  {\"k\": [1]}  ", "名前,訳\n김,Kim"]
+    for content in contents:
+        for source_path, source_text, ext in (("", "", ".txt"), ("C:/g/book.csv", content, ".csv"),
+                                              ("C:/g/book.json", "other", ".json")):
+            ns = {"json_lib": json, "result": {}, "QMessageBox": types.SimpleNamespace(information=lambda *a: None)}
+            ns["editor"] = types.SimpleNamespace(toPlainText=lambda c=content: c, source_path=source_path,
+                                                 source_text=source_text, source_extension=ext)
+            ns["dialog"] = types.SimpleNamespace(accept=lambda: None)
+            exec(accept_src + "\n_accept()\n", ns)
+            record = dts.manual_glossary_source_record(content, source_path, source_text, ext)
+            assert (record or {}) == ns["result"], (content, source_path)
+    assert dts.MANUAL_GLOSSARY_EXTENSIONS == {".csv", ".json", ".txt", ".md"}
 
 
 # ---------------------------------------------------------------------------

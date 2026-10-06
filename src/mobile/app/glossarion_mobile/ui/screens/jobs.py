@@ -70,7 +70,7 @@ __all__ = ["DONE_STRIP_SECONDS", "JobsFeature", "JobsScreen", "SCREEN_ROUTES"]
 
 log = logging.getLogger("glossarion.jobs.ui")
 
-SCREEN_ROUTES = ("jobs", "jobs.detail", "tools.files", "tools.files.folder")
+SCREEN_ROUTES = ("jobs", "jobs.detail", "tools.files", "tools.files.folder", "tools.text")
 DONE_STRIP_SECONDS = 10.0
 QUEUE_ROW_HEIGHT = 76
 QUEUE_VISIBLE_ROWS = 6
@@ -573,6 +573,9 @@ class JobsFeature:
                 # a pending glossary approval is answered on the chat's approval card
                 self._navigate("chat", {"cid": cid})
                 return
+            if snap.question and (snap.question or {}).get("kind") == "async_batch_question":
+                self._navigate("tools.async")  # Tools › Async batch answers the dialog's questions
+                return
             self._navigate("jobs.detail", {"jid": snap.id})
         else:
             self._navigate("jobs")
@@ -600,11 +603,51 @@ class JobsFeature:
                                        navigate=self._navigate, notify=notify,
                                        file_ref=prefs.file_ref if prefs is not None else None,
                                        resolve_ref=prefs.resolve_file_ref if prefs is not None else None,
-                                       run_io=self.run_io, tablet=tablet)
+                                       run_io=self.run_io, tablet=tablet, open_reader=self._open_reader_path,
+                                       push_overlay=self._push_overlay, pop_overlay=self._pop_overlay)
+        elif match.name == "tools.text":
+            from glossarion_mobile.ui.tools.text_editor import TextEditorScreen
+
+            prefs = self.prefs
+            screen = TextEditorScreen(match, roots=self.file_roots(), files=self.files, page=self.page, notify=notify,
+                                      resolve_ref=prefs.resolve_file_ref if prefs is not None else None,
+                                      run_io=self.run_io, tablet=tablet, on_close=self._back)
         else:
             return None
         self.screens_built.append(match.name)
         return screen
+
+    def _push_overlay(self, view: Any) -> None:
+        shell = getattr(self.app, "shell", None)
+        if shell is not None:
+            shell.push_overlay(view)
+            self._page_update()
+
+    def _pop_overlay(self, view: Any) -> None:
+        shell = getattr(self.app, "shell", None)
+        if shell is not None:
+            shell.pop_view(view)
+            self._page_update()
+
+    def _page_update(self) -> None:
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _back(self) -> None:
+        """Leave the top screen (a screen that asked before Back, e.g. the text editor's unsaved edits)."""
+        back = getattr(self.app, "back", None)
+        if callable(back):
+            back()
+
+    def _open_reader_path(self, *, path: str) -> Any:
+        """File browser › Open with › Reader (the Reader feature, when installed)."""
+        reader = getattr(self.app, "reader", None)
+        opener = getattr(reader, "open_book", None)
+        if not callable(opener):
+            return None
+        return opener(path=path)
 
     def screen_factory(self, match: RouteMatch) -> Any:
         screen = self.make_screen(match)

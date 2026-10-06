@@ -442,7 +442,7 @@ def test_api_queue_control_is_beside_delay_and_exported():
     settings_source = inspect.getsource(TranslatorGUI._create_settings_section)
     env_source = inspect.getsource(TranslatorGUI._get_environment_variables)
     async_source = (
-        Path(translation_module.__file__).with_name("async_api_processor.py")
+        Path(translation_module.__file__).with_name("async_batch_core.py")
     ).read_text(encoding="utf-8")
 
     assert 'QLabel("API Preflight:")' in settings_source

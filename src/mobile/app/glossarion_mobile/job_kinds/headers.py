@@ -1,31 +1,26 @@
-"""TRANSLATE_HEADERS: "Translate Headers Now" for one or more translated EPUB workspaces.
+"""TRANSLATE_HEADERS: "Translate Headers Now" for one or more translated EPUB/PDF workspaces.
 
 Desktop: Other Settings › "Translate Headers Now" (``other_settings.run_standalone_translate_headers``)
-creates a ``UnifiedClient`` for the main model/key, runs
-``translate_headers_standalone.run_translate_headers_gui(gui)`` (OPF-spine source titles ->
-``BatchHeaderTranslator`` -> ``translated_headers.txt`` + the chapter ``<h1>``/``<title>``
-updates) and then rebuilds the current EPUB with ``fallback_compile_epub``.
+checks the API key / model and runs ``translate_headers_standalone.run_translate_headers_now``
+on a worker thread: the API client set-up (the multi-key environment), the header
+translation for every selected EPUB/PDF (``translate_headers_now``: output folder per book,
+an existing ``translated_headers.txt`` reconciled / repaired / re-applied, otherwise
+``translate_headers_standalone`` -> ``translated_headers.txt`` + the chapter ``<h1>`` /
+``<title>`` updates; PDF workspaces through ``pdf_workspace_compiler``) and the rebuild of
+the current EPUB.
 
-``run_translate_headers_gui`` imports ``PySide6.QtWidgets.QMessageBox`` before anything
-else and shows message boxes on errors, so it cannot run in a mobile job (no PySide6 on the
-device; without a QApplication a message box aborts the process on a desktop dev run). The
-job therefore runs the module's own GUI-free entry for every EPUB,
-``translate_headers_standalone.run_translation(source, output_dir, log_callback)`` - the same
-``translate_headers_standalone`` engine the EPUB compile pipeline calls, configured from the
-compile environment (``HEADERS_PER_BATCH``, ``FAILED_TRANSLATION_RETRY_ATTEMPTS``,
-``BATCH_HEADER_*`` prompts, ``UPDATE_HTML_HEADERS``, ``SAVE_HEADER_TRANSLATIONS``, model / key,
-temperature, max tokens). Before each book the job exports that environment with the owner's
-``_build_epub_compile_env(folder)`` (desktop: the live GUI env) and configures the key pools
-with ``key_pools.apply_key_pools_to_runtime`` (the desktop's multi-key client set-up).
+This adapter runs that same shared function (U7) on the job's ``HeadlessOwner`` through a
+thin view that answers the desktop attributes: ``selected_files`` (the targets' sources),
+``get_current_epub_path`` (the first one) and ``_headers_stop_requested`` (the job's Stop).
+Each book's output folder comes from the Library row (``output_dir_for``), errors the
+desktop shows in a message box are logged. Before it the compile environment of the first
+workspace is exported (``owner._build_epub_compile_env``: header prompts, batch size,
+temperature, max tokens - the desktop's live GUI environment).
 
-Recorded divergences (until the desktop orchestration is split from its dialogs): an existing
-``translated_headers.txt`` is translated again (TOC.txt entries are still reused) instead of
-being re-applied with ``apply_existing_translations``; PDF workspaces are not handled here (Compile
-PDF translates the bookmarks/headers); keyless models (``authgpt/``…) work, where the desktop
-button refuses an empty API key field.
-
-Afterwards the first EPUB target is rebuilt with ``owner._run_epub_compile(folder)`` (desktop:
-the current EPUB only) unless ``rebuild_epub`` is False or the job was stopped.
+The EPUB rebuild runs through the mobile compile path (``owner._run_epub_compile(folder)`` for
+the first EPUB, unless ``rebuild_epub`` is False or the job was stopped), which also lists
+the compiled EPUB as a job output; the desktop calls ``fallback_compile_epub`` on the folder it
+finds by name (recorded divergence, DISCREPANCIES "U7 tools").
 
 params: ``targets`` (``[{"source", "folder"}]``; else the inputs are the source EPUBs and the
 owner resolves their output folders), ``rebuild_epub`` (default True).
@@ -72,11 +67,35 @@ def normalize_targets(params: Mapping[str, Any], inputs: Sequence[str], resolve:
     return out
 
 
-def _has_html(folder: str) -> bool:
-    try:
-        return any(name.lower().endswith((".html", ".xhtml", ".htm")) for name in os.listdir(folder))
-    except OSError:
-        return False
+class _HeadersView:
+    """The owner as the desktop header translation reads it (attributes fall through to it)."""
+
+    def __init__(self, owner: Any, ctx: Any, sources: Sequence[str]) -> None:
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_ctx", ctx)
+        object.__setattr__(self, "selected_files", list(sources))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_owner"), name)
+
+    @property
+    def _headers_stop_requested(self) -> bool:
+        return bool(object.__getattribute__(self, "_ctx").stop_requested())
+
+    def get_current_epub_path(self) -> str:
+        files = object.__getattribute__(self, "selected_files")
+        return files[0] if files else ""
+
+    def append_log(self, message: Any) -> None:
+        object.__getattribute__(self, "_ctx").log(message)
+
+
+def _model_and_key(owner: Any) -> tuple:
+    model = getattr(owner, "model_var", "") or ""
+    model = model.get() if hasattr(model, "get") else str(model)
+    entry = getattr(owner, "api_key_entry", None)
+    key = entry.text() if entry is not None and hasattr(entry, "text") else ""
+    return model.strip(), (key or "").strip()
 
 
 def run(ctx: Any) -> dict:
@@ -87,99 +106,54 @@ def run(ctx: Any) -> dict:
     targets = normalize_targets(params, ctx.inputs, getattr(owner, "_resolve_translation_output_dir", None))
     if not targets:
         raise JobError("No EPUB or PDF file selected, or the file does not exist.")
-    build_env = owner_method(owner, "_build_epub_compile_env")
     try:
-        from translate_headers_standalone import run_translation as translate_book_headers
+        import translate_headers_standalone as headers_core
     except Exception as exc:  # pragma: no cover - bundle without the module
         raise JobError(f"The shared header translator is not in this build ({exc}).") from exc
-    log = ctx.log
-    total = len(targets)
-    log(f"📊 Will process {total} EPUB/PDF file(s)")
-    successful = failed = 0
-    done_folders: list = []
-    for index, (source, folder) in enumerate(targets, 1):
-        if ctx.stop_requested():
-            log("\n⛔ Translation stopped by user")
-            log(f"📊 Stopped after processing {successful + failed}/{total} file(s)")
-            break
-        log(f"\n{'=' * 60}")
-        kind = "PDF" if source.lower().endswith(".pdf") else "EPUB"
-        log(f"📄 Processing {kind} {index}/{total}: {os.path.basename(source)}")
-        log(f"{'=' * 60}")
-        if total > 1:
-            ctx.phase(f"Headers {index}/{total}")
-        else:
-            ctx.phase("Translating headers")
-        base = os.path.splitext(os.path.basename(source))[0]
-        if kind == "PDF":
-            log("⏭️ PDF bookmark/header translation runs with Compile PDF on mobile; skipping.")
-            failed += 1
-            continue
-        if not os.path.isfile(source):
-            log(f"⚠️ Source EPUB not found: {source}")
-            failed += 1
-            continue
-        if not folder or not os.path.isdir(folder) or not _has_html(folder):
-            log(f"⚠️ Output directory not found for: {base}")
-            failed += 1
-            log(f"⏭️ Skipping to next EPUB... ({successful + failed}/{total} processed)\n")
-            continue
-        log(f"✓ Found output directory: {folder}")
-        build_env(folder)
-        os.environ["EPUB_PATH"] = source
-        try:
-            import key_pools
+    if not hasattr(headers_core, "run_translate_headers_now"):  # pragma: no cover - older bundle
+        raise JobError("This build's translate_headers_standalone has no run_translate_headers_now (U7).")
+    folders = {os.path.normcase(source): folder for source, folder in targets if folder}
+    first_folder = next((folder for _source, folder in targets if folder and os.path.isdir(folder)), "")
+    if first_folder:
+        owner_method(owner, "_build_epub_compile_env")(first_folder)
+    os.environ["EPUB_PATH"] = targets[0][0]
+    view = _HeadersView(owner, ctx, [source for source, _folder in targets])
+    ctx.phase("Translating headers")
+    counts: dict = {}
 
-            key_pools.apply_key_pools_to_runtime(getattr(owner, "config", {}) or {})
-        except Exception as exc:
-            log(f"⚠️ Key pools not configured: {exc}")
-        if total == 1:
-            log("🌐 Starting standalone header translation...")
-        result = translate_book_headers(source, folder, log_callback=log)
-        if ctx.stop_requested():
-            log(f"⛔ Translation stopped for: {base}")
-            failed += 1
-        elif getattr(result, "successful_noop", False):
-            log("✅ Chapter headers complete: no source header tags found")
-            successful += 1
-            done_folders.append((source, folder))
-        elif result:
-            log(f"✅ Successfully translated {len(result)} chapter headers!")
-            if os.environ.get("SAVE_HEADER_TRANSLATIONS", "1") == "1":
-                log(f"📄 Translations saved to: {os.path.join(folder, 'translated_headers.txt')}")
-            if os.environ.get("UPDATE_HTML_HEADERS", "1") == "1":
-                log(f"🗂️ HTML files updated in: {folder}")
-            successful += 1
-            done_folders.append((source, folder))
-        else:
-            log(f"⚠️ No chapters were translated for: {base}")
-            failed += 1
-    if total > 1:
-        log(f"\n{'=' * 60}")
-        log("📊 Translation Summary:")
-        log(f"  ✅ Successful: {successful}/{total}")
-        if failed > 0:
-            log(f"  ❌ Failed: {failed}/{total}")
-        log(f"{'=' * 60}")
-    ctx.set_result(headers_done=[f for _s, f in done_folders], headers_failed=failed)
+    def runner(gui: Any) -> Any:
+        result = headers_core.translate_headers_now(
+            gui,
+            show_error=lambda _title, text: ctx.log(f"❌ {text}"),
+            output_dir_for=lambda source: folders.get(os.path.normcase(os.path.abspath(source))) or None,
+        )
+        counts["result"] = result
+        return result
+
+    model, api_key = _model_and_key(owner)
+    headers_core.run_translate_headers_now(view, model, api_key, headers_runner=runner, rebuild_epub=False)
+    result = counts.get("result")
+    successful, failed = result if isinstance(result, tuple) else (0, len(targets))
+    ctx.set_result(headers_successful=successful, headers_failed=failed)
     outputs: list = []
     if ctx.stop_requested():
         return {"ok": None, "outputs": outputs}
-    epub_targets = [(s, f) for s, f in done_folders if s.lower().endswith(".epub")]
-    if params.get("rebuild_epub", True) and epub_targets:
+    epub_targets = [(s, f) for s, f in targets if s.lower().endswith(".epub") and f and os.path.isdir(f)]
+    if params.get("rebuild_epub", True) and successful and epub_targets:
         source, folder = epub_targets[0]
-        log("\n📦 Rebuilding EPUB with translated headers...")
-        log(f"📂 Output directory: {folder}")
+        ctx.log("\n📦 Rebuilding EPUB with translated headers...")
+        ctx.log(f"📂 Output directory: {folder}")
         ctx.set_output_dir(folder)
         ctx.phase("Rebuilding EPUB")
+        os.environ["EPUB_PATH"] = source
         compile_epub = owner_method(owner, "_run_epub_compile")
         ok, compiled, error = result_fields(compile_epub(folder))
         if ok is False:
-            log(f"⚠️ Failed to rebuild EPUB: {error}")
+            ctx.log(f"⚠️ Failed to rebuild EPUB: {error}")
         else:
             outputs.extend(compiled)
             if not ctx.stop_requested():
-                log("✅ EPUB rebuilt successfully with translated headers!")
+                ctx.log("✅ EPUB rebuilt successfully with translated headers!")
     if successful == 0:
         return {"ok": False, "outputs": outputs, "error": "No chapter headers were translated (see the log)."}
     return {"ok": True, "outputs": outputs}

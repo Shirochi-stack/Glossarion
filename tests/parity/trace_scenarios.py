@@ -51,6 +51,11 @@ GLOSSARY_MAIN = "extract_glossary_from_epub.main"
 METADATA_JOB = "metadata_translation_worker.run_metadata_translation_job"
 EPUB_COMPILE = "epub_converter.compile_epub"
 PDF_COMPILE = "pdf_workspace_compiler.compile_pdf_workspace"
+#: U7: the client calls of the image / generative-only / RPG Maker runners (image_job, rpgmaker_job)
+CLIENT_SEND = "UnifiedClient.send"
+IMAGE_SEND = "UnifiedClient.send_image"
+SEND_INTERRUPT = "TransateKRtoEN.send_with_interrupt"
+GAME_IMAGES = "rpgmaker_handler.translate_game_images"
 
 ALL_MODES = ("desktop", "mixins")
 DESKTOP_ONLY = ("desktop",)
@@ -295,6 +300,74 @@ def _direct_text_pre_run(owner, ctx):
 _DIRECT_TEXT_FILES = {"inputs/attachment.txt": "첫 번째 문단.\n\n김상현은 문을 열었다.\n"}
 
 T, G = TRANSLATION_MAIN, GLOSSARY_MAIN
+
+# ---------------------------------------------------------------------------
+# U7: image / video / audio inputs, generative-only runs, RPG Maker games
+# ---------------------------------------------------------------------------
+
+#: a 1x1 PNG and a tiny MP4 header
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c6360000002000100054f6b2a0000000049454e44ae426082")
+_MP4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"\x00" * 32
+
+
+def _generated(rel, data=_PNG):
+    """Client response: the provider wrote a media file into the sandbox and returns its sentinel."""
+    def result(tracer, _payload):
+        path = tracer.ctx.sandbox.path(rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return f"[GENERATED_IMAGE:{path}]"
+    return result
+
+
+def _rpg_echo(_tracer, payload):
+    """Client response for an RPG Maker chunk: ``[N] EN(text)`` for each numbered line."""
+    import re
+
+    user = next((m.get("content", "") for m in reversed(payload.get("messages") or [])
+                 if isinstance(m, dict) and m.get("role") == "user"), "")
+    parts = re.split(r"^\[(\d+)\]\s*", str(user), flags=re.M)
+    return "\n".join(f"[{parts[i]}] EN({parts[i + 1].strip()})" for i in range(1, len(parts) - 1, 2))
+
+
+def _mv_game_files(prefix="games/Hero"):
+    data = f"{prefix}/www/data"
+    return {
+        f"{prefix}/Game.exe": b"MZ\x90\x00fake-exe",
+        f"{prefix}/www/js/rpg_core.js": "// core\n",
+        f"{data}/System.json": json.dumps({"gameTitle": "勇者の冒険", "terms": {
+            "basic": ["レベル", "HP"], "commands": ["戦う", "逃げる"], "params": [],
+            "messages": {"actionFailure": "%1には効かなかった！"}}}, ensure_ascii=False),
+        f"{data}/Actors.json": json.dumps([None, {"id": 1, "name": "留奈", "nickname": "",
+                                                 "profile": "元気な少女。"}], ensure_ascii=False),
+        f"{data}/Map001.json": json.dumps({"displayName": "始まりの村", "events": [None, {
+            "id": 1, "name": "村長", "pages": [{"list": [
+                {"code": 401, "parameters": ["ようこそ、旅の方。"]},
+                {"code": 102, "parameters": [["はい", "いいえ"], 1]},
+                {"code": 0, "parameters": []}]}]}]}, ensure_ascii=False),
+    }
+
+
+def _no_file_selected(owner, _ctx):
+    """The main window's input field with nothing selected (create_file_section; HeadlessOwner's shim)."""
+    from parity import fakes
+
+    owner.entry_epub = fakes.FakeLineEdit("No file selected")
+
+
+def _media_inputs(*rels):
+    def attrs(sandbox):
+        return {"selected_files": [sandbox.path(r) for r in rels]}
+    return attrs
+
+
+_VISION_CFG = {"model": "gpt-4o", "output_mode": "vision", "enable_image_translation": True}
+_IMAGE_CFG = {"model": "gpt-4o", "output_mode": "image", "enable_image_translation": True,
+              "enable_image_output_mode": True, "image_output_resolution": "2K"}
+IS, CS = IMAGE_SEND, CLIENT_SEND
 
 SCENARIOS = {
     "fresh_install_translate": {
@@ -552,6 +625,119 @@ SCENARIOS = {
             _expect_logs("⏹️ Direct Text translation cancelled at the glossary approval step"),
         ),
     },
+    # U7: run_translation_direct dispatching to image_job / rpgmaker_job (the runners moved out of
+    # TranslatorGUI); client calls are recorded with the environment they saw.
+    "image_vision_translate": {
+        "description": "One PNG in vision mode: progress file, payloads, translated page HTML.",
+        "config": _base_config(**_VISION_CFG),
+        "files": {"inputs/page01.png": _PNG},
+        "run_attrs": _media_inputs("inputs/page01.png"),
+        "plan": {IS: [CallPlan(result="<p>The translated page.</p>")]},
+        "expect": _all(
+            _expect_entries(IS),
+            _expect_env(IS, 0, ENABLE_IMAGE_OUTPUT_MODE="0", IMAGE_OUTPUT_RESOLUTION="1K"),
+            _expect_logs("🖼️ Processing image: page01.png", "✅ Translation saved to:"),
+        ),
+    },
+    "image_batch_combined_folder": {
+        "description": "Two PNGs: one combined output folder, both pages through the vision call.",
+        "config": _base_config(**_VISION_CFG),
+        "files": {"inputs/scans/p1.png": _PNG, "inputs/scans/p2.png": _PNG[:-1] + b"\x83"},
+        "run_attrs": _media_inputs("inputs/scans/p1.png", "inputs/scans/p2.png"),
+        "plan": {IS: [CallPlan(result="<p>one</p>"), CallPlan(result="<p>two</p>")]},
+        "expect": _all(
+            _expect_entries(IS, IS),
+            _expect_logs("📁 Created combined output directory:"),
+        ),
+    },
+    "image_output_generated": {
+        "description": "Image output mode: the edited image comes back as a sentinel and is moved into the output.",
+        "config": _base_config(**_IMAGE_CFG),
+        "files": {"inputs/page01.png": _PNG},
+        "run_attrs": _media_inputs("inputs/page01.png"),
+        "plan": {IS: [CallPlan(result=_generated("Generated_Media/edit_page01.png"))]},
+        "expect": _all(
+            _expect_entries(IS),
+            _expect_env(IS, 0, ENABLE_IMAGE_OUTPUT_MODE="1", IMAGE_OUTPUT_RESOLUTION="2K"),
+            _expect_logs("✅ Generated media saved directly as: response_001_page01.png"),
+        ),
+    },
+    "video_input_generated": {
+        "description": "An MP4 input in video output mode: the source path reaches the client, video comes back.",
+        "config": _base_config(model="gpt-4o", output_mode="video", enable_image_translation=True,
+                               enable_video_output_mode=True),
+        "files": {"inputs/clip.mp4": _MP4},
+        "run_attrs": _media_inputs("inputs/clip.mp4"),
+        "plan": {IS: [CallPlan(result=_generated("Generated_Media/clip_out.mp4", _MP4))]},
+        "expect": _all(
+            _expect_entries(IS),
+            _expect_env(IS, 0, ENABLE_VIDEO_OUTPUT_MODE="1"),
+            _expect_env_endswith(IS, 0, "NANOGPT_SOURCE_VIDEO_PATH", "inputs/clip.mp4"),
+        ),
+    },
+    "audio_mode_image_input": {
+        "description": "Audio output mode with an image input: the vision call sees the audio-mode environment.",
+        "config": _base_config(model="gpt-4o", output_mode="audio", enable_audio_output_mode=True),
+        "files": {"inputs/page01.png": _PNG},
+        "run_attrs": _media_inputs("inputs/page01.png"),
+        "plan": {IS: [CallPlan(result="<p>Narration</p>")]},
+        "expect": _all(_expect_entries(IS), _expect_logs("✅ Translation saved to:")),
+    },
+    "generative_image_prompt": {
+        "description": "Image-generation model, no input: the prompt-only generation run.",
+        "config": _base_config(model="gpt-image-1", output_mode="image", enable_image_translation=True,
+                               enable_image_output_mode=True),
+        "run_attrs": {"selected_files": []},
+        "pre_run": _no_file_selected,
+        "plan": {CS: [CallPlan(result=_generated("Generated_Media/fox.png"))]},
+        "expect": _all(
+            _expect_entries(CS),
+            _expect_env(CS, 0, ENABLE_IMAGE_OUTPUT_MODE="1"),
+            _expect_logs("🎨 Generative mode: sending prompt to gpt-image-1", "📄 Media saved to:"),
+        ),
+    },
+    "generative_video_prompt": {
+        "description": "Video output mode, no input: generation with the video duration/resolution env.",
+        "config": _base_config(model="veo-3", output_mode="video", enable_image_translation=True,
+                               enable_video_output_mode=True),
+        "run_attrs": {"selected_files": []},
+        "pre_run": _no_file_selected,
+        "plan": {CS: [CallPlan(result="video job accepted")]},
+        "expect": _all(
+            _expect_entries(CS),
+            _expect_env(CS, 0, ENABLE_VIDEO_OUTPUT_MODE="1"),
+            _expect_logs("📄 Saved to:"),
+        ),
+    },
+    "generative_audio_prompt": {
+        "description": "Audio output mode, the generative sentinel selected: prompt-only speech generation.",
+        "config": _base_config(model="gpt-4o-mini-tts", output_mode="audio", enable_audio_output_mode=True),
+        "run_attrs": {"selected_files": ["__generative_mode__"]},
+        "plan": {CS: [CallPlan(result="[GENERATED_AUDIO:speech.mp3]")]},
+        "expect": _all(_expect_entries(CS), _expect_logs("🎨 Generative mode: sending prompt to gpt-4o-mini-tts")),
+    },
+    "rpgmaker_exe_text": {
+        "description": "RPG Maker MV game (.exe): extract, chunk, translate, apply into www/data.",
+        "config": _base_config(batch_translation=True, batch_size="2"),
+        "files": _mv_game_files(),
+        "run_attrs": _media_inputs("games/Hero/Game.exe"),
+        "plan": {CS: [CallPlan(result=_rpg_echo)] * 6},
+        "expect": _all(
+            _expect_logs("🎮 Detected RPG Maker MV", "🎮 GTool: Translation complete!"),
+            lambda view: [] if view.entries() and set(view.entries()) == {CS} else [f"entries {view.entries()}"],
+        ),
+    },
+    "rpgmaker_exe_image_mode": {
+        "description": "RPG Maker MV game in image mode: the game image pipeline instead of text.",
+        "config": _base_config(output_mode="vision", enable_image_translation=True),
+        "files": _mv_game_files(),
+        "run_attrs": _media_inputs("games/Hero/Game.exe"),
+        "plan": {GAME_IMAGES: [CallPlan(result=2)]},
+        "expect": _all(
+            _expect_entries(GAME_IMAGES),
+            _expect_logs("🖼️ Output mode: Image — translating game image assets only"),
+        ),
+    },
 }
 
 for _name, _scenario in SCENARIOS.items():
@@ -579,10 +765,14 @@ def modes(name: str) -> tuple:
 
 __all__ = [
     "ALL_MODES",
+    "CLIENT_SEND",
     "CallPlan",
     "DESKTOP_ONLY",
     "EPUB_COMPILE",
+    "GAME_IMAGES",
     "GLOSSARY",
+    "IMAGE_SEND",
+    "SEND_INTERRUPT",
     "GLOSSARY_MAIN",
     "METADATA_JOB",
     "PDF_COMPILE",

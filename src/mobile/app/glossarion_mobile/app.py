@@ -199,7 +199,7 @@ class GlossarionApp:
             on_open_chat=self._open_chat,
             on_chat_long_press=self._chat_actions,
             on_new_chat=lambda e: self.chat_view._on_new_chat(e),
-            on_new_scratch=lambda e: self.notify("Scratch chats arrive in U7"),
+            on_new_scratch=lambda e: self.chat_view._on_new_scratch(e),
             on_status=self._on_status_chip,
             on_settings=lambda e: self._drawer_navigate("settings"),
             on_help=self._on_help,

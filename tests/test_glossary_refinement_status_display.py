@@ -180,7 +180,8 @@ def test_manual_stop_saves_completed_type_results_only_when_changed(
     ]
     saved_csv = []
     saved_json = []
-    monkeypatch.setattr(gui_module, "parse_glossary_file", lambda _path: entries)
+    # U7: the runner is glossary_progress_core.run_manual_glossary_refinement
+    monkeypatch.setattr(glossary_progress_core, "parse_glossary_file", lambda _path: entries)
     monkeypatch.setattr(extractor, "create_client_with_multi_key_support", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(extractor, "_effective_glossary_output_limit", lambda *_args: 2048)
     monkeypatch.setattr(extractor, "_compute_safe_input_tokens", lambda *_args: 1024)

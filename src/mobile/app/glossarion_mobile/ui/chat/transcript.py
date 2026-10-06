@@ -13,6 +13,14 @@ control only shows:
 
 Following the tail: ``follow_tail`` is True while the user is within one screen of
 the bottom (``on_scroll`` events); ``scroll_to_end`` jumps with ``offset=-1``.
+
+Card slots: every saved card sits in a ``CardSlot`` that carries its ``ScrollKey`` and
+stays the same Python object across re-renders (``slot(key, card)``). Flet 1.0.3 diffs a
+*new* control that an old one matches by key as an immutable copy and marks it frozen, so
+a card re-created under its old key could never be updated in place again (Copy ✓, audio
+playback, a Vision run's OCR section, the jump highlight, live job progress). A slot
+matched by identity is diffed in place; a new card swapped into its ``content`` is a plain
+replacement, and a card passed again unchanged costs nothing.
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET, EmptyState
 
-__all__ = ["EARLIER_TEMPLATE", "EMPTY_BODY", "EMPTY_TITLE", "LATER_TEMPLATE", "SUGGESTIONS", "Transcript"]
+__all__ = ["CardSlot", "EARLIER_TEMPLATE", "EMPTY_BODY", "EMPTY_TITLE", "LATER_TEMPLATE", "SUGGESTIONS", "Transcript"]
 
 EMPTY_TITLE = "What would you like to translate?"
 EMPTY_BODY = (
@@ -41,6 +49,18 @@ SUGGESTIONS = (
 )
 EARLIER_TEMPLATE = "↑ Scroll for earlier messages ({n} hidden)"
 LATER_TEMPLATE = "Scroll for newer messages ({n} hidden) ↓"
+
+
+class CardSlot(ft.Container):
+    """The stable, ``ScrollKey``-keyed place of one transcript card (its ``content``)."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__(key=ft.ScrollKey(key))
+        self.slot_key = key
+
+    @property
+    def card(self) -> Any:
+        return self.content
 
 
 @ft.control
@@ -60,6 +80,7 @@ class Transcript(ft.ListView):
         self.scroll_interval = 100
         self.messages: list[ft.Control] = []
         self.tail: list[ft.Control] = []
+        self._slots: dict = {}  # slot key -> CardSlot of the latest set_messages
         self.hidden_before = 0
         self.hidden_after = 0
         self.follow_tail = True
@@ -96,7 +117,30 @@ class Transcript(ft.ListView):
         self.messages = list(controls)
         self.hidden_before = max(0, int(hidden_before))
         self.hidden_after = max(0, int(hidden_after))
+        # Only the slots shown now are kept: a card that leaves the window comes back in a new slot.
+        shown = {c.slot_key for c in self.messages if isinstance(c, CardSlot)}
+        self._slots = {key: slot for key, slot in self._slots.items() if key in shown}
         self._rebuild()
+
+    def slot(self, key: str, card: ft.Control) -> CardSlot:
+        """The slot keyed ``key`` (created on first use) holding ``card``."""
+        key = str(key)
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = self._slots[key] = CardSlot(key)
+        if slot.content is not card:
+            slot.content = card
+        return slot
+
+    def slot_for(self, key: Any) -> Optional[CardSlot]:
+        """The shown slot of ``key`` (a str or a ``ScrollKey``), if any."""
+        value = getattr(key, "value", key)
+        return self._slots.get(str(value)) if value is not None else None
+
+    @property
+    def cards(self) -> list:
+        """The shown message controls with their slots unwrapped (cards, switchers, banners)."""
+        return [c.card if isinstance(c, CardSlot) else c for c in self.messages]
 
     def set_tail(self, controls: Sequence[ft.Control]) -> None:
         self.tail = [c for c in controls if c is not None]

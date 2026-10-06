@@ -18,7 +18,8 @@ translation writes the same folder and their backend prints land in the job log:
 
 * ``validate_epub`` - Validate EPUB structure: ``TransateKRtoEN.validate_epub_structure``
   + ``check_epub_readiness`` per folder, classified with the desktop's result lines
-  (``other_settings.validate_epub_structure_gui``); ``result["validation"]`` holds the
+  (``other_settings.validate_epub_structure_gui``; the loop is the shared
+  ``output_tools_core.validate_epub_outputs``); ``result["validation"]`` holds the
   lines and ``result["all_passed"]`` the verdict (failures do not fail the job).
 * ``rename_outputs`` - Rename Files: ``output_naming._rename_output_files_for_retain(owner,
   retain, output_dir=folder)`` (the shared helper the desktop button calls), ``retain`` =
@@ -35,7 +36,7 @@ from typing import Any
 from glossarion_mobile.job_kinds import compiled_outputs, owner_method, result_fields
 
 __all__ = ["KINDS", "rename_message", "resolve_folder", "resolve_folders", "run_epub", "run_pdf", "run_rename",
-           "run_validate", "validation_line"]
+           "run_validate"]
 
 
 def resolve_folder(ctx: Any) -> str:
@@ -112,35 +113,24 @@ def resolve_folders(ctx: Any) -> list:
     return folders
 
 
-def validation_line(base: str, structure_ok: bool, readiness_ok: bool) -> tuple:
-    """(log line, result line, passed) of one validated folder (desktop wording)."""
-    if structure_ok and readiness_ok:
-        return f"  ✅ {base}: PASSED", f"✅ {base}: All structure files present", True
-    if structure_ok:
-        return f"  ⚠️ {base}: Structure OK, some issues", f"⚠️ {base}: Structure OK, some issues found", False
-    return f"  ❌ {base}: Missing critical files", f"❌ {base}: Missing critical EPUB files", False
-
-
 def run_validate(ctx: Any) -> dict:
+    """Validate EPUB Structure for each output folder (``output_tools_core.validate_epub_outputs``).
+
+    The desktop names each book after its EPUB and looks its folder up; here the folder is
+    known, so each one is passed as ``<folder>/<folder name>.epub`` with the folder as its
+    output folder (the log and result lines name the folder).
+    """
     folders = resolve_folders(ctx)
     ctx.phase("Validating EPUB structure")
-    lines: list = []
-    all_passed = True
-    for folder in folders:
-        base = os.path.basename(folder.rstrip("/\\"))
-        ctx.log(f"🔍 Validating EPUB structure for: {base}")
-        try:
-            from TransateKRtoEN import check_epub_readiness, validate_epub_structure
+    from output_tools_core import validate_epub_outputs
 
-            structure_ok = validate_epub_structure(folder)
-            readiness_ok = check_epub_readiness(folder)
-            log_line, result_line, passed = validation_line(base, bool(structure_ok), bool(readiness_ok))
-            ctx.log(log_line)
-        except Exception as exc:
-            ctx.log(f"  ❌ Validation error for {base}: {exc}")
-            result_line, passed = f"❌ {base}: {exc}", False
-        lines.append(result_line)
-        all_passed = all_passed and passed
+    named = {os.path.join(folder, os.path.basename(folder.rstrip("/\\")) + ".epub"): folder for folder in folders}
+    all_passed, lines = validate_epub_outputs(
+        list(named),
+        config=getattr(ctx.owner, "config", None),
+        log=ctx.log,
+        output_dir_for=named.get,
+    )
     ctx.set_result(validation=lines, all_passed=bool(all_passed and lines))
     return {"ok": True, "outputs": []}
 

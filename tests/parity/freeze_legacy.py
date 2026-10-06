@@ -264,7 +264,9 @@ SHARED_MIXIN_MODULES = (
 #: the stop protocol). They hold no owner mixin of their own (TextJobsMixin and
 #: InputPreparationMixin inherit job_runner.JobHooksMixin), but they are frozen whole like
 #: the mixin modules so the legacy side never runs their live working-tree versions.
-SHARED_HELPER_MODULES = ("job_runner", "stop_control")
+#: U7: the image / generative-only and RPG Maker runners (TranslationPipelineMixin inherits
+#: image_job.ImageJobMixin and rpgmaker_job.RpgMakerJobMixin, like JobHooksMixin above).
+SHARED_HELPER_MODULES = ("job_runner", "stop_control", "image_job", "rpgmaker_job")
 
 #: (method, statement prefix) - GUI-backed *state* assignments made while _setup_gui builds widgets.
 GUI_STATE_STATEMENTS = (

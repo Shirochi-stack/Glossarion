@@ -142,6 +142,28 @@ def fake_qa_runtime(*, defaults=None, match=None):
         return []
 
     module.run_qa_scan_path = run_qa_scan_path
+    # U7: the adapter runs the real shared loop / settings loader / stop escalation over these
+    # recording primitives (functions rebound to this module's globals); the flag setters record.
+    import qa_scan_runtime as real
+
+    module.os = os
+    for name in ("run_bulk_qa_scan", "load_current_qa_settings", "next_qa_stop_phase"):
+        fn = getattr(real, name)
+        bound = types.FunctionType(fn.__code__, module.__dict__, fn.__name__, fn.__defaults__, fn.__closure__)
+        bound.__kwdefaults__ = fn.__kwdefaults__
+        setattr(module, name, bound)
+    module.flags = []
+
+    def _stop_scan():
+        module.flags.append("stop_scan")
+        stop = getattr(sys.modules.get("scan_html_folder"), "stop_scan", None)
+        if callable(stop):
+            stop()
+
+    module.reset_qa_cancel_flags = lambda: module.flags.append("reset")
+    module.apply_qa_graceful_stop_flags = lambda: (module.flags.append("graceful"), _stop_scan())
+    module.apply_qa_force_stop_flags = lambda: (module.flags.append("force"), _stop_scan())
+    module.clear_qa_stop_flags = lambda: module.flags.append("clear")
     return module
 
 
@@ -229,6 +251,8 @@ def test_qa_adapter_bulk_scan_rules_and_reports(tmp_path, monkeypatch):
     assert any("Ignoring missing output folder" in line for line in ctx.logs)
     assert any("Starting bulk QA scan in AGGRESSIVE mode for 2 folders" in line for line in ctx.logs)
     assert any("No matching EPUB found for folder 'Beta'" in line for line in ctx.logs)
+    assert any("Matched from selected files: Alpha.epub" in line for line in ctx.logs)  # Library source by folder
+    assert fake.flags == ["reset"] and "Scanning 2/2" in ctx.phases
     assert any("Bulk scan summary: 2 successful, 0 failed" in line for line in ctx.logs)
     assert ctx.logs[-1] == "✅ Bulk QA scan completed."
     assert result["outputs"] == ctx.outputs == [qa_kind.report_path_for(with_source.folder),
@@ -257,6 +281,8 @@ def test_qa_adapter_single_folder_word_count_off_mismatch_and_stop(tmp_path, mon
     calls_before = len(fake.calls)
     assert qa_kind.run(ctx3)["ok"] is None
     assert len(fake.calls) == calls_before and stopped == [1]
+    assert fake.flags[-3:] == ["force", "stop_scan", "clear"]
+    assert any("Bulk scan stopped by user at folder 1/1" in line for line in ctx3.logs)
     with pytest.raises(Exception, match="Unknown QA scan mode"):
         qa_kind.run(FakeCtx(object(), params={"mode": "nope", "targets": [{"folder": target.folder}]}))
 
@@ -381,20 +407,31 @@ class HeadersOwner:
         return types.SimpleNamespace(ok=True, path=path, error=None)
 
 
-def test_headers_adapter_translates_each_epub_then_rebuilds_the_first(tmp_path, monkeypatch):
+def test_headers_adapter_runs_the_shared_entry_then_rebuilds_the_first(tmp_path, monkeypatch):
+    """The job runs translate_headers_standalone.run_translate_headers_now (the desktop worker) with
+    translate_headers_now as its runner: sources as the selection, the Library folders, the job's Stop."""
     calls = []
     module = types.ModuleType("translate_headers_standalone")
 
-    def run_translation(source, folder, log_callback=None):
-        calls.append((source, folder, os.environ.get("EPUB_PATH")))
-        log_callback("Translation complete!")
-        return {"response_ch001.html": "Chapter 1"}
+    def translate_headers_now(gui, *, show_error=None, process_events=None, output_dir_for=None):
+        found = [(source, output_dir_for(source)) for source in gui.selected_files]
+        calls.append({"found": found, "current": gui.get_current_epub_path(), "stop": gui._headers_stop_requested,
+                      "client": gui.api_client})
+        gui.append_log("📊 Will process 3 EPUB/PDF file(s)")
+        show_error("Error", "boom")
+        return 2, 1
 
-    module.run_translation = run_translation
+    def run_translate_headers_now(gui, model, api_key, *, headers_runner=None, rebuild_epub=True):
+        calls.append({"model": model, "key": api_key, "rebuild": rebuild_epub})
+        gui.api_client = "client"
+        try:
+            headers_runner(gui)
+        finally:
+            del gui.api_client
+
+    module.translate_headers_now = translate_headers_now
+    module.run_translate_headers_now = run_translate_headers_now
     monkeypatch.setitem(sys.modules, "translate_headers_standalone", module)
-    pools = []
-    monkeypatch.setitem(sys.modules, "key_pools",
-                        types.SimpleNamespace(apply_key_pools_to_runtime=lambda config: pools.append(config)))
     monkeypatch.delenv("UPDATE_HTML_HEADERS", raising=False)
     first = tool_target(tmp_path, "One")
     second = tool_target(tmp_path, "Two")
@@ -402,20 +439,25 @@ def test_headers_adapter_translates_each_epub_then_rebuilds_the_first(tmp_path, 
     spec = hm.headers_spec([first, second, no_folder])
     assert spec.kind == "translate_headers" and spec.params["rebuild_epub"] is True
     owner = HeadersOwner()
+    owner.model_var = "gpt-4o"
+    owner.api_key_entry = types.SimpleNamespace(text=lambda: " sk-test ")
     ctx = FakeCtx(owner, params=spec.params, inputs=spec.inputs)
     result = headers_kind.run(ctx)
-    assert [c[0] for c in calls] == [first.source, second.source] and all(c[2] == c[0] for c in calls)
-    assert owner.env_built == [first.folder, second.folder] and len(pools) == 2
+    assert calls[0] == {"model": "gpt-4o", "key": "sk-test", "rebuild": False}  # mobile rebuilds below
+    assert calls[1]["found"] == [(first.source, first.folder), (second.source, second.folder), (no_folder.source, None)]
+    assert calls[1]["current"] == first.source and calls[1]["stop"] is False and calls[1]["client"] == "client"
+    assert not hasattr(owner, "api_client")  # the temporary client lived on the job's view only
+    assert owner.env_built == [first.folder]  # the compile env of the first workspace
     assert owner.compiled == [first.folder]  # desktop: the current EPUB is rebuilt
     assert result["ok"] is True and result["outputs"] == [os.path.join(first.folder, "book.epub")]
-    assert any("Output directory not found for: Three" in line for line in ctx.logs)
-    assert any("  ✅ Successful: 2/3" in line for line in ctx.logs)
-    assert ctx.results["headers_done"] == [first.folder, second.folder]
-    # stop before the next book: no rebuild, ok None
+    assert "📊 Will process 3 EPUB/PDF file(s)" in ctx.logs and "❌ boom" in ctx.logs
+    assert ctx.results == {"headers_successful": 2, "headers_failed": 1}
+    # stopped: no rebuild, ok None
     owner2 = HeadersOwner()
     ctx2 = FakeCtx(owner2, params=spec.params, inputs=spec.inputs)
     ctx2.stop = True
     assert headers_kind.run(ctx2)["ok"] is None and owner2.compiled == []
+    assert calls[-1]["stop"] is True
 
 
 def test_compile_pdf_of_an_epub_workspace_lists_the_pdf(tmp_path):
@@ -464,7 +506,11 @@ def test_validate_and_rename_kinds(tmp_path, monkeypatch):
     assert ctx.results == {"validation": ["✅ Good: All structure files present", "❌ Bad: Missing critical EPUB files"],
                            "all_passed": False}
     assert "  ✅ Good: PASSED" in ctx.logs and "  ❌ Bad: Missing critical files" in ctx.logs
-    assert compile_kind.validation_line("X", True, False)[1] == "⚠️ X: Structure OK, some issues found"
+    import output_tools_core
+
+    assert compile_kind.run_validate.__module__ == compile_kind.__name__
+    assert "validate_epub_outputs" in compile_kind.run_validate.__code__.co_names
+    assert output_tools_core.validate_epub_outputs is not None
 
     calls = []
     monkeypatch.setitem(sys.modules, "output_naming", types.SimpleNamespace(
@@ -503,11 +549,21 @@ def test_mode_cards_match_the_desktop_mode_dialog():
     assert qm.DISPLAY_ORDER[0] == "quick-scan" and set(qm.DISPLAY_ORDER) == {c.value for c in qm.MODE_CARDS}
 
 
-def test_metadata_field_tables_match_the_desktop_dialog():
-    path = SRC_DIR / "metadata_batch_translator.py"
-    assert _literal_assignment(path, "standard_fields", "configure_metadata_fields") == hm.STANDARD_FIELDS
-    assert _literal_assignment(path, "default_enabled_fields", "configure_metadata_fields") == set(
-        hm.DEFAULT_ENABLED_FIELDS)
+def test_metadata_field_tables_are_the_desktop_dialogs():
+    """U7: the tables and rules live in metadata_batch_translator; the desktop dialog uses them."""
+    import metadata_batch_translator as mbt
+
+    assert hm.STANDARD_FIELDS is mbt.METADATA_STANDARD_FIELDS
+    assert hm.DEFAULT_ENABLED_FIELDS is mbt.METADATA_DEFAULT_ENABLED_FIELDS
+    tree = ast.parse((SRC_DIR / "metadata_batch_translator.py").read_text(encoding="utf-8-sig"))
+    dialog = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "configure_metadata_fields")
+    assigned = {t.id: s.value.id for s in ast.walk(dialog) if isinstance(s, ast.Assign) and isinstance(s.value, ast.Name)
+                for t in s.targets if isinstance(t, ast.Name)}
+    assert assigned["standard_fields"] == "METADATA_STANDARD_FIELDS"
+    assert assigned["default_enabled_fields"] == "METADATA_DEFAULT_ENABLED_FIELDS"
+    called = {n.func.id for n in ast.walk(dialog) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert {"saved_metadata_fields_for_epub", "metadata_field_checked", "store_metadata_field_selection",
+            "final_metadata_fields_config"} <= called
 
 
 def test_custom_mode_conversions_follow_the_desktop_dialog(monkeypatch):
@@ -826,10 +882,11 @@ def test_tools_hub_tiles_and_availability(tmp_path):
         _mount(page, screen.get_body())
         names = [t.name for _g, tiles in HUB_GROUPS for t in tiles]
         assert names[:4] == ["Async batch", "Review generator", "Headers & metadata", "RPG Maker"]
-        assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.async")) == "Arrives in U7"
+        assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.manga")) == "Arrives in U8"
+        assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.async")) is None  # U7
         assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.qa"),
                               IMPLEMENTED_ROUTES) is None
-        assert screen.tiles["tools.async"].on_click is None and screen.tiles["tools.async"].opacity < 1
+        assert screen.tiles["tools.manga"].on_click is None and screen.tiles["tools.manga"].opacity < 1
         assert screen.tiles["tools.qa"].content.controls[1].controls[1].value == "My Novel"
         screen.tiles["tools.convert.validate"].on_click(None)
         assert ctx.navigated[-1] == ("tools.convert", None, {"tab": "validate"})
@@ -1237,7 +1294,9 @@ def test_tools_feature_wraps_the_screen_factory(tmp_path):
         ctx = feature.context()
         assert ctx.chats_root == os.path.join(str(tmp_path / "Output"), "Direct Text")
         assert ctx.import_dir == os.path.join(str(tmp_path / "data"), "imports") and not ctx.webview_ok()
-        assert IMPLEMENTED_ROUTES == {"tools", "tools.qa", "tools.qa.report", "tools.convert", "tools.headers"}
+        assert IMPLEMENTED_ROUTES == {"tools", "tools.qa", "tools.qa.report", "tools.convert", "tools.headers",
+                                      # U7 (screens: tests_host/test_tools_u7.py)
+                                      "tools.async", "tools.review", "tools.sdlxliff", "tools.rpgmaker"}
 
     asyncio.run(scenario())
 
