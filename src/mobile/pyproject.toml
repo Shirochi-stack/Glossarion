@@ -56,7 +56,7 @@ dependencies = [
 
   # Auth / crypto
   "google-auth==2.49.1",
-  "cryptography==43.0.1",
+  "cryptography==50.0.0",
   "cffi==2.0.0",
 
   # Cloud OCR
