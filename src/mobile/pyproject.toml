@@ -69,7 +69,7 @@ dependencies = [
   "pypdf==6.19.0",
 
   # Images / on-device ONNX
-  "pillow==12.2.0",
+  "pillow==12.3.0",
   "numpy==2.4.6",
   "opencv-python-headless==5.0.0.93",
   "onnxruntime==1.27.0",
