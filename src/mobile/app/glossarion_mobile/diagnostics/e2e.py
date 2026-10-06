@@ -120,6 +120,17 @@ class E2EFailure(AssertionError):
     """A scenario check failed (message is the reason)."""
 
 
+def _seed_langdetect(seed: Any) -> Any:
+    """Set ``langdetect.DetectorFactory.seed`` (None = random); return the previous value."""
+    try:
+        from langdetect import DetectorFactory
+    except Exception:
+        return None
+    previous = getattr(DetectorFactory, "seed", None)
+    DetectorFactory.seed = seed
+    return previous
+
+
 def _check(condition: Any, message: str) -> None:
     if not condition:
         raise E2EFailure(message)
@@ -1232,11 +1243,19 @@ class E2ESession:
                f"output folder {output_dir!r} is not under the sandbox Output")
         book = self._expect_complete_book(output_dir, "translate (edited glossary)")
 
-        # 4. QA quick scan (Tools › QA Scanner)
-        qa = self.run_job(self.service, JobSpec(
-            kind="qa_scan", title=os.path.basename(output_dir), inputs=(output_dir,),
-            params={"mode": "quick-scan", "targets": [{"folder": output_dir, "source": path}]},
-            origin={"type": "e2e", "label": "E2E"}), "QA quick scan")
+        # 4. QA quick scan (Tools › QA Scanner). scan_html_folder never seeds langdetect, so
+        # its verdicts on short text vary between runs (DISCREPANCIES U6 item 8); about 1 run
+        # in 10 then flags TOC.txt / translated_headers.txt, which hits a recorded desktop bug
+        # (update_new_format_progress: UnboundLocalError on 'hashlib'). The check pins the
+        # seed for the scan, like the desktop QA parity tests, so it is deterministic.
+        seed_before = _seed_langdetect(0)
+        try:
+            qa = self.run_job(self.service, JobSpec(
+                kind="qa_scan", title=os.path.basename(output_dir), inputs=(output_dir,),
+                params={"mode": "quick-scan", "targets": [{"folder": output_dir, "source": path}]},
+                origin={"type": "e2e", "label": "E2E"}), "QA quick scan")
+        finally:
+            _seed_langdetect(seed_before)
         _check(qa.state == "DONE", f"QA job ended {qa.state}: {qa.error}")
         report = report_path_for(output_dir)
         _check(os.path.isfile(report), f"no QA report at {report}")
