@@ -66,7 +66,7 @@ dependencies = [
 
   # PDF
   "pymupdf==1.27.2.3",
-  "pypdf==6.4.1",
+  "pypdf==6.19.0",
 
   # Images / on-device ONNX
   "pillow==12.2.0",
