@@ -1390,7 +1390,11 @@ def test_scan_for_raw_matches_legacy(legacy, el, sandbox, qt_prompts):
             def scan(module, work, mode=mode, threshold=threshold):
                 ip, comp = scan_rows(module, {})
                 folder = str(work / "Downloads" / "candidates")
-                books = _raw_scan_books(ip + comp)
+                # The worker's matches (and so the order Apply registers raw inputs in) follow the
+                # book order, which follows folder mtimes the scan itself may bump; give both sides
+                # the same path order so the comparison does not depend on write timing (Linux CI).
+                books = sorted(_raw_scan_books(ip + comp),
+                               key=lambda b: (str(b.get("output_folder") or ""), str(b.get("path") or "")))
                 fake = fake_dialog(module._ScanForRawDialog, _books=books,
                                    _valid_exts={"epub", "txt", "pdf", "html"})
                 fake._selected_exts = module._ScanForRawDialog._derive_auto_exts(fake) or set(fake._valid_exts)
