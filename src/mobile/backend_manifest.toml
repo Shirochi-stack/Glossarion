@@ -61,6 +61,12 @@ modules = [
   # the Reader load them through services/library.SharedCore (importlib), hence listed here.
   "library_covers", "reader_doc", "live_stream", "progress_core", "progress_actions",
   "glossary_progress_core", "reader_overlay",
+  # U6 shared core: the Glossary Editor document (parse / save / tools / find-replace / backups /
+  # prompt-profile config helpers, lifted from GlossaryManager_GUI), the main window's glossary
+  # file actions (editor backups, delete / restore glossary files, Map Glossaries, JSON repair,
+  # lifted from translator_gui) and the Parallel EPUB pair core (parallel_epub_glossary). The
+  # Glossary Manager screens load them through services/library.SharedCore (importlib).
+  "glossary_document", "glossary_files", "parallel_epub_core",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).

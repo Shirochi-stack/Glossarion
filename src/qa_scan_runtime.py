@@ -3,8 +3,10 @@
 
 import json
 import os
+import re
 import sys
 
+import mobile_runtime
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 
 
@@ -238,6 +240,37 @@ def _json_list_from_env(name):
         return []
 
 
+#: Glossarion Mobile runs QA scans on a thread pool (Android / iOS have no process pools) with at
+#: most this many workers (``AI_HUNTER_MAX_WORKERS``). The desktop never applies either.
+MOBILE_QA_MAX_WORKERS = 2
+
+
+def mobile_qa_forcing_active():
+    """True on Glossarion Mobile (wherever ``mobile_runtime`` reports no process pools)."""
+    return not mobile_runtime.processes_available()
+
+
+def mobile_qa_max_workers():
+    """Worker cap of a mobile scan: a smaller positive ``AI_HUNTER_MAX_WORKERS`` wins."""
+    try:
+        configured = int(str(os.getenv("AI_HUNTER_MAX_WORKERS", "") or "").strip() or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    if 0 < configured < MOBILE_QA_MAX_WORKERS:
+        return configured
+    return MOBILE_QA_MAX_WORKERS
+
+
+def mobile_qa_env_overrides():
+    """QA env forced on top of the settings mirror on mobile (empty on desktop)."""
+    if not mobile_qa_forcing_active():
+        return {}
+    return {
+        "QA_USE_THREAD_EXECUTOR": "1",
+        "AI_HUNTER_MAX_WORKERS": str(mobile_qa_max_workers()),
+    }
+
+
 def qa_scan_cache_config_from_settings(qa_settings):
     settings = qa_settings if isinstance(qa_settings, dict) else {}
     cache_config = {
@@ -339,6 +372,7 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_EXCESS_PUNCTUATION_THRESHOLD": str(settings.get("excess_punctuation_threshold", 49)),
         "QA_SOURCE_LANGUAGE": str(settings.get("source_language", "auto")),
     }
+    mappings.update(mobile_qa_env_overrides())
     previous = {key: os.environ.get(key) for key in mappings}
     for key, value in mappings.items():
         os.environ[key] = value
@@ -587,6 +621,8 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
     output_language = live_config.get("output_language") or live_config.get("output_language_var")
     if output_language and not settings.get("target_language"):
         settings["target_language"] = str(output_language).strip().lower()
+    if mobile_qa_forcing_active():
+        settings["use_thread_executor"] = True
     return settings
 
 
@@ -640,3 +676,307 @@ DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = [
     'Let me analyze',
     'Let me verify',
 ]
+
+
+# ---------------------------------------------------------------------------------------------
+# Moved from QA_Scanner_GUI in U6 (Glossarion Mobile shares them; QA_Scanner_GUI imports every
+# name below): the AI-truncation prompt and Custom-mode defaults of its dialogs, its pure
+# owner / path / name helpers (verbatim) and the latest-report search of open_latest_qa_report.
+# ---------------------------------------------------------------------------------------------
+
+#: Default prompt of AI Truncation Detection (QA Scanner settings, "Edit Prompt"). The scanner's
+#: built-in fallback in scan_html_folder is the same text.
+DEFAULT_AI_TRUNCATION_PROMPT = (
+    "You are a strict translation quality analyst. Your ONLY job is to determine if "
+    "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
+    "or completely missing the final paragraphs/sentences present in the source).\n"
+    "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
+    "Only evaluate the final sentences of the provided texts. Ignore mismatches occurring at the beginning "
+    "of the provided tail segment, as it may have been cleanly cut from a larger document.\n"
+    "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
+    "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
+    "Respond with ONLY the word YES or NO. Do not explain."
+)
+
+#: Custom scan mode defaults (the Custom mode dialog; thresholds in percent).
+DEFAULT_CUSTOM_MODE_SETTINGS = {
+    'similarity': 85,
+    'semantic': 80,
+    'structural': 90,
+    'word_overlap': 75,
+    'minhash_threshold': 80,
+    'consecutive_chapters': 2,
+    'check_all_pairs': False,
+    'sample_size': 3000,
+    'min_text_length': 500,
+    'min_duplicate_word_count': 500,
+}
+
+
+def _qa_owner_output_mode(owner):
+    try:
+        if hasattr(owner, '_get_output_mode'):
+            return str(owner._get_output_mode() or '').strip().lower()
+    except Exception:
+        pass
+    try:
+        return str(getattr(owner, 'config', {}).get('output_mode', '') or '').strip().lower()
+    except Exception:
+        return ''
+
+
+def _qa_owner_uses_truncation_context(owner):
+    try:
+        settings = getattr(owner, 'config', {}).get('qa_scanner_settings', {}) or {}
+        context = (
+            settings.get('_qa_context')
+            or settings.get('qa_context')
+            or settings.get('context')
+            or settings.get('_context')
+            or ''
+        )
+        if str(context).strip().lower() in ('truncation', 'qa_truncation'):
+            return True
+        return bool(settings.get('check_ai_truncation_detection', False))
+    except Exception:
+        return False
+
+
+def _qa_vision_ocr_source_path(path, owner=None):
+    """Return this book output's OCR-source EPUB used for Vision/truncation QA, when available."""
+    if not path or not str(path).lower().endswith('.epub'):
+        return path
+    if _qa_owner_output_mode(owner) != 'vision' and not _qa_owner_uses_truncation_context(owner):
+        return path
+    try:
+        abs_path = os.path.abspath(path)
+        stem, ext = os.path.splitext(os.path.basename(abs_path))
+        if stem.lower().endswith('_ocr'):
+            stem = stem[:-4]
+        candidates = []
+        env_candidate = os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip() or os.getenv('VISION_OCR_SOURCE_EPUB', '').strip()
+        if env_candidate:
+            candidates.append(env_candidate)
+        output_dir = os.getenv('EPUB_OUTPUT_DIR', '').strip()
+        if output_dir:
+            output_abs = os.path.abspath(output_dir)
+            if os.path.basename(output_abs) == stem:
+                candidates.append(os.path.join(output_abs, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+            else:
+                candidates.append(os.path.join(output_abs, stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        override_dir = os.getenv('OUTPUT_DIRECTORY') or os.getenv('OUTPUT_DIR')
+        if override_dir:
+            candidates.append(os.path.join(os.path.abspath(override_dir), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        try:
+            owner_base_dir = getattr(owner, 'base_dir', '') if owner is not None else ''
+            if owner_base_dir:
+                candidates.append(os.path.join(os.path.abspath(owner_base_dir), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        except Exception:
+            pass
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        for candidate in candidates:
+            try:
+                candidate_abs = os.path.abspath(candidate)
+                candidate_stem = os.path.splitext(os.path.basename(candidate_abs))[0]
+                if candidate_stem.lower().endswith('_ocr'):
+                    candidate_stem = candidate_stem[:-4]
+                if candidate_stem != stem:
+                    continue
+                if os.path.basename(os.path.dirname(candidate_abs)).lower() != 'ocr':
+                    continue
+                if os.path.isfile(candidate_abs):
+                    return candidate_abs
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return path
+
+
+def _normalize_target_language(display_text):
+    """Normalize a human-facing target language label to a canonical value.
+
+    The QA pipeline expects simple lowercase identifiers like "english",
+    "korean", or "chinese". This helper maps common dropdown labels to
+    those canonical forms so detection logic stays stable even if the
+    UI wording changes (e.g. "Chinese (Simplified)").
+    """
+    if not display_text:
+        return "english"
+
+    s = display_text.strip().lower()
+
+    mapping = {
+        # Core languages
+        "english": "english",
+        "en": "english",
+        "spanish": "spanish",
+        "es": "spanish",
+        "french": "french",
+        "fr": "french",
+        "german": "german",
+        "de": "german",
+        "portuguese": "portuguese",
+        "pt": "portuguese",
+        "italian": "italian",
+        "it": "italian",
+        "russian": "russian",
+        "ru": "russian",
+        "japanese": "japanese",
+        "ja": "japanese",
+        "korean": "korean",
+        "ko": "korean",
+        # Chinese variants (keep distinct)
+        "chinese": "chinese",
+        "chinese (simplified)": "chinese (simplified)",
+        "chinese (traditional)": "chinese (traditional)",
+        "zh": "chinese",
+        "zh-cn": "chinese (simplified)",
+        "zh-tw": "chinese (traditional)",
+        # RTL / other scripts
+        "arabic": "arabic",
+        "ar": "arabic",
+        "hebrew": "hebrew",
+        "he": "hebrew",
+        "thai": "thai",
+        "th": "thai",
+    }
+
+    if s in mapping:
+        return mapping[s]
+
+    # Fallback: use the first word (e.g. "english (us)" → "english")
+    first = s.split()[0]
+    return mapping.get(first, first)
+
+
+def _normalize_source_language(display_text):
+    """
+    Normalize source language without collapsing Chinese variants.
+    Returns lowercase labels that align with word_count_multipliers keys.
+    """
+    if not display_text:
+        return 'auto'
+    s = display_text.strip().lower()
+    if s == 'auto':
+        return 'auto'
+    # Keep distinct variants for Chinese
+    if 'chinese' in s:
+        if 'traditional' in s:
+            return 'chinese (traditional)'
+        if 'simplified' in s:
+            return 'chinese (simplified)'
+        return 'chinese'
+    return s
+
+
+
+def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
+    """
+    Check if EPUB name and folder name likely refer to the same content
+    Uses strict matching to avoid false positives with similar numbered titles
+    """
+    # Normalize names for comparison
+    epub_norm = normalize_name_for_comparison(epub_name)
+    folder_norm = normalize_name_for_comparison(folder_name)
+
+    # Direct match
+    if epub_norm == folder_norm:
+        return True
+
+    # Check if folder has common output suffixes that should be ignored
+    output_suffixes = ['_output', '_translated', '_trans', '_en', '_english', '_done', '_complete', '_final']
+    if custom_suffixes:
+        custom_list = [s.strip() for s in custom_suffixes.split(',') if s.strip()]
+        output_suffixes.extend(custom_list)
+
+    for suffix in output_suffixes:
+        if folder_norm.endswith(suffix):
+            folder_base = folder_norm[:-len(suffix)]
+            if folder_base == epub_norm:
+                return True
+        if epub_norm.endswith(suffix):
+            epub_base = epub_norm[:-len(suffix)]
+            if epub_base == folder_norm:
+                return True
+
+    # Check for exact match with version numbers removed
+    version_pattern = r'[\s_-]v\d+$'
+    epub_no_version = re.sub(version_pattern, '', epub_norm)
+    folder_no_version = re.sub(version_pattern, '', folder_norm)
+
+    if epub_no_version == folder_no_version and (epub_no_version != epub_norm or folder_no_version != folder_norm):
+        return True
+
+    # STRICT NUMBER CHECK - all numbers must match exactly
+    epub_numbers = re.findall(r'\d+', epub_name)
+    folder_numbers = re.findall(r'\d+', folder_name)
+
+    if epub_numbers != folder_numbers:
+        return False
+
+    # If we get here, numbers match, so check if the text parts are similar enough
+    epub_text_only = re.sub(r'\d+', '', epub_norm).strip()
+    folder_text_only = re.sub(r'\d+', '', folder_norm).strip()
+
+    if epub_numbers and folder_numbers:
+        return epub_text_only == folder_text_only
+
+    return False
+
+
+def normalize_name_for_comparison(name):
+    """Normalize a filename for comparison - preserving number positions"""
+    name = name.lower()
+    name = re.sub(r'\.(epub|txt|html?)$', '', name)
+    name = re.sub(r'[-_\s]+', ' ', name)
+    name = re.sub(r'\[(?![^\]]*\d)[^\]]*\]', '', name)
+    name = re.sub(r'\((?![^)]*\d)[^)]*\)', '', name)
+    name = re.sub(r'[^\w\s\-]', ' ', name)
+    name = ' '.join(name.split())
+    return name.strip()
+
+
+def find_latest_qa_report(override_dir=None, last_report_path=None):
+    """Return the newest QA report (``validation_results.html``), or None when there is none.
+
+    The search of ``QAScannerMixin.open_latest_qa_report`` (moved in U6): walk
+    ``override_dir`` (OUTPUT_DIRECTORY / the ``output_directory`` setting) when it is a
+    directory, else the current working directory, skipping Direct Text folders. The last
+    scan's report (``last_report_path``) is the fallback only when the walk finds nothing.
+    """
+    newest = None
+    newest_mtime = -1
+
+    search_roots = []
+    if override_dir and os.path.isdir(override_dir):
+        search_roots.append(os.path.normpath(override_dir))
+    else:
+        search_roots.append(os.getcwd())
+
+    for root_dir in search_roots:
+        if is_direct_text_qa_path(root_dir):
+            continue
+        for root, dirs, files in os.walk(root_dir):
+            dirs[:] = [
+                dirname for dirname in dirs
+                if not is_direct_text_qa_path(os.path.join(root, dirname))
+            ]
+            for fname in files:
+                if fname.lower() == "validation_results.html":
+                    candidate = os.path.join(root, fname)
+                    try:
+                        mtime = os.path.getmtime(candidate)
+                    except Exception:
+                        mtime = 0
+                    if mtime > newest_mtime:
+                        newest_mtime = mtime
+                        newest = candidate
+
+    # Fallback to cached path only if nothing found in current search
+    if not newest and last_report_path and os.path.exists(last_report_path):
+        newest = last_report_path
+
+    if not newest or not os.path.exists(newest):
+        return None
+    return newest

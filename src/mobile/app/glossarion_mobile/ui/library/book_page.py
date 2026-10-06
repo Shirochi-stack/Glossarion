@@ -127,7 +127,7 @@ class BookPageScreen(Screen):
             item("Compile PDF", lambda: self.ctx.spawn(self.compile("compile_pdf")), ft.Icons.PICTURE_AS_PDF,
                  not has_workspace),
             item("Translate Metadata", lambda: self.ctx.spawn(self.translate_metadata()), ft.Icons.LABEL),
-            item("QA scan", lambda: self.ctx.say("The QA scanner arrives in U6"), ft.Icons.FACT_CHECK),
+            item("QA scan", lambda: self.ctx.go("tools.qa", None, {"out": self.bid}), ft.Icons.FACT_CHECK),
             item("Edit metadata.json", lambda: self.ctx.go("library.book.metadata", {"bid": self.bid}),
                  ft.Icons.DATA_OBJECT, not has_workspace),
             item("Files", self.open_files, ft.Icons.FOLDER_OPEN, not has_workspace),
@@ -453,7 +453,7 @@ class BookPageScreen(Screen):
     async def translate_metadata(self) -> Optional[str]:
         service = self.service
         if not service.has_job_kind("metadata"):
-            self.ctx.say("Metadata translation jobs arrive in U6")
+            self.ctx.say("Metadata translation is not available in this session")
             return None
         try:
             spec = await self.ctx.io(service.metadata_spec, [self.book])

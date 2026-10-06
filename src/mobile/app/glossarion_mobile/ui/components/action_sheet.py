@@ -45,11 +45,16 @@ class ActionSheet:
         subtitle: Optional[str] = None,
         cancel_label: str = "Cancel",
         tablet: bool = False,
+        on_cancel: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.items = list(items)
         self.title = title
         self.subtitle = subtitle
         self.tablet = tablet
+        # Called once when the sheet closes without a row: the Cancel row, Android back or an
+        # outside tap (an awaited choice then never waits forever).
+        self.on_cancel = on_cancel
+        self._cancelled = False
         self.selected: Optional[ActionItem] = None
         self._page: Any = None
         self.tiles: list[ft.ListTile] = [self._tile(item) for item in self.items]
@@ -88,6 +93,9 @@ class ActionSheet:
                 scrollable=True,
                 bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
             )
+        if on_cancel is not None:
+            # set before show_dialog (Flet wraps the handler present when the dialog opens)
+            self.dialog.on_dismiss = self._on_dismiss
 
     def _tile(self, item: ActionItem) -> ft.ListTile:
         color = ft.Colors.ERROR if item.destructive else None
@@ -112,6 +120,17 @@ class ActionSheet:
 
     def _on_cancel(self, e: Any = None) -> None:
         self.close()
+        self._fire_cancel()
+
+    def _on_dismiss(self, e: Any = None) -> None:
+        if self.selected is None:  # closed without a row (back gesture, outside tap)
+            self._fire_cancel()
+
+    def _fire_cancel(self) -> None:
+        if self._cancelled or self.on_cancel is None:
+            return
+        self._cancelled = True
+        call_handler(self.on_cancel)
 
     def _on_select(self, e: Any, item: ActionItem) -> None:
         if item.disabled_reason is not None:

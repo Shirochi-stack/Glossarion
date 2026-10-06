@@ -435,6 +435,12 @@ def test_offline_e2e_suite(tmp_path):
     assert chat["requests"]["glossary"] >= 1 and chat["requests"]["chapters"] == e2e.CHAPTERS
     assert chat["approval_entries"] == len(DEFAULT_GLOSSARY) and chat["live_cards"] >= 1
     assert chat["book"]["progress"]["completed"] == e2e.CHAPTERS
+    # U6: extract glossary -> edit -> save -> translate with the edit -> QA quick scan -> PDF via the shim.
+    edited = checks["e2e_glossary_edit_qa_pdf"]["detail"]
+    assert edited["edited"] == {e2e.E2ESession.EDIT_RAW: ["Seo-yeon Lee", e2e.E2ESession.EDIT_NAME]}
+    assert edited["edited_prompts"] >= 1 and edited["backups"] >= 1
+    assert edited["book"]["progress"]["completed"] == e2e.CHAPTERS and edited["qa"]["chapters"] == e2e.CHAPTERS
+    assert edited["pdf"]["pages"] >= e2e.CHAPTERS and edited["pdf"]["outline"] >= e2e.CHAPTERS
     graceful = checks["e2e_graceful_stop_resume"]["detail"]
     assert graceful["stop_secs"] <= e2e.STOP_DEADLINE
     assert sorted(graceful["saved_before_resume"] + graceful["resumed"]) == list(range(1, e2e.CHAPTERS + 1))
@@ -443,7 +449,7 @@ def test_offline_e2e_suite(tmp_path):
     assert sorted(forced["saved_before_resume"] + forced["resumed"]) == list(range(1, e2e.CHAPTERS + 1))
     hygiene = checks["e2e_process_hygiene"]["detail"]
     assert hygiene["spawn_attempts"] == 0 and hygiene["writes_outside"] == 0 and hygiene["network_attempts"] == 0
-    assert all(not job["process_diff"] for job in hygiene["jobs"]) and len(hygiene["jobs"]) == 7
+    assert all(not job["process_diff"] for job in hygiene["jobs"]) and len(hygiene["jobs"]) == 11
 
     # The sandbox is gone after a pass; the user's own chats, settings, jobs and outputs were never touched.
     sandboxes = storage["temp"] / "glossarion-e2e"

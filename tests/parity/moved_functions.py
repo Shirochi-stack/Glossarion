@@ -180,6 +180,15 @@ SHARED_MODULES = (
     "progress_core",
     "progress_actions",
     "glossary_progress_core",
+    # U6: the Glossary Editor document + Glossary Manager prompt-profile config helpers
+    # (GlossaryManager_GUI), the main window's glossary file actions (translator_gui), the
+    # Parallel EPUB pair core (parallel_epub_glossary) and the QA Scanner helpers moved into the
+    # existing qa_scan_runtime (tests/test_glossary_document.py, test_glossary_files.py,
+    # test_parallel_epub_core.py and test_qa_runtime_additions.py pin the moves)
+    "glossary_document",
+    "glossary_files",
+    "parallel_epub_core",
+    "qa_scan_runtime",
 )
 
 _RUN_ENV = ("run_env", "RunEnvMixin")

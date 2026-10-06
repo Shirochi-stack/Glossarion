@@ -93,7 +93,11 @@ jobs:
           tests/test_reader_doc.py \
           tests/test_progress_core.py \
           tests/test_progress_actions.py \
-          tests/test_glossary_progress_core.py
+          tests/test_glossary_progress_core.py \
+          tests/test_glossary_document.py \
+          tests/test_glossary_files.py \
+          tests/test_parallel_epub_core.py \
+          tests/test_qa_runtime_additions.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -119,6 +123,8 @@ jobs:
             # U5: Library covers, reader document, live stream, Progress Manager / Glossary Progress cores
             "library_covers", "reader_doc", "live_stream", "progress_core", "progress_actions",
             "glossary_progress_core",
+            # U6: Glossary Editor document, glossary file actions, Parallel EPUB pair core, QA helpers
+            "glossary_document", "glossary_files", "parallel_epub_core", "qa_scan_runtime",
         )
         failed = []
         for name in SHARED:

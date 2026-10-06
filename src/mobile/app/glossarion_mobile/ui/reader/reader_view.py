@@ -116,6 +116,8 @@ class ReaderDeps:
     cache_dir: Optional[str] = None
     width_signal: Any = None
     ask_in_chat: Optional[Callable[[str], Any]] = None
+    # add_to_glossary(term, book=row): the Glossary Manager's new-entry sheet on the book's glossary (U6)
+    add_to_glossary: Optional[Callable[..., Any]] = None
     has_book_page: Optional[Callable[[str], bool]] = None
     webview_ok: Optional[Callable[[], bool]] = None
     wakelock: Any = None  # the Reader's holder of the shared wakelock (services.wakelock)
@@ -1484,9 +1486,16 @@ class ReaderScreen(Screen):
         self.selection.hide()
 
     def _add_to_glossary(self, text: str) -> None:
+        adder = self.deps.add_to_glossary
+        self.selection.hide()
+        if adder is not None:
+            self.save_position(flush=True)
+            result = adder(text.strip(), book=dict(self._target_book) or None)
+            if asyncio.iscoroutine(result):
+                self._spawn(result)
+            return
         session = self.session
         GlossaryEntryStub(text, on_copy=self._copy, book_title=session.plan.title if session else "").show(self.page)
-        self.selection.hide()
 
     def _ask_in_chat(self, text: str) -> None:
         ask = self.deps.ask_in_chat

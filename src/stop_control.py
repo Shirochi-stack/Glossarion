@@ -22,7 +22,11 @@ moved verbatim out of ``TranslatorGUI`` (``translator_gui.py`` @ 1719fb59):
 * the non-widget tail of ``stop_translation`` (EPUB converter stop flag, HTTP logger
   silencing on a graceful stop, the stop-mode log line) as ``stop_epub_converter`` /
   ``announce_stop``, and ``run_translation_thread``'s wait for the previous stop's
-  cleanup thread as ``wait_for_stop_cleanup`` (U3 fix pass; both front ends call them).
+  cleanup thread as ``wait_for_stop_cleanup`` (U3 fix pass; both front ends call them);
+* (U6, translator_gui.py @ e28e3a0f) the non-widget part of ``stop_glossary_extraction``
+  (env flags -> latch -> module flags -> run-id-guarded cleanup thread with its own,
+  shorter helper-process list and the glossary stop file -> log line) as
+  ``request_glossary_stop`` / ``kill_glossary_helper_subprocesses``.
 
 Flag order matters (see the race comment kept in ``request_stop``): the environment
 mode flags are published before the ``set_stop_requested`` latch, so a graceful first
@@ -45,11 +49,13 @@ __all__ = [
     "apply_force_stop_flags",
     "clear_client_cancellation",
     "clear_module_stop_flags",
+    "kill_glossary_helper_subprocesses",
     "kill_helper_subprocesses",
     "make_glossary_stop_callback",
     "make_run_id",
     "prepare_glossary_stop_file",
     "register_stop_click",
+    "request_glossary_stop",
     "request_stop",
     "reset_api_watchdog",
     "reset_for_new_run",
@@ -579,6 +585,195 @@ def request_stop(*, graceful, wait_for_chunks, force=False, set_stop_requested, 
         stop_cleanup_thread.start()
         return stop_cleanup_thread
     return None
+
+
+def kill_glossary_helper_subprocesses():
+    """The glossary Stop's helper killer (``stop_glossary_extraction``): only the chapter / PDF
+    extraction helpers. Its list is shorter than :func:`kill_helper_subprocesses`' (no AuthND /
+    Gemini-Free token helpers; recorded desktop quirk, DISCREPANCIES U3 item 4). No-op where
+    subprocesses are unavailable (mobile)."""
+    if not subprocesses_available():
+        return
+    # Best-effort: terminate only known helper subprocesses we started.
+    try:
+        import psutil
+        current_process = psutil.Process(os.getpid())
+        children = current_process.children(recursive=True)
+
+        _protected_pids = set()
+        try:
+            from manga_translator import MangaTranslator
+            if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                for _key, _rec in MangaTranslator._inpaint_pool.items():
+                    if _rec and 'spares' in _rec:
+                        for _inp in _rec['spares']:
+                            if _inp and getattr(_inp, '_mp_worker', None):
+                                try:
+                                    _pid = _inp._mp_worker.pid
+                                    if _pid:
+                                        _protected_pids.add(_pid)
+                                except Exception:
+                                    pass
+        except Exception:
+            pass
+
+        def _cmdline_s(proc) -> str:
+            try:
+                cmd = proc.cmdline()
+                return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            except Exception:
+                return ""
+
+        def _is_mp_internal(cmd_s: str) -> bool:
+            cs = (cmd_s or "")
+            return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
+
+        processes_to_terminate = []
+        for child in children:
+            try:
+                if child.pid in _protected_pids:
+                    continue
+                cmd_s = _cmdline_s(child)
+                if _is_mp_internal(cmd_s):
+                    continue
+                if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                        or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
+                        or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
+                    processes_to_terminate.append(child)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        if processes_to_terminate:
+            for proc in processes_to_terminate:
+                try:
+                    proc.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+            try:
+                gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
+            except Exception:
+                alive = processes_to_terminate
+            for proc in alive:
+                try:
+                    proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+    except Exception as e:
+        print(f"Error terminating helper child processes: {e}")
+
+
+def request_glossary_stop(*, graceful, set_stop_requested, log=print, glossary_stop_flag=None,
+                          get_run_id=None, thread_name="glossary-stop-cleanup"):
+    """Stop the running glossary extraction, in the exact desktop order (``stop_glossary_extraction``).
+
+    Order: GRACEFUL_STOP -> graceful only: silence the HTTP loggers -> ``set_stop_requested()``
+    (the latch) -> immediate only: TRANSLATION_CANCELLED=1 / GRACEFUL_STOP_COMPLETED=0, the
+    module stop flags (``glossary_stop_flag(True)``, extract_glossary_from_epub,
+    unified_api_client), then a background thread that, unless a newer glossary run has started,
+    hard-cancels HTTP sessions, kills the chapter / PDF extraction helpers
+    (:func:`kill_glossary_helper_subprocesses`) and touches GLOSSARY_STOP_FILE -> the stop-mode
+    log line. The widget code, the double-click detection and the idle reset poll stay with the
+    caller.
+
+    * ``graceful``: the effective mode (a double click during a graceful stop passes False);
+    * ``set_stop_requested()``: sets the owner's stop latch (desktop: ``stop_requested = True``);
+    * ``glossary_stop_flag``: the desktop's lazily loaded extractor stop setter, or None;
+    * ``get_run_id()``: the owner's ``_glossary_run_id`` (GLOSSARION_RUN_ID is the fallback),
+      read at the click and again in the cleanup thread: a newer run makes the old cleanup a no-op.
+
+    Returns the cleanup thread (immediate stop) or None.
+    """
+    graceful_stop = graceful
+    if get_run_id is None:
+        def get_run_id():
+            return None
+
+    # Set graceful stop mode in environment so API client knows to show logs
+    os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
+
+    # Suppress HTTP logs during graceful stop
+    if graceful_stop:
+        silence_http_loggers()
+
+    set_stop_requested()
+
+    stop_cleanup_thread = None
+    # For graceful stop: DON'T abort in-flight API calls, let them finish
+    # For immediate stop: abort everything aggressively
+    if not graceful_stop:
+        # Keep the extractor's hard-stop detection in sync with the other
+        # translation stop path. Progress restoration uses this signal to
+        # distinguish cancellation from an ordinary API failure.
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+
+        # ── FAST PATH (main thread): set all boolean flags instantly ──
+        if glossary_stop_flag:
+            glossary_stop_flag(True)
+
+        try:
+            import extract_glossary_from_epub
+            if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                extract_glossary_from_epub.set_stop_flag(True)
+        except:
+            pass
+
+        # Set cancel flags immediately so _is_stop_requested() returns True
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+        except Exception:
+            pass
+
+        # ── SLOW PATH (background thread): close connections, kill procs ──
+        stop_run_id = get_run_id() or os.environ.get('GLOSSARION_RUN_ID')
+
+        def _stop_heavy_work():
+            # This cleanup is asynchronous. If another glossary run has
+            # already started, its lifecycle reset owns the provider now;
+            # an old cleanup must not cancel that new run's stream.
+            current_run_id = get_run_id() or os.environ.get('GLOSSARION_RUN_ID')
+            if stop_run_id and current_run_id != stop_run_id:
+                return
+            # Hard cancel: close active HTTP sessions to abort in-flight requests
+            try:
+                import unified_api_client as _uac
+                if hasattr(_uac, 'hard_cancel_all'):
+                    _uac.hard_cancel_all()
+            except Exception:
+                pass
+
+            kill_glossary_helper_subprocesses()
+
+            # Touch stop file for GlossaryManager subprocesses
+            try:
+                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                if stop_file:
+                    with open(stop_file, 'w', encoding='utf-8') as f:
+                        f.write('stop')
+            except Exception:
+                pass
+
+        stop_cleanup_thread = threading.Thread(target=_stop_heavy_work, daemon=True, name=thread_name)
+        stop_cleanup_thread.start()
+
+    # Log message depends on stop mode
+    if graceful_stop:
+        try:
+            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+        except Exception:
+            wait_for_chunks = False
+        if wait_for_chunks:
+            log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
+        else:
+            log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
+    else:
+        log("❌ Glossary extraction stop requested.")
+    return stop_cleanup_thread
 
 
 def stop_epub_converter():

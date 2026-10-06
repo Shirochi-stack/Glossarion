@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1-U5 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1-U6 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -335,6 +335,18 @@ U5_SHARED_MODULES = (
 #: Specs that deliberately do not bundle epub_library (it drags in Chromium WebEngine).
 LITE_WITHOUT_EPUB_LIBRARY = ("translator_lite.spec", "translator_TurboLite.spec", "translator_linux_TurboLite.spec")
 
+# U6: GlossaryManager_GUI keeps thin wrappers over glossary_document (the Glossary Editor and the
+# prompt-profile config helpers), translator_gui over glossary_files (editor backups, delete /
+# restore glossary files, Map Glossaries, JSON repair) and parallel_epub_glossary re-exports
+# parallel_epub_core (all imported at module level), so every tier ships them.
+U6_SHARED_MODULES = ("glossary_document", "glossary_files", "parallel_epub_core")
+#: Desktop module -> the U6 core it imports at module level.
+U6_IMPORTERS = {
+    "GlossaryManager_GUI": "glossary_document",
+    "translator_gui": "glossary_files",
+    "parallel_epub_glossary": "parallel_epub_core",
+}
+
 
 def _spec_list(source, name):
     lines = source.splitlines()
@@ -351,7 +363,7 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
         for name in (U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES + U4_SHARED_MODULES
-                     + U5_SHARED_MODULES):
+                     + U5_SHARED_MODULES + U6_SHARED_MODULES):
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")
@@ -374,3 +386,25 @@ def test_u5_modules_ship_where_epub_library_is_left_out():
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                 top.add(node.module.split(".")[0])
         assert not top & {"epub_library", "PySide6", "translator_gui", "Retranslation_GUI", "dpi_setup"}, (name, top)
+
+
+def _top_level_imports(name):
+    tree = ast.parse((SRC_DIR / f"{name}.py").read_text(encoding="utf-8-sig"))
+    top = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            top.add(node.module.split(".")[0])
+    return top
+
+
+def test_u6_modules_are_imported_by_the_desktop_and_stay_gui_free():
+    """The U6 cores are module-level imports of their desktop dialogs (hence every spec) and never
+    import Qt or the dialogs they were lifted from."""
+    for desktop, core in U6_IMPORTERS.items():
+        assert core in _top_level_imports(desktop), (desktop, core)
+    gui = {"PySide6", "translator_gui", "dpi_setup", "GlossaryManager_GUI", "parallel_epub_glossary",
+           "QA_Scanner_GUI", "Retranslation_GUI", "epub_library"}
+    for name in U6_SHARED_MODULES:
+        assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)

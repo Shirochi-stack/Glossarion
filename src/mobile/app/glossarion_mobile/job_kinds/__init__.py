@@ -16,7 +16,12 @@ runs for the same action:
   ``owner._run_pdf_compile(folder)`` (``text_jobs.TextJobsMixin``);
 * ``single_chapter``: the translate pair with the owner's ``_single_chapter_filter`` /
   ``_force_stream_all`` set (desktop ``start_single_chapter_translation``; the Reader's
-  "Translate this chapter" and the Book page's chapter rows).
+  "Translate this chapter" and the Book page's chapter rows);
+* ``qa_scan``: ``qa_scan_runtime.run_qa_scan_path`` per output folder (U6, QA Scanner);
+* ``validate_epub`` / ``rename_outputs``: Converter actions (``TransateKRtoEN`` validation,
+  ``output_naming._rename_output_files_for_retain``);
+* ``translate_headers``: ``translate_headers_standalone.run_translation`` per EPUB + rebuild;
+* ``metadata``: the owner's metadata-only run (desktop ``start_metadata_translation``).
 
 No backend logic lives here. ``get_kind(kind)`` returns a ``KindInfo`` (verb and
 icon for the strip and notifications, the ``stop_control.reset_for_new_run``
@@ -37,9 +42,18 @@ KIND_MODULES = {
     "translate": "translate",
     "direct_text": "direct_text",
     "extract_glossary": "glossary",
+    "glossary_refine": "glossary",
+    "unified_glossary": "glossary",
+    "parallel_pair": "glossary",
     "compile_epub": "compile",
     "compile_pdf": "compile",
     "single_chapter": "single_chapter",
+    # U6 tools (Tools › QA Scanner / Converter / Headers & metadata, Library metadata)
+    "qa_scan": "qa",
+    "validate_epub": "compile",
+    "rename_outputs": "compile",
+    "translate_headers": "headers",
+    "metadata": "metadata",
 }
 
 

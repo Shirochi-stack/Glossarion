@@ -45,6 +45,15 @@ from gender_tracking import (
     tracker_entry_for_raw,
     tracker_path_for_glossary,
 )
+import glossary_document  # editor parse/save/edit logic shared with the mobile app (U6)
+# Moved verbatim to glossary_document (U6); imported under their old names.
+from glossary_document import (
+    collect_glossary_filter_values as _collect_glossary_filter_values,
+    editor_entry_has_gender as _editor_entry_has_gender,
+    gender_resolution_summary as _gender_resolution_summary,
+    load_editor_gender_tracker as _load_editor_gender_tracker,
+    prepare_editor_gender_tracking as _prepare_editor_gender_tracking,
+)
 
 
 _EDITOR_GENDER_STATUS_ROLE = int(Qt.UserRole) + 20
@@ -88,93 +97,9 @@ def _apply_editor_gender_presentation(item, status, gender_column=None):
             item.setData(column, Qt.BackgroundRole, None)
 
 
-def _gender_resolution_summary(tracker_entry, stored_gender, threshold, bias):
-    """Build the resolution-dialog history model from shared tracker rules."""
-    automatic_entry = dict(tracker_entry or {})
-    automatic_entry["decision"] = "auto"
-    status = editor_gender_status(automatic_entry, stored_gender, threshold, bias)
-    stats = status.get("stats", {})
-    total = sum(int(values.get("count", 0) or 0) for values in stats.values())
-    genders = {}
-    for gender in BINARY_GENDERS:
-        values = stats.get(gender, {})
-        first, last = occurrence_bounds(automatic_entry, gender)
-        genders[gender] = {
-            "count": int(values.get("count", 0) or 0),
-            "ratio": float(values.get("ratio", 0.0) or 0.0),
-            "first": first,
-            "last": last,
-        }
-    changes = [change for change in automatic_entry.get("changes", []) if isinstance(change, dict)]
-    return {
-        "status": status,
-        "calculated_auto_gender": resolved_storage_gender(automatic_entry, stored_gender),
-        "total": total,
-        "genders": genders,
-        "flip_count": len(changes),
-        "latest_flips": changes[-5:],
-    }
+# _gender_resolution_summary, _collect_glossary_filter_values, _load_editor_gender_tracker,
+# _editor_entry_has_gender and _prepare_editor_gender_tracking: see glossary_document (U6).
 
-
-def _collect_glossary_filter_values(value_states, *, restrict_to_visible=False):
-    """Return checked filter values, optionally limited to search matches.
-
-    ``value_states`` contains ``(raw_value, is_visible, is_checked)`` tuples.
-    Limiting an active search to visible values gives the popup the spreadsheet
-    behavior users expect: typing a value and applying it filters to those
-    search results instead of silently retaining every hidden checked value.
-    """
-    return {
-        raw_value
-        for raw_value, is_visible, is_checked in value_states
-        if is_checked and (is_visible or not restrict_to_visible)
-    }
-
-
-def _load_editor_gender_tracker(glossary_path):
-    """Load an associated tracker without making editor-open mutate it."""
-    tracker_path = tracker_path_for_glossary(glossary_path)
-    if not tracker_path or not os.path.exists(tracker_path):
-        return None, tracker_path
-    try:
-        with open(tracker_path, "r", encoding="utf-8") as tracker_file:
-            tracker = json.load(tracker_file)
-        if isinstance(tracker, dict) and isinstance(tracker.get("entries"), dict):
-            return tracker, tracker_path
-    except Exception:
-        pass
-    return None, tracker_path
-
-
-def _editor_entry_has_gender(entry, custom_types):
-    if not isinstance(entry, dict):
-        return False
-    entry_type = str(entry.get("type", "character") or "character").strip()
-    config = custom_types.get(entry_type) if isinstance(custom_types, dict) else None
-    if isinstance(config, dict):
-        return bool(config.get("has_gender", False))
-    return entry_type.casefold() == "character"
-
-
-def _prepare_editor_gender_tracking(entries, glossary_path, custom_types, tracking_disabled=False):
-    env_disabled = str(os.getenv('GLOSSARY_SKIP_GENDER_TRACKING', '0')).strip().lower() in {
-        '1', 'true', 'yes', 'on'
-    }
-    if tracking_disabled or env_disabled:
-        return list(entries or []), None, tracker_path_for_glossary(glossary_path), 0
-    tracker, tracker_path = _load_editor_gender_tracker(glossary_path)
-    if not tracker:
-        return list(entries or []), None, tracker_path, 0
-    prepared, collapsed = collapse_tracked_gender_variants(
-        entries,
-        tracker,
-        has_gender=lambda entry: _editor_entry_has_gender(entry, custom_types),
-        score_entry=lambda entry: sum(
-            1 for key, value in entry.items()
-            if not str(key).startswith("_") and value not in (None, "", [], {})
-        ),
-    )
-    return prepared, tracker, tracker_path, collapsed
 
 
 def _recent_glossary_filter_dismissal(
@@ -273,6 +198,31 @@ class _GlossaryFilterItemDelegate(QStyledItemDelegate):
             )
             painter.drawPath(path)
         painter.restore()
+
+
+class _EditorTreeRow:
+    """glossary_document's editor-row protocol over a glossary tree item (UserRole = source ref)."""
+
+    __slots__ = ('item',)
+
+    def __init__(self, item):
+        self.item = item
+
+    def columnCount(self):
+        return self.item.columnCount()
+
+    def text(self, column):
+        return self.item.text(column)
+
+    def setText(self, column, value):
+        self.item.setText(column, value)
+
+    def ref(self):
+        return self.item.data(0, Qt.UserRole)
+
+    def set_ref(self, value):
+        self.item.setData(0, Qt.UserRole, value)
+
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -456,82 +406,29 @@ class GlossaryManagerMixin:
 
     def _glossary_prompt_profile_meta(self, profile_key):
         """Metadata for user-defined glossary prompt profile buckets."""
-        meta = {
-            'balanced_full': {
-                'config_key': 'manual_glossary_prompt3',
-                'legacy_config_key': 'manual_glossary_prompt',
-                'attr': 'manual_glossary_prompt',
-                'label': 'Balanced/Full Profile:',
-                'empty_tip': 'Create a profile for the Balanced/Full extraction prompt',
-            },
-            'minimal': {
-                'config_key': 'unified_auto_glosary_prompt3',
-                'legacy_config_key': None,
-                'attr': 'unified_auto_glosary_prompt3',
-                'label': 'Minimal Profile:',
-                'empty_tip': 'Create a profile for the Minimal glossary prompt',
-            },
-        }
-        return meta.get(profile_key, meta['balanced_full'])
+        return glossary_document.glossary_prompt_profile_meta(profile_key)
 
     def _is_default_glossary_prompt_profile(self, profile_name):
-        return str(profile_name or '').strip().casefold() == self.GLOSSARY_PROMPT_DEFAULT_PROFILE.casefold()
+        return glossary_document.is_default_glossary_prompt_profile(profile_name)
 
     def _ensure_glossary_prompt_profiles(self):
         """Ensure glossary prompt profile containers exist without seeding defaults."""
-        profiles = self.config.get('glossary_prompt_profiles', {})
-        if not isinstance(profiles, dict):
-            profiles = {}
-        for key in ('balanced_full', 'minimal'):
-            if not isinstance(profiles.get(key), dict):
-                profiles[key] = {}
-        self.config['glossary_prompt_profiles'] = profiles
-
-        active = self.config.get('active_glossary_prompt_profiles', {})
-        if not isinstance(active, dict):
-            active = {}
-        self.config['active_glossary_prompt_profiles'] = active
-
-        defaults = self.config.get('glossary_prompt_profile_defaults', {})
-        if not isinstance(defaults, dict):
-            defaults = {}
-        for key in ('balanced_full', 'minimal'):
-            if key not in defaults:
-                meta = self._glossary_prompt_profile_meta(key)
-                defaults[key] = str(
-                    self.config.get(meta['config_key'])
-                    or getattr(self, meta['attr'], '')
-                    or ''
-                )
-        self.config['glossary_prompt_profile_defaults'] = defaults
-        return profiles, active
+        return glossary_document.ensure_glossary_prompt_profiles(self)
 
     def _glossary_prompt_profiles_for(self, profile_key):
-        profiles, _active = self._ensure_glossary_prompt_profiles()
-        return profiles.setdefault(profile_key, {})
+        return glossary_document.glossary_prompt_profiles_for(self, profile_key)
 
     def _active_glossary_prompt_profile_for(self, profile_key):
-        _profiles, active = self._ensure_glossary_prompt_profiles()
-        return str(active.get(profile_key, '') or '').strip()
+        return glossary_document.active_glossary_prompt_profile_for(self, profile_key)
 
     def _set_active_glossary_prompt_profile(self, profile_key, profile_name):
-        _profiles, active = self._ensure_glossary_prompt_profiles()
-        if profile_name and not self._is_default_glossary_prompt_profile(profile_name):
-            active[profile_key] = profile_name
-        else:
-            active.pop(profile_key, None)
-        self.config['active_glossary_prompt_profiles'] = active
+        glossary_document.set_active_glossary_prompt_profile(self, profile_key, profile_name)
 
     def _default_glossary_prompt_profile_text(self, profile_key):
-        self._ensure_glossary_prompt_profiles()
-        defaults = self.config.setdefault('glossary_prompt_profile_defaults', {})
-        return str(defaults.get(profile_key, '') or '')
+        return glossary_document.default_glossary_prompt_profile_text(self, profile_key)
 
     def _set_default_glossary_prompt_profile_text(self, profile_key, text):
-        self._ensure_glossary_prompt_profiles()
-        defaults = self.config.setdefault('glossary_prompt_profile_defaults', {})
-        defaults[profile_key] = text or ''
-        self.config['glossary_prompt_profile_defaults'] = defaults
+        glossary_document.set_default_glossary_prompt_profile_text(self, profile_key, text)
 
     def _glossary_prompt_text(self, editor):
         if editor is None:
@@ -560,12 +457,7 @@ class GlossaryManagerMixin:
         widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
         editor = widgets.get('editor')
         text = self._glossary_prompt_text(editor)
-        meta = self._glossary_prompt_profile_meta(profile_key)
-        setattr(self, meta['attr'], text)
-        self.config[meta['config_key']] = text
-        if meta.get('legacy_config_key'):
-            self.config[meta['legacy_config_key']] = text
-        return text
+        return glossary_document.store_glossary_prompt_current(self, profile_key, text)
 
     def _persist_glossary_prompt_profiles(self):
         """Persist profile changes through the main config saver when available."""
@@ -988,12 +880,7 @@ class GlossaryManagerMixin:
         self._editor_last_mtime = 0.0
         self._editor_glossary_source_map = {}
         self._editor_glossary_epub_map = {}
-        self.current_glossary_data = None
-        self.current_glossary_format = None
-        self.current_gender_tracker_data = None
-        self.current_gender_tracker_path = ''
-        self._pending_gender_decisions = {}
-        self._gender_variants_pending_save = 0
+        glossary_document.reset_document(self)
         self._glossary_editor_base_stats_text = "No glossary loaded"
         self._glossary_editor_view_stats_text = "No glossary loaded"
         self._glossary_column_filters = {}
@@ -1028,65 +915,17 @@ class GlossaryManagerMixin:
             return text
         return text.replace('\\x1F', '\x1f')
 
-    @staticmethod
-    def _display_glossary_path(path, roots=3):
-        """Display the last few path parts for glossary selectors."""
-        if not path:
-            return ''
-        parts = []
-        current = os.path.normpath(path)
-        while current:
-            parent, name = os.path.split(current)
-            if name:
-                parts.append(name)
-            if not parent or parent == current or len(parts) >= roots:
-                break
-            current = parent
-        return '/'.join(reversed(parts)) if parts else os.path.basename(path)
+    # Moved verbatim to glossary_document.display_glossary_path (U6).
+    _display_glossary_path = staticmethod(glossary_document.display_glossary_path)
 
     def _unified_glossary_editor_files(self):
         """Existing unified glossary files, this run's language pair first."""
-        try:
-            import unified_glossary
-        except Exception:
-            return []
-        roots = []
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-        if override_dir and str(override_dir).strip():
-            roots.append(os.path.join(os.path.abspath(str(override_dir)), 'Glossary'))
-        shared_env = str(os.environ.get('GLOSSARY_SHARED_DIR', '') or '').strip()
-        if shared_env:
-            roots.append(os.path.abspath(shared_env))
-        for shared_root in (
-            os.path.join(str(getattr(self, 'base_dir', '') or ''), 'Glossary'),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary'),
-            os.path.join(os.getcwd(), 'Glossary'),
-        ):
-            roots.append(shared_root)
-
-        preferred = str(
-            os.environ.get('UNIFIED_GLOSSARY_RESOLVED_KEY', '') or self._unified_glossary_folder_key()
-        ).casefold()
-        found, seen = [], set()
-        for root in roots:
-            try:
-                unified_root = unified_glossary.unified_root(root)
-                if not os.path.isdir(unified_root):
-                    continue
-                keys = sorted(
-                    os.listdir(unified_root),
-                    key=lambda name: (name.casefold() != preferred, name.casefold()),
-                )
-            except Exception:
-                continue
-            for key in keys:
-                csv_path = unified_glossary.unified_paths(root, key)[2]
-                norm = os.path.normcase(os.path.abspath(csv_path))
-                if norm in seen or not os.path.isfile(csv_path):
-                    continue
-                seen.add(norm)
-                found.append(csv_path)
-        return found
+        return glossary_document.unified_glossary_editor_files(
+            self.config,
+            base_dir=getattr(self, 'base_dir', ''),
+            folder_key=self._unified_glossary_folder_key,
+            module_dir=os.path.dirname(os.path.abspath(__file__)),
+        )
 
     def _append_unified_glossaries_to_editor_combo(self):
         """List the unified glossaries after the book glossaries in the editor.
@@ -1118,441 +957,33 @@ class GlossaryManagerMixin:
         finally:
             combo.blockSignals(was_blocked)
 
-    def _glossary_type_count_summary(self, entries, max_custom_types=7):
-        """Return built-in and prioritized custom entry-type counts for editor status."""
-        counts = {}
-        display_names = {}
-        for entry in entries or []:
-            if not isinstance(entry, dict):
-                continue
-            raw_type = str(entry.get('type') or '').strip()
-            if not raw_type:
-                continue
-            normalized = raw_type.casefold()
-            counts[normalized] = counts.get(normalized, 0) + 1
-            display_names.setdefault(normalized, raw_type)
-
-        characters = counts.get('character', 0)
-        terms = counts.get('terms', 0) + counts.get('term', 0)
-        parts = [f"Characters: {characters}", f"Terms: {terms}"]
-
-        configured_types = (
+    def _glossary_editor_entry_type_config(self):
+        """Entry types the editor status line ranks custom types by (attribute, else config)."""
+        return (
             getattr(self, 'custom_entry_types', None)
             or getattr(self, 'config', {}).get('custom_entry_types', {})
             or {}
         )
-        configured_meta = {}
-        if isinstance(configured_types, dict):
-            for order, (type_name, type_config) in enumerate(configured_types.items()):
-                normalized = str(type_name or '').strip().casefold()
-                if not normalized:
-                    continue
-                type_config = type_config if isinstance(type_config, dict) else {}
-                configured_meta[normalized] = {
-                    'has_gender': bool(type_config.get('has_gender', False)),
-                    'order': order,
-                    'display_name': str(type_name).strip(),
-                }
 
-        built_in_types = {'character', 'term', 'terms'}
-        custom_types = [
-            normalized
-            for normalized, count in counts.items()
-            if normalized not in built_in_types and count > 0
-        ]
-        custom_types.sort(
-            key=lambda normalized: (
-                not configured_meta.get(normalized, {}).get('has_gender', False),
-                -counts[normalized],
-                configured_meta.get(normalized, {}).get('order', float('inf')),
-                normalized,
-            )
+    def _glossary_type_count_summary(self, entries, max_custom_types=7):
+        """Return built-in and prioritized custom entry-type counts for editor status."""
+        return glossary_document.glossary_type_count_summary(
+            entries, self._glossary_editor_entry_type_config(), max_custom_types
         )
-
-        try:
-            custom_limit = max(0, int(max_custom_types))
-        except (TypeError, ValueError):
-            custom_limit = 7
-        for normalized in custom_types[:custom_limit]:
-            raw_label = (
-                configured_meta.get(normalized, {}).get('display_name')
-                or display_names.get(normalized)
-                or normalized
-            )
-            label = str(raw_label).replace('_', ' ').strip().title()
-            parts.append(f"{label}: {counts[normalized]}")
-
-        return ", ".join(parts)
 
     def _parse_editor_token_glossary_async(self, lines):
         """Parse token-efficient glossary CSV text without touching Qt widgets."""
-        entries = []
-        sections = []
-        current_section = None
-        header_columns = ['raw_name', 'translated_name', 'gender', 'description']
-        default_extra_columns = []
-        try:
-            import PatternManager as _pm
-            pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
-            if isinstance(pf, (list, tuple)):
-                default_extra_columns.extend(pf)
-        except Exception:
-            pass
-        default_extra_columns.extend(self.config.get('custom_glossary_fields', []))
-        extra_columns = list(default_extra_columns)
-        custom_types = getattr(self, 'custom_entry_types', {}) or {
-            'character': {'enabled': True, 'has_gender': True},
-            'terms': {'enabled': True, 'has_gender': False},
-            'surnames': {'enabled': True, 'has_gender': False},
-            'titles': {'enabled': True, 'has_gender': True},
-            'locations': {'enabled': True, 'has_gender': False},
-            'nicknames': {'enabled': True, 'has_gender': True},
-        }
-
-        type_map = {}
-        for t in custom_types.keys():
-            t_lower = t.lower()
-            type_map[t_lower] = t
-            if not t_lower.endswith('s'):
-                type_map[f"{t_lower}s"] = t
-
-        import re
-
-        def _parse_token_entry_line(line):
-            body = line[2:].strip()
-
-            def _split_head_desc(text):
-                paren_depth = 0
-                bracket_depth = 0
-                for idx, ch in enumerate(text):
-                    if ch == '(' and bracket_depth == 0:
-                        paren_depth += 1
-                    elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
-                        paren_depth -= 1
-                    elif ch == '[' and paren_depth == 0:
-                        bracket_depth += 1
-                    elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
-                        bracket_depth -= 1
-                    elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
-                        return text[:idx].rstrip(), text[idx + 1:].strip()
-                return text, ""
-
-            head, desc = _split_head_desc(body)
-
-            extra_values = {}
-
-            def _pull_custom_tails(text):
-                while True:
-                    tail = re.search(r'\s+\(([^()]*)\)\s*$', text)
-                    if not tail or ':' not in tail.group(1):
-                        return text.rstrip()
-                    for paren_m in re.finditer(r'\(([^)]+)\)', tail.group(0)):
-                        content = paren_m.group(1).strip()
-                        if ':' in content:
-                            k, v = content.split(':', 1)
-                            extra_values[k.strip()] = v.strip()
-                    text = text[:tail.start()].rstrip()
-
-            head = _pull_custom_tails(head)
-            bracket = ""
-            gender_match = re.search(r'\s*\[([^\]]*)\]\s*$', head)
-            if gender_match:
-                bracket = (gender_match.group(1) or '').strip()
-                head = head[:gender_match.start()].rstrip()
-                head = _pull_custom_tails(head)
-
-            equal_match = re.match(r'^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$', head)
-            if equal_match:
-                raw_name = (equal_match.group('raw') or '').strip()
-                translated = (equal_match.group('translated') or '').strip()
-                return translated, raw_name, bracket, desc, extra_values
-
-            legacy_match = re.match(r'^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$', head)
-            if legacy_match:
-                translated = (legacy_match.group('translated') or '').strip()
-                raw_name = (legacy_match.group('raw') or '').strip()
-                return translated, raw_name, bracket, desc, extra_values
-
-            return None
-
-        for raw_line in lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line.lower().startswith('glossary columns:'):
-                cols_text = line.split(':', 1)[1]
-                header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
-                if len(header_columns) < 4:
-                    header_columns = ['raw_name', 'translated_name', 'gender', 'description']
-                positional = {'translated_name', 'raw_name', 'gender'}
-                extra_columns = [c for c in header_columns if c.lower() not in positional]
-                if not extra_columns:
-                    extra_columns = list(default_extra_columns)
-                continue
-            if line.startswith('===') and line.endswith('==='):
-                section_name = line.strip('=').strip()
-                current_section = section_name
-                sections.append(section_name)
-                continue
-            if not line.startswith('* '):
-                continue
-
-            parsed_line = _parse_token_entry_line(line)
-            if not parsed_line:
-                continue
-            translated, raw_name, bracket, desc, extra_values = parsed_line
-            if desc and ' | ' in desc:
-                parts = desc.split(' | ')
-                desc = parts[0].strip()
-                for part in parts[1:]:
-                    if ':' in part:
-                        k, v = part.split(':', 1)
-                        extra_values[k.strip()] = v.strip()
-
-            if desc and extra_columns:
-                remaining_cols = [c for c in extra_columns if c not in extra_values]
-                if remaining_cols:
-                    paren_match = re.search(r'\s*\((.+)\)\s*$', desc)
-                    if paren_match:
-                        paren_content = paren_match.group(1).strip()
-                        cols_in_paren = [
-                            c for c in remaining_cols
-                            if re.search(re.escape(c) + r'\s*:', paren_content, re.IGNORECASE)
-                        ]
-                        if cols_in_paren:
-                            positions = []
-                            for c in cols_in_paren:
-                                col_match = re.search(re.escape(c) + r'\s*:\s*', paren_content, re.IGNORECASE)
-                                if col_match:
-                                    positions.append((col_match.start(), col_match.end(), c))
-                            positions.sort(key=lambda x: x[0])
-                            for i, (_start, end, col) in enumerate(positions):
-                                if i + 1 < len(positions):
-                                    val = paren_content[end:positions[i + 1][0]].strip().rstrip(',').strip()
-                                else:
-                                    val = paren_content[end:].strip()
-                                extra_values[col] = val
-                            desc = desc[:paren_match.start()].strip().rstrip(',').strip()
-                            remaining_cols = [c for c in remaining_cols if c not in extra_values]
-
-                    for col in remaining_cols:
-                        if not desc:
-                            break
-                        col_esc = re.escape(col)
-                        comma_match = re.compile(r',\s*' + col_esc + r'\s*:\s*', re.IGNORECASE).search(desc)
-                        if comma_match:
-                            extra_values[col] = desc[comma_match.end():].strip()
-                            desc = desc[:comma_match.start()].strip()
-                            continue
-                        start_match = re.compile(r'^' + col_esc + r'\s*:\s*', re.IGNORECASE).search(desc)
-                        if start_match:
-                            extra_values[col] = desc[start_match.end():].strip()
-                            desc = ''
-
-            entry = {
-                'type': type_map.get((current_section or 'terms').lower(), 'terms'),
-                'raw_name': raw_name,
-                'translated_name': translated,
-                'gender': bracket,
-            }
-            if desc and 'description' not in extra_values:
-                entry['description'] = desc
-            if current_section:
-                entry['_section'] = current_section
-            for col in extra_columns:
-                if col in extra_values:
-                    entry[col] = extra_values[col]
-            entries.append(entry)
-
-        return entries, sections
+        return glossary_document.parse_token_glossary(
+            lines,
+            self.config.get('custom_glossary_fields', []),
+            getattr(self, 'custom_entry_types', {}),
+        )
 
     def _parse_glossary_file_for_editor_async(self, path):
         """Read and parse a glossary file for the editor without touching Qt widgets."""
-        all_fields = set()
-        entries = []
-        current_data = None
-        current_format = None
-        sections = []
-
-        if path.lower().endswith('.csv'):
-            with open(path, 'r', encoding='utf-8') as f:
-                raw_content = f.read()
-            lines = raw_content.splitlines(True)
-
-            token_style = False
-            for line in lines:
-                lstrip = line.lstrip()
-                if lstrip.startswith('===') or lstrip.startswith('* '):
-                    token_style = True
-                    break
-            if not token_style and lines and lines[0].lower().startswith('glossary columns:'):
-                token_style = True
-
-            if token_style:
-                entries, sections = self._parse_editor_token_glossary_async(lines)
-                current_data = entries
-                current_format = 'token_csv'
-                for entry in entries:
-                    all_fields.update(entry.keys())
-            else:
-                import csv
-                _GSEP = '\x1F'
-                if _GSEP in raw_content:
-                    rows = []
-                    for line in raw_content.split('\n'):
-                        line = line.strip()
-                        if line:
-                            rows.append([p.strip() for p in line.split(_GSEP)])
-                else:
-                    from io import StringIO
-                    rows = list(csv.reader(StringIO(raw_content)))
-
-                header_names = None
-                data_start = 0
-                if rows and rows[0] and rows[0][0].strip().lower() == 'type':
-                    header_names = [h.strip().lower() for h in rows[0]]
-                    data_start = 1
-
-                if header_names:
-                    col_map = {name: i for i, name in enumerate(header_names)}
-                    expected_cols = len(header_names)
-                    desc_idx = col_map.get('description', -1)
-                    cols_after_desc = expected_cols - desc_idx - 1 if desc_idx >= 0 else 0
-
-                    for row in rows[data_start:]:
-                        if not row or len(row) < 3:
-                            continue
-                        entry = {}
-                        excess = len(row) - expected_cols
-                        if excess > 0 and desc_idx >= 0:
-                            for name, idx in col_map.items():
-                                if idx < desc_idx:
-                                    entry[name] = row[idx] if idx < len(row) else ''
-                            after_desc_names = [
-                                n for n, i in sorted(col_map.items(), key=lambda x: x[1])
-                                if i > desc_idx
-                            ]
-                            for offset, name in enumerate(after_desc_names):
-                                tail_idx = len(row) - cols_after_desc + offset
-                                entry[name] = row[tail_idx] if tail_idx < len(row) else ''
-                            desc_end = len(row) - cols_after_desc
-                            entry['description'] = ', '.join(row[desc_idx:desc_end])
-                        else:
-                            for name, idx in col_map.items():
-                                entry[name] = row[idx] if idx < len(row) else ''
-                        entries.append(entry)
-                else:
-                    for row in rows[data_start:]:
-                        if len(row) >= 3:
-                            entry = {
-                                'type': row[0],
-                                'raw_name': row[1],
-                                'translated_name': row[2],
-                            }
-                            if len(row) > 3:
-                                entry['gender'] = row[3]
-                            if len(row) > 4:
-                                entry['description'] = ', '.join(row[4:])
-                            entries.append(entry)
-
-                current_data = entries
-                current_format = 'list'
-                for entry in entries:
-                    all_fields.update(entry.keys())
-        else:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            if isinstance(data, dict):
-                if 'entries' in data:
-                    current_data = data
-                    current_format = 'dict'
-                    for original, translated in data['entries'].items():
-                        entry = {'original': original, 'translated': translated}
-                        entries.append(entry)
-                        all_fields.update(entry.keys())
-                else:
-                    current_data = {'entries': data}
-                    current_format = 'dict'
-                    for original, translated in data.items():
-                        entry = {'original': original, 'translated': translated}
-                        entries.append(entry)
-                        all_fields.update(entry.keys())
-            elif isinstance(data, list):
-                current_data = data
-                current_format = 'list'
-                for item in data:
-                    if isinstance(item, dict):
-                        all_fields.update(item.keys())
-                        entries.append(item)
-
-        gender_tracker = None
-        gender_tracker_path = tracker_path_for_glossary(path)
-        gender_variants_collapsed = 0
-        if current_format in ['list', 'token_csv']:
-            custom_types = getattr(self, 'custom_entry_types', None) or self.config.get('custom_entry_types', {})
-            entries, gender_tracker, gender_tracker_path, gender_variants_collapsed = (
-                _prepare_editor_gender_tracking(
-                    entries,
-                    path,
-                    custom_types,
-                    tracking_disabled=bool(self.config.get('glossary_skip_gender_tracking', False)),
-                )
-            )
-            current_data = entries
-            all_fields = set()
-            for entry in entries:
-                if isinstance(entry, dict):
-                    all_fields.update(entry.keys())
-
-        # One spelling per Gender column, whatever the file holds: `male`
-        # and `Male` also have to match the same Gender filter.
-        normalize_entries_gender(current_data if isinstance(current_data, list) else entries)
-        if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
-            column_fields = []
-            if any('_section' in e for e in entries):
-                column_fields.append('_section')
-            column_fields.extend(['type', 'raw_name', 'translated_name', 'gender'])
-            for entry in entries:
-                for field in entry.keys():
-                    if field.startswith('_'):
-                        continue
-                    if field not in column_fields:
-                        column_fields.append(field)
-        else:
-            standard_fields = [
-                'original_name', 'name', 'original', 'translated', 'gender',
-                'title', 'group_affiliation', 'traits', 'how_they_refer_to_others',
-                'locations',
-            ]
-            column_fields = [field for field in standard_fields if field in all_fields]
-            column_fields.extend(sorted(all_fields - set(standard_fields)))
-
-        stats = [f"Total entries: {len(entries)}"]
-        if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
-            stats.append(self._glossary_type_count_summary(entries))
-        elif current_format == 'list':
-            chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
-            locs = sum(1 for e in entries if 'locations' in e and e['locations'])
-            stats.append(f"Characters: {chars}, Locations: {locs}")
-        if gender_variants_collapsed:
-            stats.append(
-                f"{gender_variants_collapsed} tracked gender duplicate"
-                f"{'s' if gender_variants_collapsed != 1 else ''} pending save"
-            )
-
-        return {
-            'path': path,
-            'entries': entries,
-            'current_data': current_data,
-            'current_format': current_format,
-            'sections': sections,
-            'column_fields': column_fields,
-            'stats_text': " | ".join(stats),
-            'gender_tracker': gender_tracker,
-            'gender_tracker_path': gender_tracker_path,
-            'gender_variants_collapsed': gender_variants_collapsed,
-        }
+        return glossary_document.parse_glossary_file(
+            path, self.config, getattr(self, 'custom_entry_types', None)
+        )
     
     @staticmethod
     def _add_combobox_arrow(combobox):
@@ -1799,15 +1230,7 @@ class GlossaryManagerMixin:
 
     def _unified_glossary_folder_key(self):
         """The Unified Glossary subfolder the current settings resolve to."""
-        try:
-            import unified_glossary
-            return unified_glossary.describe_folder_key(
-                self.config.get('unified_glossary_source_language', 'auto'),
-                bool(self.config.get('unified_glossary_combine_all_languages', False)),
-                self.config.get('output_language') or os.environ.get('OUTPUT_LANGUAGE') or 'English',
-            )
-        except Exception:
-            return 'auto'
+        return glossary_document.unified_glossary_folder_key(getattr(self, 'config', None))
 
     def _unified_glossary_hint_text(self):
         return f"(Current: Glossary/Unified Glossary/{self._unified_glossary_folder_key()}/)"
@@ -4142,18 +3565,10 @@ class GlossaryManagerMixin:
             traceback.print_exc()
     
     def _default_glossary_refinement_system_prompt(self):
-        try:
-            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
-            return DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
-        except Exception:
-            return ""
+        return glossary_document.default_glossary_refinement_system_prompt()
 
     def _default_glossary_refinement_user_prompt(self):
-        try:
-            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT
-            return DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT
-        except Exception:
-            return ""
+        return glossary_document.default_glossary_refinement_user_prompt()
 
     def _create_refinement_prompt_profile_controls(self, system_editor, user_editor):
         """Prefill-style profiles storing a refinement system/user prompt pair."""
@@ -5799,14 +5214,7 @@ Do not stop after the glossary."""
 
     def _unified_glossary_shared_dir(self):
         """The shared Glossary/ folder, resolved the way a run resolves it."""
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-        if override_dir and str(override_dir).strip():
-            return os.path.join(os.path.abspath(str(override_dir)), 'Glossary')
-        try:
-            from translator_gui import _get_app_dir
-            return os.path.join(_get_app_dir(), 'Glossary')
-        except Exception:
-            return os.path.join(os.getcwd(), 'Glossary')
+        return glossary_document.unified_glossary_shared_dir(self.config)
 
     def _unified_glossary_run_is_active(self):
         """A translation or glossary run is in progress (its hooks write the same files)."""
@@ -5851,12 +5259,7 @@ Do not stop after the glossary."""
         except Exception:
             pass
         shared_dir = self._unified_glossary_shared_dir()
-        settings = {
-            'OUTPUT_LANGUAGE': self.config.get('output_language') or os.environ.get('OUTPUT_LANGUAGE') or 'English',
-            'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES': '1' if self.config.get('unified_glossary_combine_all_languages', False) else '0',
-            'UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES': '1' if self.config.get('unified_glossary_exclude_gender_entries', True) else '0',
-            'GLOSSARY_SHARED_DIR': shared_dir,
-        }
+        settings = glossary_document.unified_rebuild_settings(self.config, shared_dir)
 
         def _worker():
             try:
@@ -7816,36 +7219,16 @@ Do not stop after the glossary."""
         gender_status_role = _EDITOR_GENDER_STATUS_ROLE
 
         def _gender_settings():
-            threshold = getattr(
-                self,
-                'glossary_gender_noise_threshold_var',
-                self.config.get('glossary_gender_noise_threshold', 10),
-            )
-            bias = getattr(
-                self,
-                'glossary_gender_tracking_bias_var',
-                self.config.get('glossary_gender_tracking_bias', 'none'),
-            )
-            return threshold, bias
+            return glossary_document.editor_gender_settings(self, self.config)
 
         def _gender_tracker_entry(entry):
-            if not isinstance(entry, dict):
-                return None
-            return tracker_entry_for_raw(
-                getattr(self, 'current_gender_tracker_data', None),
-                entry.get('raw_name', ''),
+            return glossary_document.tracker_entry_for_entry(
+                entry, getattr(self, 'current_gender_tracker_data', None)
             )
 
         def _gender_status(entry):
-            tracker_entry = _gender_tracker_entry(entry)
-            if not tracker_entry:
-                return None
-            threshold, bias = _gender_settings()
-            return editor_gender_status(
-                tracker_entry,
-                entry.get('gender', '') if isinstance(entry, dict) else '',
-                threshold,
-                bias,
+            return glossary_document.entry_gender_status(
+                entry, getattr(self, 'current_gender_tracker_data', None), _gender_settings
             )
 
         def _apply_tracker_highlight(item):
@@ -7865,18 +7248,12 @@ Do not stop after the glossary."""
             _apply_editor_gender_presentation(item, status, gender_column)
 
         def get_baseline_translated(item, col_key):
-            if col_key not in ['translated_name', 'translated']:
-                return None
-            if self.current_glossary_format in ['list', 'token_csv']:
-                try:
-                    idx = int(item.data(0, Qt.UserRole))
-                except Exception:
-                    return None
-                return self._original_translated_map.get(idx, '')
-            elif self.current_glossary_format == 'dict':
-                key = item.data(0, Qt.UserRole)
-                return self._original_translated_map.get(key, '')
-            return None
+            return glossary_document.baseline_translated(
+                self._original_translated_map,
+                self.current_glossary_format,
+                item.data(0, Qt.UserRole),
+                col_key,
+            )
 
         def update_row_highlight(item, col_key, new_val):
             baseline = get_baseline_translated(item, col_key)
@@ -7887,36 +7264,13 @@ Do not stop after the glossary."""
         self._mark_glossary_row_updated = mark_row_updated
 
         def _editor_data_row_specs():
-            specs = []
-            fields = list(getattr(self, 'glossary_column_fields', []) or [])
-            if self.current_glossary_format in ['list', 'token_csv']:
-                for source_idx, entry in enumerate(self.current_glossary_data or []):
-                    entry_dict = dict(entry) if isinstance(entry, dict) else {}
-                    specs.append((source_idx, source_idx, entry_dict))
-            elif self.current_glossary_format == 'dict':
-                data = self.current_glossary_data or {}
-                entries = data.get('entries', data) if isinstance(data, dict) else {}
-                if isinstance(entries, dict):
-                    for source_idx, (key, value) in enumerate(entries.items()):
-                        if isinstance(value, dict):
-                            entry_dict = dict(value)
-                            entry_dict.setdefault('original', key)
-                            entry_dict.setdefault('raw_name', key)
-                        else:
-                            entry_dict = {'original': key, 'translated': value}
-                        specs.append((source_idx, key, entry_dict))
-            return fields, specs
+            return glossary_document.editor_row_specs(
+                getattr(self, 'glossary_column_fields', []),
+                self.current_glossary_data,
+                self.current_glossary_format,
+            )
 
-        def _editor_display_value(entry, field):
-            """Render a glossary value exactly as it appears in the editor tree."""
-            value = entry.get(field, '') if isinstance(entry, dict) else ''
-            if isinstance(value, list):
-                value = ', '.join(str(v) for v in value)
-            elif isinstance(value, dict):
-                value = ', '.join(f"{k}: {v}" for k, v in value.items())
-            elif value is None:
-                value = ''
-            return str(value)
+        _editor_display_value = glossary_document.editor_display_value
 
         def _active_glossary_column_filters():
             filters = getattr(self, '_glossary_column_filters', {})
@@ -7942,14 +7296,11 @@ Do not stop after the glossary."""
                     )
 
         def _tree_item_matches_glossary_filters(item):
-            filters = _active_glossary_column_filters()
-            fields = list(getattr(self, 'glossary_column_fields', []) or [])
-            field_columns = {field: index + 1 for index, field in enumerate(fields)}
-            for field, allowed_values in filters.items():
-                column = field_columns.get(field)
-                if column is None or item.text(column) not in allowed_values:
-                    return False
-            return True
+            return glossary_document.row_matches_column_filters(
+                item.text,
+                getattr(self, 'glossary_column_fields', []),
+                _active_glossary_column_filters(),
+            )
 
         def _apply_glossary_column_filters(update_stats=True):
             filters = _active_glossary_column_filters()
@@ -8021,12 +7372,9 @@ Do not stop after the glossary."""
                 return
             self._glossary_column_filter_dismissed = None
 
-            values = sorted(
-                {
-                    self.glossary_tree.topLevelItem(row).text(column)
-                    for row in range(self.glossary_tree.topLevelItemCount())
-                },
-                key=lambda value: (value != '', value.casefold()),
+            values = glossary_document.column_filter_values(
+                self.glossary_tree.topLevelItem(row).text(column)
+                for row in range(self.glossary_tree.topLevelItemCount())
             )
             if not values:
                 return
@@ -8309,12 +7657,9 @@ Do not stop after the glossary."""
 
         def _configure_editor_tree_columns(column_fields):
             self.glossary_column_fields = list(column_fields)
-            valid_fields = set(column_fields)
-            self._glossary_column_filters = {
-                field: allowed
-                for field, allowed in _active_glossary_column_filters().items()
-                if field in valid_fields
-            }
+            self._glossary_column_filters = glossary_document.prune_column_filters(
+                _active_glossary_column_filters(), column_fields
+            )
             self.glossary_tree.setColumnCount(len(column_fields) + 1)
             _refresh_glossary_filter_headers()
             self.glossary_tree.setColumnWidth(0, 80)
@@ -8418,14 +7763,9 @@ Do not stop after the glossary."""
             add_batch(0)
 
         def _loaded_glossary_stats_text(entries):
-            stats = [f"Total entries: {len(entries)}"]
-            if self.current_glossary_format in ['list', 'token_csv'] and entries and isinstance(entries[0], dict) and 'type' in entries[0]:
-                stats.append(self._glossary_type_count_summary(entries))
-            elif self.current_glossary_format == 'list':
-                chars = sum(1 for e in entries if isinstance(e, dict) and ('original_name' in e or 'name' in e))
-                locs = sum(1 for e in entries if isinstance(e, dict) and 'locations' in e and e['locations'])
-                stats.append(f"Characters: {chars}, Locations: {locs}")
-            return " | ".join(stats)
+            return glossary_document.loaded_stats_text(
+                entries, self.current_glossary_format, self._glossary_editor_entry_type_config()
+            )
 
         def _repair_loading_stats_label_if_tree_loaded():
             if self.stats_label.text() != "Loading glossary..." or self.glossary_tree.topLevelItemCount() <= 0:
@@ -8459,25 +7799,7 @@ Do not stop after the glossary."""
                 self.append_log(f"Failed to load glossary: {error}")
                 return
 
-            entries = payload.get('entries', [])
-            column_fields = payload.get('column_fields', [])
-            self.current_glossary_data = payload.get('current_data')
-            self.current_glossary_format = payload.get('current_format')
-            self.current_glossary_sections = payload.get('sections', [])
-            self.current_gender_tracker_data = payload.get('gender_tracker')
-            self.current_gender_tracker_path = payload.get('gender_tracker_path', '')
-            self._pending_gender_decisions = {}
-            self._gender_variants_pending_save = int(payload.get('gender_variants_collapsed', 0) or 0)
-            self.glossary_column_fields = list(column_fields)
-            if self.current_glossary_format in ['list', 'token_csv']:
-                self._original_translated_map = {
-                    idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data or [])
-                    if isinstance(entry, dict)
-                }
-            elif self.current_glossary_format == 'dict':
-                self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
-            else:
-                self._original_translated_map = {}
+            entries, column_fields = glossary_document.apply_parse_payload(self, payload)
             _populate_editor_tree_from_data()
 
             loaded_stats = payload.get('stats_text', f"Total entries: {len(entries)}")
@@ -8563,407 +7885,15 @@ Do not stop after the glossary."""
                    threading.Thread(target=worker, name="GlossaryEditorLoad", daemon=True).start()
                    return
 
-               # Helpers for token-efficient format (sectioned, bullet-style CSV text)
-               def parse_token_efficient_glossary(lines):
-                   entries = []
-                   sections = []
-                   current_section = None
-                   gender_keywords = {'male', 'female', 'unknown'}
-                   header_columns = ['raw_name', 'translated_name', 'gender', 'description']
-                   # Default extra columns: pattern manager + custom fields (used if header omits them)
-                   default_extra_columns = []
-                   try:
-                       import PatternManager as _pm
-                       pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
-                       if isinstance(pf, (list, tuple)):
-                           default_extra_columns.extend(pf)
-                   except Exception:
-                       pass
-                   default_extra_columns.extend(self.config.get('custom_glossary_fields', []))
-                   extra_columns = list(default_extra_columns)
-                   # Map section -> type (from custom entry types only, plus simple plurals)
-                   custom_types = getattr(self, 'custom_entry_types', {}) or {
-                       'character': {'enabled': True, 'has_gender': True},
-                       'terms': {'enabled': True, 'has_gender': False},
-                       'surnames': {'enabled': True, 'has_gender': False},
-                       'titles': {'enabled': True, 'has_gender': True},
-                       'locations': {'enabled': True, 'has_gender': False},
-                       'nicknames': {'enabled': True, 'has_gender': True},
-                   }
-
-                   type_map = {}
-                   for t in custom_types.keys():
-                       type_map[t.lower()] = t
-                       # naive plural
-                       if not t.lower().endswith('s'):
-                           type_map[f"{t.lower()}s"] = t
-
-                   import re
-
-                   def _parse_token_entry_line(line):
-                       body = line[2:].strip()
-
-                       def _split_head_desc(text):
-                           paren_depth = 0
-                           bracket_depth = 0
-                           for idx, ch in enumerate(text):
-                               if ch == '(' and bracket_depth == 0:
-                                   paren_depth += 1
-                               elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
-                                   paren_depth -= 1
-                               elif ch == '[' and paren_depth == 0:
-                                   bracket_depth += 1
-                               elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
-                                   bracket_depth -= 1
-                               elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
-                                   return text[:idx].rstrip(), text[idx + 1:].strip()
-                           return text, ""
-
-                       head, desc = _split_head_desc(body)
-
-                       extra_values = {}
-
-                       def _pull_custom_tails(text):
-                           while True:
-                               tail = re.search(r'\s+\(([^()]*)\)\s*$', text)
-                               if not tail or ':' not in tail.group(1):
-                                   return text.rstrip()
-                               for paren_m in re.finditer(r'\(([^)]+)\)', tail.group(0)):
-                                   content = paren_m.group(1).strip()
-                                   if ':' in content:
-                                       k, v = content.split(':', 1)
-                                       extra_values[k.strip()] = v.strip()
-                               text = text[:tail.start()].rstrip()
-
-                       head = _pull_custom_tails(head)
-                       bracket = ""
-                       gender_match = re.search(r'\s*\[([^\]]*)\]\s*$', head)
-                       if gender_match:
-                           bracket = (gender_match.group(1) or '').strip()
-                           head = head[:gender_match.start()].rstrip()
-                           head = _pull_custom_tails(head)
-
-                       equal_match = re.match(r'^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$', head)
-                       if equal_match:
-                           raw_name = (equal_match.group('raw') or '').strip()
-                           translated = (equal_match.group('translated') or '').strip()
-                           return translated, raw_name, bracket, desc, extra_values
-
-                       legacy_match = re.match(r'^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$', head)
-                       if legacy_match:
-                           translated = (legacy_match.group('translated') or '').strip()
-                           raw_name = (legacy_match.group('raw') or '').strip()
-                           return translated, raw_name, bracket, desc, extra_values
-
-                       return None
-
-                   for raw_line in lines:
-                       line = raw_line.strip()
-                       if not line:
-                           continue
-                       if line.lower().startswith('glossary columns:'):
-                           # Parse header columns
-                           cols_text = line.split(':', 1)[1]
-                           header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
-                           if len(header_columns) < 4:
-                               header_columns = ['raw_name', 'translated_name', 'gender', 'description']
-                           # Only translated_name, raw_name, gender are positionally fixed
-                           # Everything else (including description) is extracted from tail text
-                           positional = {'translated_name', 'raw_name', 'gender'}
-                           extra_columns = [c for c in header_columns if c.lower() not in positional]
-                           if not extra_columns:
-                               extra_columns = list(default_extra_columns)
-                           continue
-                       if line.startswith('===') and line.endswith('==='):
-                           section_name = line.strip('=').strip()
-                           current_section = section_name
-                           sections.append(section_name)
-                           continue
-                       if not line.startswith('* '):
-                           continue
-
-                       parsed_line = _parse_token_entry_line(line)
-                       if not parsed_line:
-                           continue
-                       translated, raw_name, bracket, desc, extra_values = parsed_line
-                       if desc and ' | ' in desc:
-                           parts = desc.split(' | ')
-                           desc = parts[0].strip()
-                           for part in parts[1:]:
-                               if ':' in part:
-                                   k, v = part.split(':', 1)
-                                   extra_values[k.strip()] = v.strip()
-
-                       # Detect inline column names the AI wrote directly in the text
-                       # Handles: "(fun fact: X, bad fact: Y)" and ", fun fact: X"
-                       if desc and extra_columns:
-                           import re as _re
-                           remaining_cols = [c for c in extra_columns if c not in extra_values]
-                           if remaining_cols:
-                               # Phase 1: Extract trailing (...) block containing field labels
-                               paren_match = _re.search(r'\s*\((.+)\)\s*$', desc)
-                               if paren_match:
-                                   paren_content = paren_match.group(1).strip()
-                                   cols_in_paren = [c for c in remaining_cols
-                                                    if _re.search(_re.escape(c) + r'\s*:', paren_content, _re.IGNORECASE)]
-                                   if cols_in_paren:
-                                       positions = []
-                                       for c in cols_in_paren:
-                                           m = _re.search(_re.escape(c) + r'\s*:\s*', paren_content, _re.IGNORECASE)
-                                           if m:
-                                               positions.append((m.start(), m.end(), c))
-                                       positions.sort(key=lambda x: x[0])
-                                       for i, (start, end, col) in enumerate(positions):
-                                           if i + 1 < len(positions):
-                                               val = paren_content[end:positions[i+1][0]].strip().rstrip(',').strip()
-                                           else:
-                                               val = paren_content[end:].strip()
-                                           extra_values[col] = val
-                                       desc = desc[:paren_match.start()].strip().rstrip(',').strip()
-                                       remaining_cols = [c for c in remaining_cols if c not in extra_values]
-
-                               # Phase 2: comma-prefixed or start-of-string patterns
-                               for col in remaining_cols:
-                                   if not desc:
-                                       break
-                                   col_esc = _re.escape(col)
-                                   p2 = _re.compile(r',\s*' + col_esc + r'\s*:\s*', _re.IGNORECASE)
-                                   m2 = p2.search(desc)
-                                   if m2:
-                                       extra_values[col] = desc[m2.end():].strip()
-                                       desc = desc[:m2.start()].strip()
-                                       continue
-                                   p3 = _re.compile(r'^' + col_esc + r'\s*:\s*', _re.IGNORECASE)
-                                   m3 = p3.search(desc)
-                                   if m3:
-                                       extra_values[col] = desc[m3.end():].strip()
-                                       desc = ''
-
-                       gender = ''
-                       if bracket:
-                           gender = bracket
-
-                       entry = {
-                           'type': type_map.get((current_section or 'terms').lower(), 'terms'),
-                           'raw_name': raw_name,
-                           'translated_name': translated,
-                           'gender': gender,
-                       }
-                       if desc:
-                           # If 'description' is an extra column, it was already handled
-                           # by inline detection. Assign leftover text to 'description'
-                           # only if not already set from extra_values.
-                           if 'description' not in extra_values:
-                               entry['description'] = desc
-                       if current_section:
-                           entry['_section'] = current_section
-                       # Apply any extra columns from header
-                       for col in extra_columns:
-                           if col in extra_values:
-                               entry[col] = extra_values[col]
-                       entries.append(entry)
-
-                   return entries, sections
-
-               # Prepare accumulator for field discovery
-               all_fields = set()
-
-               # Try CSV first
-               if path.endswith('.csv'):
-                   # Peek to detect token-efficient format
-                   with open(path, 'r', encoding='utf-8') as f:
-                       lines = f.readlines()
-
-                   token_style = False
-                   for l in lines:
-                       lstrip = l.lstrip()
-                       if lstrip.startswith('===') or lstrip.startswith('* '):
-                           token_style = True
-                           break
-                   if not token_style and lines and lines[0].lower().startswith('glossary columns:'):
-                       token_style = True
-
-                   if token_style:
-                       entries, sections = parse_token_efficient_glossary(lines)
-                       self.current_glossary_data = entries
-                       self.current_glossary_format = 'token_csv'
-                       self.current_glossary_sections = sections
-                       for e in entries:
-                           all_fields.update(e.keys())
-                   else:
-                       import csv
-                       entries = []
-                       _GSEP = '\x1F'
-                       with open(path, 'r', encoding='utf-8') as f:
-                           raw_content = f.read()
-                       
-                       if _GSEP in raw_content:
-                           # New Unit Separator format
-                           rows = []
-                           for _line in raw_content.split('\n'):
-                               _line = _line.strip()
-                               if _line:
-                                   rows.append([p.strip() for p in _line.split(_GSEP)])
-                       else:
-                           # Legacy comma-separated format
-                           from io import StringIO
-                           reader = csv.reader(StringIO(raw_content))
-                           rows = list(reader)
-
-                       # Detect header row: first row whose first cell is 'type'
-                       header_names = None
-                       data_start = 0
-                       if rows and rows[0] and rows[0][0].strip().lower() == 'type':
-                           header_names = [h.strip().lower() for h in rows[0]]
-                           data_start = 1
-
-                       if header_names:
-                           # Build column map from header
-                           col_map = {}  # name -> index
-                           for i, name in enumerate(header_names):
-                               col_map[name] = i
-                           expected_cols = len(header_names)
-
-                           # Find the description column index if it exists
-                           desc_idx = col_map.get('description', -1)
-                           # Count how many named columns come AFTER description
-                           cols_after_desc = 0
-                           if desc_idx >= 0:
-                               cols_after_desc = expected_cols - desc_idx - 1
-
-                           for row in rows[data_start:]:
-                               if not row or len(row) < 3:
-                                   continue
-                               entry = {}
-                               excess = len(row) - expected_cols
-
-                               if excess > 0 and desc_idx >= 0:
-                                   # Row has more cells than expected — description has unquoted commas.
-                                   # Assign columns before description normally
-                                   for name, idx in col_map.items():
-                                       if idx < desc_idx:
-                                           entry[name] = row[idx] if idx < len(row) else ''
-                                   # Assign columns after description from the END of the row
-                                   after_desc_names = [n for n, i in sorted(col_map.items(), key=lambda x: x[1]) if i > desc_idx]
-                                   for offset, name in enumerate(after_desc_names):
-                                       # Read from the tail end of the row
-                                       tail_idx = len(row) - cols_after_desc + offset
-                                       entry[name] = row[tail_idx] if tail_idx < len(row) else ''
-                                   # Everything in the middle is the description
-                                   desc_end = len(row) - cols_after_desc
-                                   entry['description'] = ', '.join(row[desc_idx:desc_end])
-                               else:
-                                   # Normal case — row has expected number of cells (or fewer)
-                                   for name, idx in col_map.items():
-                                       entry[name] = row[idx] if idx < len(row) else ''
-
-                               entries.append(entry)
-                       else:
-                           # No header — fall back to positional parsing
-                           for row in rows[data_start:]:
-                               if len(row) >= 3:
-                                   entry = {
-                                       'type': row[0],
-                                       'raw_name': row[1],
-                                       'translated_name': row[2]
-                                   }
-                                   if len(row) > 3:
-                                       entry['gender'] = row[3]
-                                   if len(row) > 4:
-                                       entry['description'] = ', '.join(row[4:])
-                                   entries.append(entry)
-
-                       self.current_glossary_data = entries
-                       self.current_glossary_format = 'list'
-                       for e in entries:
-                           all_fields.update(e.keys())
-               else:
-                   # JSON format
-                   with open(path, 'r', encoding='utf-8') as f:
-                       data = json.load(f)
-                   
-                   entries = []
-                   
-                   if isinstance(data, dict):
-                       if 'entries' in data:
-                           self.current_glossary_data = data
-                           self.current_glossary_format = 'dict'
-                           for original, translated in data['entries'].items():
-                               entry = {'original': original, 'translated': translated}
-                               entries.append(entry)
-                               all_fields.update(entry.keys())
-                       else:
-                           self.current_glossary_data = {'entries': data}
-                           self.current_glossary_format = 'dict'
-                           for original, translated in data.items():
-                               entry = {'original': original, 'translated': translated}
-                               entries.append(entry)
-                               all_fields.update(entry.keys())
-                   
-                   elif isinstance(data, list):
-                       self.current_glossary_data = data
-                       self.current_glossary_format = 'list'
-                       for item in data:
-                           all_fields.update(item.keys())
-                           entries.append(item)
-               
-               normalize_entries_gender(entries)
-               # Set up columns based on new format
-               if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
-                   # New simple format
-                   column_fields = []
-                   # Show section if present
-                   if any('_section' in e for e in entries):
-                       column_fields.append('_section')
-                   column_fields.extend(['type', 'raw_name', 'translated_name', 'gender'])
-
-                   # Include description/custom fields
-                   for entry in entries:
-                       for field in entry.keys():
-                           if field.startswith('_'):
-                               continue
-                           if field not in column_fields:
-                               column_fields.append(field)
-                   
-                   # Check for any custom fields
-                   for entry in entries:
-                       for field in entry.keys():
-                           if field.startswith('_'):
-                               continue
-                           if field not in column_fields:
-                               column_fields.append(field)
-               else:
-                   # Old format compatibility
-                   standard_fields = ['original_name', 'name', 'original', 'translated', 'gender', 
-                                    'title', 'group_affiliation', 'traits', 'how_they_refer_to_others', 
-                                    'locations']
-                   
-                   column_fields = []
-                   for field in standard_fields:
-                       if field in all_fields:
-                           column_fields.append(field)
-                   
-                   custom_fields = sorted(all_fields - set(standard_fields))
-                   column_fields.extend(custom_fields)
-               
+               # Restore path (undo / redo): re-read the file just written from the
+               # in-memory data (glossary_document.reparse_glossary_file, U6).
+               entries, column_fields, loaded_stats = glossary_document.reparse_glossary_file(
+                   self, path, self.config, getattr(self, 'custom_entry_types', None)
+               )
                self.glossary_column_fields = list(column_fields)
                _populate_editor_tree_from_data()
-               
-               # Update stats
-               stats = []
-               stats.append(f"Total entries: {len(entries)}")
-               
-               if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
-                   # New format stats
-                   stats.append(self._glossary_type_count_summary(entries))
-               elif self.current_glossary_format == 'list':
-                   # Old format stats
-                   chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
-                   locs = sum(1 for e in entries if 'locations' in e and e['locations'])
-                   stats.append(f"Characters: {chars}, Locations: {locs}")
-               
+
                self._editor_load_token = None
-               loaded_stats = " | ".join(stats)
                self.stats_label.setText(loaded_stats)
                self._glossary_editor_base_stats_text = loaded_stats
                self._glossary_editor_view_stats_text = loaded_stats
@@ -9037,131 +7967,7 @@ Do not stop after the glossary."""
            if not path or self.current_glossary_data is None:
                return False
            try:
-               if self.current_glossary_format in ['list', 'token_csv']:
-                   from extract_glossary_from_epub import (
-                       _load_gender_tracker,
-                       resolve_glossary_gender_variants,
-                       set_gender_tracker_decisions,
-                       sync_gender_tracker_with_glossary,
-                   )
-                   pending_decisions = dict(getattr(self, '_pending_gender_decisions', {}) or {})
-                   if pending_decisions:
-                       set_gender_tracker_decisions(path, pending_decisions)
-                   tracker_path = tracker_path_for_glossary(path)
-                   tracker = _load_gender_tracker(tracker_path) if os.path.exists(tracker_path) else None
-                   if tracker:
-                       self.current_gender_tracker_data = tracker
-                       self.current_gender_tracker_path = tracker_path
-                       self.current_glossary_data, _collapsed = resolve_glossary_gender_variants(
-                           self.current_glossary_data,
-                           output_path=path,
-                           tracker=tracker,
-                       )
-               if path.endswith('.csv'):
-                   if getattr(self, 'current_glossary_format', '') == 'token_csv':
-                       def save_token_csv(entries, path_out):
-                           sections = getattr(self, 'current_glossary_sections', []) or []
-                           if not sections:
-                               sections = ['CHARACTERS', 'TERMS', 'TITLES', 'ORGANIZATIONS', 'LOCATIONS', 'ITEMS', 'ABILITYS']
-
-                           grouped = {sec: [] for sec in sections}
-                           default_map = {'character': 'CHARACTERS', 'terms': 'TERMS'}
-                           for entry in entries:
-                               sec = entry.get('_section')
-                               if not sec:
-                                   sec = default_map.get(entry.get('type', 'terms'), 'TITLES')
-                               if sec not in grouped:
-                                   grouped[sec] = []
-                                   sections.append(sec)
-                               grouped[sec].append(entry)
-
-                           # Build header columns: standard + pattern-manager fields + custom/additional fields
-                           standard_cols = ['raw_name', 'translated_name', 'gender', 'description']
-                           pattern_fields = []
-                           try:
-                               import PatternManager as _pm
-                               pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
-                               if isinstance(pf, (list, tuple)):
-                                   pattern_fields = list(pf)
-                           except Exception:
-                               pattern_fields = []
-
-                           custom_fields = self.config.get('custom_glossary_fields', [])
-                           # include any fields present in data that are not internal/standard
-                           data_fields = []
-                           for e in entries:
-                               for k in e.keys():
-                                   if k.startswith('_') or k in ['type'] + standard_cols:
-                                       continue
-                                   if k not in custom_fields and k not in pattern_fields and k not in data_fields:
-                                       data_fields.append(k)
-                           header_cols = standard_cols + pattern_fields + custom_fields + data_fields
-
-                           lines = [f"Glossary Columns: {', '.join(header_cols)}", ""]
-                           for sec in sections:
-                               sec_entries = grouped.get(sec, [])
-                               if not sec_entries:
-                                   continue
-                               lines.append(f"=== {sec} ===")
-                               for e in sec_entries:
-                                   translated = e.get('translated_name', '')
-                                   raw_name = e.get('raw_name', '')
-                                   gender = e.get('gender', '')
-                                   desc = e.get('description', '')
-
-                                   line = f"* {raw_name} = {translated}" if raw_name else f"* {translated}"
-                                   if gender:
-                                       line += f" [{gender}]"
-                                   extra_tail = []
-                                   for col in header_cols:
-                                       if col in ['translated_name', 'raw_name', 'gender', 'description']:
-                                           continue
-                                       val = e.get(col, '')
-                                       if val:
-                                           extra_tail.append(f"{col}: {val}")
-                                   if desc:
-                                       line += f": {desc}"
-                                   if extra_tail:
-                                       tail_str = " | ".join(extra_tail)
-                                       line += f" | {tail_str}" if desc else f": {tail_str}"
-                                   lines.append(line)
-                               lines.append("")
-
-                           with open(path_out, 'w', encoding='utf-8', newline='') as f:
-                               f.write("\n".join(lines).rstrip() + "\n")
-
-                       save_token_csv(self.current_glossary_data, path)
-                   else:
-                       import csv
-                       standard_fields = ['type', 'raw_name', 'translated_name', 'gender']
-                       extra_fields = []
-                       for entry in self.current_glossary_data:
-                           for k in entry.keys():
-                               if k.startswith('_') or k in standard_fields:
-                                   continue
-                               if k not in extra_fields:
-                                   extra_fields.append(k)
-                       with open(path, 'w', encoding='utf-8', newline='') as f:
-                           writer = csv.writer(f)
-                           writer.writerow(standard_fields + extra_fields)
-                           for entry in self.current_glossary_data:
-                               row = [
-                                   entry.get('type', ''),
-                                   entry.get('raw_name', ''),
-                                   entry.get('translated_name', ''),
-                                   entry.get('gender', '')
-                               ]
-                               for field in extra_fields:
-                                   row.append(entry.get(field, ''))
-                               writer.writerow(row)
-               else:
-                   with open(path, 'w', encoding='utf-8') as f:
-                       json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
-               if self.current_glossary_format in ['list', 'token_csv']:
-                   sync_gender_tracker_with_glossary(self.current_glossary_data, path)
-               self._pending_gender_decisions = {}
-               self._gender_variants_pending_save = 0
-               return True
+               return glossary_document.save_document(self, path, self.config)
            except Exception as e:
                QMessageBox.critical(parent, "Error", f"Failed to save: {e}")
                return False
@@ -9173,16 +7979,9 @@ Do not stop after the glossary."""
             
             if self.current_glossary_format in ['list', 'token_csv']:
                 # Check if there are any empty fields
-                empty_fields_found = False
-                fields_cleaned = {}
-                
-                # Count empty fields first
-                for entry in self.current_glossary_data:
-                    for field in list(entry.keys()):
-                        value = entry[field]
-                        if value is None or value == "" or (isinstance(value, list) and len(value) == 0) or (isinstance(value, dict) and len(value) == 0):
-                            empty_fields_found = True
-                            fields_cleaned[field] = fields_cleaned.get(field, 0) + 1
+                empty_fields_found, fields_cleaned = glossary_document.count_empty_fields(
+                    self.current_glossary_data
+                )
                 
                 # If no empty fields found, show message and return
                 if not empty_fields_found:
@@ -9194,22 +7993,13 @@ Do not stop after the glossary."""
                     return
                 
                 # Now actually clean the fields
-                total_cleaned = 0
-                for entry in self.current_glossary_data:
-                    for field in list(entry.keys()):
-                        value = entry[field]
-                        if value is None or value == "" or (isinstance(value, list) and len(value) == 0) or (isinstance(value, dict) and len(value) == 0):
-                            entry.pop(field)
-                            total_cleaned += 1
+                total_cleaned = glossary_document.remove_empty_fields(self.current_glossary_data)
                 
                 if save_current_glossary():
                     load_glossary_for_editing()
                     
                     # Provide detailed feedback
-                    msg = f"Cleaned {total_cleaned} empty fields\n\n"
-                    msg += "Fields cleaned:\n"
-                    for field, count in sorted(fields_cleaned.items(), key=lambda x: x[1], reverse=True):
-                        msg += f"• {field}: {count} entries\n"
+                    msg = glossary_document.clean_empty_fields_message(total_cleaned, fields_cleaned)
                     
                     QMessageBox.information(parent, "Success", msg)
         
@@ -9231,29 +8021,9 @@ Do not stop after the glossary."""
                 if hasattr(self, '_push_undo_snapshot'):
                     self._push_undo_snapshot()
                     
-                indices_to_delete = []
-                keys_to_delete = []
-                for item in selected:
-                   if self.current_glossary_format in ['list', 'token_csv']:
-                       try:
-                           indices_to_delete.append(int(item.data(0, Qt.UserRole)))
-                       except (TypeError, ValueError):
-                           pass
-                   elif self.current_glossary_format == 'dict':
-                       key = item.data(0, Qt.UserRole)
-                       if key is not None:
-                           keys_to_delete.append(key)
-
-                indices_to_delete.sort(reverse=True)
-
-                if self.current_glossary_format in ['list', 'token_csv']:
-                   for idx in indices_to_delete:
-                       if 0 <= idx < len(self.current_glossary_data):
-                           del self.current_glossary_data[idx]
-
-                elif self.current_glossary_format == 'dict':
-                   for key in keys_to_delete:
-                       self.current_glossary_data.get('entries', {}).pop(key, None)
+                indices_to_delete, keys_to_delete = glossary_document.delete_entries(
+                    self, [item.data(0, Qt.UserRole) for item in selected]
+                )
 
                 if save_current_glossary():
                    load_glossary_for_editing()
@@ -9267,16 +8037,13 @@ Do not stop after the glossary."""
             if self.current_glossary_format in ['list', 'token_csv']:
                 # Import the skip function from the updated script
                 try:
-                    from extract_glossary_from_epub import skip_duplicate_entries, remove_honorifics
-                    
-                    # Set environment variable for honorifics toggle
-                    os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'
-                    
+                    # skip_duplicate_entries (the Balanced/Full dedup engine) via glossary_document
                     original_count = len(self.current_glossary_data)
-                    self.current_glossary_data = skip_duplicate_entries(
+                    self.current_glossary_data = glossary_document.remove_duplicate_entries(
                         self.current_glossary_data,
-                        glossary_path=self.editor_file_entry.text(),
-                        gender_tracker=getattr(self, 'current_gender_tracker_data', None),
+                        self.editor_file_entry.text(),
+                        getattr(self, 'current_gender_tracker_data', None),
+                        self.config.get('glossary_disable_honorifics_filter', False),
                     )
                     duplicates_removed = original_count - len(self.current_glossary_data)
                     
@@ -9293,17 +8060,9 @@ Do not stop after the glossary."""
                         
                 except ImportError:
                     # Fallback implementation
-                    seen_raw_names = set()
-                    unique_entries = []
-                    duplicates = 0
-                    
-                    for entry in self.current_glossary_data:
-                        raw_name = entry.get('raw_name', '').lower().strip()
-                        if raw_name and raw_name not in seen_raw_names:
-                            seen_raw_names.add(raw_name)
-                            unique_entries.append(entry)
-                        elif raw_name:
-                            duplicates += 1
+                    unique_entries, duplicates = glossary_document.remove_duplicate_entries_fallback(
+                        self.current_glossary_data
+                    )
                     
                     if duplicates > 0:
                         self.current_glossary_data = unique_entries
@@ -9318,12 +8077,8 @@ Do not stop after the glossary."""
             """Show info about duplicate detection (simplified for new format)"""
             QMessageBox.information(
                 parent,
-                "Duplicate Detection", 
-                "Duplicate detection is based on the raw_name field.\n\n"
-                "• Entries with identical raw_name values are considered duplicates\n"
-                "• The first occurrence is kept, later ones are removed\n"
-                "• Honorifics filtering can be toggled in the Manual Glossary tab\n\n"
-                "When honorifics filtering is enabled, names are compared after removing honorifics."
+                glossary_document.DUPLICATE_DETECTION_INFO_TITLE,
+                glossary_document.DUPLICATE_DETECTION_INFO_TEXT,
             )
 
         def backup_settings_dialog():
@@ -9419,7 +8174,7 @@ Do not stop after the glossary."""
                 
                 # Check if backup folder exists and show count
                 if os.path.exists(full_path):
-                    backup_count = len([f for f in os.listdir(full_path) if f.endswith('.json')])
+                    backup_count = glossary_document.count_editor_backups(full_path)
                     count_label = QLabel(f"Currently contains {backup_count} backup(s)")
                     count_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px;")
                     main_layout.addWidget(count_label)
@@ -9454,13 +8209,9 @@ Do not stop after the glossary."""
                 with open(_cfg_path, 'w', encoding='utf-8') as f:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
                 
-                status = "enabled" if backup_checkbox.isChecked() else "disabled"
-                if backup_checkbox.isChecked():
-                    limit = max_backups_spinbox.value()
-                    limit_text = "unlimited" if limit == 0 else f"max {limit}"
-                    msg = f"Automatic backups {status} ({limit_text})"
-                else:
-                    msg = f"Automatic backups {status}"
+                msg = glossary_document.backup_settings_message(
+                    backup_checkbox.isChecked(), max_backups_spinbox.value()
+                )
                     
                 QMessageBox.information(backup_dialog, "Success", msg)
                 backup_dialog.accept()
@@ -9534,7 +8285,9 @@ Do not stop after the glossary."""
             stats_layout = QVBoxLayout(stats_group)
             main_layout.addWidget(stats_group)
             
-            entry_count = len(self.current_glossary_data) if self.current_glossary_format in ['list', 'token_csv'] else len(self.current_glossary_data.get('entries', {}))
+            entry_count = glossary_document.document_entry_count(
+                self.current_glossary_data, self.current_glossary_format
+            )
             stats_layout.addWidget(QLabel(f"Total entries: {entry_count}"))
             
             # For new format, show type breakdown
@@ -9579,10 +8332,7 @@ Do not stop after the glossary."""
             def preview_changes():
                 try:
                     top_n = int(top_entry.text())
-                    entries_to_remove = max(0, entry_count - top_n)
-                    
-                    preview_text = f"Preview of changes:\n"
-                    preview_text += f"• Entries: {entry_count} → {top_n} ({entries_to_remove} removed)\n"
+                    preview_text = glossary_document.trim_preview_text(entry_count, top_n)
                     
                     preview_label.setText(preview_text)
                     preview_label.setStyleSheet("color: #7bb3e0; font-size: 10pt;")
@@ -9613,16 +8363,7 @@ Do not stop after the glossary."""
                         if not self.create_glossary_backup(f"before_trim_{entries_to_remove}"):
                             return
                     
-                    if self.current_glossary_format in ['list', 'token_csv']:
-                        # Keep only top N entries
-                        if top_n < len(self.current_glossary_data):
-                            self.current_glossary_data = self.current_glossary_data[:top_n]
-                    
-                    elif self.current_glossary_format == 'dict':
-                        # For dict format, only support entry limit
-                        entries = list(self.current_glossary_data['entries'].items())
-                        if top_n < len(entries):
-                            self.current_glossary_data['entries'] = dict(entries[:top_n])
+                    glossary_document.trim_entries(self, top_n)
                     
                     if save_current_glossary():
                         load_glossary_for_editing()
@@ -9698,7 +8439,9 @@ Do not stop after the glossary."""
             content_layout.addSpacing(15)
             
             # Current stats
-            entry_count = len(self.current_glossary_data) if self.current_glossary_format in ['list', 'token_csv'] else len(self.current_glossary_data.get('entries', {}))
+            entry_count = glossary_document.document_entry_count(
+                self.current_glossary_data, self.current_glossary_format
+            )
             
             stats_group = QGroupBox("Current Status")
             stats_layout = QVBoxLayout(stats_group)
@@ -9709,9 +8452,9 @@ Do not stop after the glossary."""
             content_layout.addSpacing(15)
             
             # Check if new format
-            is_new_format = (self.current_glossary_format in ['list', 'token_csv'] and 
-                           self.current_glossary_data and 
-                           'type' in self.current_glossary_data[0])
+            is_new_format = glossary_document.is_new_format_data(
+                self.current_glossary_data, self.current_glossary_format
+            )
             
             # Filter conditions
             conditions_group = QGroupBox("Filter Conditions")
@@ -9729,21 +8472,7 @@ Do not stop after the glossary."""
                 conditions_layout.addSpacing(10)
                 
                 # Build type list from configured custom entry types (enabled only)
-                _custom_types_cfg = self.config.get('custom_entry_types', {
-                    'character': {'enabled': True, 'has_gender': True},
-                    'terms': {'enabled': True, 'has_gender': False},
-                    'surnames': {'enabled': True, 'has_gender': False},
-                    'titles': {'enabled': True, 'has_gender': True},
-                    'locations': {'enabled': True, 'has_gender': False},
-                    'nicknames': {'enabled': True, 'has_gender': True}
-                })
-                filter_types = [t for t, cfg in _custom_types_cfg.items() if cfg.get('enabled', True)]
-
-                # Also include any types actually present in the glossary data
-                for _entry in self.current_glossary_data:
-                    _t = _entry.get('type')
-                    if _t and _t not in filter_types:
-                        filter_types.append(_t)
+                filter_types = glossary_document.filter_entry_types(self.config, self.current_glossary_data)
 
                 limit_hint = QLabel("Optional: keep only the first N entries of each type (blank = keep all)")
                 limit_hint.setStyleSheet("color: gray; font-size: 9pt;")
@@ -9882,59 +8611,18 @@ Do not stop after the glossary."""
             preview_label.setStyleSheet("color: gray; font-size: 10pt;")
             preview_layout.addWidget(preview_label)
             
-            def get_type_limit(type_name):
-                """Parse the 'first N' limit for a type. None = no limit."""
-                edit = type_limits.get(type_name)
-                if edit is None:
-                    return None
-                text = edit.text().strip()
-                if not text:
-                    return None
-                try:
-                    return max(0, int(text))
-                except ValueError:
-                    return None
-
             def check_entry_matches(entry, type_counts=None):
                 """Check if an entry matches the filter conditions"""
-                # Type filter
-                if is_new_format and entry.get('type'):
-                    type_check = type_checks.get(entry['type'])
-                    if type_check and not type_check.isChecked():
-                        return False
-                
-                # Text filter
-                search_text = search_entry.text().strip().lower()
-                if search_text:
-                    # Search in all text fields
-                    entry_text = ' '.join(str(v) for v in entry.values() if isinstance(v, str)).lower()
-                    if search_text not in entry_text:
-                        return False
-                
-                # Gender filter
-                if is_new_format and gender_value != "all":
-                    # Apply gender filter to any type with has_gender
-                    _custom_types = self.config.get('custom_entry_types', {
-                        'character': {'enabled': True, 'has_gender': True},
-                        'terms': {'enabled': True, 'has_gender': False},
-                        'surnames': {'enabled': True, 'has_gender': False},
-                        'titles': {'enabled': True, 'has_gender': True},
-                        'locations': {'enabled': True, 'has_gender': False},
-                        'nicknames': {'enabled': True, 'has_gender': True}
-                    })
-                    entry_cfg = _custom_types.get(entry.get('type', ''), {})
-                    if entry_cfg.get('has_gender', False) and entry.get('gender') != gender_value:
-                        return False
-
-                # Per-type "first N" limit (applied only to entries that passed all other filters)
-                if is_new_format and type_counts is not None and entry.get('type'):
-                    _t = entry['type']
-                    limit = get_type_limit(_t)
-                    if limit is not None and type_counts.get(_t, 0) >= limit:
-                        return False
-                    type_counts[_t] = type_counts.get(_t, 0) + 1
-
-                return True
+                return glossary_document.entry_matches_filter(
+                    entry,
+                    type_counts,
+                    is_new_format=is_new_format,
+                    kept_types={name: check.isChecked() for name, check in type_checks.items()},
+                    search_text=search_entry.text(),
+                    gender_value=gender_value,
+                    config=self.config,
+                    type_limits={name: edit.text() for name, edit in type_limits.items()},
+                )
             
             def preview_filter():
                 """Preview the filter results"""
@@ -9945,17 +8633,9 @@ Do not stop after the glossary."""
                         gender_value = val
                         break
                 
-                matching = 0
-                type_counts = {}
-
-                if self.current_glossary_format in ['list', 'token_csv']:
-                    for entry in self.current_glossary_data:
-                        if check_entry_matches(entry, type_counts):
-                            matching += 1
-                else:
-                    for key, entry in self.current_glossary_data.get('entries', {}).items():
-                        if check_entry_matches(entry, type_counts):
-                            matching += 1
+                matching = glossary_document.count_filter_matches(
+                    self.current_glossary_data, self.current_glossary_format, check_entry_matches
+                )
                 
                 removed = entry_count - matching
                 preview_label.setText(f"Filter matches: {matching} entries ({removed} will be removed)")
@@ -9981,11 +8661,7 @@ Do not stop after the glossary."""
                         break
                 
                 if self.current_glossary_format in ['list', 'token_csv']:
-                    filtered = []
-                    type_counts = {}
-                    for entry in self.current_glossary_data:
-                        if check_entry_matches(entry, type_counts):
-                            filtered.append(entry)
+                    filtered = glossary_document.filter_list_entries(self.current_glossary_data, check_entry_matches)
                     
                     removed = len(self.current_glossary_data) - len(filtered)
                     
@@ -10041,52 +8717,13 @@ Do not stop after the glossary."""
                return
            
            try:
-               if self.current_glossary_format in ['list', 'token_csv']:
-                   exported = []
-                   for item in selected:
-                       try:
-                           idx = int(item.data(0, Qt.UserRole))
-                       except (TypeError, ValueError):
-                           continue
-                       if 0 <= idx < len(self.current_glossary_data):
-                           exported.append(self.current_glossary_data[idx])
-                   
-                   if path.endswith('.csv'):
-                       # Export as CSV
-                       import csv
-                       with open(path, 'w', encoding='utf-8', newline='') as f:
-                           writer = csv.writer(f)
-                           _custom_types = self.config.get('custom_entry_types', {
-                               'character': {'enabled': True, 'has_gender': True},
-                               'terms': {'enabled': True, 'has_gender': False},
-                               'surnames': {'enabled': True, 'has_gender': False},
-                               'titles': {'enabled': True, 'has_gender': True},
-                               'locations': {'enabled': True, 'has_gender': False},
-                               'nicknames': {'enabled': True, 'has_gender': True}
-                           })
-                           for entry in exported:
-                               entry_cfg = _custom_types.get(entry.get('type', ''), {})
-                               if entry_cfg.get('has_gender', False):
-                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
-                                                  entry.get('translated_name', ''), entry.get('gender', '')])
-                               else:
-                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
-                                                  entry.get('translated_name', ''), ''])
-                   else:
-                       # Export as JSON
-                       with open(path, 'w', encoding='utf-8') as f:
-                           json.dump(exported, f, ensure_ascii=False, indent=2)
-               
-               else:
-                   exported = {}
-                   for item in selected:
-                       key = item.data(0, Qt.UserRole)
-                       if key in self.current_glossary_data.get('entries', {}):
-                           value = self.current_glossary_data['entries'][key]
-                           exported[key] = value
-                   
-                   with open(path, 'w', encoding='utf-8') as f:
-                       json.dump(exported, f, ensure_ascii=False, indent=2)
+               glossary_document.export_selected_entries(
+                   path,
+                   self.current_glossary_data,
+                   self.current_glossary_format,
+                   [item.data(0, Qt.UserRole) for item in selected],
+                   self.config,
+               )
                
                QMessageBox.information(self.dialog, "Success", f"Exported {len(selected)} entries to {os.path.basename(path)}")
                
@@ -10095,20 +8732,9 @@ Do not stop after the glossary."""
        
         def collect_translated_changes():
             """Return list of (old, new) translated-name changes since last baseline."""
-            changes = []
-            if self.current_glossary_format in ['list', 'token_csv']:
-                for idx, entry in enumerate(self.current_glossary_data or []):
-                    old = self._original_translated_map.get(idx, entry.get('translated_name', ''))
-                    new = entry.get('translated_name', '')
-                    if old != new:
-                        changes.append((old, new))
-            elif self.current_glossary_format == 'dict':
-                entries = (self.current_glossary_data or {}).get('entries', {})
-                for key, new in entries.items():
-                    old = self._original_translated_map.get(key, new)
-                    if old != new:
-                        changes.append((old, new))
-            return changes
+            return glossary_document.collect_translated_changes(
+                self.current_glossary_data, self.current_glossary_format, self._original_translated_map
+            )
 
         def _update_html_files_legacy(changes):
             """Legacy sequential output-file updater."""
@@ -10288,219 +8914,30 @@ Do not stop after the glossary."""
 
         def update_html_files(changes):
             """Replace old translated names with new ones across output files."""
-            if not changes:
-                return 0, 0
-
-            effective_changes = [(old, new) for old, new in changes if old and new and old != new]
-            if not effective_changes:
-                return 0, 0
-
-            glossary_path = self.editor_file_entry.text()
-            if not glossary_path or not os.path.exists(glossary_path):
-                self.append_log("Cannot update output files: no glossary file loaded.")
-                return 0, 0
-
-            glossary_dir = os.path.dirname(glossary_path)
-            glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]
-            parent_of_glossary_dir = os.path.dirname(glossary_dir)
-            is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
-            is_book_glossary_subfolder = os.path.basename(parent_of_glossary_dir).lower() == 'glossary'
-
-            book_output_dir = None
-            if is_shared_glossary_folder:
-                book_name = None
-                for suffix in ('_glossary', '_Glossary'):
-                    if glossary_fname.endswith(suffix):
-                        book_name = glossary_fname[:-len(suffix)]
-                        break
-                if not book_name:
-                    book_name = glossary_fname
-                if book_name:
-                    candidate = os.path.join(parent_of_glossary_dir, book_name)
-                    if os.path.isdir(candidate):
-                        book_output_dir = candidate
-                if not book_output_dir:
-                    book_output_dir = parent_of_glossary_dir
-            elif is_book_glossary_subfolder:
-                book_name = os.path.basename(glossary_dir)
-                grandparent = os.path.dirname(parent_of_glossary_dir)
-                candidate = os.path.join(grandparent, book_name)
-                book_output_dir = candidate if os.path.isdir(candidate) else grandparent
-            else:
-                book_output_dir = glossary_dir
-
-            if not os.path.isdir(book_output_dir):
-                self.append_log(f"Cannot update output files: directory not found: {book_output_dir}")
-                return 0, 0
-
-            self.append_log(f"Scanning output files in: {book_output_dir}")
-
-            excluded_extensions = {'.csv', '.json'}
-            excluded_names = {'metadata.json', 'metadata.opf', 'metadata.xml', 'content.opf', 'toc.ncx'}
-            candidate_paths = []
-            for name in sorted(os.listdir(book_output_dir)):
-                path = os.path.join(book_output_dir, name)
-                if not os.path.isfile(path):
-                    continue
-                lower_name = name.lower()
-                if any(lower_name.endswith(ext) for ext in excluded_extensions):
-                    continue
-                if lower_name in excluded_names or lower_name.endswith('.opf'):
-                    continue
-                candidate_paths.append(path)
-
-            if not candidate_paths:
-                return 0, 0
-
-            def _configured_update_workers():
-                enabled = bool(
-                    getattr(
-                        self,
-                        'enable_parallel_extraction_var',
-                        self.config.get('enable_parallel_extraction', False),
-                    )
-                )
-                if not enabled:
-                    return 1
-                raw_workers = getattr(
+            return glossary_document.update_output_files(
+                self.editor_file_entry.text(),
+                changes,
+                self.append_log,
+                getattr(
+                    self,
+                    'enable_parallel_extraction_var',
+                    self.config.get('enable_parallel_extraction', False),
+                ),
+                getattr(
                     self,
                     'extraction_workers_var',
                     self.config.get('extraction_workers', os.environ.get('EXTRACTION_WORKERS', 1)),
-                )
-                try:
-                    workers = int(raw_workers)
-                except (TypeError, ValueError):
-                    workers = 1
-                return max(1, workers)
-
-            def _update_one_file(path):
-                logs = []
-                try:
-                    with open(path, 'rb') as f:
-                        raw_bytes = f.read()
-                    try:
-                        content = raw_bytes.decode('utf-8')
-                    except UnicodeDecodeError:
-                        content = raw_bytes.decode('utf-8', errors='replace')
-
-                    new_content = content
-                    per_pair_counts = []
-                    for old, new in effective_changes:
-                        before_count = new_content.count(old)
-                        if before_count == 0:
-                            continue
-                        new_content = new_content.replace(old, new)
-                        per_pair_counts.append((old, new, before_count))
-
-                    if new_content == content:
-                        return {"path": path, "files_updated": 0, "replacements": 0, "logs": logs}
-
-                    try:
-                        stat_before = os.stat(path)
-                        mtime_before = stat_before.st_mtime
-                        size_before = stat_before.st_size
-                    except Exception:
-                        mtime_before, size_before = None, None
-
-                    new_bytes = new_content.encode('utf-8')
-                    with open(path, 'wb') as f:
-                        f.write(new_bytes)
-                        f.flush()
-                        try:
-                            os.fsync(f.fileno())
-                        except Exception:
-                            pass
-
-                    try:
-                        with open(path, 'rb') as f:
-                            verify_bytes = f.read()
-                        stat_after = os.stat(path)
-                        mtime_after = stat_after.st_mtime
-                        size_after = stat_after.st_size
-                    except Exception as ve:
-                        logs.append(f"Could not verify write of {path}: {ve}")
-                        verify_bytes = None
-                        mtime_after, size_after = None, None
-
-                    replaced_here = sum(c for _o, _n, c in per_pair_counts)
-                    write_landed = verify_bytes == new_bytes
-                    if write_landed:
-                        logs.append(
-                            f"Updated file: {path} ({replaced_here} replacements, "
-                            f"{size_before} -> {size_after} bytes)"
-                        )
-                        return {"path": path, "files_updated": 1, "replacements": replaced_here, "logs": logs}
-
-                    resolved = os.path.realpath(path)
-                    logs.append(
-                        f"Write did NOT persist for {path}"
-                        + (f" (realpath: {resolved})" if resolved != path else "")
-                    )
-                    logs.append(
-                        f"   expected {len(new_bytes)} bytes, found {size_after} bytes"
-                        + (f" (mtime {mtime_before} -> {mtime_after})" if mtime_before is not None else "")
-                    )
-                    if verify_bytes is not None:
-                        try:
-                            verify_text = verify_bytes.decode('utf-8', errors='replace')
-                            for old, new, _cnt in per_pair_counts:
-                                still = verify_text.count(old)
-                                if still:
-                                    logs.append(f"   - '{old}' still present {still} time(s) (expected 0)")
-                        except Exception:
-                            pass
-                    logs.append(
-                        "   Likely causes: file locked by another app, OneDrive/antivirus revert, "
-                        "or read-only attribute. Try closing viewers and retry."
-                    )
-                    return {"path": path, "files_updated": 0, "replacements": replaced_here, "logs": logs}
-                except Exception as e:
-                    return {
-                        "path": path,
-                        "files_updated": 0,
-                        "replacements": 0,
-                        "logs": [f"Failed to update {path}: {e}"],
-                    }
-
-            workers = _configured_update_workers()
-            if workers > 1 and len(candidate_paths) > 1:
-                self.append_log(f"Updating {len(candidate_paths)} output files with {workers} worker threads")
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                results = []
-                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="GlossaryFileUpdate") as executor:
-                    future_to_path = {executor.submit(_update_one_file, path): path for path in candidate_paths}
-                    for future in as_completed(future_to_path):
-                        try:
-                            results.append(future.result())
-                        except Exception as e:
-                            path = future_to_path.get(future, "<unknown>")
-                            results.append({
-                                "path": path,
-                                "files_updated": 0,
-                                "replacements": 0,
-                                "logs": [f"Failed to update {path}: {e}"],
-                            })
-                results.sort(key=lambda item: item.get("path", ""))
-            else:
-                results = [_update_one_file(path) for path in candidate_paths]
-
-            files_updated = 0
-            total_replacements = 0
-            for result in results:
-                files_updated += int(result.get("files_updated", 0) or 0)
-                total_replacements += int(result.get("replacements", 0) or 0)
-                for line in result.get("logs", []):
-                    self.append_log(line)
-            return files_updated, total_replacements
+                ),
+            )
         
         def save_edited_glossary():
            changes = collect_translated_changes()
            if self.update_html_on_save_checkbox.isChecked() and changes:
-               example_lines = "<br>".join(f"{old or '&lt;empty&gt;'} -> {new or '&lt;empty&gt;'}" for old, new in changes[:5])
+               _prompt_title, _prompt_text, example_lines = glossary_document.update_output_files_prompt(changes)
                msg = QMessageBox(self.dialog)
                msg.setIcon(QMessageBox.Warning)
-               msg.setWindowTitle("Update output files")
-               msg.setText(f"{len(changes)} entries have had their translated name field updated.\nNow matching output files will be updated to reflect the change.")
+               msg.setWindowTitle(_prompt_title)
+               msg.setText(_prompt_text)
                msg.setInformativeText(example_lines)
                msg.setTextFormat(Qt.RichText)
                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
@@ -10520,12 +8957,11 @@ Do not stop after the glossary."""
                    files_updated, total_repl = update_html_files(changes)
                    self.append_log(f"Updated {files_updated} files with translated-name changes ({total_repl} replacements).")
                # Reset baseline and highlights
-               if self.current_glossary_format in ['list', 'token_csv']:
-                   self._original_translated_map = {
-                       idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data)
-                   }
-               elif self.current_glossary_format == 'dict':
-                   self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
+               _saved_baseline = glossary_document.saved_translated_baseline(
+                   self.current_glossary_data, self.current_glossary_format
+               )
+               if _saved_baseline is not None:
+                   self._original_translated_map = _saved_baseline
                for i in range(self.glossary_tree.topLevelItemCount()):
                    tree_item = self.glossary_tree.topLevelItem(i)
                    data_entry = _editor_entry_for_item(tree_item)
@@ -10567,32 +9003,9 @@ Do not stop after the glossary."""
                return
            
            try:
-               if path.endswith('.csv'):
-                   # Save as CSV
-                   import csv
-                   with open(path, 'w', encoding='utf-8', newline='') as f:
-                       writer = csv.writer(f)
-                       if self.current_glossary_format == 'list':
-                           _custom_types = self.config.get('custom_entry_types', {
-                               'character': {'enabled': True, 'has_gender': True},
-                               'terms': {'enabled': True, 'has_gender': False},
-                               'surnames': {'enabled': True, 'has_gender': False},
-                               'titles': {'enabled': True, 'has_gender': True},
-                               'locations': {'enabled': True, 'has_gender': False},
-                               'nicknames': {'enabled': True, 'has_gender': True}
-                           })
-                           for entry in self.current_glossary_data:
-                               entry_cfg = _custom_types.get(entry.get('type', ''), {})
-                               if entry_cfg.get('has_gender', False):
-                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
-                                                  entry.get('translated_name', ''), entry.get('gender', '')])
-                               else:
-                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
-                                                  entry.get('translated_name', ''), ''])
-               else:
-                   # Save as JSON
-                   with open(path, 'w', encoding='utf-8') as f:
-                       json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+               glossary_document.save_glossary_as(
+                   path, self.current_glossary_data, self.current_glossary_format, self.config
+               )
                
                self.editor_file_entry.setText(path)
                QMessageBox.information(self.dialog, "Success", f"Glossary saved to {os.path.basename(path)}")
@@ -10680,152 +9093,19 @@ Do not stop after the glossary."""
                 except Exception:
                     pass
 
-                # Collect any paths that the main GUI has already resolved
-                # (via auto-mapping or manual load) so we always try them FIRST
-                # regardless of which branch we take below.
-                _already_mapped = []
-                try:
-                    for _attr in ('auto_loaded_glossary_path', 'manual_glossary_path'):
-                        _p = getattr(self, _attr, None)
-                        if _p and os.path.exists(_p):
-                            _already_mapped.append(_p)
-                    _mmap = getattr(self, 'manual_glossary_map', None) or {}
-                    if isinstance(_mmap, dict):
-                        for _p in _mmap.values():
-                            if _p and os.path.exists(_p) and _p not in _already_mapped:
-                                _already_mapped.append(_p)
-                except Exception:
-                    _already_mapped = []
-
-                ext_priority = ['.csv', '.json', '.txt', '.md']
-                mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
-                auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
-                use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full', 'single_pass'))
-
-                found_glossaries = []  # list of (display_name, full_path)
-                found_glossary_sources = {}
-
-                for source_path in source_paths:
-                    if not source_path or not os.path.exists(source_path):
-                        continue
-                    base = os.path.splitext(os.path.basename(source_path))[0]
-
-                    candidates = []
-
-                    # Prefer any already-resolved path that looks associated
-                    # with THIS input source (same basename stem).
-                    _base_lc = base.lower()
-                    for _p in _already_mapped:
-                        try:
-                            _p_stem = os.path.splitext(os.path.basename(_p))[0].lower()
-                            _dir_name = os.path.basename(os.path.dirname(_p)).lower()
-                            if (_base_lc in _p_stem) or (_base_lc == _dir_name):
-                                if _p not in candidates:
-                                    candidates.append(_p)
-                        except Exception:
-                            pass
-                    # Also try single-selection case: any resolved path when
-                    # there is exactly one input source selected.
-                    if len(source_paths) == 1:
-                        for _p in _already_mapped:
-                            if _p not in candidates:
-                                candidates.append(_p)
-
-                    if override_dir and override_dir.strip():
-                        abs_override = os.path.abspath(override_dir)
-                        glossary_folder = os.path.join(abs_override, 'Glossary')
-                        book_dir = os.path.join(abs_override, base)
-
-                        if use_per_book:
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(book_dir, f"glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, base, f"{base}_glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, base, f"{base}{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
-                        else:
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, base, f"{base}_glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, base, f"{base}{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(book_dir, f"glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
-                    else:
-                        # No override — check auto/manual paths first, then EPUB parent dir
-                        auto_path = getattr(self, 'auto_loaded_glossary_path', None)
-                        manual_path = getattr(self, 'manual_glossary_path', None)
-                        if auto_path and os.path.exists(auto_path):
-                            candidates.append(auto_path)
-                        if manual_path and os.path.exists(manual_path):
-                            candidates.append(manual_path)
-                        source_parent = os.path.dirname(os.path.abspath(source_path))
-                        output_dirs = [os.path.join(source_parent, base)]
-                        try:
-                            output_base_getter = getattr(self, '_get_output_base_dir', None)
-                            if callable(output_base_getter):
-                                output_dirs.append(
-                                    os.path.join(output_base_getter(source_path), base)
-                                )
-                        except Exception:
-                            pass
-                        for out_dir in output_dirs:
-                            for ext in ext_priority:
-                                candidates.append(os.path.join(out_dir, f"glossary{ext}"))
-                            for ext in ext_priority:
-                                candidates.append(
-                                    os.path.join(out_dir, 'Glossary', f"glossary{ext}")
-                                )
-
-                        shared_dirs = []
-                        for shared_root in (
-                            os.path.join(str(getattr(self, 'base_dir', '') or ''), 'Glossary'),
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary'),
-                            os.path.join(os.getcwd(), 'Glossary'),
-                        ):
-                            if shared_root and shared_root not in shared_dirs:
-                                shared_dirs.append(shared_root)
-                        for glossary_folder in shared_dirs:
-                            for ext in ext_priority:
-                                candidates.append(
-                                    os.path.join(
-                                        glossary_folder,
-                                        base,
-                                        f"{base}_glossary{ext}",
-                                    )
-                                )
-                            for ext in ext_priority:
-                                candidates.append(
-                                    os.path.join(glossary_folder, base, f"{base}{ext}")
-                                )
-                            for ext in ext_priority:
-                                candidates.append(
-                                    os.path.join(glossary_folder, f"{base}_glossary{ext}")
-                                )
-                            for ext in ext_priority:
-                                candidates.append(
-                                    os.path.join(glossary_folder, f"{base}{ext}")
-                                )
-
-                    # Pick first match for this book
-                    for cand in candidates:
-                        if os.path.exists(cand):
-                            display = self._display_glossary_path(cand)
-                            if not any(fp == cand for _, fp in found_glossaries):
-                                found_glossaries.append((display, cand))
-                                found_glossary_sources[cand] = source_path
-                            break
+                # Already-resolved paths first, then the per-book / shared Glossary
+                # folders (glossary_document.resolve_editor_glossaries, U6).
+                found_glossaries, found_glossary_sources = glossary_document.resolve_editor_glossaries(
+                    source_paths,
+                    config=self.config,
+                    override_dir=override_dir,
+                    auto_loaded_glossary_path=getattr(self, 'auto_loaded_glossary_path', None),
+                    manual_glossary_path=getattr(self, 'manual_glossary_path', None),
+                    manual_glossary_map=getattr(self, 'manual_glossary_map', None),
+                    output_base_getter=getattr(self, '_get_output_base_dir', None),
+                    base_dir=getattr(self, 'base_dir', ''),
+                    module_dir=os.path.dirname(os.path.abspath(__file__)),
+                )
 
                 # Populate combo
                 self._editor_glossary_source_map = dict(found_glossary_sources)
@@ -10884,26 +9164,10 @@ Do not stop after the glossary."""
             toolbar_layout.addWidget(btn)
 
         # ── Undo / Redo / Open Backups ──
-        import copy as _copy
-
-        def _trim_undo_stack():
-            if len(self._undo_stack) > self._undo_max:
-                self._undo_stack.pop(0)
-
         def _push_undo_snapshot():
             """Snapshot current glossary data onto the undo stack (call BEFORE mutation)."""
-            if self.current_glossary_data is None:
-                return
-            snap = {
-                'kind': 'glossary',
-                'data': _copy.deepcopy(self.current_glossary_data),
-                'gender_tracker': _copy.deepcopy(getattr(self, 'current_gender_tracker_data', None)),
-                'pending_gender_decisions': _copy.deepcopy(getattr(self, '_pending_gender_decisions', {})),
-            }
-            self._undo_stack.append(snap)
-            _trim_undo_stack()
-            self._redo_stack.clear()
-            _update_undo_redo_state()
+            if glossary_document.push_undo_snapshot(self, self._undo_stack, self._redo_stack, self._undo_max):
+                _update_undo_redo_state()
 
         def _push_html_undo_snapshot(changes):
             """Record a direct output-file (HTML) Find/Replace so it can be undone.
@@ -10913,24 +9177,12 @@ Do not stop after the glossary."""
             re-applies them forward. This is independent of the glossary data, so
             it lets the 'update output files directly' path participate in undo.
             """
-            if not changes:
-                return
-            self._undo_stack.append({'kind': 'html', 'changes': list(changes)})
-            _trim_undo_stack()
-            self._redo_stack.clear()
-            _update_undo_redo_state()
-
-        def _entry_kind(entry):
-            return entry.get('kind') if isinstance(entry, dict) and 'kind' in entry else 'glossary'
+            if glossary_document.push_html_undo_snapshot(self._undo_stack, self._redo_stack, self._undo_max, changes):
+                _update_undo_redo_state()
 
         def _undo_action():
-            if not self._undo_stack:
-                return
-            entry = self._undo_stack.pop()
-            if _entry_kind(entry) == 'html':
-                # Reverse the output-file replacements (new -> old)
-                self._redo_stack.append(entry)
-                reverse = [(new, old) for (old, new) in entry.get('changes', [])]
+            kind, reverse = glossary_document.undo_step(self, self._undo_stack, self._redo_stack)
+            if kind == 'html':
                 try:
                     files_updated, total_repl = update_html_files(reverse)
                     self.append_log(f"↶ Undo: reverted {total_repl} replacement(s) across {files_updated} output file(s).")
@@ -10938,39 +9190,14 @@ Do not stop after the glossary."""
                     self.append_log(f"⚠️ Undo (output files) failed: {e}")
                 _update_undo_redo_state()
                 return
-            # Glossary snapshot
-            if self.current_glossary_data is None:
-                # Nothing to restore into; put it back and bail
-                self._undo_stack.append(entry)
+            if kind != 'glossary':
                 return
-            self._redo_stack.append({
-                'kind': 'glossary',
-                'data': _copy.deepcopy(self.current_glossary_data),
-                'gender_tracker': _copy.deepcopy(getattr(self, 'current_gender_tracker_data', None)),
-                'pending_gender_decisions': _copy.deepcopy(getattr(self, '_pending_gender_decisions', {})),
-            })
-            self.current_glossary_data = entry.get('data') if isinstance(entry, dict) else entry
-            if isinstance(entry, dict):
-                self.current_gender_tracker_data = entry.get('gender_tracker')
-                restored_pending = dict(entry.get('pending_gender_decisions', {}) or {})
-                tracker_entries = (self.current_gender_tracker_data or {}).get('entries', {})
-                for tracker_item in tracker_entries.values() if isinstance(tracker_entries, dict) else []:
-                    if isinstance(tracker_item, dict) and tracker_item.get('raw_name'):
-                        restored_pending.setdefault(
-                            tracker_item['raw_name'],
-                            tracker_item.get('decision', 'auto'),
-                        )
-                self._pending_gender_decisions = restored_pending
             load_glossary_for_editing(skip_file_read=True)
             _update_undo_redo_state()
 
         def _redo_action():
-            if not self._redo_stack:
-                return
-            entry = self._redo_stack.pop()
-            if _entry_kind(entry) == 'html':
-                # Re-apply the output-file replacements (old -> new)
-                self._undo_stack.append(entry)
+            kind, entry = glossary_document.redo_step(self, self._undo_stack, self._redo_stack)
+            if kind == 'html':
                 try:
                     files_updated, total_repl = update_html_files(list(entry.get('changes', [])))
                     self.append_log(f"↷ Redo: re-applied {total_repl} replacement(s) across {files_updated} output file(s).")
@@ -10978,27 +9205,8 @@ Do not stop after the glossary."""
                     self.append_log(f"⚠️ Redo (output files) failed: {e}")
                 _update_undo_redo_state()
                 return
-            if self.current_glossary_data is None:
-                self._redo_stack.append(entry)
+            if kind != 'glossary':
                 return
-            self._undo_stack.append({
-                'kind': 'glossary',
-                'data': _copy.deepcopy(self.current_glossary_data),
-                'gender_tracker': _copy.deepcopy(getattr(self, 'current_gender_tracker_data', None)),
-                'pending_gender_decisions': _copy.deepcopy(getattr(self, '_pending_gender_decisions', {})),
-            })
-            self.current_glossary_data = entry.get('data') if isinstance(entry, dict) else entry
-            if isinstance(entry, dict):
-                self.current_gender_tracker_data = entry.get('gender_tracker')
-                restored_pending = dict(entry.get('pending_gender_decisions', {}) or {})
-                tracker_entries = (self.current_gender_tracker_data or {}).get('entries', {})
-                for tracker_item in tracker_entries.values() if isinstance(tracker_entries, dict) else []:
-                    if isinstance(tracker_item, dict) and tracker_item.get('raw_name'):
-                        restored_pending.setdefault(
-                            tracker_item['raw_name'],
-                            tracker_item.get('decision', 'auto'),
-                        )
-                self._pending_gender_decisions = restored_pending
             load_glossary_for_editing(skip_file_read=True)
             _update_undo_redo_state()
 
@@ -11015,7 +9223,7 @@ Do not stop after the glossary."""
             if not path:
                 QMessageBox.warning(parent, "No File", "No glossary file is loaded.")
                 return
-            backup_dir = os.path.join(os.path.dirname(path), "Backups")
+            backup_dir = glossary_document.editor_backup_dir(path)
             if not os.path.isdir(backup_dir):
                 QMessageBox.information(parent, "No Backups",
                     f"No backups folder found yet.\n\n"
@@ -11093,39 +9301,7 @@ Do not stop after the glossary."""
             _line_num = 1
             selected = self.glossary_tree.currentItem()
             if selected:
-                try:
-                    # Skip generic column values that would match section headers
-                    _GENERIC_VALS = {
-                        'character', 'characters', 'terms', 'term', 'title', 'titles',
-                        'organization', 'organizations', 'location', 'locations',
-                        'item', 'items', 'ability', 'abilitys', 'abilities',
-                        'male', 'female', 'unknown', '',
-                    }
-                    # Gather searchable text — prefer unique fields (names) over generic (type/gender)
-                    search_terms = []
-                    # Check UserRole data first (original key for dict format)
-                    user_data = selected.data(0, Qt.UserRole)
-                    if isinstance(user_data, str) and user_data.strip():
-                        search_terms.append(user_data.strip())
-                    # Then check visible columns, skipping generic values
-                    for col_idx in range(1, selected.columnCount()):
-                        val = (selected.text(col_idx) or '').strip()
-                        if val and len(val) >= 2 and val.lower() not in _GENERIC_VALS:
-                            search_terms.append(val)
-
-                    if search_terms:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as _f:
-                            _lines = _f.readlines()
-                        # Find the first line containing any of the search terms
-                        for term in search_terms:
-                            for _i, _ln in enumerate(_lines, 1):
-                                if term in _ln:
-                                    _line_num = _i
-                                    break
-                            if _line_num > 1:
-                                break
-                except Exception:
-                    pass
+                _line_num = glossary_document.editor_entry_line_number(file_path, _EditorTreeRow(selected))
 
             try:
                 if sys.platform == 'win32':
@@ -11162,31 +9338,13 @@ Do not stop after the glossary."""
         def _editor_entry_for_item(item):
             if item is None:
                 return None
-            if self.current_glossary_format in ['list', 'token_csv']:
-                try:
-                    source_index = int(item.data(0, Qt.UserRole))
-                except (TypeError, ValueError):
-                    return None
-                if 0 <= source_index < len(self.current_glossary_data or []):
-                    entry = self.current_glossary_data[source_index]
-                    return entry if isinstance(entry, dict) else None
-            return None
+            return glossary_document.entry_for_ref(
+                self.current_glossary_data, self.current_glossary_format, item.data(0, Qt.UserRole)
+            )
 
         def _can_resolve_gender(item):
             status = item.data(0, gender_status_role) if item is not None else None
-            return isinstance(status, dict) and bool(status.get('conflict'))
-
-        def _format_tracker_location(occurrence):
-            if not isinstance(occurrence, dict):
-                return "—"
-            chapter = occurrence.get('chapter_num')
-            chapter_file = str(occurrence.get('chapter_file', '') or '').strip()
-            parts = []
-            if chapter not in (None, ''):
-                parts.append(f"chapter {chapter}")
-            if chapter_file:
-                parts.append(chapter_file)
-            return " · ".join(parts) or "—"
+            return glossary_document.can_resolve_gender(status)
 
         def _open_gender_resolution(item, column_idx=None, require_gender_column=False):
             if item is None or not _can_resolve_gender(item):
@@ -11205,9 +9363,7 @@ Do not stop after the glossary."""
 
             raw_name = str(data_entry.get('raw_name', '') or '').strip()
             translated_name = str(data_entry.get('translated_name', '') or '').strip()
-            current_decision = normalize_gender(tracker_entry.get('decision', 'auto'))
-            if current_decision not in {'auto', *BINARY_GENDERS}:
-                current_decision = 'auto'
+            current_decision = glossary_document.current_gender_decision(tracker_entry)
             threshold, bias = _gender_settings()
             summary = _gender_resolution_summary(
                 tracker_entry,
@@ -11232,10 +9388,7 @@ Do not stop after the glossary."""
             heading.setTextFormat(Qt.RichText)
             layout.addWidget(heading)
 
-            threshold_pct = normalize_threshold(threshold) * 100
-            bias_label = normalize_bias(bias).replace('_', ' ').title()
-            if bias_label == 'None':
-                bias_label = 'No Bias'
+            threshold_pct, bias_label = glossary_document.gender_settings_labels(threshold, bias)
             overview = QLabel(
                 f"Calculated Auto result: <b>{summary['calculated_auto_gender'].title()}</b> "
                 f"&nbsp;·&nbsp; Editor display: <b>{automatic_status.get('label', '')}</b><br>"
@@ -11248,22 +9401,15 @@ Do not stop after the glossary."""
             history_group = QGroupBox("Tracking history")
             history_layout = QVBoxLayout(history_group)
             for gender in BINARY_GENDERS:
-                values = summary['genders'][gender]
-                count = values['count']
-                ratio = values['ratio'] * 100
                 history_layout.addWidget(QLabel(
-                    f"{gender.title()}: {count}/{total} ({ratio:.1f}%)  ·  "
-                    f"first {_format_tracker_location(values['first'])}  ·  "
-                    f"last {_format_tracker_location(values['last'])}"
+                    glossary_document.gender_history_line(gender, summary, total)
                 ))
 
             history_layout.addWidget(QLabel(f"Gender flips: {summary['flip_count']}"))
             if summary['latest_flips']:
                 latest_lines = []
                 for change in reversed(summary['latest_flips']):
-                    source = normalize_gender(change.get('from', '')).title() or '?'
-                    target = normalize_gender(change.get('to', '')).title() or '?'
-                    latest_lines.append(f"• {source} → {target} · {_format_tracker_location(change)}")
+                    latest_lines.append(glossary_document.gender_flip_line(change))
                 latest = QLabel("Latest flips:\n" + "\n".join(latest_lines))
                 latest.setWordWrap(True)
                 history_layout.addWidget(latest)
@@ -11298,12 +9444,7 @@ Do not stop after the glossary."""
                 selected = next((key for key, radio in radios.items() if radio.isChecked()), 'auto')
                 if hasattr(self, '_push_undo_snapshot'):
                     self._push_undo_snapshot()
-                tracker_entry['decision'] = selected
-                self._pending_gender_decisions[raw_name] = selected
-                data_entry['gender'] = display_gender(resolved_storage_gender(
-                    tracker_entry,
-                    data_entry.get('gender', ''),
-                ))
+                glossary_document.apply_gender_decision(self, tracker_entry, data_entry, raw_name, selected)
                 _decorate_gender_item(item, data_entry, self.glossary_column_fields)
                 mark_row_updated(item, True)
                 if hasattr(self, '_apply_glossary_column_filters'):
@@ -11369,162 +9510,41 @@ Do not stop after the glossary."""
         self._show_tree_context_menu_slot = show_tree_context_menu
 
         def _editor_associated_source_path():
-            glossary_path = self.editor_file_entry.text()
-            try:
-                mapped = (
+            return glossary_document.editor_associated_source_path(
+                self.editor_file_entry.text(),
+                (
                     getattr(self, '_editor_glossary_source_map', None)
                     or getattr(self, '_editor_glossary_epub_map', {})
                     or {}
-                )
-                if glossary_path in mapped and os.path.exists(mapped[glossary_path]):
-                    return mapped[glossary_path]
-            except Exception:
-                pass
-            try:
-                source_paths = [
-                    path
-                    for path in self._glossary_editor_input_sources()
-                    if os.path.exists(path)
-                ]
-                if len(source_paths) == 1:
-                    return source_paths[0]
-            except Exception:
-                pass
-            for getter_name in ('get_current_epub_path',):
-                try:
-                    getter = getattr(self, getter_name, None)
-                    if callable(getter):
-                        path = getter()
-                        if path and str(path).lower().endswith('.epub') and os.path.exists(path):
-                            return path
-                except Exception:
-                    pass
-            for attr_name in ('file_path',):
-                try:
-                    path = getattr(self, attr_name, None)
-                    if path and str(path).lower().endswith('.epub') and os.path.exists(path):
-                        return path
-                except Exception:
-                    pass
-            try:
-                path = self.config.get('last_epub_path') if hasattr(self, 'config') else None
-                if path and str(path).lower().endswith('.epub') and os.path.exists(path):
-                    return path
-            except Exception:
-                pass
-            return None
+                ),
+                self._glossary_editor_input_sources,
+                getattr(self, 'get_current_epub_path', None),
+                getattr(self, 'file_path', None),
+                self.config if hasattr(self, 'config') else None,
+            )
 
         def _editor_tree_usage_entries():
-            entries = []
             fields, specs = _editor_data_row_specs()
-            for source_idx, _source_ref, source_entry in specs:
-                entry = {'source_index': source_idx}
-                for field in fields:
-                    value = source_entry.get(field, '') if isinstance(source_entry, dict) else ''
-                    if isinstance(value, list):
-                        value = ', '.join(str(v) for v in value)
-                    elif isinstance(value, dict):
-                        value = ', '.join(f"{k}: {v}" for k, v in value.items())
-                    elif value is None:
-                        value = ''
-                    entry[field] = str(value)
-                if not entry.get('raw_name'):
-                    for fallback in ('original_name', 'original'):
-                        if entry.get(fallback):
-                            entry['raw_name'] = entry.get(fallback)
-                            break
-                if not entry.get('translated_name'):
-                    for fallback in ('name', 'translated'):
-                        if entry.get(fallback):
-                            entry['translated_name'] = entry.get(fallback)
-                            break
-                entries.append(entry)
-            return entries
+            return glossary_document.editor_usage_entries(fields, specs)
 
         def _editor_output_dir_from_source(source_path):
-            if not source_path:
-                return None
-            try:
-                resolver = getattr(self, '_resolve_open_output_folder_for_file', None)
-                if callable(resolver):
-                    resolved = resolver(source_path)
-                    if resolved and os.path.isdir(resolved):
-                        return resolved
-            except Exception:
-                pass
-            file_base = os.path.splitext(os.path.basename(source_path))[0]
-            candidates = []
-            override_dir = None
-            try:
-                for value in (
-                    os.environ.get('OUTPUT_DIRECTORY'),
-                    os.environ.get('OUTPUT_DIR'),
-                    self.config.get('output_directory') if hasattr(self, 'config') else None,
-                ):
-                    value = str(value or '').strip().strip('"')
-                    if value:
-                        override_dir = value
-                        break
-            except Exception:
-                override_dir = None
-            if override_dir:
-                candidates.append(os.path.join(os.path.abspath(override_dir), file_base))
-            try:
-                base_dir_getter = getattr(self, '_get_output_base_dir', None)
-                if callable(base_dir_getter):
-                    candidates.append(os.path.join(base_dir_getter(source_path), file_base))
-            except Exception:
-                pass
-            candidates.append(os.path.join(os.path.dirname(os.path.abspath(source_path)), file_base))
-            candidates.append(os.path.abspath(file_base))
-            for candidate in candidates:
-                if candidate and os.path.isdir(candidate):
-                    return candidate
-            return None
+            return glossary_document.editor_output_dir_from_source(
+                source_path,
+                self.config if hasattr(self, 'config') else None,
+                getattr(self, '_resolve_open_output_folder_for_file', None),
+                getattr(self, '_get_output_base_dir', None),
+            )
 
         def _editor_output_dir_from_glossary(glossary_path):
-            if not glossary_path or not os.path.exists(glossary_path):
-                return None
-            try:
-                mapped = (
+            return glossary_document.editor_output_dir_from_glossary(
+                glossary_path,
+                (
                     getattr(self, '_editor_glossary_source_map', None)
                     or getattr(self, '_editor_glossary_epub_map', {})
                     or {}
-                )
-                source_path = mapped.get(glossary_path)
-                if source_path:
-                    resolved = _editor_output_dir_from_source(source_path)
-                    if resolved:
-                        return resolved
-            except Exception:
-                pass
-            glossary_dir = os.path.dirname(os.path.abspath(glossary_path))
-            glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]
-            parent_of_glossary_dir = os.path.dirname(glossary_dir)
-            is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
-            is_book_glossary_subfolder = os.path.basename(parent_of_glossary_dir).lower() == 'glossary'
-
-            if is_shared_glossary_folder:
-                book_name = None
-                for suffix in ('_glossary', '_Glossary'):
-                    if glossary_fname.endswith(suffix):
-                        book_name = glossary_fname[:-len(suffix)]
-                        break
-                if not book_name:
-                    book_name = glossary_fname
-                if book_name:
-                    candidate = os.path.join(parent_of_glossary_dir, book_name)
-                    if os.path.isdir(candidate):
-                        return candidate
-                return parent_of_glossary_dir if os.path.isdir(parent_of_glossary_dir) else None
-
-            if is_book_glossary_subfolder:
-                book_name = os.path.basename(glossary_dir)
-                grandparent = os.path.dirname(parent_of_glossary_dir)
-                candidate = os.path.join(grandparent, book_name)
-                return candidate if os.path.isdir(candidate) else grandparent
-
-            return glossary_dir if os.path.isdir(glossary_dir) else None
+                ),
+                _editor_output_dir_from_source,
+            )
 
         def _editor_translated_output_dir():
             source_dir = _editor_output_dir_from_source(
@@ -11533,58 +9553,6 @@ Do not stop after the glossary."""
             if source_dir:
                 return source_dir
             return _editor_output_dir_from_glossary(self.editor_file_entry.text())
-
-        def _editor_translated_output_files(output_dir):
-            if not output_dir or not os.path.isdir(output_dir):
-                return []
-            readable_exts = {'.html', '.htm', '.xhtml', '.xml', '.txt', '.md'}
-            excluded_names = {
-                'metadata.json',
-                'metadata.opf',
-                'metadata.xml',
-                'content.opf',
-                'toc.ncx',
-                'glossary.csv',
-                'glossary.json',
-                'translation_progress.json',
-            }
-            paths = []
-            for name in sorted(os.listdir(output_dir)):
-                path = os.path.join(output_dir, name)
-                if not os.path.isfile(path):
-                    continue
-                lower_name = name.lower()
-                if lower_name in excluded_names:
-                    continue
-                if os.path.splitext(lower_name)[1] not in readable_exts:
-                    continue
-                paths.append(path)
-            return paths
-
-        def _read_translated_output_texts(paths, progress_callback=None):
-            texts = []
-            errors = []
-            total_files = len(paths or [])
-            last_progress_emit = 0.0
-            for file_idx, path in enumerate(paths, start=1):
-                try:
-                    with open(path, 'rb') as f:
-                        raw_bytes = f.read()
-                    try:
-                        content = raw_bytes.decode('utf-8')
-                    except UnicodeDecodeError:
-                        content = raw_bytes.decode('utf-8', errors='replace')
-                    if os.path.splitext(path)[1].lower() in {'.html', '.htm', '.xhtml', '.xml'}:
-                        content = html_to_text(content)
-                    texts.append(content)
-                except Exception as exc:
-                    errors.append(f"Failed to read translated output file for hide-unused: {path}: {exc}")
-                if callable(progress_callback):
-                    now = time.monotonic()
-                    if file_idx == total_files or now - last_progress_emit >= 0.5:
-                        progress_callback(file_idx, total_files, os.path.basename(path))
-                        last_progress_emit = now
-            return texts, errors
 
         def _set_all_editor_rows_visible(final_stats_text=None):
             _populate_editor_tree_from_data_batched(final_stats_text=final_stats_text)
@@ -11688,85 +9656,7 @@ Do not stop after the glossary."""
                     except RuntimeError:
                         pass
 
-                try:
-                    output_files = _editor_translated_output_files(output_dir)
-                    if not output_files:
-                        result = {
-                            'ok': True,
-                            'token': token,
-                            'output_dir': output_dir,
-                            'no_files': True,
-                            'total': total,
-                        }
-                    else:
-                        output_texts, errors = _read_translated_output_texts(
-                            output_files,
-                            progress_callback=lambda current, total_files, _name: emit_progress(
-                                {
-                                    'stage': 'reading',
-                                    'current': current,
-                                    'total_files': total_files,
-                                }
-                            ),
-                        )
-                        emit_progress({'stage': 'starting', 'total': total, 'total_files': len(output_texts)})
-                        output_index = build_prepared_output_index(output_texts)
-                        used_rows = []
-
-                        def _source_idx_for_entry(entry, fallback_idx):
-                            source_idx = entry.get('source_index', fallback_idx)
-                            try:
-                                return int(source_idx)
-                            except (TypeError, ValueError):
-                                return fallback_idx
-
-                        if entries and output_index['outputs']:
-                            # Token-set matching is ~microseconds per entry, so a plain
-                            # loop in this worker thread keeps the UI responsive without
-                            # the overhead (and GIL ping-pong) of a thread pool.
-                            checked = 0
-                            last_emit = 0.0
-                            for fallback_idx, entry in enumerate(entries):
-                                source_idx = _source_idx_for_entry(entry, fallback_idx)
-                                if entry_matches_output_index(entry, output_index):
-                                    used_rows.append(source_idx)
-                                checked += 1
-                                now = time.monotonic()
-                                if checked == total or now - last_emit >= 0.5:
-                                    emit_progress(
-                                        {
-                                            'stage': 'matching',
-                                            'checked': checked,
-                                            'total': total,
-                                            'used': len(used_rows),
-                                        }
-                                    )
-                                    last_emit = now
-                        else:
-                            emit_progress(
-                                {
-                                    'stage': 'matching',
-                                    'checked': total,
-                                    'total': total,
-                                    'used': 0,
-                                }
-                            )
-                        result = {
-                            'ok': True,
-                            'token': token,
-                            'output_dir': output_dir,
-                            'used_rows': sorted(set(used_rows)),
-                            'errors': errors,
-                            'total': total,
-                        }
-                except Exception as exc:
-                    result = {
-                        'ok': False,
-                        'token': token,
-                        'output_dir': output_dir,
-                        'error': str(exc),
-                        'total': total,
-                    }
+                result = glossary_document.compute_used_rows(entries, output_dir, total, token, emit_progress)
                 try:
                     self._hide_unused_filter_bridge.finished.emit(result)
                 except RuntimeError:
@@ -11808,19 +9698,23 @@ Do not stop after the glossary."""
                     return
                 if text != getattr(self, "_last_find_text", ""):
                     self._last_find_pos = -1
-                text_lower = text.lower()
-                start = (getattr(self, "_last_find_pos", -1) + 1) % total
-                for offset in range(total):
-                    idx = (start + offset) % total
+                idx = glossary_document.find_next_index(
+                    text,
+                    total,
+                    lambda row: [
+                        self.glossary_tree.topLevelItem(row).text(c)
+                        for c in range(self.glossary_tree.topLevelItem(row).columnCount())
+                    ],
+                    getattr(self, "_last_find_pos", -1),
+                )
+                if idx is not None:
                     item = self.glossary_tree.topLevelItem(idx)
-                    cols = [item.text(c) for c in range(item.columnCount())]
-                    if any(text_lower in c.lower() for c in cols):
-                        self.glossary_tree.setCurrentItem(item)
-                        self.glossary_tree.scrollToItem(item)
-                        self._last_find_text = text
-                        self._last_find_pos = idx
-                        status_label.setText(f"Found at row {idx + 1}")
-                        return
+                    self.glossary_tree.setCurrentItem(item)
+                    self.glossary_tree.scrollToItem(item)
+                    self._last_find_text = text
+                    self._last_find_pos = idx
+                    status_label.setText(f"Found at row {idx + 1}")
+                    return
                 status_label.setText("No matches found.")
 
             def replace_in_item(item):
@@ -11830,58 +9724,22 @@ Do not stop after the glossary."""
                 if not text or item is None:
                     return 0
 
-                pattern = re.compile(re.escape(text), re.IGNORECASE)
-                replacements = 0
-
-                for col_idx in range(1, item.columnCount()):
-                    before = item.text(col_idx)
-                    after, count = pattern.subn(repl, before)
-                    if count == 0:
-                        continue
-
-                    item.setText(col_idx, after)
-                    col_key = self.glossary_column_fields[col_idx - 1] if self.glossary_column_fields else None
-
-                    if self.current_glossary_format in ['list', 'token_csv']:
-                        try:
-                            row_idx = int(item.data(0, Qt.UserRole))
-                        except Exception:
-                            row_idx = -1
-                        if 0 <= row_idx < len(self.current_glossary_data) and col_key:
-                            entry = self.current_glossary_data[row_idx]
-                            if col_key == '_section':
-                                entry['_section'] = after
-                            elif after:
-                                entry[col_key] = after
-                            elif col_key in {'type', 'raw_name', 'translated_name', 'gender', 'description'}:
-                                entry[col_key] = ''
-                            else:
-                                entry.pop(col_key, None)
-
-                    elif self.current_glossary_format == 'dict':
-                        key = item.data(0, Qt.UserRole)
-                        entries = self.current_glossary_data.get('entries', {})
-                        if col_key == 'original':
-                            value = entries.pop(key, None)
-                            new_key = after if after else key
-                            entries[new_key] = value
-                            item.setData(0, Qt.UserRole, new_key)
-                        elif col_key == 'translated' and key in entries:
-                            entries[key] = after
-
-                    replacements += count
-                    update_row_highlight(item, col_key, after)
-
-                return replacements
+                return glossary_document.replace_in_row(
+                    self,
+                    _EditorTreeRow(item),
+                    self.glossary_column_fields,
+                    text,
+                    repl,
+                    on_replaced=lambda col_key, after: update_row_highlight(item, col_key, after),
+                )
 
             def replace_current():
                 item = self.glossary_tree.currentItem()
                 find_text = find_edit.text()
                 # Only snapshot the undo state if this row actually contains a
                 # match, so a no-op Replace doesn't waste an undo step.
-                will_change = bool(find_text) and item is not None and any(
-                    re.search(re.escape(find_text), item.text(c), re.IGNORECASE)
-                    for c in range(1, item.columnCount())
+                will_change = glossary_document.row_has_match(
+                    _EditorTreeRow(item) if item is not None else None, find_text
                 )
                 if will_change and hasattr(self, '_push_undo_snapshot'):
                     self._push_undo_snapshot()
@@ -11924,8 +9782,8 @@ Do not stop after the glossary."""
                     new = replace_edit.text()
                     prompt = QMessageBox(self.dialog)
                     prompt.setIcon(QMessageBox.Question)
-                    prompt.setWindowTitle("No glossary match")
-                    prompt.setText("No entry found in the glossary. Update output files directly?")
+                    prompt.setWindowTitle(glossary_document.NO_GLOSSARY_MATCH_TITLE)
+                    prompt.setText(glossary_document.NO_GLOSSARY_MATCH_TEXT)
                     prompt.setInformativeText(f"{old} -> {new}")
                     prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                     prompt.setDefaultButton(QMessageBox.Yes)
@@ -12069,63 +9927,8 @@ Do not stop after the glossary."""
         # physically copies the glossary into the selected EPUB's output
         # folder as glossary.csv — same shape that running translation
         # produces — so the translator picks it up on next run.
-        def _resolve_epub_output_dir(epub_path):
-            """Return (output_dir, file_base) using the same rules as the
-            translator / retranslation GUI. Creates the folder when it
-            doesn't exist (mirrors Retranslation_GUI's auto-create logic).
-            """
-            if not epub_path:
-                return None, None
-            file_base = os.path.splitext(os.path.basename(epub_path))[0]
-            override_dir = None
-            try:
-                # Check every path used across the codebase:
-                #   - OUTPUT_DIRECTORY / OUTPUT_DIR env vars
-                #   - config['output_directory']
-                # Trim whitespace + treat empty strings as "no override".
-                _candidates = [
-                    os.environ.get('OUTPUT_DIRECTORY'),
-                    os.environ.get('OUTPUT_DIR'),
-                ]
-                if hasattr(self, 'config'):
-                    _candidates.append(self.config.get('output_directory'))
-                for _c in _candidates:
-                    if _c is None:
-                        continue
-                    _c = str(_c).strip().strip('"')
-                    if _c:
-                        override_dir = _c
-                        break
-            except Exception:
-                override_dir = None
-            if override_dir:
-                output_dir = os.path.join(os.path.abspath(override_dir), file_base)
-            else:
-                output_dir = file_base
-            # macOS .app bundles can run with cwd='/' (read-only). Anchor
-            # relative output paths against the source EPUB's directory in
-            # that case — matches Retranslation_GUI's behavior.
-            try:
-                import sys as _sys
-                if _sys.platform == 'darwin' and not os.path.isabs(output_dir):
-                    output_dir = os.path.join(os.path.dirname(os.path.abspath(epub_path)), output_dir)
-            except Exception:
-                pass
-            if not os.path.exists(output_dir):
-                try:
-                    os.makedirs(output_dir, exist_ok=True)
-                    # Seed an empty progress file so the retranslation GUI
-                    # can discover this folder later without regenerating it.
-                    progress_file_path = os.path.join(output_dir, "translation_progress.json")
-                    if not os.path.exists(progress_file_path):
-                        empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
-                        with open(progress_file_path, 'w', encoding='utf-8') as _f:
-                            json.dump(empty_prog, _f, ensure_ascii=False, indent=2)
-                    self.append_log(f"\U0001F4C1 Created output folder: {output_dir}")
-                except Exception as _e:
-                    self.append_log(f"\u26a0\ufe0f Failed to create output folder: {_e}")
-                    return None, file_base
-            return output_dir, file_base
+        # _resolve_epub_output_dir: glossary_document.resolve_epub_output_dir (U6).
+
 
         def load_current_glossary_as_manual():
             # Multi-EPUB case: never force one glossary onto all inputs —
@@ -12266,45 +10069,26 @@ Do not stop after the glossary."""
             # this code for the single-EPUB (or no-selection) path.
             if _is_manual_only:
                 try:
-                    import shutil as _shutil
                     # Try every source the main translator uses to know
                     # which EPUB is "current":
                     #   1. selected_files (a single EPUB)
                     #   2. EPUB_PATH env var
                     #   3. config['last_epub_path']
-                    epub_path = None
-                    try:
-                        selected = list(getattr(self, 'selected_files', []) or [])
-                        epubs = [p for p in selected if str(p).lower().endswith('.epub')]
-                        if len(epubs) == 1:
-                            epub_path = epubs[0]
-                        if not epub_path:
-                            _env_ep = os.environ.get('EPUB_PATH')
-                            if _env_ep and os.path.isfile(_env_ep) and _env_ep.lower().endswith('.epub'):
-                                epub_path = _env_ep
-                        if not epub_path:
-                            _last = self.config.get('last_epub_path') if hasattr(self, 'config') else None
-                            if _last and os.path.isfile(_last) and _last.lower().endswith('.epub'):
-                                epub_path = _last
-                    except Exception:
-                        pass
+                    epub_path = glossary_document.manual_only_epub_path(
+                        getattr(self, 'selected_files', []),
+                        self.config if hasattr(self, 'config') else None,
+                    )
                     if not epub_path:
                         self.append_log(
                             "\u26a0\ufe0f Manual Glossary Only: no EPUB selected — skipping output-folder copy."
                         )
                     else:
-                        out_dir, _base = _resolve_epub_output_dir(epub_path)
-                        if out_dir:
-                            dest = os.path.join(out_dir, "glossary.csv")
-                            if os.path.abspath(path) == os.path.abspath(dest):
-                                self.append_log(
-                                    f"\U0001F4CE Glossary already at output path: {dest}"
-                                )
-                            else:
-                                _shutil.copy2(path, dest)
-                                self.append_log(
-                                    f"\U0001F4CE Copied glossary to EPUB output: {dest}"
-                                )
+                        glossary_document.copy_glossary_to_epub_output(
+                            path,
+                            epub_path,
+                            self.config if hasattr(self, 'config') else None,
+                            self.append_log,
+                        )
                 except Exception as e:
                     self.append_log(
                         f"\u26a0\ufe0f Failed to copy glossary to EPUB output folder: {e}"
@@ -12464,68 +10248,14 @@ Do not stop after the glossary."""
                     def _row_key(item):
                         return tuple(item.text(c) for c in range(1, item.columnCount()))
 
-                    old_content = {}
-                    for i, cols in old_rows.items():
-                        key = cols[1:]  # skip row # column
-                        old_content[key] = i
-                    new_content = {}
-                    new_count = self.glossary_tree.topLevelItemCount()
-                    for i in range(new_count):
-                        item = self.glossary_tree.topLevelItem(i)
-                        if item:
-                            new_content[_row_key(item)] = i
-
-                    old_keys = set(old_content.keys())
-                    new_keys = set(new_content.keys())
-                    added_keys = new_keys - old_keys    # new or modified entries
-                    deleted_keys = old_keys - new_keys  # removed entries
-
-                    flash_indices = []  # (index, color)
-                    _used_positions = set()
-
-                    # Greedy pair: match each deleted key to nearest added key = modification (orange)
-                    remaining_added = {k: new_content[k] for k in added_keys}
-                    remaining_deleted = {k: old_content[k] for k in deleted_keys}
-                    matched_added = set()
-                    matched_deleted = set()
-                    for d_key in sorted(remaining_deleted, key=lambda k: remaining_deleted[k]):
-                        d_pos = remaining_deleted[d_key]
-                        best_a, best_dist = None, float('inf')
-                        for a_key in remaining_added:
-                            if a_key in matched_added:
-                                continue
-                            dist = abs(remaining_added[a_key] - d_pos)
-                            if dist < best_dist:
-                                best_dist = dist
-                                best_a = a_key
-                        if best_a is not None:
-                            matched_added.add(best_a)
-                            matched_deleted.add(d_key)
-                            idx = remaining_added[best_a]
-                            flash_indices.append((idx, "#eab308"))  # yellow = modified
-                            _used_positions.add(idx)
-
-                    # Green for truly new rows (unmatched adds)
-                    for key in added_keys - matched_added:
-                        idx = new_content[key]
-                        flash_indices.append((idx, "#15803d"))
-                        _used_positions.add(idx)
-
-                    # Red for truly deleted rows (unmatched deletes)
-                    for key in deleted_keys - matched_deleted:
-                        old_idx = old_content[key]
-                        nearest = min(old_idx, new_count - 1) if new_count > 0 else -1
-                        if nearest >= 0 and nearest not in _used_positions:
-                            flash_indices.append((nearest, "#dc2626"))
-                            _used_positions.add(nearest)
-
-                    # Fallback: duplicate rows (content keys same but count changed)
-                    if not flash_indices and new_count != len(old_rows):
-                        if new_count > len(old_rows):
-                            for idx in range(len(old_rows), new_count):
-                                flash_indices.append((idx, "#15803d"))
-                        else:
-                            flash_indices.append((max(0, new_count - 1), "#dc2626"))
+                    flash_indices = glossary_document.reload_flash_rows(
+                        old_rows,
+                        [
+                            _row_key(self.glossary_tree.topLevelItem(i))
+                            if self.glossary_tree.topLevelItem(i) else None
+                            for i in range(self.glossary_tree.topLevelItemCount())
+                        ],
+                    )
 
                     if flash_indices:
                         # Save and clear selection so flash isn't hidden behind blue
@@ -12674,43 +10404,17 @@ Do not stop after the glossary."""
        entry.selectAll()
        
        def save_edit():
-           new_value = entry.toPlainText()
-           if str(col_key).strip().lower() == 'gender':
-               new_value = display_gender(new_value)
+           new_value = glossary_document.normalize_edit_value(col_key, entry.toPlainText())
            item.setText(column_idx, new_value)
            # Snapshot before mutation for undo
            if hasattr(self, '_push_undo_snapshot'):
                self._push_undo_snapshot()
            
-           try:
-               row_idx = int(item.data(0, Qt.UserRole))
-           except Exception:
-               row_idx = -1
-           
-           if self.current_glossary_format in ['list', 'token_csv']:
-               if 0 <= row_idx < len(self.current_glossary_data):
-                   data_entry = self.current_glossary_data[row_idx]
-                   # Standard fields must be kept as empty strings, not removed,
-                   # to avoid losing columns (e.g. gender) when saved.
-                   _standard_fields = {'type', 'raw_name', 'translated_name', 'gender', 'description'}
-                   if new_value:
-                       data_entry[col_key] = new_value
-                   elif col_key in _standard_fields:
-                       data_entry[col_key] = ''
-                   else:
-                       data_entry.pop(col_key, None)
-           
-           elif self.current_glossary_format == 'dict':
-               key = item.data(0, Qt.UserRole)
-               entries = self.current_glossary_data.get('entries', {})
-               if key in entries:
-                   if col_key == 'original':
-                       value = entries.pop(key)
-                       new_key = new_value or key
-                       entries[new_key] = value
-                       item.setData(0, Qt.UserRole, new_key)
-                   elif col_key == 'translated':
-                       entries[key] = new_value
+           row_idx, new_ref, ref_changed = glossary_document.apply_entry_edit(
+               self, item.data(0, Qt.UserRole), col_key, new_value
+           )
+           if ref_changed:
+               item.setData(0, Qt.UserRole, new_ref)
            # Local highlight update to mark changed translated fields
            if col_key in ['translated_name', 'translated']:
                try:
@@ -12801,11 +10505,7 @@ Do not stop after the glossary."""
         
         # Get current file path
         current_path = self.editor_file_entry.text()
-        if current_path:
-            default_csv_path = current_path.replace('.json', '.csv')
-        else:
-            override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
-            default_csv_path = os.path.join(os.path.abspath(override_dir) if override_dir else os.getcwd(), "glossary.csv")
+        default_csv_path = glossary_document.default_convert_path(current_path, self.config)
         
         # Ask user for CSV save location
         csv_path, _ = QFileDialog.getSaveFileName(
@@ -12819,169 +10519,11 @@ Do not stop after the glossary."""
             return
         
         try:
-            # Check whether to use legacy CSV or token-efficient format
-            use_legacy = self.config.get('glossary_use_legacy_csv', False)
-            
-            # Get custom types for gender info
-            custom_types = self.config.get('custom_entry_types', {
-                'character': {'enabled': True, 'has_gender': True},
-                'terms': {'enabled': True, 'has_gender': False},
-                'surnames': {'enabled': True, 'has_gender': False},
-                'titles': {'enabled': True, 'has_gender': True},
-                'locations': {'enabled': True, 'has_gender': False},
-                'nicknames': {'enabled': True, 'has_gender': True}
-            })
-            
-            # Get custom fields
-            custom_fields = self.config.get('custom_glossary_fields', [])
-
-            # ── Normalise entries to new-format dicts (type/raw_name/translated_name/gender) ──
-            entries = []
-            if isinstance(self.current_glossary_data, list) and self.current_glossary_data:
-                if 'type' in self.current_glossary_data[0]:
-                    # Already new format
-                    entries = list(self.current_glossary_data)
-                else:
-                    # Old format → convert
-                    for entry in self.current_glossary_data:
-                        is_location = False
-                        if 'locations' in entry and entry['locations']:
-                            is_location = True
-                        elif 'title' in entry and any(term in str(entry.get('title', '')).lower()
-                                                      for term in ['location', 'place', 'city', 'region']):
-                            is_location = True
-                        entry_type = 'terms' if is_location else 'character'
-                        type_config = custom_types.get(entry_type, {})
-                        new_entry = {
-                            'type': entry_type,
-                            'raw_name': entry.get('original_name', entry.get('original', '')),
-                            'translated_name': entry.get('name', entry.get('translated', '')),
-                            'gender': entry.get('gender', 'Unknown') if type_config.get('has_gender', False) else '',
-                        }
-                        desc = entry.get('description', '')
-                        if desc:
-                            new_entry['description'] = desc
-                        entries.append(new_entry)
-            elif isinstance(self.current_glossary_data, dict):
-                # Dict format (key→value pairs)
-                src = self.current_glossary_data.get('entries', self.current_glossary_data)
-                for original, translated in src.items():
-                    entries.append({
-                        'type': 'terms',
-                        'raw_name': original,
-                        'translated_name': translated,
-                        'gender': '',
-                    })
-
-            if not entries:
+            fmt_label = glossary_document.convert_to_csv(self, csv_path, self.config)
+            if fmt_label is None:
                 QMessageBox.critical(self.dialog, "Error", "No entries to export")
                 return
 
-            if use_legacy:
-                # ── Legacy CSV format ────────────────────────────────────────
-                import csv
-                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-                    writer = csv.writer(f)
-                    header = ['type', 'raw_name', 'translated_name', 'gender']
-                    if custom_fields:
-                        header.extend(custom_fields)
-                    writer.writerow(header)
-                    for entry in entries:
-                        entry_type = entry.get('type', 'terms')
-                        type_config = custom_types.get(entry_type, {})
-                        row = [
-                            entry_type,
-                            entry.get('raw_name', ''),
-                            entry.get('translated_name', ''),
-                            entry.get('gender', '') if type_config.get('has_gender', False) else '',
-                        ]
-                        for field in custom_fields:
-                            row.append(entry.get(field, ''))
-                        writer.writerow(row)
-            else:
-                # ── Token-efficient format (sectioned, bullet-style) ─────────
-                sections = getattr(self, 'current_glossary_sections', []) or []
-                if not sections:
-                    # Build sections from entry types
-                    seen = set()
-                    for e in entries:
-                        sec = e.get('_section')
-                        if not sec:
-                            t = e.get('type', 'terms').upper()
-                            sec = t + 'S' if not t.endswith('S') else t
-                        if sec not in seen:
-                            sections.append(sec)
-                            seen.add(sec)
-
-                grouped = {sec: [] for sec in sections}
-                default_map = {'character': 'CHARACTERS', 'terms': 'TERMS'}
-                for entry in entries:
-                    sec = entry.get('_section')
-                    if not sec:
-                        t = entry.get('type', 'terms')
-                        sec = default_map.get(t)
-                        if not sec:
-                            sec = t.upper() + ('S' if not t.upper().endswith('S') else '')
-                    if sec not in grouped:
-                        grouped[sec] = []
-                        sections.append(sec)
-                    grouped[sec].append(entry)
-
-                # Build header columns
-                standard_cols = ['raw_name', 'translated_name', 'gender', 'description']
-                pattern_fields = []
-                try:
-                    import PatternManager as _pm
-                    pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
-                    if isinstance(pf, (list, tuple)):
-                        pattern_fields = list(pf)
-                except Exception:
-                    pattern_fields = []
-
-                # Include any fields present in data that are not internal/standard
-                data_fields = []
-                for e in entries:
-                    for k in e.keys():
-                        if k.startswith('_') or k in ['type'] + standard_cols:
-                            continue
-                        if k not in custom_fields and k not in pattern_fields and k not in data_fields:
-                            data_fields.append(k)
-                header_cols = standard_cols + pattern_fields + custom_fields + data_fields
-
-                lines = [f"Glossary Columns: {', '.join(header_cols)}", ""]
-                for sec in sections:
-                    sec_entries = grouped.get(sec, [])
-                    if not sec_entries:
-                        continue
-                    lines.append(f"=== {sec} ===")
-                    for e in sec_entries:
-                        translated = e.get('translated_name', '')
-                        raw_name = e.get('raw_name', '')
-                        gender = e.get('gender', '')
-                        desc = e.get('description', '')
-
-                        line = f"* {raw_name} = {translated}" if raw_name else f"* {translated}"
-                        if gender:
-                            line += f" [{gender}]"
-                        extra_tail = []
-                        for col in header_cols:
-                            if col in ['translated_name', 'raw_name', 'gender', 'description']:
-                                continue
-                            val = e.get(col, '')
-                            if val:
-                                extra_tail.append(f"{col}: {val}")
-                        if desc:
-                            line += f": {desc}"
-                        if extra_tail:
-                            tail_str = " | ".join(extra_tail)
-                            line += f" | {tail_str}" if desc else f": {tail_str}"
-                        lines.append(line)
-                    lines.append("")
-
-                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-                    f.write("\n".join(lines).rstrip() + "\n")
-
-            fmt_label = "legacy CSV" if use_legacy else "token-efficient"
             QMessageBox.information(self.dialog, "Success", f"Glossary exported to {fmt_label} format:\n{csv_path}")
             self.append_log(f"✅ Exported glossary to {fmt_label} format: {csv_path}")
 

@@ -28,7 +28,7 @@ __all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "RO
 log = logging.getLogger("glossarion.ui")
 
 # Milestones whose surfaces exist in this build.
-SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5"})
+SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6"})
 
 ROUTE_ICONS = {
     "library": "LOCAL_LIBRARY",
@@ -52,6 +52,9 @@ class Screen:
     """Base class: override ``build_body`` (and optionally ``actions``/``dispose``)."""
 
     title = ""
+    #: The title Text the shell built for this screen (phone app bar / tablet main-area bar); a screen
+    #: whose title changes while it is shown sets its ``value`` and updates it.
+    app_bar_title: Optional[ft.Text] = None
 
     def __init__(self, match: Optional[RouteMatch] = None) -> None:
         self.match = match
@@ -83,6 +86,10 @@ class Screen:
         back leaves selection mode before it leaves the screen). A screen that overrides this
         gets a View that asks before popping (``can_pop=False`` + ``on_confirm_pop``)."""
         return False
+
+    # A screen holding unsaved work may define ``async def confirm_leave(self) -> bool``: the app awaits
+    # it before a navigation disposes the screen (drawer / sidebar destination, chat row, a link from
+    # outside the app, a View popped below it); False cancels that navigation (GlossaryScreen).
 
 
 def intercepts_back(screen: Any) -> bool:
@@ -169,10 +176,12 @@ def build_screen_view(screen: Screen, route: str) -> ft.View:
     custom = getattr(screen, "build_view", None)
     if callable(custom):
         return custom(route)
+    title = ft.Text(screen.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600)
+    screen.app_bar_title = title
     view = ft.View(
         route=route,
         appbar=ft.AppBar(
-            title=ft.Text(screen.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600),
+            title=title,
             actions=screen.actions() or None,
             bgcolor=ft.Colors.SURFACE,
             elevation_on_scroll=0,

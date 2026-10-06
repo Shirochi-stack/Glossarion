@@ -124,9 +124,18 @@ class JobKind(str, enum.Enum):
     TRANSLATE = "translate"
     DIRECT_TEXT = "direct_text"
     EXTRACT_GLOSSARY = "extract_glossary"
+    GLOSSARY_REFINE = "glossary_refine"
+    UNIFIED_GLOSSARY = "unified_glossary"
+    PARALLEL_PAIR = "parallel_pair"
     COMPILE_EPUB = "compile_epub"
     COMPILE_PDF = "compile_pdf"
     SINGLE_CHAPTER = "single_chapter"
+    # U6 tools
+    QA_SCAN = "qa_scan"
+    VALIDATE_EPUB = "validate_epub"
+    RENAME_OUTPUTS = "rename_outputs"
+    TRANSLATE_HEADERS = "translate_headers"
+    METADATA = "metadata"
 
 
 class JobState(str, enum.Enum):
@@ -752,12 +761,39 @@ class JobBackend:
 
         Not replayed (recorded divergences): ``save_config`` (mobile never persists on a
         stop), the 500 ms ``_reset_stop_flags_if_idle`` timer (the next job's
-        ``reset_for_new_run`` resets them). Glossary jobs (``kind='glossary'``) take this
-        same protocol: it latches the owner's ``stop_requested``, which the glossary
-        extractor's stop callback polls, and touches GLOSSARY_STOP_FILE on an immediate stop
-        (the desktop's separate ``stop_glossary_extraction`` stays with its button).
+        ``reset_for_new_run`` resets them). Glossary jobs (``kind='glossary'``) take the
+        desktop ``stop_glossary_extraction`` protocol, ``stop_control.request_glossary_stop``
+        (U6: GRACEFUL_STOP, HTTP log suppression, the latch, the immediate-stop flags and the
+        run-id-guarded cleanup that kills the helper processes and touches GLOSSARY_STOP_FILE);
+        a forced stop is the desktop's double-click (graceful False). A build without it falls
+        back to the translation protocol above (it latches the owner's ``stop_requested``,
+        which the glossary extractor's stop callback polls).
         """
         stop_control = self._module("stop_control")
+        glossary_stop = getattr(stop_control, "request_glossary_stop", None) if kind == "glossary" else None
+        if callable(glossary_stop):
+            if force:
+                graceful = False
+                if owner is not None:
+                    try:
+                        owner.graceful_stop_active = False
+                        owner._last_stop_was_graceful = False
+                    except Exception:
+                        pass
+                log("⚡ Double-click detected — forcing immediate stop!")
+
+            def glossary_stop_flag(value: bool) -> None:
+                # Desktop: the lazily loaded ``glossary_stop_flag`` global
+                # (extract_glossary_from_epub.set_stop_flag), set once the extractor is loaded.
+                module = sys.modules.get("extract_glossary_from_epub")
+                set_flag = getattr(module, "set_stop_flag", None) if module is not None else None
+                if callable(set_flag):
+                    set_flag(value)
+
+            glossary_stop(graceful=graceful, set_stop_requested=set_stop_requested, log=log,
+                          glossary_stop_flag=glossary_stop_flag,
+                          get_run_id=lambda: getattr(owner, "_glossary_run_id", None))
+            return
         if force:
             graceful = False
             if owner is not None:

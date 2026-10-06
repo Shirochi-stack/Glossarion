@@ -128,12 +128,25 @@ def test_refusal_defaults_are_one_list(tmp_path, monkeypatch):
     uac = pytest.importorskip("unified_api_client")
     monkeypatch.setenv("CONFIG_FILE", str(tmp_path / "missing.json"))
     assert uac.UnifiedClient._get_refusal_patterns(None) == list(kps.DEFAULT_REFUSAL_PATTERNS)
-    # the other copies in the tree still match (they should import key_pool_service one day)
+    # U6: the QA scanner and the translator's QA-failure check import this list (no copies left)
     scan = SRC / "scan_html_folder.py"
     tree = ast.parse(scan.read_text(encoding="utf-8-sig"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "DEFAULT_REFUSAL_PATTERNS":
-            assert ast.literal_eval(node.value) == list(kps.DEFAULT_REFUSAL_PATTERNS)
+    assert not [node for node in tree.body if isinstance(node, ast.Assign)
+                and getattr(node.targets[0], "id", "") == "DEFAULT_REFUSAL_PATTERNS"]
+    assert any(isinstance(node, ast.ImportFrom) and node.module == "key_pool_service"
+               and [(a.name, a.asname) for a in node.names] == [("DEFAULT_REFUSAL_PATTERNS", None)]
+               for node in tree.body)
+    tkr = ast.parse((SRC / "TransateKRtoEN.py").read_text(encoding="utf-8-sig"))
+    check = next(node for node in tkr.body if isinstance(node, ast.FunctionDef)
+                 and node.name == "is_qa_failed_response")
+    imports = [node for node in ast.walk(check) if isinstance(node, ast.ImportFrom)
+               and node.module == "key_pool_service"]
+    assert [(a.name, a.asname) for node in imports for a in node.names] == [
+        ("DEFAULT_REFUSAL_PATTERNS", "refusal_patterns")]
+    assert not [node for node in ast.walk(check) if isinstance(node, ast.Assign)
+                and getattr(node.targets[0], "id", "") == "refusal_patterns"]
+    scan_html_folder = pytest.importorskip("scan_html_folder")
+    assert scan_html_folder.DEFAULT_REFUSAL_PATTERNS is kps.DEFAULT_REFUSAL_PATTERNS
 
 
 def test_refusal_config_helpers():

@@ -104,9 +104,11 @@ class BookmarksSheet(_Sheet):
 
 
 class GlossaryEntryStub(_Sheet):
-    REASON = "Arrives in U6"
-    DETAIL = ("Adding terms from the Reader opens the glossary entry editor, which ships with the Glossary "
-              "Manager (U6). Copy the term for now.")
+    """Fallback when the Glossary Manager (GlossaryFeature) is not installed in this session."""
+
+    REASON = "Glossary Manager unavailable"
+    DETAIL = ("Adding terms from the Reader opens the Glossary Manager's entry editor, which is not available in "
+              "this session. Copy the term for now.")
 
     def __init__(self, term: str, *, on_copy: Callable[[str], Any], book_title: str = "") -> None:
         self.term = ft.TextField(label="Raw term", value=term, dense=True, key="gloss-raw")

@@ -50,7 +50,10 @@ What it does (plan section 9, build-ci design section 7.4):
    installed encryption keys, openai/pydantic/jiter, PyMuPDF, cv2, onnxruntime,
    16 MiB thread stacks, and ``library_reader``: a partly translated workspace of the
    self-test EPUB opened through the Library scan, Book page, Chapters tab and Reader
-   page builder over the bundled ``library_core`` / ``progress_core`` / ``reader_doc``)
+   page builder over the bundled ``library_core`` / ``progress_core`` / ``reader_doc``, and
+   ``glossary_qa``: a token-CSV glossary parsed, edited, saved and re-parsed through
+   ``glossary_document.GlossaryDocument`` plus a QA quick scan through
+   ``qa_scan_runtime.run_qa_scan_path``, which must run on threads)
    plus host checks:
    ``key_material`` (Fernet round trip through ``api_key_encryption`` with the injected
    key, no key file written), ``chapter_extractor_pool`` (``extract_chapters`` on the

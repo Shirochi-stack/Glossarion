@@ -236,6 +236,7 @@ class AppShell:
         self.tablet_title = ft.Text(
             entry.screen.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600, expand=True
         )
+        entry.screen.app_bar_title = self.tablet_title  # a screen that renames itself updates it
         self.tablet_back_button = ft.IconButton(
             icon=ft.Icons.ARROW_BACK, tooltip="Back", on_click=self._on_tablet_back, size_constraints=HIT_TARGET
         )
@@ -381,6 +382,43 @@ class AppShell:
             below.append(entry)
         return below
 
+    def _plan(self, match: RouteMatch, reset: bool, in_app: bool) -> tuple[list[RouteMatch], dict[str, StackEntry]]:
+        """The routes of the stack after showing ``match`` (a non-root route) and the current entries
+        by route, which ``show`` reuses for those routes and disposes otherwise."""
+        wanted = self._chain(match)
+        below = None if reset else self._push_base(match, wanted, in_app)
+        if below is not None:
+            # Pushed on top of the screens the user came from (UI_SPEC §1.6 rule 5).
+            existing = {entry.route: entry for entry in self.stack[len(below):]}
+            wanted = [entry.match for entry in below] + [match]
+            existing.update({entry.route: entry for entry in below})
+        else:
+            existing = {entry.route: entry for entry in self.stack}
+        return wanted, existing
+
+    def leaving_entries(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False) -> list[StackEntry]:
+        """The stack entries ``show(match, reset=, in_app=)`` would dispose (nothing changes): the app asks
+        their screens' ``confirm_leave`` first (unsaved edits)."""
+        presentation = match.presentation
+        if presentation in (HANDLED, SHEET):
+            return []
+        if presentation == ROOT:
+            if not self.stack and match.route == self.current.route:
+                return []
+            return list(self.stack)
+        wanted, existing = self._plan(match, reset, in_app)
+        for item in wanted:
+            existing.pop(item.route, None)
+        return list(existing.values())
+
+    def entries_above(self, view: Any) -> list[StackEntry]:
+        """The entries above the one whose View is ``view`` (tablet: main-area screens hidden behind a
+        full-screen View); ``pop_view(view)`` disposes them with it."""
+        for index, entry in enumerate(self.stack):
+            if entry.view is not None and entry.view is view:
+                return list(self.stack[index + 1:])
+        return []
+
     def show(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False) -> bool:
         """Show a whitelisted route. Returns False when nothing changed.
 
@@ -405,15 +443,7 @@ class AppShell:
             self.current = match
             self._install_views()
             return True
-        wanted = self._chain(match)
-        below = None if reset else self._push_base(match, wanted, in_app)
-        if below is not None:
-            # Pushed on top of the screens the user came from (UI_SPEC §1.6 rule 5).
-            existing = {entry.route: entry for entry in self.stack[len(below):]}
-            wanted = [entry.match for entry in below] + [match]
-            existing.update({entry.route: entry for entry in below})
-        else:
-            existing = {entry.route: entry for entry in self.stack}
+        wanted, existing = self._plan(match, reset, in_app)
         new_stack: list[StackEntry] = []
         created: list[StackEntry] = []
         for item in wanted:
@@ -450,17 +480,19 @@ class AppShell:
         self._install_views()
         return self.current_route
 
-    def pop_view(self, view: Any) -> str:
-        """``page.on_view_pop``: drop ``view`` (and anything above it)."""
+    def pop_view(self, view: Any, *, keep_above: bool = False) -> str:
+        """``page.on_view_pop``: drop ``view`` (and anything above it). ``keep_above``: drop only that
+        View's entry; the entries above it stay (a screen there kept its unsaved edits)."""
         if view is not None and view in self.overlays:
             index = self.overlays.index(view)
             del self.overlays[index:]
         else:
             for index, entry in enumerate(self.stack):
                 if entry.view is not None and entry.view is view:
-                    for removed in self.stack[index:]:
+                    end = index + 1 if keep_above else len(self.stack)
+                    for removed in self.stack[index:end]:
                         removed.screen.dispose()
-                    del self.stack[index:]
+                    del self.stack[index:end]
                     break
             else:
                 if self.overlays:

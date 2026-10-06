@@ -294,7 +294,8 @@ jobs:
         working-directory: src/mobile
         run: |
           # The device self-test suite "e2e" (glossarion_mobile/diagnostics/e2e.py) against app/backend, the
-          # exact module set the APK/IPA ship: chat + Balanced glossary approval, translate, compile, graceful
+          # exact module set the APK/IPA ship: chat + Balanced glossary approval, translate, compile, extract
+          # glossary -> edit -> save -> translate -> QA quick scan -> PDF via the PyMuPDF shim (U6), graceful
           # and force stop, kill & resume, process hygiene. tests_host/test_e2e_offline.py runs it on src/.
           rm -rf build/e2e
           mkdir -p build/e2e/data build/e2e/cache build/e2e/temp

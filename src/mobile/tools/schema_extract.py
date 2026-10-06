@@ -98,6 +98,10 @@ OWNER_MODULES = (
     # U4: GUI-free rules / catalog steps the TranslatorGUI handlers call (moved bodies)
     "settings_rules.py",
     "model_catalog_core.py",
+    # U6: the main window's glossary file actions and Parallel EPUB pair helpers (moved bodies,
+    # ``config`` in place of ``self.config``)
+    "glossary_files.py",
+    "parallel_epub_core.py",
     "translator_gui.py",
 )
 OWNER_CLASSES = ("TranslatorGUI",)          # plus every *Mixin class in OWNER_MODULES
@@ -107,6 +111,7 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     "direct_text_store.py",   # the Direct Text dialog's GUI-free halves (inherited by the dialog)
     "direct_text_stream.py",
     "GlossaryManager_GUI.py",
+    "glossary_document.py",   # U6: the Glossary Editor + prompt-profile helpers GlossaryManager_GUI calls
     "QA_Scanner_GUI.py",
     "manga_settings_dialog.py",
     "epub_library.py",
@@ -121,6 +126,12 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     "multi_api_key_manager.py",
 )
 EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py")
+# Top-level definitions a scanned module holds for the mobile app only (not desktop code moved out
+# of a dialog): never scanned, so they add no records, origins or UI sites of their own.
+SCAN_EXCLUDE = {
+    "glossary_document.py": ("EditorOwner", "EditorRow", "editor_rows", "GlossaryPromptProfiles",
+                             "RefinementPromptProfiles", "GlossaryEditorError", "GlossaryDocument"),
+}
 # (module, function, widget) -> config keys the widget shows although the dialog no longer
 # names them in an expression bound to it: the U4 review fixes moved the "Assistant Prompt"
 # dialog's drafts into prompt_profiles.PrefillState, so its profile combo reads
@@ -246,6 +257,21 @@ UI_SITE_ROOTS = (
     ("GlossaryManager_GUI.py", "_create_glossary_anti_duplicate_section", "glossary.anti_duplicate"),
     ("GlossaryManager_GUI.py", "_setup_glossary_editor_tab", "glossary.editor"),
     ("GlossaryManager_GUI.py", "*", "glossary.other"),
+    # U6: glossary_document holds the Editor tab's inner functions and the Balanced/Full tab's
+    # prompt-profile config helpers (moved out of GlossaryManager_GUI).
+    ("glossary_document.py", "glossary_prompt_profile_meta", "glossary.balanced_full"),
+    ("glossary_document.py", "ensure_glossary_prompt_profiles", "glossary.balanced_full"),
+    ("glossary_document.py", "glossary_prompt_profiles_for", "glossary.balanced_full"),
+    ("glossary_document.py", "active_glossary_prompt_profile_for", "glossary.balanced_full"),
+    ("glossary_document.py", "set_active_glossary_prompt_profile", "glossary.balanced_full"),
+    ("glossary_document.py", "default_glossary_prompt_profile_text", "glossary.balanced_full"),
+    ("glossary_document.py", "set_default_glossary_prompt_profile_text", "glossary.balanced_full"),
+    ("glossary_document.py", "store_glossary_prompt_current", "glossary.balanced_full"),
+    ("glossary_document.py", "default_glossary_refinement_system_prompt", "glossary.refinement"),
+    ("glossary_document.py", "default_glossary_refinement_user_prompt", "glossary.refinement"),
+    ("glossary_document.py", "unified_glossary_shared_dir", "glossary.unified"),
+    ("glossary_document.py", "unified_rebuild_settings", "glossary.unified"),
+    ("glossary_document.py", "*", "glossary.editor"),
     ("QA_Scanner_GUI.py", "*", "qa"),
     ("manga_settings_dialog.py", "*", "manga"),
     ("epub_library.py", "*", "library"),
@@ -306,6 +332,11 @@ def load_module(src: Path, name: str):
         return None
     source = read_source(path)
     tree = ast.parse(source, filename=name)
+    excluded = SCAN_EXCLUDE.get(name, ())
+    if excluded:
+        tree.body = [node for node in tree.body
+                     if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                             and node.name in excluded)]
     mod = Module(name, source, tree)
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):

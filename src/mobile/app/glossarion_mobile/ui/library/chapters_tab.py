@@ -58,7 +58,7 @@ RETRANSLATE_U7 = ("Retranslating selected chapters (deleting their outputs and r
 EMPTY_TITLE = "No chapters found yet"
 EMPTY_BODY = "Start a translation to see chapter progress."
 EDIT_TRANSLATION_REASON = "The SDLXLIFF reviewer arrives in U7"
-TEXT_EDITOR_REASON = "The text editor arrives in U6"
+TEXT_EDITOR_REASON = "The text editor arrives in U7"
 ENGINE_REASON = "Needs the translation engine job (arrives in U7)"
 # Desktop Book Details "Translate chapter" (BookDetailsDialog._translate_single_chapter)
 RETRANSLATE_TITLE = "Retranslate chapter"

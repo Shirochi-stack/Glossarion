@@ -271,6 +271,7 @@ class ReaderFeature:
             cache_dir=cache_dir,
             width_signal=getattr(state, "width", None),
             ask_in_chat=self._ask_in_chat if chat_view is not None else None,
+            add_to_glossary=self._add_to_glossary,
             has_book_page=self.has_book_page,
             webview_ok=lambda: webview_supported(page) and self.server is not None,
             wakelock=wakelock,
@@ -281,6 +282,19 @@ class ReaderFeature:
         back = getattr(self.app, "back", None)
         if callable(back):
             back()
+
+    def _add_to_glossary(self, term: str, book: Optional[dict] = None) -> Any:
+        """Selection › Add to glossary: the GlossaryFeature (installed after the Reader) opens the book's
+        glossary with a new entry for the term; without it the copy-only sheet stays."""
+        feature = getattr(self.app, "glossary_feature", None)
+        adder = getattr(feature, "add_term", None)
+        if adder is None:
+            from glossarion_mobile.ui.reader.sheets import GlossaryEntryStub
+
+            copy = getattr(self.app, "_copy_text", None) or (lambda _text: None)
+            GlossaryEntryStub(term, on_copy=copy, book_title=str((book or {}).get("name") or "")).show(self.page)
+            return None
+        return adder(term, book=book)
 
     def _ask_in_chat(self, text: str) -> None:
         """"Ask in chat": a fresh chat with the quoted selection as its draft."""

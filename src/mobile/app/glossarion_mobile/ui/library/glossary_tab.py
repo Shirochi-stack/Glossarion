@@ -2,16 +2,17 @@
 
 Header "📖 {book_title}" + the file chip "📁 <base>_glossary_progress.json"; the
 "⚠️ Progress file was deleted. Waiting for a new glossary progress file…" banner;
-the glossary file card (Open in editor (U6) · Extract / Continue extraction job ·
-⋯ Delete glossary files · Restore backup · Load as manual glossary (U6)); the stats
+the glossary file card (Open in editor · Extract / Continue extraction job ·
+⋯ Delete glossary files · Restore backup · Load as manual glossary - the U6 GlossaryFeature
+hooks, ``LibraryService.glossary_hooks``); the stats
 chips (Total · ✅ Completed · ⏭️ Skipped · 🔄 In Progress · ❌ Failed · 🔗 Merged ·
 ⬜ Not Translated · ✨ Not Refined · 💀 Refine Failed; the last three and Merged are
 hidden at 0; tap filters, long-press jumps); the pinned Minimal Pass and Refinement
 rows above the chapter rows.
 
 Row ⋯: 📝 Show footnote · ✅ Mark as completed · 🗑️ Remove <Ch.X> from progress ·
-✨ Refine this (job). Selection bar: Mark as Completed · Remove from progress ·
-Refine · More (Show glossary footnote(s) · Generate completed summary (written to
+✨ Refine this (the refinement sheet → a ``glossary_refine`` job). Selection bar: Mark as
+Completed · Remove from progress · Refine · More (Show glossary footnote(s) · Generate completed summary (written to
 ``glossary_footnotes/`` and shared) · ✅/❌ Skip unmatched entries).
 
 All reads and writes are ``glossary_progress_core`` calls (writes take the
@@ -46,8 +47,8 @@ log = logging.getLogger("glossarion.library.ui")
 
 DELETED_BANNER = "⚠️ Progress file was deleted. Waiting for a new glossary progress file…"
 EMPTY_BODY = "Run glossary extraction to see chapter progress. Refinement entry types are listed below."
-GLOSSARY_TOOLS_REASON = "Arrives with the Glossary tools (U6)"
-REFINE_REASON = "Glossary refinement jobs arrive in U6"
+GLOSSARY_TOOLS_REASON = "The Glossary Manager is not available in this session"
+REFINE_REASON = "Glossary refinement is not available in this session"
 
 
 def empty_title(book_title: str) -> str:
@@ -82,20 +83,27 @@ class GlossaryTab:
         self.extract_button = ft.FilledTonalButton(content="Extract glossary", icon=ft.Icons.AUTO_AWESOME,
                                                    on_click=lambda e: self.ctx.spawn(self.extract()),
                                                    disabled=not extract_ok, key="gp-extract")
+        hooks = self._hooks()  # U6 GlossaryFeature (LibraryService.glossary_hooks)
+        tools: list = [
+            ft.OutlinedButton(content="Open in editor", icon=ft.Icons.EDIT_NOTE, disabled=hooks is None,
+                              tooltip=None if hooks is not None else GLOSSARY_TOOLS_REASON,
+                              on_click=lambda e: self.ctx.spawn(self.open_editor()), key="gp-open-editor"),
+            self.extract_button,
+            ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Glossary file", items=[
+                ft.PopupMenuItem(content="Delete glossary files", disabled=hooks is None,
+                                 on_click=lambda e: self.ctx.spawn(self.delete_glossary_files())),
+                ft.PopupMenuItem(content="Restore backup", disabled=hooks is None,
+                                 on_click=lambda e: self.ctx.spawn(self.restore_glossary_backup())),
+                ft.PopupMenuItem(content="Load as manual glossary", disabled=hooks is None,
+                                 on_click=lambda e: self.ctx.spawn(self.load_as_manual())),
+            ], key="gp-file-menu"),
+        ]
+        if hooks is None:
+            tools.append(ReasonChip(reason="Glossary tools unavailable", detail=GLOSSARY_TOOLS_REASON))
         self.file_card = ft.Container(
             content=ft.Column([
                 ft.Text("", key="gp-file-name", theme_style=ft.TextThemeStyle.BODY_MEDIUM),
-                ft.Row([
-                    ft.OutlinedButton(content="Open in editor", icon=ft.Icons.EDIT_NOTE, disabled=True,
-                                      tooltip=GLOSSARY_TOOLS_REASON, key="gp-open-editor"),
-                    self.extract_button,
-                    ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Glossary file", items=[
-                        ft.PopupMenuItem(content="Delete glossary files", disabled=True),
-                        ft.PopupMenuItem(content="Restore backup", disabled=True),
-                        ft.PopupMenuItem(content="Load as manual glossary", disabled=True),
-                    ], key="gp-file-menu"),
-                    ReasonChip(reason="Glossary tools: U6", detail=GLOSSARY_TOOLS_REASON),
-                ], wrap=True, spacing=6, run_spacing=4),
+                ft.Row(tools, wrap=True, spacing=6, run_spacing=4),
             ], spacing=4, tight=True),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, border_radius=tokens.RADII["card"], padding=10,
             key="gp-file-card")
@@ -104,11 +112,12 @@ class GlossaryTab:
         self.total_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="gp-total")
         self.path_row = ft.Row([
             ft.TextButton(content="Select All", on_click=lambda e: self.select_all(), key="gp-select-all"),
-            ft.TextButton(content="✨ Refinement", disabled=not self._refine_ok(), tooltip=None if
-                          self._refine_ok() else REFINE_REASON, key="gp-refinement"),
+            ft.TextButton(content="✨ Refinement", disabled=not self._refine_ok(), tooltip=self._refine_reason(),
+                          on_click=lambda e: self.ctx.spawn(self.refine()), key="gp-refinement"),
             ft.TextButton(content="Files", on_click=lambda e: self.page.open_files(), key="gp-files"),
-            ft.TextButton(content="✏️ Open Glossary", disabled=True, tooltip=GLOSSARY_TOOLS_REASON,
-                          key="gp-open-glossary"),
+            ft.TextButton(content="✏️ Open Glossary", disabled=hooks is None,
+                          tooltip=None if hooks is not None else GLOSSARY_TOOLS_REASON,
+                          on_click=lambda e: self.ctx.spawn(self.open_editor()), key="gp-open-glossary"),
         ], wrap=True, spacing=0)
         self.selection_bar = SelectionTopBar(on_close=self.exit_selection, on_select_all=self.select_all,
                                              key="gp-selection")
@@ -134,8 +143,19 @@ class GlossaryTab:
             self.apply(self.page.glossary)
         return self.root
 
+    def _hooks(self) -> Any:
+        """The U6 GlossaryFeature (``LibraryService.glossary_hooks``), None before it is installed."""
+        return getattr(self.page.service, "glossary_hooks", None)
+
+    def _refine_reason(self) -> Optional[str]:
+        hooks = self._hooks()
+        if hooks is None or not self.page.service.has_job_kind("glossary_refine"):
+            return REFINE_REASON
+        supported = getattr(getattr(hooks, "service", None), "refine_supported", None)
+        return supported() if callable(supported) else None
+
     def _refine_ok(self) -> bool:
-        return self.page.service.has_job_kind("glossary_refine")
+        return self._refine_reason() is None
 
     # ---- data -------------------------------------------------------------------------------------
 
@@ -344,8 +364,8 @@ class GlossaryTab:
             BulkAction("remove", "\U0001f5d1️ Remove from progress", "DELETE_OUTLINE",
                        lambda: self.ctx.spawn(self.run_action("remove", rows)), self._reason("remove", rows),
                        destructive=True),
-            BulkAction("refine", "✨ Refine", "AUTO_FIX_HIGH", disabled_reason=None if self._refine_ok()
-                       else REFINE_REASON),
+            BulkAction("refine", "✨ Refine", "AUTO_FIX_HIGH", lambda: self.ctx.spawn(self.refine(rows)),
+                       disabled_reason=self._refine_reason()),
         ]
         skip = bool(self.page.service.cfg("glossary_progress_skip_unmatched_entries", True))
         more = [
@@ -369,8 +389,8 @@ class GlossaryTab:
             ActionItem(f"\U0001f5d1️ Remove {label} from progress ({row.label})",
                        lambda: self.ctx.spawn(self.run_action("remove", rows)), icon="DELETE_OUTLINE",
                        disabled_reason=self._reason("remove", rows), destructive=True),
-            ActionItem("✨ Refine this", icon="AUTO_FIX_HIGH",
-                       disabled_reason=None if self._refine_ok() else REFINE_REASON),
+            ActionItem("✨ Refine this", lambda: self.ctx.spawn(self.refine(rows)), icon="AUTO_FIX_HIGH",
+                       disabled_reason=self._refine_reason()),
         ]
         sheet = ActionSheet(items, title=row.title, subtitle=f"{row.icon} {row.label}", tablet=self.ctx.tablet)
         self.ctx.show(sheet)
@@ -464,6 +484,62 @@ class GlossaryTab:
         self.ctx.say(("✅" if value else "❌") + " Skip unmatched entries")
         self._sync_selection()
         return value
+
+    # ---- U6 glossary tools (GlossaryFeature hooks) ----------------------------------------------------
+
+    def _inputs(self) -> list:
+        hooks = self._hooks()
+        if hooks is None:
+            return []
+        return hooks.service.input_paths_for_books([self.page.book])
+
+    async def open_editor(self) -> Any:
+        hooks = self._hooks()
+        if hooks is None:
+            self.ctx.say(GLOSSARY_TOOLS_REASON)
+            return None
+        glossary_file = self.view.glossary_file if self.view is not None else None
+        return await hooks.open_editor_for_book(self.page.book, glossary_file=glossary_file)
+
+    async def delete_glossary_files(self) -> Any:
+        hooks = self._hooks()
+        if hooks is None:
+            return None
+        result = await hooks.delete_glossary_files(await self.ctx.io(self._inputs))
+        if result:
+            await self.page.reload_glossary()
+        return result
+
+    async def restore_glossary_backup(self) -> Any:
+        hooks = self._hooks()
+        if hooks is None:
+            return None
+        result = await hooks.restore_glossary_backup(await self.ctx.io(self._inputs))
+        if result:
+            await self.page.reload_glossary()
+        return result
+
+    async def load_as_manual(self) -> Any:
+        hooks = self._hooks()
+        glossary_file = self.view.glossary_file if self.view is not None else None
+        if hooks is None:
+            return None
+        if not glossary_file:
+            self.ctx.say("This book has no glossary file yet")
+            return None
+        source = await self.ctx.io(self.page.service.raw_source, self.page.book)
+        return await hooks.use_as_manual(glossary_file, source_path=source or None)
+
+    async def refine(self, rows: Sequence[pm.GlossaryRowVM] = ()) -> Any:
+        """✨ Refine this (refinement rows) / ✨ Refinement (all active types): the refinement sheet → job."""
+        reason = self._refine_reason()
+        hooks = self._hooks()
+        if reason is not None or hooks is None:
+            self.ctx.say(reason or REFINE_REASON)
+            return None
+        targets = [r for r in rows if r.kind == "refinement"]
+        self.exit_selection() if self.selecting else None
+        return await hooks.open_refine(self.page.book, self.view, targets)
 
     async def extract(self) -> Optional[str]:
         service = self.page.service

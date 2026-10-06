@@ -293,7 +293,7 @@ class OverviewTab:
         if not (has_raw and raw.lower().endswith(".epub")):
             metadata_reason = "Needs a raw EPUB"
         elif not service.has_job_kind("metadata"):
-            metadata_reason = "Metadata translation jobs arrive in U6"
+            metadata_reason = "Metadata translation is not available in this session"
 
         def icon(name: str, tip: str, handler: Any, reason: Optional[str], key: str) -> ft.Control:
             button = icon_button(name, reason or tip, handler, key=key, disabled=reason is not None)

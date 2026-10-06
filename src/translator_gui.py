@@ -1329,6 +1329,7 @@ from stop_control import (
     make_run_id,
     prepare_glossary_stop_file,
     register_stop_click,
+    request_glossary_stop,
     request_stop,
     reset_api_watchdog,
     reset_stop_env,
@@ -1339,6 +1340,10 @@ from stop_control import (
 # _atomic_text_write stays importable from translator_gui.
 from direct_text_store import ChatStoreMixin, _atomic_text_write, apply_direct_text_run_environment
 from direct_text_stream import DirectTextStreamMixin
+# U6: the glossary file actions (editor backups, delete / restore of a book's glossary files,
+# the Map Glossaries data steps, JSON repair) live in glossary_files; the methods and closures
+# below keep the widgets and call it.
+import glossary_files
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
 
 
@@ -10346,52 +10351,24 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         # For manual backups, always proceed. For automatic backups, check the setting.
         if operation_name != "manual" and not self.config.get('glossary_auto_backup', True):
             return True
-        
-        if not self.current_glossary_data or not hasattr(self, 'editor_file_entry') or not self.editor_file_entry.text():
+        # The editor's state is read only when a backup can happen (glossary_files.create_glossary_backup).
+        if not self.current_glossary_data or not hasattr(self, 'editor_file_entry'):
             return True
-        
-        try:
-            # Get the original glossary file path
-            original_path = self.editor_file_entry.text()
-            original_dir = os.path.dirname(original_path)
-            original_name = os.path.basename(original_path)
-            
-            # Create backup directory
-            backup_dir = os.path.join(original_dir, "Backups")
-            
-            # Create directory if it doesn't exist
-            try:
-                os.makedirs(backup_dir, exist_ok=True)
-            except Exception as e:
-                self.append_log(f"⚠️ Failed to create backup directory: {str(e)}")
-                return False
-            
-            # Generate timestamp-based backup filename
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            backup_name = f"{os.path.splitext(original_name)[0]}_{operation_name}_{timestamp}.json"
-            backup_path = os.path.join(backup_dir, backup_name)
-            
-            # Try to save backup
-            with open(backup_path, 'w', encoding='utf-8') as f:
-                json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
-            
-            self.append_log(f"💾 Backup created: {backup_name}")
-            
-            # Optional: Clean old backups if more than limit
-            max_backups = self.config.get('glossary_max_backups', 50)
-            if max_backups > 0:
-                self._clean_old_backups(backup_dir, original_name, max_backups)
-            
-            return True
-            
-        except Exception as e:
-            # Log the actual error
-            self.append_log(f"⚠️ Backup failed: {str(e)}")
+
+        def _ask_continue(title, text):
             # Ask user if they want to continue anyway
-            reply = QMessageBox.question(self, "Backup Failed", 
-                                      f"Failed to create backup: {str(e)}\n\nContinue anyway?",
+            reply = QMessageBox.question(self, title, text,
                                       QMessageBox.Yes | QMessageBox.No)
             return reply == QMessageBox.Yes
+
+        return glossary_files.create_glossary_backup(
+            self.editor_file_entry.text(),
+            self.current_glossary_data,
+            operation_name,
+            config=self.config,
+            append_log=self.append_log,
+            ask_continue=_ask_continue,
+        )
 
     def get_current_epub_path(self):
         """Get the currently selected EPUB path from various sources"""
@@ -10433,27 +10410,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     
     def _clean_old_backups(self, backup_dir, original_name, max_backups):
         """Remove old backups exceeding the limit"""
-        try:
-            # Find all backups for this glossary
-            prefix = os.path.splitext(original_name)[0]
-            backups = []
-            
-            for file in os.listdir(backup_dir):
-                if file.startswith(prefix) and file.endswith('.json'):
-                    file_path = os.path.join(backup_dir, file)
-                    backups.append((file_path, os.path.getmtime(file_path)))
-            
-            # Sort by modification time (oldest first)
-            backups.sort(key=lambda x: x[1])
-            
-            # Remove oldest backups if exceeding limit
-            while len(backups) > max_backups:
-                old_backup = backups.pop(0)
-                os.remove(old_backup[0])
-                self.append_log(f"🗑️ Removed old backup: {os.path.basename(old_backup[0])}")
-                
-        except Exception as e:
-            self.append_log(f"⚠️ Error cleaning old backups: {str(e)}")
+        glossary_files.clean_old_backups(backup_dir, original_name, max_backups, self.append_log)
         
     def open_manga_translator(self):
         """Open manga translator in a new window"""
@@ -19462,106 +19419,24 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         # Delete glossary button (supports multiple EPUBs)
         def _delete_current_glossary():
             try:
-                files = list(getattr(self, 'selected_files', []) or [])
-                epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                if not epubs and hasattr(self, 'get_current_epub_path'):
-                    ep = self.get_current_epub_path()
-                    if ep:
-                        epubs = [ep]
+                epubs = glossary_files.selected_glossary_epubs(
+                    getattr(self, 'selected_files', []),
+                    getattr(self, 'get_current_epub_path', None),
+                )
                 if not epubs:
                     QMessageBox.warning(self, "No File", "No input file selected.")
                     return
 
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                mode = self.config.get('auto_glossary_mode', 'off').lower()
-                is_balanced_full = mode in ('balanced', 'full')
-
-                all_files = []  # (book_base, file_path)
-                for epub_path in epubs:
-                    base = os.path.splitext(os.path.basename(epub_path))[0]
-
-                    if override_dir:
-                        _root = os.path.abspath(override_dir)
-                    else:
-                        _root = _get_app_dir()
-
-                    # 1. Shared Glossary/ folder at root: <root>/Glossary/<base>_glossary.*
-                    gdir = os.path.join(_root, 'Glossary')
-                    if os.path.isdir(gdir):
-                        nested_gdir = os.path.join(gdir, base)
-                        if os.path.isdir(nested_gdir):
-                            for ext in ['.csv', '.json', '.txt', '.md']:
-                                f = os.path.join(nested_gdir, f"{base}_glossary{ext}")
-                                if os.path.exists(f):
-                                    all_files.append((base, f))
-                            for fname in [
-                                f"{base}_glossary_progress.json",
-                                f"{base}_gender_tracker.json",
-                                f"{base}_glossary_history.json",
-                            ]:
-                                f = os.path.join(nested_gdir, fname)
-                                if os.path.exists(f):
-                                    all_files.append((base, f))
-                        for ext in ['.csv', '.json', '.txt', '.md']:
-                            f = os.path.join(gdir, f"{base}_glossary{ext}")
-                            if os.path.exists(f):
-                                all_files.append((base, f))
-                        for fname in [
-                            f"{base}_glossary_progress.json",
-                            f"{base}_gender_tracker.json",
-                            f"{base}_glossary_history.json",
-                        ]:
-                            pf = os.path.join(gdir, fname)
-                            if os.path.exists(pf):
-                                all_files.append((base, pf))
-
-                    # 2. Per-book folder: <root>/<base>/glossary.* and <root>/<base>/Glossary/<base>_glossary.*
-                    out_dir = os.path.join(_root, base)
-                    if os.path.isdir(out_dir):
-                        for ext in ['.csv', '.json', '.txt', '.md']:
-                            f = os.path.join(out_dir, f"glossary{ext}")
-                            if os.path.exists(f):
-                                all_files.append((base, f))
-                        # Per-book Glossary subfolder
-                        book_gdir = os.path.join(out_dir, 'Glossary')
-                        if os.path.isdir(book_gdir):
-                            for ext in ['.csv', '.json', '.txt', '.md']:
-                                f = os.path.join(book_gdir, f"{base}_glossary{ext}")
-                                if os.path.exists(f):
-                                    all_files.append((base, f))
-                        # Progress files
-                        for pname in ['glossary_progress.json', f'{base}_glossary_progress.json']:
-                            pf = os.path.join(out_dir, pname)
-                            if os.path.exists(pf):
-                                all_files.append((base, pf))
-
-                    # 3. Include whatever _guess_glossary_for_input_file would map
-                    #    (handles fuzzy matching when enabled)
-                    try:
-                        _guessed = self._guess_glossary_for_input_file(epub_path)
-                        if _guessed and os.path.exists(_guessed):
-                            _g_norm = os.path.normpath(os.path.abspath(_guessed))
-                            if _g_norm not in {os.path.normpath(os.path.abspath(fp)) for _, fp in all_files}:
-                                all_files.append((base, _guessed))
-                    except Exception:
-                        pass
-
-                    # 4. Also include the currently active auto-mapped glossary
-                    _auto_gp = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                    if _auto_gp and os.path.exists(_auto_gp) and not getattr(self, 'manual_glossary_manually_loaded', False):
-                        _auto_norm = os.path.normpath(os.path.abspath(_auto_gp))
-                        if _auto_norm not in {os.path.normpath(os.path.abspath(fp)) for _, fp in all_files}:
-                            all_files.append((base, _auto_gp))
-
-                # Deduplicate by normalized path
-                _seen = set()
-                _deduped = []
-                for bk, fp in all_files:
-                    _norm = os.path.normpath(os.path.abspath(fp))
-                    if _norm not in _seen:
-                        _seen.add(_norm)
-                        _deduped.append((bk, fp))
-                all_files = _deduped
+                # Every glossary artifact of the books (shared Glossary/ folder, output folder,
+                # the auto-mapped guess and the active auto-mapped glossary), deduplicated.
+                all_files = glossary_files.collect_glossary_files_for_inputs(
+                    epubs,
+                    config=self.config,
+                    guess_glossary=self._guess_glossary_for_input_file,
+                    auto_loaded_glossary_path=getattr(self, 'auto_loaded_glossary_path', None),
+                    manual_glossary_path=getattr(self, 'manual_glossary_path', None),
+                    manually_loaded=getattr(self, 'manual_glossary_manually_loaded', False),
+                )
 
                 if not all_files:
                     books_str = ", ".join(os.path.splitext(os.path.basename(e))[0] for e in epubs)
@@ -19578,15 +19453,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     return
 
                 # Group by book for display
-                from collections import OrderedDict
-                grouped = OrderedDict()
-                for bk, fp in all_files:
-                    grouped.setdefault(bk, []).append(fp)
-                display = []
-                for bk, fps in grouped.items():
-                    display.append(f"[{bk}]")
-                    for fp in fps:
-                        display.append(f"  {os.path.basename(fp)}")
+                display = glossary_files.glossary_delete_display(all_files)
 
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Question)
@@ -19601,19 +19468,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 if msg.exec() != QMessageBox.Yes:
                     return
 
-                import shutil
-                from datetime import datetime
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                deleted = []
-                for bk, fp in all_files:
-                    try:
-                        backup_root = os.path.join(os.path.dirname(fp), 'Backups')
-                        backup_dir = os.path.join(backup_root, timestamp)
-                        os.makedirs(backup_dir, exist_ok=True)
-                        shutil.move(fp, os.path.join(backup_dir, os.path.basename(fp)))
-                        deleted.append(f"{bk}/{os.path.basename(fp)}")
-                    except Exception as e:
-                        self.append_log(f"⚠️ Failed to delete {fp}: {e}")
+                # Move each file into <its folder>/Backups/<timestamp>/
+                deleted = glossary_files.delete_glossary_files(all_files, self.append_log)
 
                 self.auto_loaded_glossary_path = None
                 self.auto_loaded_glossary_for_file = None
@@ -19635,48 +19491,20 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         def _find_latest_backup():
             """Find the latest backup subfolder across all selected EPUBs."""
             try:
-                files = list(getattr(self, 'selected_files', []) or [])
-                epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                if not epubs and hasattr(self, 'get_current_epub_path'):
-                    ep = self.get_current_epub_path()
-                    if ep:
-                        epubs = [ep]
+                epubs = glossary_files.selected_glossary_epubs(
+                    getattr(self, 'selected_files', []),
+                    getattr(self, 'get_current_epub_path', None),
+                )
                 if not epubs:
                     return None, []
 
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                latest_dir = None
-                latest_time = ''
-                for epub_path in epubs:
-                    base = os.path.splitext(os.path.basename(epub_path))[0]
-                    backup_dirs_to_check = []
-                    if override_dir:
-                        backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', base, 'Backups'))
-                        backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', 'Backups'))
-                        backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), base, 'Backups'))
-                    else:
-                        backup_dirs_to_check.append(os.path.join('Glossary', base, 'Backups'))
-                        backup_dirs_to_check.append(os.path.join(_get_app_dir(), 'Glossary', base, 'Backups'))
-                        backup_dirs_to_check.append(os.path.join('Glossary', 'Backups'))
-                        backup_dirs_to_check.append(os.path.join(_get_app_dir(), base, 'Backups'))
-                    for bdir in backup_dirs_to_check:
-                        if not os.path.isdir(bdir):
-                            continue
-                        for sub in os.listdir(bdir):
-                            sub_path = os.path.join(bdir, sub)
-                            if os.path.isdir(sub_path) and sub > latest_time:
-                                backup_files = [f for f in os.listdir(sub_path) if os.path.isfile(os.path.join(sub_path, f))]
-                                if backup_files:
-                                    latest_time = sub
-                                    latest_dir = sub_path
-                return latest_dir, os.listdir(latest_dir) if latest_dir else []
+                return glossary_files.find_latest_glossary_backup(epubs, config=self.config)
             except Exception:
                 return None, []
 
         def _restore_glossary_backup():
             """Restore the most recent glossary backup."""
             try:
-                import shutil
                 backup_dir, backup_files = _find_latest_backup()
                 if not backup_dir or not backup_files:
                     return
@@ -19702,17 +19530,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 if msg.exec() != QMessageBox.Yes:
                     return
 
-                # Determine where to restore to (parent of Backups dir)
-                restore_dir = os.path.dirname(os.path.dirname(backup_dir))
-                restored = []
-                for fname in backup_files:
-                    src = os.path.join(backup_dir, fname)
-                    dst = os.path.join(restore_dir, fname)
-                    try:
-                        shutil.copy2(src, dst)
-                        restored.append(fname)
-                    except Exception as e:
-                        self.append_log(f"⚠️ Failed to restore {fname}: {e}")
+                # Copy the files back beside the Backups folder
+                restored = glossary_files.restore_glossary_backup(
+                    backup_dir, backup_files, self.append_log
+                )
 
                 if restored:
                     self.append_log(f"↩️ Restored from {os.path.basename(backup_dir)}: {', '.join(restored)}")
@@ -20045,29 +19866,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             if not raw_path:
                 return ""
 
-        raw_base = os.path.splitext(os.path.basename(raw_path))[0]
-        override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get(
-            "output_directory"
-        )
-        if override_dir:
-            shared_glossary_dir = os.path.join(
-                os.path.abspath(str(override_dir)), "Glossary"
-            )
-        else:
-            shared_glossary_dir = "Glossary"
-        # Match the glossary extractor's writable macOS fallback exactly.
-        if sys.platform == "darwin" and not os.path.isabs(shared_glossary_dir):
-            shared_glossary_dir = os.path.join(
-                os.path.dirname(os.path.abspath(raw_path)), shared_glossary_dir
-            )
+        from parallel_epub_core import resolve_parallel_epub_glossary_output_dir
 
-        from glossary_paths import get_book_glossary_dir
-
-        return get_book_glossary_dir(
-            shared_glossary_dir,
-            raw_base,
-            create=bool(create),
-            fallback_base=raw_path,
+        return resolve_parallel_epub_glossary_output_dir(
+            raw_path, self.config, create=create
         )
 
     def _parallel_epub_mapping_sidecar_path(
@@ -20075,57 +19877,25 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     ) -> str:
         """Return the durable mapping path inside the raw book's glossary folder."""
 
-        raw_path = str(raw_path or "").strip()
-        if not raw_path:
-            return ""
-        raw_path = os.path.abspath(raw_path)
-        folder = self._resolve_parallel_epub_glossary_output_dir(
-            raw_path, create=bool(create_parent)
-        )
-        if not folder:
-            return ""
-        from glossary_paths import sanitize_glossary_folder_name
+        from parallel_epub_core import parallel_epub_mapping_sidecar_path
 
-        raw_base = os.path.splitext(os.path.basename(raw_path))[0]
-        safe_base = sanitize_glossary_folder_name(raw_base)
-        return os.path.join(folder, f"{safe_base}_parallel_epub_mapping.json")
+        return parallel_epub_mapping_sidecar_path(
+            raw_path, self.config, create_parent=create_parent
+        )
 
     def _write_parallel_epub_mapping_sidecar(self, selection: dict) -> str:
         """Atomically persist a compact, chapter-text-free pair selection."""
 
-        if not isinstance(selection, dict) or not selection.get("mapping"):
-            raise ValueError("The Parallel EPUB mapping is empty.")
-        path = self._parallel_epub_mapping_sidecar_path(
-            str(selection.get("raw_path") or ""), create_parent=True
-        )
-        if not path:
-            raise ValueError("The Parallel EPUB mapping path could not be resolved.")
-        _atomic_json_write(path, selection)
-        return path
+        from parallel_epub_core import write_parallel_epub_mapping_sidecar
+
+        return write_parallel_epub_mapping_sidecar(selection, self.config)
 
     def _read_parallel_epub_mapping_sidecar(self, raw_path: str):
         """Read and validate a compact mapping stored with glossary artifacts."""
 
-        path = self._parallel_epub_mapping_sidecar_path(raw_path)
-        if not path or not os.path.isfile(path):
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                selection = json.load(handle)
-            if not isinstance(selection, dict) or not isinstance(
-                selection.get("mapping"), list
-            ):
-                return None
-            saved_raw_path = os.path.abspath(
-                str(selection.get("raw_path") or "")
-            )
-            if os.path.normcase(saved_raw_path) != os.path.normcase(
-                os.path.abspath(str(raw_path or ""))
-            ):
-                return None
-            return selection
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
+        from parallel_epub_core import read_parallel_epub_mapping_sidecar
+
+        return read_parallel_epub_mapping_sidecar(raw_path, self.config)
 
     def _open_folder_in_file_manager(self, folder_path: str):
         """Open an existing folder in the platform file manager."""
@@ -26541,12 +26311,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
         current_time = time.time()
         if not hasattr(self, '_glossary_stop_click_times'):
             self._glossary_stop_click_times = []
-        
-        # Add current click
-        self._glossary_stop_click_times.append(current_time)
-        # Remove clicks older than 1 second
-        self._glossary_stop_click_times = [t for t in self._glossary_stop_click_times if current_time - t < 1.0]
-        
+
+        # Add current click; remove clicks older than 1 second
+        self._glossary_stop_click_times = register_stop_click(self._glossary_stop_click_times, current_time)
+
         # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
         if len(self._glossary_stop_click_times) >= 2 and already_in_graceful_stop:
             self.append_log("⚡ Double-click detected — forcing immediate stop!")
@@ -26586,161 +26354,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     border-color: #555555;
                 }
             """)
-        
-        # Set graceful stop mode in environment so API client knows to show logs
-        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
-        
-        # Suppress HTTP logs during graceful stop
-        if graceful_stop:
-            try:
-                import logging
-                for logger_name in ['httpx', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']:
-                    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
-            except Exception:
-                pass
-        
-        self.stop_requested = True
-        
-        # For graceful stop: DON'T abort in-flight API calls, let them finish
-        # For immediate stop: abort everything aggressively
-        if not graceful_stop:
-            # Keep the extractor's hard-stop detection in sync with the other
-            # translation stop path. Progress restoration uses this signal to
-            # distinguish cancellation from an ordinary API failure.
-            os.environ['TRANSLATION_CANCELLED'] = '1'
-            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
 
-            # ── FAST PATH (main thread): set all boolean flags instantly ──
-            if glossary_stop_flag:
-                glossary_stop_flag(True)
-            
-            try:
-                import extract_glossary_from_epub
-                if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-                    extract_glossary_from_epub.set_stop_flag(True)
-            except:
-                pass
-            
-            # Set cancel flags immediately so _is_stop_requested() returns True
-            try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'set_stop_flag'):
-                    unified_api_client.set_stop_flag(True)
-                if hasattr(unified_api_client, 'UnifiedClient'):
-                    unified_api_client.UnifiedClient._global_cancelled = True
-            except Exception:
-                pass
-            
-            # ── SLOW PATH (background thread): close connections, kill procs ──
-            stop_run_id = getattr(self, '_glossary_run_id', None) or os.environ.get('GLOSSARION_RUN_ID')
+        # The stop protocol (stop_control.request_glossary_stop, desktop order): GRACEFUL_STOP ->
+        # graceful: silence HTTP logs -> stop_requested -> immediate: cancel env, module stop
+        # flags, run-id-guarded cleanup thread (hard cancel, helper processes, glossary stop
+        # file) -> the stop-mode log line.
+        def _set_stop_requested():
+            self.stop_requested = True
 
-            def _stop_heavy_work():
-                # This cleanup is asynchronous. If another glossary run has
-                # already started, its lifecycle reset owns the provider now;
-                # an old cleanup must not cancel that new run's stream.
-                current_run_id = getattr(self, '_glossary_run_id', None) or os.environ.get('GLOSSARION_RUN_ID')
-                if stop_run_id and current_run_id != stop_run_id:
-                    return
-                # Hard cancel: close active HTTP sessions to abort in-flight requests
-                try:
-                    import unified_api_client as _uac
-                    if hasattr(_uac, 'hard_cancel_all'):
-                        _uac.hard_cancel_all()
-                except Exception:
-                    pass
-                
-                # Best-effort: terminate only known helper subprocesses we started.
-                try:
-                    import psutil
-                    current_process = psutil.Process(os.getpid())
-                    children = current_process.children(recursive=True)
-
-                    _protected_pids = set()
-                    try:
-                        from manga_translator import MangaTranslator
-                        if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
-                            for _key, _rec in MangaTranslator._inpaint_pool.items():
-                                if _rec and 'spares' in _rec:
-                                    for _inp in _rec['spares']:
-                                        if _inp and getattr(_inp, '_mp_worker', None):
-                                            try:
-                                                _pid = _inp._mp_worker.pid
-                                                if _pid:
-                                                    _protected_pids.add(_pid)
-                                            except Exception:
-                                                pass
-                    except Exception:
-                        pass
-
-                    def _cmdline_s(proc) -> str:
-                        try:
-                            cmd = proc.cmdline()
-                            return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-                        except Exception:
-                            return ""
-
-                    def _is_mp_internal(cmd_s: str) -> bool:
-                        cs = (cmd_s or "")
-                        return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
-
-                    processes_to_terminate = []
-                    for child in children:
-                        try:
-                            if child.pid in _protected_pids:
-                                continue
-                            cmd_s = _cmdline_s(child)
-                            if _is_mp_internal(cmd_s):
-                                continue
-                            if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                    or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
-                                    or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
-                                processes_to_terminate.append(child)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            continue
-
-                    if processes_to_terminate:
-                        for proc in processes_to_terminate:
-                            try:
-                                proc.terminate()
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass
-
-                        try:
-                            gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
-                        except Exception:
-                            alive = processes_to_terminate
-                        for proc in alive:
-                            try:
-                                proc.kill()
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass
-                except Exception as e:
-                    print(f"Error terminating helper child processes: {e}")
-
-                # Touch stop file for GlossaryManager subprocesses
-                try:
-                    stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-                    if stop_file:
-                        with open(stop_file, 'w', encoding='utf-8') as f:
-                            f.write('stop')
-                except Exception:
-                    pass
-            
-            import threading
-            threading.Thread(target=_stop_heavy_work, daemon=True, name="glossary-stop-cleanup").start()
-        
-        # Log message depends on stop mode
-        if graceful_stop:
-            try:
-                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-            except Exception:
-                wait_for_chunks = False
-            if wait_for_chunks:
-                self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
-            else:
-                self.append_log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
-        else:
-            self.append_log("❌ Glossary extraction stop requested.")
+        request_glossary_stop(
+            graceful=graceful_stop,
+            set_stop_requested=_set_stop_requested,
+            log=self.append_log,
+            glossary_stop_flag=glossary_stop_flag,
+            get_run_id=lambda: getattr(self, '_glossary_run_id', None),
+        )
         # Keep polling until the worker has actually exited, then clear every
         # extractor/client/proxy stop source. A one-shot check while the worker
         # is still alive leaves cancellation state behind for the next run.
@@ -28457,43 +28085,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
     def _load_parallel_epub_chapters(self, epub_path):
         """Keep all EPUB documents for pairing and reading-order boundaries."""
-        from extract_glossary_from_epub import extract_chapters_from_epub
+        from parallel_epub_core import load_parallel_epub_chapters
 
-        # Special-file rules only veto automatic pairs in the dialog. Applying
-        # them during extraction would hide files from manual selection and
-        # prevent saved manual mappings from being restored.
-        return extract_chapters_from_epub(
-            epub_path, return_document_metadata=True, include_special_files=True,
-        )
+        return load_parallel_epub_chapters(epub_path)
 
     def _build_parallel_epub_pair_artifact(self, result):
         """Build the disposable working EPUB without changing GUI state."""
 
-        from parallel_epub_glossary import (
-            parallel_epub_working_filename,
-            write_parallel_epub,
-        )
+        from parallel_epub_core import build_parallel_epub_pair_artifact
 
-        raw_path = str(result.get("raw_path") or "")
-        raw_stem = os.path.splitext(os.path.basename(raw_path))[0]
-        pair_temp_dir = tempfile.TemporaryDirectory(
-            prefix="glossarion_parallel_epub_"
-        )
-        generated_path = os.path.join(
-            pair_temp_dir.name,
-            parallel_epub_working_filename(raw_path),
-        )
-        try:
-            write_parallel_epub(
-                generated_path,
-                result.get("pairs") or [],
-                str(result.get("wrapper_prompt") or ""),
-                title=raw_stem,
-            )
-        except Exception:
-            pair_temp_dir.cleanup()
-            raise
-        return pair_temp_dir, generated_path
+        return build_parallel_epub_pair_artifact(result)
 
     def _activate_parallel_epub_pair_source(
         self,
@@ -28516,13 +28117,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 result
             )
 
+        from parallel_epub_core import parallel_epub_pair_source_state
+
         self._release_parallel_epub_pair_source()
-        raw_path = os.path.abspath(str(result.get("raw_path") or ""))
-        translated_path = os.path.abspath(
-            str(result.get("translated_path") or "")
-        )
-        pairs = list(result.get("pairs") or [])
-        pair_count = len(pairs)
         persistent_selection = compact_parallel_epub_selection(result)
         mapping_sidecar_path = ""
         try:
@@ -28534,20 +28131,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 f"⚠️ Could not save the Parallel EPUB mapping beside its glossary: {exc}"
             )
         self.config[PARALLEL_EPUB_SELECTION_CONFIG_KEY] = persistent_selection
-        self._parallel_epub_pair_source = {
-            "raw_path": raw_path,
-            "translated_path": translated_path,
-            "system_prompt": str(result.get("system_prompt") or ""),
-            "profile_name": str(result.get("profile_name") or ""),
-            "pair_count": pair_count,
-            "raw_filenames": [
-                str(pair.get("raw_filename") or "") for pair in pairs
-            ],
-            "persistent_selection": persistent_selection,
-            "mapping_sidecar_path": mapping_sidecar_path,
-            "generated_path": generated_path,
-            "temporary_directory": pair_temp_dir,
-        }
+        self._parallel_epub_pair_source = parallel_epub_pair_source_state(
+            result,
+            persistent_selection=persistent_selection,
+            mapping_sidecar_path=mapping_sidecar_path,
+            generated_path=generated_path,
+            pair_temp_dir=pair_temp_dir,
+        )
+        raw_path = self._parallel_epub_pair_source["raw_path"]
+        translated_path = self._parallel_epub_pair_source["translated_path"]
+        pair_count = self._parallel_epub_pair_source["pair_count"]
         self.selected_files = [generated_path]
         self.current_file_index = 0
         self.file_path = generated_path
@@ -28648,52 +28241,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
         def restore_worker():
             pair_temp_dir = None
             try:
-                from parallel_epub_glossary import (
-                    DEFAULT_PARALLEL_EPUB_PROFILE,
-                    DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT,
-                    default_parallel_epub_system_prompt,
-                    restore_parallel_epub_pairs,
-                )
+                from parallel_epub_core import rebuild_parallel_epub_pair_result
 
-                raw_chapters = self._load_parallel_epub_chapters(raw_path)
-                translated_chapters = self._load_parallel_epub_chapters(
-                    translated_path
+                result, skipped = rebuild_parallel_epub_pair_result(
+                    selection_copy,
+                    self.config,
+                    chapter_loader=self._load_parallel_epub_chapters,
                 )
-                pairs, skipped = restore_parallel_epub_pairs(
-                    raw_chapters,
-                    translated_chapters,
-                    selection_copy.get("mapping") or [],
-                )
-                if not pairs:
-                    raise ValueError(
-                        "None of the saved HTML filename mappings still exist."
-                    )
-                profile_name = str(
-                    selection_copy.get("profile_name")
-                    or DEFAULT_PARALLEL_EPUB_PROFILE
-                )
-                profiles = self.config.get("parallel_epub_glossary_profiles", {})
-                profile_prompt = (
-                    profiles.get(profile_name, "")
-                    if isinstance(profiles, dict)
-                    else ""
-                )
-                result = {
-                    "raw_path": raw_path,
-                    "translated_path": translated_path,
-                    "pairs": pairs,
-                    "wrapper_prompt": str(
-                        selection_copy.get("wrapper_prompt")
-                        or self.config.get("parallel_epub_glossary_wrapper_prompt")
-                        or DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT
-                    ),
-                    "system_prompt": str(
-                        selection_copy.get("system_prompt")
-                        or profile_prompt
-                        or default_parallel_epub_system_prompt()
-                    ),
-                    "profile_name": profile_name,
-                }
                 pair_temp_dir, generated_path = (
                     self._build_parallel_epub_pair_artifact(result)
                 )
@@ -31646,24 +31200,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         scroll.setWidgetResizable(True)
 
         # Drop-support: allow dragging a glossary file onto a row (or onto the dialog to apply to all)
-        allowed_gloss_exts = {'.json', '.csv', '.txt', '.md'}
-
-        def _normalize_drop_path(p: str) -> str:
-            try:
-                p = (p or '').strip().strip('"')
-                if not p:
-                    return ''
-                return os.path.normpath(os.path.abspath(p))
-            except Exception:
-                return (p or '').strip()
-
-        def _is_allowed_glossary(p: str) -> bool:
-            try:
-                if not p or not os.path.exists(p):
-                    return False
-                return os.path.splitext(p)[1].lower() in allowed_gloss_exts
-            except Exception:
-                return False
+        # (accepted files: glossary_files.ALLOWED_GLOSSARY_EXTENSIONS)
+        _normalize_drop_path = glossary_files.normalize_glossary_drop_path
+        _is_allowed_glossary = glossary_files.is_allowed_glossary_file
 
         class _DropGlossaryLineEdit(QLineEdit):
             def __init__(self, *args, **kwargs):
@@ -31763,12 +31302,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 pass
 
             # Prefill: existing map -> guessed -> empty
-            gp = None
-            try:
-                key = os.path.normpath(os.path.abspath(epub_path))
-                gp = existing_map.get(epub_path) or existing_map.get(key) or existing_map.get(os.path.normpath(epub_path))
-            except Exception:
-                gp = None
+            gp = glossary_files.mapped_glossary_for_input(existing_map, epub_path)
             if not gp:
                 gp = self._guess_glossary_for_input_file(epub_path)
             if gp:
@@ -31813,16 +31347,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 _le.setText("")
 
         def do_save():
-            mapping = {}
-            missing = []
-            for _ep, _le in rows:
-                p = _le.text().strip()
-                if not p:
-                    continue
-                if not os.path.exists(p):
-                    missing.append(f"{os.path.basename(_ep)} → {p}")
-                    continue
-                mapping[os.path.normpath(os.path.abspath(_ep))] = os.path.normpath(os.path.abspath(p))
+            mapping, missing = glossary_files.build_glossary_mapping(
+                [(_ep, _le.text()) for _ep, _le in rows]
+            )
 
             if missing:
                 QMessageBox.warning(
@@ -31881,94 +31408,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 _mode_key = ''
             if _mode_key == 'off_no_automap' and mapping:
-                try:
-                    import shutil as _shutil
-                    import sys as _sys
-
-                    def _resolve_out_dir(_epub_path):
-                        """Same rules as translator / retranslation GUIs."""
-                        if not _epub_path:
-                            return None
-                        # RPG Maker .exe uses its own GTool_Translation folder; skip
-                        if _epub_path.lower().endswith('.exe'):
-                            return None
-                        _base = os.path.splitext(os.path.basename(_epub_path))[0]
-                        _override = None
-                        for _c in (
-                            os.environ.get('OUTPUT_DIRECTORY'),
-                            os.environ.get('OUTPUT_DIR'),
-                            self.config.get('output_directory') if hasattr(self, 'config') else None,
-                        ):
-                            if _c is None:
-                                continue
-                            _c = str(_c).strip().strip('"')
-                            if _c:
-                                _override = _c
-                                break
-                        _out = os.path.join(os.path.abspath(_override), _base) if _override else _base
-                        if _sys.platform == 'darwin' and not os.path.isabs(_out):
-                            _out = os.path.join(os.path.dirname(os.path.abspath(_epub_path)), _out)
-                        if not os.path.exists(_out):
-                            try:
-                                os.makedirs(_out, exist_ok=True)
-                                _pf = os.path.join(_out, "translation_progress.json")
-                                if not os.path.exists(_pf):
-                                    with open(_pf, 'w', encoding='utf-8') as _f:
-                                        json.dump(
-                                            {"chapters": {}, "chapter_chunks": {}, "version": "2.1"},
-                                            _f, ensure_ascii=False, indent=2,
-                                        )
-                                self.append_log(f"\U0001F4C1 Created output folder: {_out}")
-                            except Exception as _e:
-                                self.append_log(f"\u26a0\ufe0f Failed to create output folder for {os.path.basename(_epub_path)}: {_e}")
-                                return None
-                        return _out
-
-                    def _target_name_for(_p):
-                        _ext = os.path.splitext(_p)[1].lower()
-                        if _ext in ('.csv', '.txt'):
-                            return 'glossary.csv'
-                        if _ext == '.md':
-                            return 'glossary.md'
-                        if _ext == '.json':
-                            return 'glossary.json'
-                        return 'glossary.csv'
-
-                    copied = 0
-                    skipped = 0
-                    failed = 0
-                    for _epub_path, _glossary_path in mapping.items():
-                        try:
-                            _out = _resolve_out_dir(_epub_path)
-                            if not _out:
-                                failed += 1
-                                continue
-                            _dest = os.path.join(_out, _target_name_for(_glossary_path))
-                            if os.path.abspath(_glossary_path) == os.path.abspath(_dest):
-                                self.append_log(f"\U0001F4CE Glossary already at output path: {_dest}")
-                                skipped += 1
-                                continue
-                            _shutil.copy2(_glossary_path, _dest)
-                            self.append_log(f"\U0001F4CE Copied glossary to EPUB output: {_dest}")
-                            copied += 1
-                        except Exception as _e:
-                            failed += 1
-                            self.append_log(
-                                f"\u26a0\ufe0f Copy failed for {os.path.basename(_epub_path)}: {_e}"
-                            )
-                    _parts = []
-                    if copied:
-                        _parts.append(f"{copied} copied")
-                    if skipped:
-                        _parts.append(f"{skipped} already in place")
-                    if failed:
-                        _parts.append(f"{failed} failed")
-                    _summary = ", ".join(_parts) if _parts else "no changes"
-                    self.append_log(
-                        f"\U0001F4DA Manual Glossary Only: mapping applied to {len(mapping)} EPUB output folder(s): {_summary}"
-                    )
-                except Exception as e:
-                    self.append_log(f"\u26a0\ufe0f Failed to copy mapped glossaries to output folders: {e}")
+                glossary_files.copy_mapped_glossaries_to_outputs(
+                    mapping,
+                    config=self.config if hasattr(self, 'config') else None,
+                    append_log=self.append_log,
+                )
 
             try:
                 dialog.close()
@@ -32287,131 +31731,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
     def _comprehensive_json_fix(self, content):
         """Apply comprehensive JSON fixes."""
-        import re
-        
-        # Store original for comparison
-        fixed = content
-        
-        # 1. Remove BOM if present
-        if fixed.startswith('\ufeff'):
-            fixed = fixed[1:]
-        
-        # 2. Fix common Unicode issues first
-        replacements = {
-            '"': '"',  # Left smart quote
-            '"': '"',  # Right smart quote
-            ''': "'",  # Left smart apostrophe
-            ''': "'",  # Right smart apostrophe
-            '–': '-',  # En dash
-            '—': '-',  # Em dash
-            '…': '...',  # Ellipsis
-            '\u200b': '',  # Zero-width space
-            '\u00a0': ' ',  # Non-breaking space
-        }
-        for old, new in replacements.items():
-            fixed = fixed.replace(old, new)
-        
-        # 3. Fix trailing commas in objects and arrays
-        fixed = re.sub(r',\s*}', '}', fixed)
-        fixed = re.sub(r',\s*]', ']', fixed)
-        
-        # 4. Fix multiple commas
-        fixed = re.sub(r',\s*,+', ',', fixed)
-        
-        # 5. Fix missing commas between array/object elements
-        # Between closing and opening braces/brackets
-        fixed = re.sub(r'}\s*{', '},{', fixed)
-        fixed = re.sub(r']\s*\[', '],[', fixed)
-        fixed = re.sub(r'}\s*\[', '},[', fixed)
-        fixed = re.sub(r']\s*{', '],{', fixed)
-        
-        # Between string values (but not inside strings)
-        # This is tricky, so we'll be conservative
-        fixed = re.sub(r'"\s+"(?=[^:]*":)', '","', fixed)
-        
-        # 6. Fix unquoted keys (simple cases)
-        # Match unquoted keys that are followed by a colon
-        fixed = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed)
-        
-        # 7. Fix single quotes to double quotes for keys and simple string values
-        # Keys
-        fixed = re.sub(r"([{,]\s*)'([^']+)'(\s*:)", r'\1"\2"\3', fixed)
-        # Simple string values (be conservative)
-        fixed = re.sub(r"(:\s*)'([^'\"]*)'(\s*[,}])", r'\1"\2"\3', fixed)
-        
-        # 8. Fix common escape issues
-        # Replace single backslashes with double backslashes (except for valid escapes)
-        # This is complex, so we'll only fix obvious cases
-        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', fixed)
-        
-        # 9. Ensure proper brackets/braces balance
-        # Count opening and closing brackets
-        open_braces = fixed.count('{')
-        close_braces = fixed.count('}')
-        open_brackets = fixed.count('[')
-        close_brackets = fixed.count(']')
-        
-        # Add missing closing braces/brackets at the end
-        if open_braces > close_braces:
-            fixed += '}' * (open_braces - close_braces)
-        if open_brackets > close_brackets:
-            fixed += ']' * (open_brackets - close_brackets)
-        
-        # 10. Remove trailing comma before EOF
-        fixed = re.sub(r',\s*$', '', fixed.strip())
-        
-        # 11. Fix unescaped newlines in strings (conservative approach)
-        # This is very tricky to do with regex without a proper parser
-        # We'll skip this for safety
-        
-        # 12. Remove comments (JSON doesn't support comments)
-        # Remove // style comments
-        fixed = re.sub(r'//.*$', '', fixed, flags=re.MULTILINE)
-        # Remove /* */ style comments
-        fixed = re.sub(r'/\*.*?\*/', '', fixed, flags=re.DOTALL)
-        
-        return fixed
+        return glossary_files.comprehensive_json_fix(content)
 
     def _analyze_json_errors(self, original, fixed, original_error, fixed_error):
         """Analyze JSON errors and provide helpful information."""
-        analysis = []
-        
-        # Check for common issues
-        if '{' in original and original.count('{') != original.count('}'):
-            analysis.append(f"• Mismatched braces: {original.count('{')} opening, {original.count('}')} closing")
-        
-        if '[' in original and original.count('[') != original.count(']'):
-            analysis.append(f"• Mismatched brackets: {original.count('[')} opening, {original.count(']')} closing")
-        
-        if original.count('"') % 2 != 0:
-            analysis.append("• Odd number of quotes (possible unclosed string)")
-        
-        # Check for BOM
-        if original.startswith('\ufeff'):
-            analysis.append("• File starts with BOM (Byte Order Mark)")
-        
-        # Check for common problematic patterns
-        if re.search(r'[''""…]', original):
-            analysis.append("• Contains smart quotes or special Unicode characters")
-        
-        if re.search(r':\s*[a-zA-Z_][a-zA-Z0-9_]*\s*[,}]', original):
-            analysis.append("• Possible unquoted string values")
-        
-        if re.search(r'[{,]\s*[a-zA-Z_][a-zA-Z0-9_]*\s*:', original):
-            analysis.append("• Possible unquoted keys")
-        
-        if '//' in original or '/*' in original:
-            analysis.append("• Contains comments (not valid in JSON)")
-        
-        # Try to find the approximate error location
-        if hasattr(original_error, 'lineno'):
-            lines = original.split('\n')
-            if 0 < original_error.lineno <= len(lines):
-                error_line = lines[original_error.lineno - 1]
-                analysis.append(f"\nError near line {original_error.lineno}:")
-                analysis.append(f"  {error_line.strip()}")
-        
-        return "\n".join(analysis) if analysis else "Unable to determine specific issues."
+        return glossary_files.analyze_json_errors(original, fixed, original_error, fixed_error)
 
     def save_config(self, show_message=True):
         """Persist all settings to config.json."""

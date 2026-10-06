@@ -4,21 +4,20 @@ The dialog in this module deliberately stops at preparing a paired EPUB.  The
 main window then sends that temporary book through Glossarion's existing EPUB
 glossary pipeline, so chapter batching, progress recovery, parsing, refinement,
 and output handling all continue to use the established implementation.
+
+The mapping, prompt and EPUB-writing logic lives in the GUI-free
+``parallel_epub_core`` (shared with the mobile app); every name it had here is
+re-exported below, and the dialog keeps only widgets and calls into it.
 """
 
 from __future__ import annotations
 
-import html
 import os
-import re
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
-from ebooklib import epub
-from epub_special_files import special_file_flags
 from PySide6.QtCore import QRect, QStringListModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
@@ -49,467 +48,43 @@ from PySide6.QtWidgets import (
 )
 
 
-DEFAULT_PARALLEL_EPUB_PROFILE = "Parallel EPUB Glossary"
-PARALLEL_EPUB_SELECTION_CONFIG_KEY = "parallel_epub_pair_selection"
-
-DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT = """\
-[RAW EPUB START — {raw_filename}]
-{raw_text}
-[RAW EPUB END]
-
-[TRANSLATED EPUB START — {translated_filename}]
-{translated_text}
-[TRANSLATED EPUB END]"""
-
-PARALLEL_EPUB_SYSTEM_INSTRUCTIONS = """\
-PAIR-SPECIFIC INSTRUCTIONS:
-- You are cross-checking aligned HTML chapters from a raw/source-language EPUB and an existing translated EPUB.
-- Every user input contains one or more mapped raw/translated chapter pairs. Treat each RAW EPUB section as the authority for raw_name and its matching TRANSLATED EPUB section as the authority for established translated_name spellings.
-- Cross-check both sections before creating each entry. Only output an entry when its matching established rendering is present in the translated section, and copy that rendering exactly. If the translated section does not provide a verifiable matching rendering, skip the entry entirely; never invent one yourself.
-- Use the paired context to recover entries that one edition makes implicit, but never invent an entry or translation unsupported by either section.
-- The pair-specific rules above take priority if the general glossary rules below would otherwise make you ignore the supplied translated edition."""
-
-
-def parallel_epub_working_filename(raw_path: str) -> str:
-    """Keep the raw EPUB basename so glossary output uses its normal folder."""
-
-    source_name = os.path.basename(str(raw_path or "").strip())
-    stem, extension = os.path.splitext(source_name)
-    if not stem:
-        stem = "raw_epub"
-    if extension.lower() != ".epub":
-        return f"{stem}.epub"
-    return source_name
-
-
-def default_parallel_epub_system_prompt() -> str:
-    """Return pair instructions followed by the canonical prompt verbatim."""
-    from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT
-
-    return f"{PARALLEL_EPUB_SYSTEM_INSTRUCTIONS}\n\n{DEFAULT_GLOSSARY_PROMPT}"
-
-
-def chapter_filename(chapter) -> str:
-    """Read a chapter filename from extractor tuples or dialog dictionaries."""
-    if isinstance(chapter, dict):
-        return str(chapter.get("filename") or "")
-    if isinstance(chapter, (tuple, list)) and len(chapter) >= 2:
-        return str(chapter[1] or "")
-    return ""
-
-
-def chapter_text(chapter) -> str:
-    """Read chapter text from extractor tuples or dialog dictionaries."""
-    if isinstance(chapter, dict):
-        return str(chapter.get("text") or "")
-    if isinstance(chapter, (tuple, list)) and chapter:
-        return str(chapter[0] or "")
-    return str(chapter or "")
-
-
-def compact_parallel_epub_selection(result: dict) -> dict:
-    """Return the persistent, text-free representation of a mapped pair."""
-
-    mappings = []
-    for ordinal, pair in enumerate(result.get("pairs") or []):
-        if not isinstance(pair, dict):
-            continue
-        raw_filename = str(pair.get("raw_filename") or "")
-        translated_filename = str(pair.get("translated_filename") or "")
-        if not raw_filename or not translated_filename:
-            continue
-        try:
-            raw_index = int(pair.get("raw_index", ordinal))
-        except (TypeError, ValueError):
-            raw_index = ordinal
-        try:
-            translated_index = int(pair.get("translated_index", ordinal))
-        except (TypeError, ValueError):
-            translated_index = ordinal
-        mappings.append(
-            {
-                "raw_index": raw_index,
-                "translated_index": translated_index,
-                "raw_filename": raw_filename,
-                "translated_filename": translated_filename,
-            }
-        )
-
-    return {
-        "version": 1,
-        "raw_path": os.path.abspath(str(result.get("raw_path") or "")),
-        "translated_path": os.path.abspath(
-            str(result.get("translated_path") or "")
-        ),
-        "mapping": mappings,
-        "wrapper_prompt": str(result.get("wrapper_prompt") or ""),
-        "system_prompt": str(result.get("system_prompt") or ""),
-        "profile_name": str(
-            result.get("profile_name") or DEFAULT_PARALLEL_EPUB_PROFILE
-        ),
-    }
-
-
-def restore_parallel_epub_pairs(
-    raw_chapters: Sequence,
-    translated_chapters: Sequence,
-    stored_mapping: Sequence,
-) -> tuple[List[Dict[str, object]], int]:
-    """Reattach saved filename mappings to freshly extracted chapter text.
-
-    Stored indexes are used only when the filename at that index still agrees.
-    Filename lookup is the fallback, so a harmless EPUB reading-order change does
-    not destroy the saved mapping. Missing or duplicate references are skipped
-    and returned as the second value.
-    """
-
-    raw_used = set()
-    translated_used = set()
-
-    def resolve_index(chapters, saved_index, saved_filename, used):
-        expected = str(saved_filename or "")
-        expected_key = expected.replace("\\", "/").casefold()
-        try:
-            candidate = int(saved_index)
-        except (TypeError, ValueError):
-            candidate = -1
-        if (
-            0 <= candidate < len(chapters)
-            and candidate not in used
-            and chapter_filename(chapters[candidate])
-            .replace("\\", "/")
-            .casefold()
-            == expected_key
-        ):
-            return candidate
-        for index, chapter in enumerate(chapters):
-            if index in used:
-                continue
-            if (
-                chapter_filename(chapter).replace("\\", "/").casefold()
-                == expected_key
-            ):
-                return index
-        return None
-
-    restored = []
-    skipped = 0
-    for entry in stored_mapping or []:
-        if not isinstance(entry, dict):
-            skipped += 1
-            continue
-        raw_index = resolve_index(
-            raw_chapters,
-            entry.get("raw_index"),
-            entry.get("raw_filename"),
-            raw_used,
-        )
-        translated_index = resolve_index(
-            translated_chapters,
-            entry.get("translated_index"),
-            entry.get("translated_filename"),
-            translated_used,
-        )
-        if raw_index is None or translated_index is None:
-            skipped += 1
-            continue
-        raw_used.add(raw_index)
-        translated_used.add(translated_index)
-        restored.append(
-            {
-                "raw_index": raw_index,
-                "translated_index": translated_index,
-                "raw_filename": chapter_filename(raw_chapters[raw_index]),
-                "raw_text": chapter_text(raw_chapters[raw_index]),
-                "translated_filename": chapter_filename(
-                    translated_chapters[translated_index]
-                ),
-                "translated_text": chapter_text(
-                    translated_chapters[translated_index]
-                ),
-            }
-        )
-    return restored, skipped
-
-
-def _normalized_member_stem(filename: str) -> str:
-    stem = Path(str(filename or "")).stem.casefold()
-    return re.sub(r"[^a-z0-9]+", "", stem)
-
-
-def _member_number_signature(filename: str) -> tuple:
-    numbers = tuple(
-        int(part) for part in re.findall(r"\d+", Path(str(filename or "")).stem)
-    )
-    # Zero-only names such as 0000_Information are front-matter offset
-    # candidates, not chapter-number anchors.
-    return numbers if any(number > 0 for number in numbers) else ()
-
-
-def _has_positive_member_number(filename: str) -> bool:
-    """Return whether a filename contains any numeric value greater than zero."""
-
-    return bool(_member_number_signature(filename))
-
-
-def _nonpositive_member_layout(chapters: Sequence) -> tuple:
-    """Describe where no-number/zero-only files occur among numbered files."""
-
-    positive_members_seen = 0
-    layout = []
-    for chapter in chapters:
-        if _has_positive_member_number(chapter_filename(chapter)):
-            positive_members_seen += 1
-        else:
-            layout.append(positive_members_seen)
-    return tuple(layout)
-
-
-def _chapter_special_flags(
-    chapters: Sequence,
-    predicate: Callable[[str], bool],
-    *,
-    protect_interior: bool = False,
-    reading_order: Optional[Sequence[str]] = None,
-) -> List[bool]:
-    """Keep textless EPUB documents in the special-file boundary context."""
-    filenames = [chapter_filename(chapter) for chapter in chapters]
-    if not protect_interior or not reading_order:
-        return special_file_flags(
-            filenames, predicate, protect_interior=protect_interior,
-        )
-    ordered_flags = special_file_flags(
-        reading_order, predicate, protect_interior=True,
-    )
-    by_filename = dict(zip(reading_order, ordered_flags))
-    return [
-        by_filename[filename] if filename in by_filename else bool(predicate(filename))
-        for filename in filenames
-    ]
-
-
-def auto_map_epub_chapters(
-    raw_chapters: Sequence,
-    translated_chapters: Sequence,
-    *,
-    enable_auto_offset: bool = True,
-    special_file_predicate: Optional[Callable[[str], bool]] = None,
-    protect_interior_special_files: bool = True,
-    raw_reading_order: Optional[Sequence[str]] = None,
-    translated_reading_order: Optional[Sequence[str]] = None,
-) -> List[Dict[str, object]]:
-    """Map names/numbers, leaving special files available for manual pairing."""
-    mappings: List[Dict[str, object]] = [
-        {
-            "raw_index": index,
-            "translated_index": None,
-            "strategy": "Unmatched",
-            "auto_offset": 0,
-        }
-        for index in range(len(raw_chapters))
-    ]
-    available = set(range(len(translated_chapters)))
-
-    def assign_unique(key_func: Callable[[str], object], strategy: str) -> None:
-        raw_keys: Dict[object, List[int]] = {}
-        translated_keys: Dict[object, List[int]] = {}
-        for raw_index, mapping in enumerate(mappings):
-            if mapping["translated_index"] is not None:
-                continue
-            key = key_func(chapter_filename(raw_chapters[raw_index]))
-            if key:
-                raw_keys.setdefault(key, []).append(raw_index)
-        for translated_index in sorted(available):
-            key = key_func(chapter_filename(translated_chapters[translated_index]))
-            if key:
-                translated_keys.setdefault(key, []).append(translated_index)
-        for key, raw_indexes in raw_keys.items():
-            translated_indexes = translated_keys.get(key, [])
-            if len(raw_indexes) != 1 or len(translated_indexes) != 1:
-                continue
-            raw_index = raw_indexes[0]
-            translated_index = translated_indexes[0]
-            mappings[raw_index]["translated_index"] = translated_index
-            mappings[raw_index]["strategy"] = strategy
-            available.discard(translated_index)
-
-    if enable_auto_offset:
-        # No-number and zero-only documents deliberately stay out of every
-        # automatic assignment, even when their stems match. They remain in
-        # the UI for explicit manual selection.
-        assign_unique(
-            lambda filename: (
-                _normalized_member_stem(filename)
-                if _has_positive_member_number(filename)
-                else ""
-            ),
-            "Exact filename",
-        )
-    else:
-        assign_unique(_normalized_member_stem, "Exact filename")
-
-    def assign_reading_group(numbered: bool, strategy: str) -> None:
-        raw_indexes = [
-            index
-            for index, mapping in enumerate(mappings)
-            if mapping["translated_index"] is None
-            and _has_positive_member_number(chapter_filename(raw_chapters[index]))
-            is numbered
-        ]
-        translated_indexes = [
-            index
-            for index in sorted(available)
-            if _has_positive_member_number(
-                chapter_filename(translated_chapters[index])
-            )
-            is numbered
-        ]
-        for raw_index, translated_index in zip(raw_indexes, translated_indexes):
-            visual_offset = raw_index - translated_index if numbered else 0
-            mappings[raw_index]["translated_index"] = translated_index
-            mappings[raw_index]["auto_offset"] = visual_offset
-            mappings[raw_index]["strategy"] = (
-                f"Auto offset {visual_offset:+d}" if visual_offset else strategy
-            )
-            available.discard(translated_index)
-
-    if enable_auto_offset:
-        # When zero-only/unnumbered files occur at different positions, they
-        # are the offset signal. Align positive-numbered reading sequences
-        # first; raw_0002 can legitimately correspond to translated_0001.
-        has_nonpositive_offset = _nonpositive_member_layout(
-            raw_chapters
-        ) != _nonpositive_member_layout(translated_chapters)
-        if has_nonpositive_offset:
-            assign_reading_group(True, "Numbered order")
-        assign_unique(_member_number_signature, "Chapter number")
-        if not has_nonpositive_offset:
-            assign_reading_group(True, "Numbered order")
-
-        # No-number/zero-only raw rows stay Unmatched and their translated
-        # counterparts stay unused. This prevents front matter from entering
-        # the paired glossary unless the user selects it manually.
-    else:
-        assign_unique(_member_number_signature, "Chapter number")
-        unmatched_raw = [
-            index
-            for index, mapping in enumerate(mappings)
-            if mapping["translated_index"] is None
-        ]
-        for raw_index, translated_index in zip(unmatched_raw, sorted(available)):
-            mappings[raw_index]["translated_index"] = translated_index
-            mappings[raw_index]["strategy"] = "Reading order"
-            available.discard(translated_index)
-
-    if special_file_predicate:
-        raw_special = _chapter_special_flags(
-            raw_chapters,
-            special_file_predicate, protect_interior=protect_interior_special_files,
-            reading_order=raw_reading_order,
-        )
-        translated_special = _chapter_special_flags(
-            translated_chapters,
-            special_file_predicate, protect_interior=protect_interior_special_files,
-            reading_order=translated_reading_order,
-        )
-        # Keep special files in the candidate sequences until alignment is
-        # complete. Removing one first would shift every following positional
-        # pair (for example, raw 56 would receive translated 57).
-        for mapping in mappings:
-            raw_index = mapping["raw_index"]
-            translated_index = mapping["translated_index"]
-            if raw_special[raw_index] or (
-                translated_index is not None
-                and translated_special[translated_index]
-            ):
-                mapping["translated_index"] = None
-                mapping["strategy"] = "Special file — Unmapped"
-                mapping["auto_offset"] = 0
-
-    return mappings
-
-
-def apply_parallel_epub_wrapper(
-    template: str,
-    *,
-    raw_text: str,
-    translated_text: str,
-    raw_filename: str,
-    translated_filename: str,
-) -> str:
-    """Expand only supported placeholders, leaving unrelated braces intact."""
-    result = str(template or "")
-    replacements = {
-        "{raw_text}": str(raw_text or ""),
-        "{translated_text}": str(translated_text or ""),
-        "{raw_filename}": str(raw_filename or ""),
-        "{translated_filename}": str(translated_filename or ""),
-    }
-    for placeholder, value in replacements.items():
-        result = result.replace(placeholder, value)
-    return result
-
-
-def write_parallel_epub(
-    output_path: str,
-    pairs: Iterable[Dict[str, str]],
-    wrapper_prompt: str,
-    *,
-    title: str = "Parallel EPUB Pair",
-) -> str:
-    """Write mapped chapter pairs as one valid EPUB for the shared extractor."""
-    pair_list = list(pairs)
-    if not pair_list:
-        raise ValueError("At least one mapped HTML pair is required.")
-    if "{raw_text}" not in wrapper_prompt or "{translated_text}" not in wrapper_prompt:
-        raise ValueError(
-            "The wrapper prompt must contain {raw_text} and {translated_text}."
-        )
-
-    output_path = os.path.abspath(output_path)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    book = epub.EpubBook()
-    book.set_identifier(f"glossarion-parallel-{uuid.uuid4().hex}")
-    book.set_title(str(title or "Parallel EPUB Pair"))
-    book.set_language("und")
-
-    epub_chapters = []
-    for index, pair in enumerate(pair_list, start=1):
-        wrapped = apply_parallel_epub_wrapper(
-            wrapper_prompt,
-            raw_text=pair.get("raw_text", ""),
-            translated_text=pair.get("translated_text", ""),
-            raw_filename=pair.get("raw_filename", ""),
-            translated_filename=pair.get("translated_filename", ""),
-        )
-        # A preformatted element preserves wrapper boundaries while escaping any
-        # markup that appeared in source prose. The established EPUB extractor
-        # will turn it back into plain text before sending it to the model.
-        content = (
-            "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head>"
-            f"<title>Mapped pair {index}</title></head><body>"
-            f"<pre style=\"white-space: pre-wrap\">{html.escape(wrapped)}</pre>"
-            "</body></html>"
-        )
-        chapter = epub.EpubHtml(
-            title=f"Mapped pair {index}",
-            file_name=f"pair_{index:04d}.xhtml",
-            lang="und",
-        )
-        chapter.content = content
-        book.add_item(chapter)
-        epub_chapters.append(chapter)
-
-    book.toc = tuple(epub_chapters)
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
-    # Keep the required EPUB navigation document out of the reading spine so a
-    # user who enables "translate special files" still sends only mapped pairs
-    # through glossary extraction.
-    book.spine = list(epub_chapters)
-    epub.write_epub(output_path, book, {})
-    return output_path
+from parallel_epub_core import (  # noqa: F401 - moved to the GUI-free core (U6); re-exported
+    DEFAULT_PARALLEL_EPUB_PROFILE,
+    DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT,
+    PARALLEL_EPUB_SELECTION_CONFIG_KEY,
+    PARALLEL_EPUB_SYSTEM_INSTRUCTIONS,
+    _chapter_special_flags,
+    _has_positive_member_number,
+    _member_number_signature,
+    _nonpositive_member_layout,
+    _normalized_member_stem,
+    active_parallel_epub_profile,
+    apply_parallel_epub_wrapper,
+    auto_map_epub_chapters,
+    build_parallel_epub_pairs,
+    chapter_filename,
+    chapter_text,
+    compact_parallel_epub_selection,
+    default_parallel_epub_system_prompt,
+    load_parallel_epub_chapters,
+    load_parallel_epub_documents,
+    offset_parallel_epub_mapping,
+    parallel_epub_mapping_status,
+    parallel_epub_profiles,
+    parallel_epub_prompt_settings,
+    parallel_epub_selection_matches,
+    parallel_epub_working_filename,
+    persisted_parallel_epub_rows,
+    prepare_persisted_parallel_epub_selection,
+    restore_parallel_epub_pairs,
+    selected_parallel_epub_mapping,
+    translated_mapping_label,
+    unpaired_file_counts,
+    unpaired_warning_text,
+    valid_parallel_epub_rows,
+    validate_parallel_epub_pair,
+    write_parallel_epub,
+)
 
 
 class _EpubDropZone(QFrame):
@@ -792,30 +367,17 @@ class ParallelEpubPairDialog(QDialog):
         self._translated_mapping_model = QStringListModel(self)
         self.epubLoadFinished.connect(self._finish_epub_load)
 
-        saved_profiles = self.config.get("parallel_epub_glossary_profiles", {})
-        self.profiles = dict(saved_profiles) if isinstance(saved_profiles, dict) else {}
-        default_prompt = default_parallel_epub_system_prompt()
-        if DEFAULT_PARALLEL_EPUB_PROFILE not in self.profiles:
-            self.profiles[DEFAULT_PARALLEL_EPUB_PROFILE] = default_prompt
+        self.profiles = parallel_epub_profiles(self.config)
 
         self._build_ui()
-        active = str(
-            self.config.get("parallel_epub_glossary_active_profile")
-            or DEFAULT_PARALLEL_EPUB_PROFILE
-        )
-        if active not in self.profiles:
-            active = DEFAULT_PARALLEL_EPUB_PROFILE
+        active = active_parallel_epub_profile(self.config, self.profiles)
         self.profile_combo.setCurrentText(active)
         self._load_profile(active)
         self._refresh_load_controls()
 
     @staticmethod
     def _default_chapter_loader(path: str) -> Sequence:
-        from extract_glossary_from_epub import extract_chapters_from_epub
-
-        return extract_chapters_from_epub(
-            path, return_document_metadata=True, include_special_files=True,
-        )
+        return load_parallel_epub_chapters(path)
 
     def _build_ui(self):
         mapping_combo_style = ""
@@ -1142,27 +704,9 @@ class ParallelEpubPairDialog(QDialog):
         self._refresh_load_controls()
 
         def load_in_background():
-            chapters = []
-            reading_order = []
-            error = ""
-            try:
-                extracted = list(self.chapter_loader(path) or [])
-                for index, item in enumerate(extracted, start=1):
-                    filename = chapter_filename(item) or f"HTML {index}"
-                    reading_order.append(filename)
-                    text = chapter_text(item)
-                    if not text.strip():
-                        continue
-                    chapters.append(
-                        {
-                            "text": text,
-                            "filename": filename,
-                        }
-                    )
-                if not chapters:
-                    error = "The EPUB has no eligible HTML files with readable text."
-            except Exception as exc:
-                error = str(exc)
+            chapters, reading_order, error = load_parallel_epub_documents(
+                self.chapter_loader, path
+            )
             try:
                 self.epubLoadFinished.emit(
                     side, path, serial,
@@ -1277,30 +821,13 @@ class ParallelEpubPairDialog(QDialog):
     def restore_persisted_selection(self, selection: dict) -> bool:
         """Load both real EPUBs and restore a text-free saved HTML mapping."""
 
-        if not isinstance(selection, dict) or not selection.get("mapping"):
+        pending = prepare_persisted_parallel_epub_selection(selection)
+        if pending is None:
             return False
-        raw_path = os.path.abspath(str(selection.get("raw_path") or ""))
-        translated_path = os.path.abspath(
-            str(selection.get("translated_path") or "")
-        )
-        if not (
-            os.path.isfile(raw_path)
-            and raw_path.lower().endswith(".epub")
-            and os.path.isfile(translated_path)
-            and translated_path.lower().endswith(".epub")
-        ):
-            return False
+        raw_path = pending["raw_path"]
+        translated_path = pending["translated_path"]
 
-        self._pending_persisted_selection = {
-            **selection,
-            "raw_path": raw_path,
-            "translated_path": translated_path,
-            "mapping": [
-                dict(item)
-                for item in selection.get("mapping") or []
-                if isinstance(item, dict)
-            ],
-        }
+        self._pending_persisted_selection = pending
 
         wrapper_prompt = str(selection.get("wrapper_prompt") or "")
         if wrapper_prompt:
@@ -1447,17 +974,9 @@ class ParallelEpubPairDialog(QDialog):
         selection = self._pending_persisted_selection
         if not isinstance(selection, dict):
             return False
-        current_paths = (
-            os.path.normcase(os.path.abspath(self.raw_path)),
-            os.path.normcase(os.path.abspath(self.translated_path)),
-        )
-        saved_paths = (
-            os.path.normcase(os.path.abspath(str(selection.get("raw_path") or ""))),
-            os.path.normcase(
-                os.path.abspath(str(selection.get("translated_path") or ""))
-            ),
-        )
-        if current_paths != saved_paths:
+        if not parallel_epub_selection_matches(
+            selection, self.raw_path, self.translated_path
+        ):
             return False
 
         restored, _skipped = restore_parallel_epub_pairs(
@@ -1465,23 +984,12 @@ class ParallelEpubPairDialog(QDialog):
             self.translated_chapters,
             selection.get("mapping") or [],
         )
+        rows = persisted_parallel_epub_rows(self.mapping_table.rowCount(), restored)
         header = self.mapping_table.horizontalHeader()
         self.mapping_table.setUpdatesEnabled(False)
         header.setSectionResizeMode(2, QHeaderView.Fixed)
         try:
-            # Missing entries in the compact mapping are intentional unmapped
-            # rows, so clear every auto-map assignment before restoring pairs.
-            for row in range(self.mapping_table.rowCount()):
-                translated_item = self.mapping_table.item(row, 1)
-                if translated_item is not None:
-                    translated_item.setData(Qt.UserRole, -1)
-                    translated_item.setText(self._translated_mapping_label(-1))
-                strategy_item = self.mapping_table.item(row, 2)
-                if strategy_item is not None:
-                    strategy_item.setText("Saved — Unmapped")
-            for pair in restored:
-                row = int(pair["raw_index"])
-                translated_index = int(pair["translated_index"])
+            for row, (translated_index, strategy) in enumerate(rows):
                 translated_item = self.mapping_table.item(row, 1)
                 if translated_item is not None:
                     translated_item.setData(Qt.UserRole, translated_index)
@@ -1490,7 +998,7 @@ class ParallelEpubPairDialog(QDialog):
                     )
                 strategy_item = self.mapping_table.item(row, 2)
                 if strategy_item is not None:
-                    strategy_item.setText("Saved Mapping")
+                    strategy_item.setText(strategy)
         finally:
             header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
             self.mapping_table.setUpdatesEnabled(True)
@@ -1533,9 +1041,7 @@ class ParallelEpubPairDialog(QDialog):
         )
 
     def _translated_mapping_label(self, translated_index: int) -> str:
-        if 0 <= translated_index < len(self.translated_chapters):
-            return str(self.translated_chapters[translated_index]["filename"])
-        return "— Unmapped —"
+        return translated_mapping_label(self.translated_chapters, translated_index)
 
     def _apply_mapping_offset(self, delta: int):
         """Shift every automatic translated index, keeping overflow unmapped."""
@@ -1543,18 +1049,16 @@ class ParallelEpubPairDialog(QDialog):
         if not self._auto_mapping or not self.translated_chapters:
             return
         self._mapping_offset += int(delta)
-        translated_count = len(self.translated_chapters)
-        translated_special = _chapter_special_flags(
+        rows = offset_parallel_epub_mapping(
+            self._auto_mapping,
+            self._mapping_offset,
             self.translated_chapters,
-            self.special_file_predicate or (lambda _filename: False),
+            self.special_file_predicate,
             protect_interior=bool(
                 self.config.get('never_consider_in_between_files_as_special', True)
             ),
             reading_order=self.translated_reading_order,
         )
-        # Offset direction follows what the user sees in the raw-row table:
-        # +1 moves the existing assignments down one raw row, so each row must
-        # select the translated index that was previously one row above it.
         # Suspend table painting for the whole batch so hundreds of mapping
         # cells can be updated with a single final repaint.
         header = self.mapping_table.horizontalHeader()
@@ -1564,37 +1068,17 @@ class ParallelEpubPairDialog(QDialog):
         # column-width recalculations.
         header.setSectionResizeMode(2, QHeaderView.Fixed)
         try:
-            for row, automatic in enumerate(self._auto_mapping):
+            for row, (translated_index, strategy) in enumerate(rows):
                 translated_item = self.mapping_table.item(row, 1)
                 if translated_item is None:
                     continue
-                base_index = automatic.get("translated_index")
-                shifted_index = (
-                    None
-                    if base_index is None
-                    else int(base_index) - self._mapping_offset
-                )
-                if shifted_index is None or not 0 <= shifted_index < translated_count:
-                    translated_index = -1
-                    strategy = f"Offset {self._mapping_offset:+d} (unmapped)"
-                elif translated_special[shifted_index]:
-                    translated_index = -1
-                    strategy = "Special file — Unmapped"
-                else:
-                    translated_index = shifted_index
-                    strategy = f"Offset {self._mapping_offset:+d}"
                 translated_item.setData(Qt.UserRole, translated_index)
                 translated_item.setText(
                     self._translated_mapping_label(translated_index)
                 )
                 strategy_item = self.mapping_table.item(row, 2)
                 if strategy_item is not None:
-                    if self._mapping_offset:
-                        strategy_item.setText(strategy)
-                    else:
-                        strategy_item.setText(
-                            str(automatic.get("strategy") or "Unmatched")
-                        )
+                    strategy_item.setText(strategy)
         finally:
             header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
             self.mapping_table.setUpdatesEnabled(True)
@@ -1642,13 +1126,7 @@ class ParallelEpubPairDialog(QDialog):
     def _set_rows_unmapped(self, rows: Iterable[int]):
         """Set several mapping cells to Unmapped in one repaint-safe batch."""
 
-        valid_rows = sorted(
-            {
-                int(row)
-                for row in rows
-                if 0 <= int(row) < self.mapping_table.rowCount()
-            }
-        )
+        valid_rows = valid_parallel_epub_rows(rows, self.mapping_table.rowCount())
         if not valid_rows:
             return
         header = self.mapping_table.horizontalHeader()
@@ -1671,44 +1149,28 @@ class ParallelEpubPairDialog(QDialog):
         self._update_mapping_status()
 
     def _selected_mapping(self) -> List[Dict[str, int]]:
-        selected = []
+        translated_indexes = []
         for row in range(self.mapping_table.rowCount()):
             translated_item = self.mapping_table.item(row, 1)
-            translated_index = (
+            translated_indexes.append(
                 translated_item.data(Qt.UserRole)
                 if translated_item is not None
                 else -1
             )
-            try:
-                translated_index = int(translated_index)
-            except (TypeError, ValueError):
-                translated_index = -1
-            if translated_index >= 0:
-                selected.append({"raw_index": row, "translated_index": translated_index})
-        return selected
+        return selected_parallel_epub_mapping(translated_indexes)
 
     def _unpaired_file_counts(self, mapping: Sequence[Dict[str, int]]) -> tuple:
         """Return unmatched raw and unused translated document counts."""
 
-        used_translated = {item["translated_index"] for item in mapping}
-        unmatched_raw = len(self.raw_chapters) - len(mapping)
-        unused_translated = len(self.translated_chapters) - len(used_translated)
-        return unmatched_raw, unused_translated
+        return unpaired_file_counts(
+            mapping, len(self.raw_chapters), len(self.translated_chapters)
+        )
 
     def _unpaired_warning_text(self, mapping: Sequence[Dict[str, int]]) -> str:
         """Explain every individual HTML document excluded from the pair."""
 
-        unmatched_raw, unused_translated = self._unpaired_file_counts(mapping)
-        excluded_total = unmatched_raw + unused_translated
-        return (
-            f"{excluded_total} HTML file(s) are not part of a mapped pair and "
-            "will be skipped.\n\n"
-            f"Mapped raw/translated pairs: {len(mapping)}\n"
-            f"Unmatched raw HTML files: {unmatched_raw}\n"
-            f"Unused translated HTML files: {unused_translated}\n\n"
-            "Unused translated files are the extra files that overflow beyond "
-            "the available raw rows, or files that no raw row currently selects.\n\n"
-            "Continue with only the mapped pairs?"
+        return unpaired_warning_text(
+            mapping, len(self.raw_chapters), len(self.translated_chapters)
         )
 
     def _create_centered_question_box(self, title: str, text: str) -> QMessageBox:
@@ -1744,34 +1206,17 @@ class ParallelEpubPairDialog(QDialog):
 
     def _update_mapping_status(self):
         mapping = self._selected_mapping()
-        used = [item["translated_index"] for item in mapping]
-        duplicate_count = len(used) - len(set(used))
-        unmatched_raw, unused_translated = self._unpaired_file_counts(mapping)
-        parts = [f"{len(mapping)} mapped"]
-        if self._mapping_offset:
-            parts.append(f"offset {self._mapping_offset:+d}")
-        else:
-            automatic_offsets = sorted(
-                {
-                    int(item.get("auto_offset") or 0)
-                    for item in self._auto_mapping
-                    if int(item.get("auto_offset") or 0)
-                }
-            )
-            if len(automatic_offsets) == 1:
-                parts.append(f"auto offset {automatic_offsets[0]:+d}")
-            elif automatic_offsets:
-                parts.append("automatic numbering offsets")
-        if unmatched_raw:
-            parts.append(f"{unmatched_raw} raw unmatched")
-        if unused_translated:
-            parts.append(f"{unused_translated} translated unused")
+        status_text, duplicate_count = parallel_epub_mapping_status(
+            mapping,
+            self._mapping_offset,
+            self._auto_mapping,
+            len(self.raw_chapters),
+            len(self.translated_chapters),
+        )
         if duplicate_count:
-            parts.append(f"{duplicate_count} duplicate assignment(s)")
             self.mapping_status.setStyleSheet("color: #ff7b7b; font-size: 8pt;")
         else:
             self.mapping_status.setStyleSheet("color: #9ba4b3; font-size: 8pt;")
-        status_text = " • ".join(parts)
         self.mapping_status.setText(status_text)
         self.mapping_status.setToolTip(status_text)
 
@@ -1837,12 +1282,12 @@ class ParallelEpubPairDialog(QDialog):
         self._persist_prompt_settings()
 
     def _persist_prompt_settings(self):
-        self.config["parallel_epub_glossary_profiles"] = dict(self.profiles)
-        self.config["parallel_epub_glossary_active_profile"] = (
-            self.profile_combo.currentText().strip() or DEFAULT_PARALLEL_EPUB_PROFILE
-        )
-        self.config["parallel_epub_glossary_wrapper_prompt"] = (
-            self.wrapper_edit.toPlainText()
+        self.config.update(
+            parallel_epub_prompt_settings(
+                self.profiles,
+                self.profile_combo.currentText(),
+                self.wrapper_edit.toPlainText(),
+            )
         )
         parent = self.parent()
         if parent is not None and hasattr(parent, "save_config"):
@@ -1852,48 +1297,25 @@ class ParallelEpubPairDialog(QDialog):
                 pass
 
     def _accept_pair(self):
-        if self._active_load is not None or self._pending_loads:
-            QMessageBox.information(
-                self,
-                "EPUB Still Loading",
-                "Wait for both EPUBs to finish loading before using the mapped pair.",
-            )
-            return
-        if not self.raw_chapters or not self.translated_chapters:
-            QMessageBox.warning(self, "EPUBs Required", "Load both the raw and translated EPUB.")
-            return
-        if os.path.normcase(os.path.abspath(self.raw_path)) == os.path.normcase(
-            os.path.abspath(self.translated_path)
-        ):
-            QMessageBox.warning(
-                self,
-                "Two EPUBs Required",
-                "Choose the source EPUB on the left and its translated edition on the right.",
-            )
-            return
         wrapper = self.wrapper_edit.toPlainText()
-        if "{raw_text}" not in wrapper or "{translated_text}" not in wrapper:
-            QMessageBox.warning(
-                self,
-                "Wrapper Placeholders Required",
-                "The wrapper prompt must contain both {raw_text} and {translated_text}.",
-            )
-            return
         system_prompt = self.system_prompt_edit.toPlainText().strip()
-        if not system_prompt:
-            QMessageBox.warning(self, "System Prompt Required", "The system prompt cannot be empty.")
-            return
         mapping = self._selected_mapping()
-        if not mapping:
-            QMessageBox.warning(self, "Mapping Required", "Map at least one HTML file pair.")
-            return
-        translated_indexes = [item["translated_index"] for item in mapping]
-        if len(translated_indexes) != len(set(translated_indexes)):
-            QMessageBox.warning(
-                self,
-                "Duplicate Mapping",
-                "Each translated HTML file can only be assigned once.",
-            )
+        problem = validate_parallel_epub_pair(
+            loading=self._active_load is not None or bool(self._pending_loads),
+            raw_path=self.raw_path,
+            translated_path=self.translated_path,
+            raw_chapters=self.raw_chapters,
+            translated_chapters=self.translated_chapters,
+            wrapper_prompt=wrapper,
+            system_prompt=system_prompt,
+            mapping=mapping,
+        )
+        if problem is not None:
+            kind, title, text = problem
+            if kind == "information":
+                QMessageBox.information(self, title, text)
+            else:
+                QMessageBox.warning(self, title, text)
             return
         unmatched_raw, unused_translated = self._unpaired_file_counts(mapping)
         if unmatched_raw or unused_translated:
@@ -1901,20 +1323,9 @@ class ParallelEpubPairDialog(QDialog):
             if answer != QMessageBox.Yes:
                 return
 
-        pairs = []
-        for item in mapping:
-            raw = self.raw_chapters[item["raw_index"]]
-            translated = self.translated_chapters[item["translated_index"]]
-            pairs.append(
-                {
-                    "raw_index": item["raw_index"],
-                    "translated_index": item["translated_index"],
-                    "raw_filename": raw["filename"],
-                    "raw_text": raw["text"],
-                    "translated_filename": translated["filename"],
-                    "translated_text": translated["text"],
-                }
-            )
+        pairs = build_parallel_epub_pairs(
+            mapping, self.raw_chapters, self.translated_chapters
+        )
 
         profile_name = self.profile_combo.currentText().strip() or DEFAULT_PARALLEL_EPUB_PROFILE
         self.profiles[profile_name] = system_prompt

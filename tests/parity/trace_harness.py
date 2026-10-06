@@ -757,11 +757,19 @@ class DesktopDriver:
     @staticmethod
     def run(tracer, owner, scenario):
         if scenario["entry"] == ts.GLOSSARY:
-            return owner.run_glossary_extraction_direct()
+            # the Extract Glossary button (U6): run_glossary_extraction_thread resets the stop
+            # state (stop env, run id, extractor stop flag, glossary stop file) and hands
+            # run_glossary_extraction_direct to the executor, which the gate runs inline
+            return owner.run_glossary_extraction_thread()
         return owner.run_translation_thread()
 
     @staticmethod
     def click(tracer):
+        if (tracer.scenario or {}).get("entry") == ts.GLOSSARY:
+            # the Extract Glossary button while extraction runs: run_glossary_extraction_thread
+            # stops a live glossary worker through stop_glossary_extraction (U6 scenarios)
+            tracer.owner.stop_glossary_extraction()
+            return
         # the Run/Stop button: run_translation_thread() stops a live worker (stop_translation)
         tracer.owner.run_translation_thread()
 
@@ -808,6 +816,28 @@ class MobileDriver:
         import stop_control
 
         owner = tracer.owner
+        if (tracer.scenario or {}).get("entry") == ts.GLOSSARY:
+            # U6: a glossary job stops through stop_control.request_glossary_stop (the desktop
+            # stop_glossary_extraction protocol). The desktop forces an immediate stop only while
+            # its button reads "Finishing..." (no such label here), so there is no force click; the
+            # latch is stop_requested and the cleanup's run-id guard reads _glossary_run_id.
+            if not hasattr(stop_control, "request_glossary_stop"):
+                raise Unavailable("stop_control.request_glossary_stop is missing (U6)")
+            entry = getattr(owner, "_backend_entry", None)
+            if callable(entry):
+                glossary_flag = entry("glossary_stop_flag")
+            else:  # pre-U3 owner: the desktop's lazily loaded glossary_stop_flag
+                glossary_flag = getattr(importlib.import_module("extract_glossary_from_epub"), "set_stop_flag", None)
+
+            def glossary_latch():
+                owner.stop_requested = True
+
+            _call_supported(stop_control.request_glossary_stop,
+                            graceful=bool(getattr(owner, "graceful_stop_var", False)),
+                            set_stop_requested=glossary_latch, log=owner.append_log,
+                            glossary_stop_flag=glossary_flag,
+                            get_run_id=lambda: getattr(owner, "_glossary_run_id", None))
+            return
         if tracer.mobile_tracker is None:
             tracer.mobile_tracker = stop_control.StopClickTracker()
         force = bool(_call_supported(tracer.mobile_tracker.register, now=tracer.clock.time()))
@@ -1437,6 +1467,11 @@ def _mobile_event(event):
     kw = dict(kwargs)
     if "flags" in kw and isinstance(kw["flags"], dict):
         kw["flags"] = {k: kw["flags"].get(k) for k in _FLAG_KEYS_MOBILE}
+        # The shared pipelines read graceful_stop_active with getattr(..., False). A fresh mobile
+        # glossary job owner has no value until a stop latches one, while the desktop Extract
+        # Glossary button sets False at run start (U6 glossary stop scenarios): equivalent.
+        if kw["flags"].get("graceful_stop_active") == _ABSENT:
+            kw["flags"]["graceful_stop_active"] = False
     if "env" in kw:
         kw["env"] = _mask_env(kw["env"])
     if "env_vars" in kw and isinstance(kw["env_vars"], dict):

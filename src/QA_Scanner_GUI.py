@@ -21,6 +21,20 @@ import traceback
 from language_options import TARGET_LANGUAGES
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 from qa_scan_runtime import is_html_like_path
+# Pure helpers, the latest-report lookup and the dialog defaults live in qa_scan_runtime
+# (moved in U6 so Glossarion Mobile shares them); imported here under their old names.
+from qa_scan_runtime import (
+    DEFAULT_AI_TRUNCATION_PROMPT,
+    DEFAULT_CUSTOM_MODE_SETTINGS,
+    _normalize_source_language,
+    _normalize_target_language,
+    _qa_owner_output_mode,
+    _qa_owner_uses_truncation_context,
+    _qa_vision_ocr_source_path,
+    check_epub_folder_match,
+    find_latest_qa_report,
+    normalize_name_for_comparison,
+)
 
 DEFAULT_AI_ARTIFACT_PATTERNS = [
     'Sure',
@@ -173,230 +187,6 @@ def _prewarm_dialog_offscreen(dialog):
             pass
 
 
-def _qa_owner_output_mode(owner):
-    try:
-        if hasattr(owner, '_get_output_mode'):
-            return str(owner._get_output_mode() or '').strip().lower()
-    except Exception:
-        pass
-    try:
-        return str(getattr(owner, 'config', {}).get('output_mode', '') or '').strip().lower()
-    except Exception:
-        return ''
-
-
-def _qa_owner_uses_truncation_context(owner):
-    try:
-        settings = getattr(owner, 'config', {}).get('qa_scanner_settings', {}) or {}
-        context = (
-            settings.get('_qa_context')
-            or settings.get('qa_context')
-            or settings.get('context')
-            or settings.get('_context')
-            or ''
-        )
-        if str(context).strip().lower() in ('truncation', 'qa_truncation'):
-            return True
-        return bool(settings.get('check_ai_truncation_detection', False))
-    except Exception:
-        return False
-
-
-def _qa_vision_ocr_source_path(path, owner=None):
-    """Return this book output's OCR-source EPUB used for Vision/truncation QA, when available."""
-    if not path or not str(path).lower().endswith('.epub'):
-        return path
-    if _qa_owner_output_mode(owner) != 'vision' and not _qa_owner_uses_truncation_context(owner):
-        return path
-    try:
-        abs_path = os.path.abspath(path)
-        stem, ext = os.path.splitext(os.path.basename(abs_path))
-        if stem.lower().endswith('_ocr'):
-            stem = stem[:-4]
-        candidates = []
-        env_candidate = os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip() or os.getenv('VISION_OCR_SOURCE_EPUB', '').strip()
-        if env_candidate:
-            candidates.append(env_candidate)
-        output_dir = os.getenv('EPUB_OUTPUT_DIR', '').strip()
-        if output_dir:
-            output_abs = os.path.abspath(output_dir)
-            if os.path.basename(output_abs) == stem:
-                candidates.append(os.path.join(output_abs, "OCR", f"{stem}_OCR{ext or '.epub'}"))
-            else:
-                candidates.append(os.path.join(output_abs, stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
-        override_dir = os.getenv('OUTPUT_DIRECTORY') or os.getenv('OUTPUT_DIR')
-        if override_dir:
-            candidates.append(os.path.join(os.path.abspath(override_dir), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
-        try:
-            owner_base_dir = getattr(owner, 'base_dir', '') if owner is not None else ''
-            if owner_base_dir:
-                candidates.append(os.path.join(os.path.abspath(owner_base_dir), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
-        except Exception:
-            pass
-        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
-        for candidate in candidates:
-            try:
-                candidate_abs = os.path.abspath(candidate)
-                candidate_stem = os.path.splitext(os.path.basename(candidate_abs))[0]
-                if candidate_stem.lower().endswith('_ocr'):
-                    candidate_stem = candidate_stem[:-4]
-                if candidate_stem != stem:
-                    continue
-                if os.path.basename(os.path.dirname(candidate_abs)).lower() != 'ocr':
-                    continue
-                if os.path.isfile(candidate_abs):
-                    return candidate_abs
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return path
-
-
-def _normalize_target_language(display_text):
-    """Normalize a human-facing target language label to a canonical value.
-
-    The QA pipeline expects simple lowercase identifiers like "english",
-    "korean", or "chinese". This helper maps common dropdown labels to
-    those canonical forms so detection logic stays stable even if the
-    UI wording changes (e.g. "Chinese (Simplified)").
-    """
-    if not display_text:
-        return "english"
-
-    s = display_text.strip().lower()
-
-    mapping = {
-        # Core languages
-        "english": "english",
-        "en": "english",
-        "spanish": "spanish",
-        "es": "spanish",
-        "french": "french",
-        "fr": "french",
-        "german": "german",
-        "de": "german",
-        "portuguese": "portuguese",
-        "pt": "portuguese",
-        "italian": "italian",
-        "it": "italian",
-        "russian": "russian",
-        "ru": "russian",
-        "japanese": "japanese",
-        "ja": "japanese",
-        "korean": "korean",
-        "ko": "korean",
-        # Chinese variants (keep distinct)
-        "chinese": "chinese",
-        "chinese (simplified)": "chinese (simplified)",
-        "chinese (traditional)": "chinese (traditional)",
-        "zh": "chinese",
-        "zh-cn": "chinese (simplified)",
-        "zh-tw": "chinese (traditional)",
-        # RTL / other scripts
-        "arabic": "arabic",
-        "ar": "arabic",
-        "hebrew": "hebrew",
-        "he": "hebrew",
-        "thai": "thai",
-        "th": "thai",
-    }
-
-    if s in mapping:
-        return mapping[s]
-
-    # Fallback: use the first word (e.g. "english (us)" → "english")
-    first = s.split()[0]
-    return mapping.get(first, first)
-
-
-def _normalize_source_language(display_text):
-    """
-    Normalize source language without collapsing Chinese variants.
-    Returns lowercase labels that align with word_count_multipliers keys.
-    """
-    if not display_text:
-        return 'auto'
-    s = display_text.strip().lower()
-    if s == 'auto':
-        return 'auto'
-    # Keep distinct variants for Chinese
-    if 'chinese' in s:
-        if 'traditional' in s:
-            return 'chinese (traditional)'
-        if 'simplified' in s:
-            return 'chinese (simplified)'
-        return 'chinese'
-    return s
-
-
-
-def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
-    """
-    Check if EPUB name and folder name likely refer to the same content
-    Uses strict matching to avoid false positives with similar numbered titles
-    """
-    # Normalize names for comparison
-    epub_norm = normalize_name_for_comparison(epub_name)
-    folder_norm = normalize_name_for_comparison(folder_name)
-
-    # Direct match
-    if epub_norm == folder_norm:
-        return True
-
-    # Check if folder has common output suffixes that should be ignored
-    output_suffixes = ['_output', '_translated', '_trans', '_en', '_english', '_done', '_complete', '_final']
-    if custom_suffixes:
-        custom_list = [s.strip() for s in custom_suffixes.split(',') if s.strip()]
-        output_suffixes.extend(custom_list)
-
-    for suffix in output_suffixes:
-        if folder_norm.endswith(suffix):
-            folder_base = folder_norm[:-len(suffix)]
-            if folder_base == epub_norm:
-                return True
-        if epub_norm.endswith(suffix):
-            epub_base = epub_norm[:-len(suffix)]
-            if epub_base == folder_norm:
-                return True
-
-    # Check for exact match with version numbers removed
-    version_pattern = r'[\s_-]v\d+$'
-    epub_no_version = re.sub(version_pattern, '', epub_norm)
-    folder_no_version = re.sub(version_pattern, '', folder_norm)
-
-    if epub_no_version == folder_no_version and (epub_no_version != epub_norm or folder_no_version != folder_norm):
-        return True
-
-    # STRICT NUMBER CHECK - all numbers must match exactly
-    epub_numbers = re.findall(r'\d+', epub_name)
-    folder_numbers = re.findall(r'\d+', folder_name)
-
-    if epub_numbers != folder_numbers:
-        return False
-
-    # If we get here, numbers match, so check if the text parts are similar enough
-    epub_text_only = re.sub(r'\d+', '', epub_norm).strip()
-    folder_text_only = re.sub(r'\d+', '', folder_norm).strip()
-
-    if epub_numbers and folder_numbers:
-        return epub_text_only == folder_text_only
-
-    return False
-
-
-def normalize_name_for_comparison(name):
-    """Normalize a filename for comparison - preserving number positions"""
-    name = name.lower()
-    name = re.sub(r'\.(epub|txt|html?)$', '', name)
-    name = re.sub(r'[-_\s]+', ' ', name)
-    name = re.sub(r'\[(?![^\]]*\d)[^\]]*\]', '', name)
-    name = re.sub(r'\((?![^)]*\d)[^)]*\)', '', name)
-    name = re.sub(r'[^\w\s\-]', ' ', name)
-    name = ' '.join(name.split())
-    return name.strip()
-
-
 def _normalize_qa_dialog_path(value):
     """Normalize a path returned by a Qt file dialog.
 
@@ -488,42 +278,10 @@ class QAScannerMixin:
     def open_latest_qa_report(self):
         """Open the most recently found QA report (validation_results.html)."""
         try:
-            from qa_scan_runtime import is_direct_text_qa_path
-
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-            newest = None
-            newest_mtime = -1
+            newest = find_latest_qa_report(override_dir, getattr(self, 'last_qa_report_path', None))
 
-            search_roots = []
-            if override_dir and os.path.isdir(override_dir):
-                search_roots.append(os.path.normpath(override_dir))
-            else:
-                search_roots.append(os.getcwd())
-
-            for root_dir in search_roots:
-                if is_direct_text_qa_path(root_dir):
-                    continue
-                for root, dirs, files in os.walk(root_dir):
-                    dirs[:] = [
-                        dirname for dirname in dirs
-                        if not is_direct_text_qa_path(os.path.join(root, dirname))
-                    ]
-                    for fname in files:
-                        if fname.lower() == "validation_results.html":
-                            candidate = os.path.join(root, fname)
-                            try:
-                                mtime = os.path.getmtime(candidate)
-                            except Exception:
-                                mtime = 0
-                            if mtime > newest_mtime:
-                                newest_mtime = mtime
-                                newest = candidate
-
-            # Fallback to cached path only if nothing found in current search
-            if not newest and getattr(self, 'last_qa_report_path', None) and os.path.exists(self.last_qa_report_path):
-                newest = self.last_qa_report_path
-
-            if not newest or not os.path.exists(newest):
+            if not newest:
                 QMessageBox.information(self, "QA Report", "QA report does not exist. Run a QA scan first.")
                 return
 
@@ -1374,18 +1132,7 @@ class QAScannerMixin:
             saved_custom_settings = self.config.get('qa_scanner_settings', {}).get('custom_mode_settings', {})
 
             # Default values
-            custom_settings = {
-                'similarity': 85,
-                'semantic': 80,
-                'structural': 90,
-                'word_overlap': 75,
-                'minhash_threshold': 80,
-                'consecutive_chapters': 2,
-                'check_all_pairs': False,
-                'sample_size': 3000,
-                'min_text_length': 500,
-                'min_duplicate_word_count': 500
-            }
+            custom_settings = dict(DEFAULT_CUSTOM_MODE_SETTINGS)
 
             # Override with saved settings if they exist
             if saved_custom_settings:
@@ -4690,17 +4437,7 @@ class QAScannerMixin:
             additional_layout.addWidget(ai_trunc_tail_widget)
 
             # "Edit Prompt" button
-            _ai_trunc_default_prompt = (
-                "You are a strict translation quality analyst. Your ONLY job is to determine if "
-                "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
-                "or completely missing the final paragraphs/sentences present in the source).\n"
-                "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
-                "Only evaluate the final sentences of the provided texts. Ignore mismatches occurring at the beginning "
-                "of the provided tail segment, as it may have been cleanly cut from a larger document.\n"
-                "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
-                "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
-                "Respond with ONLY the word YES or NO. Do not explain."
-            )
+            _ai_trunc_default_prompt = DEFAULT_AI_TRUNCATION_PROMPT
             # Store current custom prompt (or default) in a mutable container for the closure
             _ai_trunc_prompt_holder = [qa_settings.get('ai_truncation_prompt', _ai_trunc_default_prompt)]
             # Store prompt role: 'system' or 'user' (default: system)

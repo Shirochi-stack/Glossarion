@@ -1030,9 +1030,12 @@ def test_app_start_installs_the_library_and_the_reader(app_env):
             assert await uf._wait(lambda: finished == ["job-1"])
             await app.navigate("/library")
             assert isinstance(app.shell.top_screen, LibraryScreen)
-            await app.navigate("/tools")
-            assert "tools.progress" in app.shell.top_screen.tiles
-            assert app.shell.top_screen.tiles["tools.progress"].trailing is None  # no "Arrives in" chip
+            await app.navigate("/tools")  # U6: the Tools hub (ToolsFeature) lists the Library's tools
+            from glossarion_mobile.ui.tools.hub import ToolsHubScreen
+
+            hub = app.shell.top_screen
+            assert isinstance(hub, ToolsHubScreen) and "tools.progress" in hub.tiles
+            assert hub.tiles["tools.progress"].on_click is not None  # opens: no "Arrives in" chip
         finally:
             try:
                 lc.uninstall_library_env()
@@ -1682,3 +1685,27 @@ def test_pdf_without_a_workspace_is_not_offered_to_the_reader(tmp_path):
         screen.dispose()
 
     asyncio.run(scenario())
+
+
+def test_compile_spec_uses_the_workspace_compile_kind():
+    """Integrate (U6): the Book page / Library "Compile EPUB" / "Compile PDF" run the compiler of the
+    workspace's source format like the desktop (library_core._workspace_compile_kind): a PDF workspace
+    compiles through compile_pdf; an EPUB workspace's PDF is the EPUB compile with "Create PDF after
+    EPUB" on (the Converter's compile_spec)."""
+    kinds = {}
+    core = types.SimpleNamespace(_workspace_compile_kind=lambda book, folder: kinds.get(folder, "epub"))
+    service = LibraryService(core=SharedCore({"library_core": core}), config={})
+    epub_book = {"name": "Novel", "output_folder": "/out/Novel"}
+    pdf_book = {"name": "Manual", "output_folder": "/out/Manual"}
+    kinds["/out/Manual"] = "pdf"
+    spec = service.compile_spec(epub_book, "compile_epub")
+    assert (spec.kind, spec.params) == ("compile_epub", {"folder": "/out/Novel"})
+    spec = service.compile_spec(epub_book, "compile_pdf")
+    assert spec.kind == "compile_epub"
+    assert spec.params == {"folder": "/out/Novel", "config_overrides": {"enable_pdf_output": True},
+                           "pdf_after_epub": True}
+    for kind in ("compile_epub", "compile_pdf"):
+        spec = service.compile_spec(pdf_book, kind)
+        assert (spec.kind, spec.params) == ("compile_pdf", {"folder": "/out/Manual"})
+    with pytest.raises(ValueError):
+        service.compile_spec({"name": "x"}, "compile_epub")

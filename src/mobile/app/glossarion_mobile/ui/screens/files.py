@@ -271,9 +271,9 @@ class FileBrowserScreen(Screen):
         later = [
             ActionItem(label, None, icon=icon, disabled_reason=reason, key=f"file-{key}")
             for key, label, icon, reason in (
-                ("open", "Open with…", "OPEN_IN_NEW", "Reader and editors arrive in U5/U6"),
-                ("rename", "Rename", "DRIVE_FILE_RENAME_OUTLINE", "Arrives with the file tools (U6)"),
-                ("delete", "Delete", "DELETE_OUTLINE", "Arrives with the file tools (U6)"),
+                ("open", "Open with…", "OPEN_IN_NEW", "Arrives with the text editor and file tools (U7)"),
+                ("rename", "Rename", "DRIVE_FILE_RENAME_OUTLINE", "Arrives with the file tools (U7)"),
+                ("delete", "Delete", "DELETE_OUTLINE", "Arrives with the file tools (U7)"),
             )
         ]
         sheet = export_sheet(self.files, entry.path, page=self.page, notify=self.notify, tablet=self.tablet,

@@ -72,7 +72,7 @@ EMPTY_COMPLETED = "Your Library is empty.\n\nAdd finished .epub files with “Ad
 PREF_VIEW = "library_view"
 PREF_SHOW_LANGUAGE = "library_show_language"
 PREF_SHOW_PROGRESS = "library_show_progress"
-GLOSSARY_FILES_REASON = "Arrives with the Glossary tools (U6)"
+GLOSSARY_FILES_REASON = "The Glossary Manager is not available in this session"
 SERIES_REASON = "Arrives in U9"
 RAW_IMPORT_EXTENSIONS = ["epub", "txt", "pdf", "html", "htm"]
 SCROLL_APPEND_PX = 600
@@ -730,7 +730,7 @@ class LibraryScreen(Screen):
         with_raw = [b for b in books if b.get("raw_source_path") and not b.get("missing_raw_file")]
         epubs = [b for b in with_raw if str(b.get("raw_source_path") or "").lower().endswith(".epub")]
         workspaces = [b for b in books if b.get("output_folder")]
-        metadata_reason = None if service.has_job_kind("metadata") else "Metadata translation jobs arrive in U6"
+        metadata_reason = None if service.has_job_kind("metadata") else "Metadata translation is not available in this session"
         if not epubs:
             metadata_reason = "No raw EPUB resolves for the selection"
         primary = [
@@ -746,8 +746,10 @@ class LibraryScreen(Screen):
         ]
         more = [
             BulkAction("glossary_delete", f"Delete glossary files ({count})", "DELETE_SWEEP",
-                       disabled_reason=GLOSSARY_FILES_REASON),
-            BulkAction("glossary_restore", "Restore glossary backup", "RESTORE", disabled_reason=GLOSSARY_FILES_REASON),
+                       lambda: self.ctx.spawn(self.delete_glossary_files(books)), self._glossary_reason(),
+                       destructive=True),
+            BulkAction("glossary_restore", "Restore glossary backup", "RESTORE",
+                       lambda: self.ctx.spawn(self.restore_glossary_backup(books)), self._glossary_reason()),
             BulkAction("clear_raw", f"Clear saved raw link (for {count} item{'s' if count != 1 else ''})",
                        "LINK_OFF", lambda: self.ctx.spawn(clear_raw_link_flow(self.ctx, books))),
             BulkAction("share", "Share", "IOS_SHARE", lambda: self.ctx.spawn(self.share_books(books))),
@@ -791,7 +793,7 @@ class LibraryScreen(Screen):
                        disabled_reason=(None if has_raw and raw.lower().endswith(".epub")
                                         and service.has_job_kind("metadata")
                                         else "Needs a raw EPUB" if not (has_raw and raw.lower().endswith(".epub"))
-                                        else "Metadata translation jobs arrive in U6")),
+                                        else "Metadata translation is not available in this session")),
             ActionItem("\U0001f4d8 Compile EPUB", lambda: self.ctx.spawn(self.compile([book], "compile_epub")),
                        icon="MENU_BOOK", disabled_reason=None if has_progress else "No translation_progress.json"),
             ActionItem("\U0001f4c4 Compile PDF", lambda: self.ctx.spawn(self.compile([book], "compile_pdf")),
@@ -803,9 +805,10 @@ class LibraryScreen(Screen):
                        disabled_reason=None if self._developer() else "Developer setting"),
             ActionItem("✂️ Clear saved raw link", lambda: self.ctx.spawn(clear_raw_link_flow(self.ctx, [book])),
                        icon="LINK_OFF"),
-            ActionItem("\U0001f5d1️ Delete glossary files", icon="DELETE_SWEEP",
-                       disabled_reason=GLOSSARY_FILES_REASON),
-            ActionItem("↩️ Restore glossary backup", icon="RESTORE", disabled_reason=GLOSSARY_FILES_REASON),
+            ActionItem("\U0001f5d1️ Delete glossary files", lambda: self.ctx.spawn(self.delete_glossary_files([book])),
+                       icon="DELETE_SWEEP", disabled_reason=self._glossary_reason()),
+            ActionItem("↩️ Restore glossary backup", lambda: self.ctx.spawn(self.restore_glossary_backup([book])),
+                       icon="RESTORE", disabled_reason=self._glossary_reason()),
             ActionItem("\U0001f5d1️ Delete", lambda: self.ctx.spawn(self.delete_books([book])),
                        icon="DELETE_OUTLINE", destructive=True),
         ]
@@ -813,6 +816,36 @@ class LibraryScreen(Screen):
 
     def _developer(self) -> bool:
         return bool(self._pref("developer_mode", False))
+
+    # ---- glossary files (U6 GlossaryFeature hooks: the desktop 🗑️ / ↩️ for the selected inputs) ----
+
+    def _glossary_hooks(self) -> Any:
+        return getattr(self.service, "glossary_hooks", None)
+
+    def _glossary_reason(self) -> Optional[str]:
+        return None if self._glossary_hooks() is not None else GLOSSARY_FILES_REASON
+
+    async def delete_glossary_files(self, books: Sequence[Mapping[str, Any]]) -> Any:
+        hooks = self._glossary_hooks()
+        if hooks is None:
+            self.ctx.say(GLOSSARY_FILES_REASON)
+            return None
+        inputs = await self.ctx.io(hooks.service.input_paths_for_books, list(books))
+        result = await hooks.delete_glossary_files(inputs)
+        if result is not None:
+            self.exit_selection()
+        return result
+
+    async def restore_glossary_backup(self, books: Sequence[Mapping[str, Any]]) -> Any:
+        hooks = self._glossary_hooks()
+        if hooks is None:
+            self.ctx.say(GLOSSARY_FILES_REASON)
+            return None
+        inputs = await self.ctx.io(hooks.service.input_paths_for_books, list(books))
+        result = await hooks.restore_glossary_backup(inputs)
+        if result is not None:
+            self.exit_selection()
+        return result
 
     def copy_path(self, book: Mapping[str, Any]) -> Any:
         copy = self.ctx.copy_text
@@ -860,7 +893,7 @@ class LibraryScreen(Screen):
     async def translate_metadata(self, books: Sequence[Mapping[str, Any]]) -> Optional[str]:
         service = self.service
         if not service.has_job_kind("metadata"):
-            self.ctx.say("Metadata translation jobs arrive in U6")
+            self.ctx.say("Metadata translation is not available in this session")
             return None
         try:
             spec = await self.ctx.io(service.metadata_spec, list(books))

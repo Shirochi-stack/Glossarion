@@ -151,6 +151,14 @@ class GlossarionApp:
         self.library: Any = None
         self.library_feature: Any = None
         self.reader: Any = None
+        # U6: GlossaryFeature.install sets glossary (GlossaryService over glossary_document /
+        # glossary_files / parallel_epub_core) and glossary_feature (Glossaries, the Glossary
+        # Manager page, Unified glossary, Parallel EPUB pair, the Library / Book page glossary
+        # hooks, the chat "Extract glossary" tool); ToolsFeature.install sets tools (Tools hub,
+        # QA Scanner + report viewer, Converter / Compile, Headers & metadata).
+        self.glossary: Any = None
+        self.glossary_feature: Any = None
+        self.tools: Any = None
 
     @staticmethod
     def _make_secure_storage() -> Any:
@@ -233,6 +241,8 @@ class GlossarionApp:
         await self._install_pages()  # accounts (all providers), profiles, prefill, data pages
         await self._install_library()  # Library shelves, Book page, Progress manager, intents
         await self._install_reader()  # /reader/<bid> (after the Library: it resolves book ids)
+        await self._install_glossary()  # Glossary Manager + the Library's glossary hooks (after the Library)
+        await self._install_tools()  # Tools hub, QA Scanner, Converter, Headers & metadata (after Library + Reader)
         self.dispatcher.spawn(self._after_ready())
         match = await self.dispatch_route(page.route, source="initial")
         await self._maybe_welcome(match)
@@ -338,6 +348,29 @@ class GlossarionApp:
             await ReaderFeature.install(self)  # sets self.reader; wraps shell.screen_factory
         except Exception:
             log.exception("reader feature unavailable; /reader shows a placeholder")
+
+    async def _install_glossary(self) -> None:
+        """The Glossary Manager (Glossaries list, the glossary page with the Editor / General /
+        Balanced-Full / Minimal / Refinement tabs, Unified glossary, Parallel EPUB pair), the
+        Library / Book page glossary hooks (open in editor, delete / restore glossary files,
+        load as manual glossary, refine) and the chat "Extract glossary" tool (U6)."""
+        try:
+            from glossarion_mobile.ui.glossary.feature import GlossaryFeature
+
+            await GlossaryFeature.install(self)  # sets self.glossary / glossary_feature; wraps the shell
+        except Exception:
+            log.exception("glossary feature unavailable; /glossary shows a placeholder")
+
+    async def _install_tools(self) -> None:
+        """The Tools hub, QA Scanner (+ report viewer), Converter / Compile EPUB-PDF and Headers &
+        metadata screens (U6). Their job kinds (qa_scan, validate_epub, rename_outputs,
+        translate_headers, metadata) are registered in ``job_kinds``."""
+        try:
+            from glossarion_mobile.ui.tools.feature import ToolsFeature
+
+            await ToolsFeature.install(self)  # sets self.tools; wraps shell.screen_factory
+        except Exception:
+            log.exception("tools feature unavailable; /tools shows the hub")
 
     async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
         """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome
@@ -451,9 +484,38 @@ class GlossarionApp:
                 return match  # the client echoing a route the app pushed (overlays stay)
             if not self.shell.overlays:
                 return match  # echo of an in-app navigation
+        guarded = self._guarded(self.shell.leaving_entries(match, reset=reset, in_app=source == "app"))
+        if guarded and not await self._confirm_leave(guarded):
+            log.info("navigation to %s cancelled: a screen kept its unsaved changes", match.route)
+            if source != "app":
+                self.dispatcher.spawn(self._restore_route())  # the client already shows the link's route
+            return None
         self.shell.show(match, reset=reset, in_app=source == "app")
         self.page.update()
         return match
+
+    @staticmethod
+    def _guarded(entries: Any) -> list:
+        """The entries whose screens ask before they are disposed (``Screen.confirm_leave``)."""
+        return [entry for entry in entries or () if callable(getattr(entry.screen, "confirm_leave", None))]
+
+    async def _confirm_leave(self, entries: Any) -> bool:
+        """Ask the screens a navigation would dispose, top first (the glossary editor's "Unsaved
+        changes"); False as soon as one keeps the user there."""
+        for entry in reversed(list(entries)):
+            confirm = getattr(entry.screen, "confirm_leave", None)
+            if not callable(confirm):
+                continue
+            try:
+                answer = confirm()
+                if asyncio.iscoroutine(answer):
+                    answer = await answer
+            except Exception:
+                log.exception("the leave check of %s failed", type(entry.screen).__name__)
+                answer = True
+            if not answer:
+                return False
+        return True
 
     def _consume_route_echo(self, route: str) -> bool:
         now = time.monotonic()
@@ -505,7 +567,13 @@ class GlossarionApp:
         self.navigate_to(route_name, reset=True)
 
     async def on_view_pop(self, e: Any) -> None:
-        route = self.shell.pop_view(getattr(e, "view", None))
+        view = getattr(e, "view", None)
+        # Tablet: main-area screens above a popped full-screen View (the Reader) go with it. The client has
+        # already popped that View, so a screen keeping its unsaved edits ("Keep editing") stays and is
+        # shown in the main area instead of being disposed.
+        guarded = self._guarded(self.shell.entries_above(view))
+        keep_above = bool(guarded) and not await self._confirm_leave(guarded)
+        route = self.shell.pop_view(view, keep_above=keep_above)
         self.page.update()
         await self._sync_route(route)
 
@@ -562,8 +630,24 @@ class GlossarionApp:
         await self.shell.close_drawer()
 
     def _open_chat(self, cid: str) -> None:
+        name, params = ("home", None) if cid == "1" else ("chat", {"cid": cid})
+        try:
+            target = parse_route(build_route(name, params))
+        except RouteError:
+            target = None
+        guarded = (self._guarded(self.shell.leaving_entries(target, in_app=True))
+                   if target is not None and self.shell is not None else [])
+        if guarded:
+            # A screen with unsaved edits asks first; the chat switches only when it may be left.
+            async def after_leave() -> None:
+                if await self._confirm_leave(guarded):
+                    self.state.current_chat.set(cid)
+                    await self.navigate(build_route(name, params))
+
+            self.dispatcher.spawn(after_leave())
+            return
         self.state.current_chat.set(cid)
-        self.navigate_to("home" if cid == "1" else "chat", None if cid == "1" else {"cid": cid})
+        self.navigate_to(name, params)
 
     def _chat_actions(self, chat: ChatSummary) -> ActionSheet:
         def pin() -> None:

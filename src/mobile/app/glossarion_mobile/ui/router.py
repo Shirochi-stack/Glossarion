@@ -208,7 +208,8 @@ ROUTES: tuple[RouteSpec, ...] = (
     RouteSpec("tools.qa.report", "/tools/qa/report/{rid:hex12}", "QA report", VIEW, "U6", parent="tools.qa"),
     RouteSpec("tools.files", "/tools/files/{root:root}", "Files", VIEW, "U3", parent="tools"),
     RouteSpec("tools.files.folder", "/tools/files/{root:root}/{fid:hex12}", "Files", VIEW, "U3", parent="tools"),
-    RouteSpec("tools.text", "/tools/text/{fid:hex12}", "Text editor", FULLSCREEN, "U6", query={"hit": "int"}),
+    # UI_SPEC §4.10 (TextEditor with the file tools): U7
+    RouteSpec("tools.text", "/tools/text/{fid:hex12}", "Text editor", FULLSCREEN, "U7", query={"hit": "int"}),
     # Settings (§4.11-4.16)
     RouteSpec("settings", "/settings", "Settings", VIEW, "U2"),
     RouteSpec("settings.section", "/settings/s/{section:section}", "Settings", VIEW, "U2", parent="settings", fragment="key"),

@@ -1535,7 +1535,7 @@ File row ⋯ (`ActionSheet`): Open · Use as manual glossary · Share · Delete 
   - switches: Update output files on save · Hide unused entries
   - **Advanced ›** Reload · Clean empty fields · Remove duplicates · Backup settings · Trim entries · Filter entries · Convert format · About format
   - Text size
-- **Find / Replace sheet:** find, replace, scope (Raw / Translated / All), Match case, Whole word, Replace all. When nothing in the glossary matches, the dialog "No glossary match — apply to output HTML files?" offers Apply (undoable) or Cancel.
+- **Find / Replace sheet:** the desktop editor's Find / Replace dialog: find, replace with, a live preview ("n rows · n matches"), Find Next · Replace · Replace all. Matching is the desktop's (the shared `row_has_match` / `replace_in_row`): case-insensitive, in every column of the rows the view holds (all rows, or the used ones while Hide unused is on). There is no scope, Match case or Whole word option because the desktop dialog has none (amended in the U6 review; DISCREPANCIES "U6 review"). When nothing in the glossary matches, the dialog "No glossary match — apply to output HTML files?" offers Apply (undoable) or Cancel.
 - **Tablet:** a fixed-column grid with horizontal scroll and the entry editor in the SidePanel.
 
 **Settings tabs** (schema-generated; locks show as a purple 🔒 chip "Locked by mode: Minimal")
@@ -2031,7 +2031,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `GlossaryProgressPane` (`library/glossary_pane.py`) | Header + file chip · file card · stats chips · pinned Minimal/Refinement rows · chapter rows with ⋯ | as ChaptersPane, plus a deleted-file banner | same as ChaptersPane, plus `Banner` |
 | `DeleteConfirmView` (`library/delete_confirm.py`) | Per-target checkbox rows · contents summary · keyword field · red Delete | Delete disabled until the keyword is typed · deleting (progress) | `View`, `Checkbox`, `ListView`, `TextField`, `FilledButton` in the error colour |
 | `EntrySheet` (`glossary/entry_sheet.py`) | Raw · translated · type · gender · description · custom fields · Resolve gender… · Save / Delete | new · edit · conflict warning | `BottomSheet(scrollable=True)` (SidePanel on tablet), `TextField`, `Dropdown`, `FilledButton` |
-| `FindReplaceSheet` (`glossary/find_replace.py`) | Find · replace · scope (Raw / Translated / All) · Match case · Whole word · Replace all | n matches · none → the "apply to output HTML files?" dialog | `BottomSheet`, `TextField`, `SegmentedButton`, `Checkbox`, `ConfirmDialog` |
+| `FindReplaceSheet` (`glossary/find_replace.py`) | Find · replace with · Find Next · Replace · Replace all (case-insensitive, every column: the desktop dialog) | n rows · n matches · none → the "apply to output HTML files?" dialog | `BottomSheet`, `TextField`, `ConfirmDialog` |
 
 ### 5.7 Settings tiles and editors (schema-bound; `settings/tiles.py`)
 

@@ -1753,3 +1753,691 @@ identical in both trees.
   (`defang_book_scripts`) before the shell wraps it, so only the page's own scripts can carry
   the nonce. Mobile only; regression test
   `test_style_raw_text_in_svg_and_math_never_becomes_a_nonced_script`.
+
+## U6 QA Scanner helpers (qa_scan_runtime additions; QA_Scanner_GUI and scan_html_folder rewired)
+
+Moved at BASE_SHA e28e3a0f (the U5 commit; the parity oracle, goldens and trace oracle were
+re-frozen there). Line numbers refer to `git show e28e3a0f:src/<file>`: QA_Scanner_GUI.py (QG),
+qa_scan_runtime.py (QR), scan_html_folder.py (SH). tests/test_qa_runtime_additions.py pins the
+moves: verbatim AST checks, a differential fuzz against the legacy source, and an end-to-end quick
+scan (desktop environment against mobile environment).
+
+### What moved
+- QG 176-397 were copied byte for byte into qa_scan_runtime: `_qa_owner_output_mode`,
+  `_qa_owner_uses_truncation_context`, `_qa_vision_ocr_source_path`, `_normalize_target_language`,
+  `_normalize_source_language`, `check_epub_folder_match` and `normalize_name_for_comparison`.
+  QA_Scanner_GUI imports them under the same names, so they are the same objects as before for
+  `run_qa_scan`, the settings dialog and the OCR source rows.
+- The search in `open_latest_qa_report` (QG 488-540) is now
+  `qa_scan_runtime.find_latest_qa_report(override_dir, last_report_path)`. The method keeps its
+  message boxes, the `last_qa_report_path` update, `openUrl` and its log lines.
+- The AI-truncation default prompt (QG 4693-4703) is now `DEFAULT_AI_TRUNCATION_PROMPT`. The dialog
+  keeps its local `_ai_trunc_default_prompt = DEFAULT_AI_TRUNCATION_PROMPT`, so the generated
+  schema (`$expr: _ai_trunc_default_prompt`) is unchanged.
+- The Custom-mode defaults (QG 1377-1388) are now `DEFAULT_CUSTOM_MODE_SETTINGS`. The dialog uses
+  `custom_settings = dict(DEFAULT_CUSTOM_MODE_SETTINGS)`, a fresh copy each time, as the literal was.
+- U4 carry-over: the `DEFAULT_REFUSAL_PATTERNS` list (SH 443-464) became
+  `from key_pool_service import DEFAULT_REFUSAL_PATTERNS`. It has the same 30 strings in the same
+  order. The function-local copy in TransateKRtoEN (~24120) is untouched: that file has a
+  different owner (open item).
+
+### Behaviour deltas (intentional, parity-neutral)
+- `_qa_vision_ocr_source_path` builds its last candidate from `dirname(abspath(__file__))`.
+  `__file__` is now qa_scan_runtime.py instead of QA_Scanner_GUI.py, which is the same directory
+  in source runs and in every PyInstaller spec (both are flat `src` modules). On mobile it is the
+  read-only backend directory, where that candidate never exists.
+- `open_latest_qa_report` used to import `is_direct_text_qa_path` inside its `try`; the import is
+  now module-level. QA_Scanner_GUI already imported qa_scan_runtime at module level, so no
+  reachable behaviour changes.
+- `scan_html_folder.DEFAULT_REFUSAL_PATTERNS` is now key_pool_service's tuple, so
+  `_get_refusal_patterns_for_scan()` returns that tuple when config.json has no
+  `refusal_patterns`. Its one caller only iterates the value. The literal check in
+  tests/test_key_pool_service.py now finds no copy to compare in scan_html_folder;
+  test_qa_runtime_additions asserts the identity instead.
+
+### Mobile forcing (GUI-free; desktop unchanged)
+- `qa_scan_runtime.mobile_qa_forcing_active()` is `not mobile_runtime.processes_available()`.
+  That is true on Glossarion Mobile and whenever GLOSSARION_NO_PROCESSES is set. In that case
+  `prepare_qa_scan_settings` sets `use_thread_executor = True`, and
+  `apply_qa_scan_env_from_settings` adds two variables through `mobile_qa_env_overrides()`:
+  `QA_USE_THREAD_EXECUTOR=1` and `AI_HUNTER_MAX_WORKERS`. The worker value is
+  `MOBILE_QA_MAX_WORKERS` (2), or a smaller positive value already in the environment.
+  `restore_env` restores both with the other QA_* variables.
+- Every caller of `run_qa_scan_path` gets the forcing: the QA tool job, the post-translation scan
+  and the Multipass "Failed" scan.
+- On desktop, `mobile_qa_env_overrides()` returns `{}`, so the env mapping and the prepared
+  settings are the legacy ones (fuzzed over 500 states against the legacy module).
+- scan_html_folder already used threads when processes are unavailable (the U1 gates). The forcing
+  also caps the worker count. Without it, a mobile scan used the `AI_HUNTER_MAX_WORKERS` that the
+  HeadlessOwner exports (`cpu_count // 2`, for example 8 threads).
+- End to end: the U3 offline E2E output workspace (`e2e --keep --only e2e_translate_glossary_off`)
+  was quick-scanned twice. The first run used a real offscreen TranslatorGUI through
+  `run_qa_scan(mode_override='quick-scan', non_interactive=True)` (auto-searched output folder,
+  ProcessPoolExecutor). The second used the mobile environment with `HeadlessOwner` and
+  `run_qa_scan_path` (2 threads, PySide6 never imported). With langdetect seeded, all 46
+  workspace files are identical, including the 4 report files and translation_progress.json.
+
+### Desktop defaults / bugs found (not fixed)
+1. **Custom word-count multipliers never reach a scan.** `normalize_qa_scan_settings` (QR 198-206)
+   always replaces `word_count_multipliers` with `CANONICAL_WORD_COUNT_MULTIPLIERS`. GUI scans,
+   the post-translation scan and the Multipass "Failed" scan all pass through it
+   (`run_qa_scan_path` -> `prepare_qa_scan_settings`). So the settings dialog's manual sliders
+   (`use_auto_multipliers = False`, QG 5795-5817) are saved but have no effect.
+2. **The QA default sets disagree.** The sets are: the GUI prewarm dict (QG 547-587), the widget
+   defaults and save mirror (QG ~3634-5990), Reset (QG 6040-6320), `default_qa_scan_settings`
+   (QR 129-195), save_config's `default_qa_settings` (settings_persistence 677), the `.get`
+   defaults of `apply_qa_scan_env_from_settings` (QR 263-345) and run_env (2350-2374), and the
+   scanner's `.get` defaults.
+   - `check_missing_beautifulsoup_tags`: True in the GUI prewarm, checkbox, save mirror and Reset
+     (QG 580, 3867, 5929, 6081, 6307). False in the runtime, save_config and scanner (QR 167,
+     321; settings_persistence 677; SH 9858, 10655). Normalisation fills False when the key is
+     unsaved, so on a fresh install the dialog shows the box ticked while scans run with the
+     check off, until the dialog is saved once.
+   - `check_missing_header_tags`: settings default True (QR 166; QG 4432, 6084, 6311). The env
+     mirror and the scanner default to False (QR 320; SH 9745, 10375, 10990).
+   - `truncation_embed_threshold`: the slider defaults to 45 (QG 4618). The runtime, Reset and
+     scanner use 30 (QR 178; QG 6092; SH 11826).
+   - `punctuation_loss_threshold`: 49 (QR 155; QG 3634, 6061). The env mirror defaults to 50
+     (QR 338), and so does the scanner docstring (SH 2305).
+   - `check_translation_artifacts` (QR 140) and `check_word_count_ratio` (QR 181) default to True,
+     but the env mirror defaults them to False (QR 281, 326). This is latent on the
+     `run_qa_scan_path` path, which normalises first; it applies only to callers that pass
+     unnormalised dicts.
+3. **The Custom mode's `min_duplicate_word_count` is dead.** It is a default (QG 1387) and is
+   loaded from saved settings (QG 1406). But the dialog has no widget for it, and neither
+   "Start Scan" (QG 1638-1650) nor "Save Settings" (QG 1658-1670) writes it.
+4. **Custom "Save Settings" writes the wrong config.json in frozen builds.** It writes
+   `os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')` (QG 1693), next to
+   the module. In PyInstaller builds that is `_internal`, not the `CONFIG_FILE` beside the exe.
+   The write also bypasses config_store and the config backups.
+5. **A second Custom dialog has different key names.** The module-level
+   `show_custom_detection_dialog` (QG 6445-, used by scan_html_folder's CLI `--interactive`,
+   SH 12566) keeps its own defaults: `text_similarity` / `semantic_analysis` /
+   `structural_patterns` / `minhash_similarity`. `run_qa_scan` uses `similarity` / `semantic` /
+   `structural` / `minhash_threshold`. It was not moved, since it is a Qt dialog for the CLI.
+6. **Duplicated constants**, identical today, so they can drift:
+   - `DEFAULT_AI_ARTIFACT_PATTERNS` (QG 25-48, QR 32-55, SH 360 as a tuple).
+   - `DEFAULT_AI_THINKING_PREAMBLE_PATTERNS` (QG 50-59, QR 633-642, SH 1491 as a tuple).
+   - The AI-truncation prompt: now `DEFAULT_AI_TRUNCATION_PROMPT`, and again as the scanner's
+     fallback (SH 7187-7197).
+   - `_normalize_target_language` (moved) and the older `normalize_target_language` (QR 87-126)
+     disagree. Whitespace-only input raises IndexError in the moved copy (`s.split()[0]`) and
+     returns "english" in the runtime copy, which also `str()`s non-strings.
+7. **`apply_qa_scan_env_from_settings` lacks two variables** that the dialog's save handler
+   (QG 5896, 5921) and run_env (2355, 2374) export: `AI_HUNTER_MAX_WORKERS` and
+   `QA_EXCLUDE_RUBY_TAGS` (shared-core design §4 item 9). A desktop scan therefore uses whatever
+   the last save or translation run left in `os.environ`. On mobile, the forcing now sets
+   `AI_HUNTER_MAX_WORKERS`.
+8. **QA reports are not reproducible on short or ambiguous text.** scan_html_folder never seeds
+   langdetect (SH 32, 1310; `DetectorFactory.seed` is unset). On the E2E workspace, the
+   romanised-Korean `TOC.txt` / `translated_headers.txt` were flagged
+   `Language_mismatch_detected_HR/SW_expected_English` at random: 3 of 4 desktop runs and 3 of 4
+   mobile runs, with different files each time. The reports and `qa_failed` marks change between
+   identical scans. Seeding (`DetectorFactory.seed = 0`) would make them deterministic, but it
+   changes report output, so it needs approval. The E2E comparison seeds langdetect in every
+   process through a `sitecustomize` (test-only).
+9. **Executor log lines are misleading.** The scanner always logs "🔍 Starting scan with
+   ProcessPoolExecutor" (SH 10319) and "⚡ ProcessPoolExecutor: ENABLED - Maximum performance
+   achieved!" (SH 12264), even when it scans on a thread pool (the desktop thread toggle, and
+   every mobile scan). Mobile shows the desktop text unchanged.
+
+## U6 Glossary Editor document (glossary_document; GlossaryManager_GUI rewired)
+
+Frozen source: GlossaryManager_GUI.py at e28e3a0f (U6 base; "GM n" below). The pure inner
+functions of the Glossary Editor closure (`_setup_glossary_editor_tab`, GM 7563-12593), the
+`save_edit` body of `_on_tree_double_click` (GM 12676-12750), `convert_glossary_format`
+(GM 12792-12995), the editor's parse helpers (GM 1121-1555), five module-level gender helpers
+(GM 91-177) and the Glossary Manager's prompt-profile config helpers (GM 457-568, 4144-4156)
+moved to `src/glossary_document.py` with explicit parameters. The closures and methods stay in
+GlossaryManager_GUI as thin wrappers with their dialogs, widgets and message boxes; the
+module-level helpers are re-exported under their old names.
+
+### What moved (and how the desktop calls it)
+
+- Every moved body is the frozen text plus documented edits (tests/test_glossary_document.py
+  `MOVED_BLOCKS`, 102 blocks): `self` state becomes explicit parameters, or a *document* object
+  with the attribute names the desktop keeps on TranslatorGUI (`current_glossary_data`,
+  `current_glossary_format`, `current_glossary_sections`, `current_gender_tracker_data/path`,
+  `_pending_gender_decisions`, `_gender_variants_pending_save`, `glossary_column_fields`,
+  `_original_translated_map`). The desktop passes `self`, so partial updates on an exception
+  (for example `save_document` replacing the data with the gender-resolved list before a failed
+  write) stay exactly as before.
+- Tree items become a row protocol (`columnCount/text/setText/ref/set_ref`;
+  `GlossaryManager_GUI._EditorTreeRow` over a QTreeWidgetItem, `glossary_document.EditorRow` for
+  GUI-free callers). `update_row_highlight` runs through `on_replaced(col_key, after)` at the
+  same point.
+- GlossaryManager_GUI differs from the frozen file only in 91 rewired spans
+  (`REWIRE_SPANS`, checked line by line). `parse_token_efficient_glossary` (GM 8567-8766, the
+  undo/redo restore path's copy of `_parse_editor_token_glossary_async`) is now a call to the
+  same `parse_token_glossary` (tier D: frozen copy vs shared function, equal on 500 states).
+  `get_type_limit` (GM 9885-9896) and the unused `_format_tracker_location`,
+  `_editor_translated_output_files`, `_read_translated_output_texts`,
+  `_resolve_epub_output_dir`, `_trim_undo_stack` and `_entry_kind` closures went with their
+  callers.
+- Process-environment reads and writes are unchanged (OUTPUT_DIRECTORY / OUTPUT_DIR,
+  GLOSSARY_SHARED_DIR, UNIFIED_GLOSSARY_RESOLVED_KEY, GLOSSARY_SKIP_GENDER_TRACKING, EPUB_PATH,
+  EXTRACTION_WORKERS are read where they were; Remove Duplicates still sets
+  GLOSSARY_DISABLE_HONORIFICS_FILTER).
+- Evaluation order: a few wrappers read owner attributes eagerly that the frozen code read
+  lazily (`get_baseline_translated`'s item ref, `update_html_files`' worker settings,
+  `check_entry_matches`' checkbox states). These are attribute reads without side effects.
+
+### Desktop bugs found (recorded, not fixed)
+
+1. **Save As to a `.csv` file writes an empty file for token-CSV and JSON-object glossaries.**
+   `save_as_glossary` (GM 10570-10591) writes rows only when the format is `list` (legacy CSV);
+   a `token_csv` or `dict` glossary saved as `.csv` produces a 0-byte file, then the editor
+   points at that file. Export Selection / Save As CSV also drop descriptions and custom fields
+   and blank the gender of types without `has_gender` (GM 10067-10074, 10584-10591).
+2. **BOM-prefixed glossaries.** The editor reads with `utf-8`, not `utf-8-sig`. A token CSV
+   starting with a BOM loses its `Glossary Columns:` header (columns fall back to the defaults);
+   a JSON glossary with a BOM fails to load ("Failed to load glossary"). Saving writes no BOM.
+3. **The two load paths disagree.** The background load (`_parse_glossary_file_for_editor_async`,
+   now `parse_glossary_file`) folds tracked gender variants, matches `.csv` case-insensitively
+   and skips non-dict JSON items. The undo/redo restore path (GM 8768-8963, now
+   `reparse_glossary_file`) keeps the variants, matches `.csv` case-sensitively (`Book.CSV` is
+   parsed as JSON and fails) and raises on non-dict JSON items.
+4. **Most actions are not undoable.** Delete Selected pushes an undo snapshot, then saves and
+   reloads; the reload (`apply_loaded_glossary_result`, GM 8496-8497) clears the undo and redo
+   history. The same holds for Clean Empty Fields, Remove Duplicates, Trim, Filter and a
+   Convert onto the open file. Only cell edits, Replace and Resolve Gender stay undoable until
+   the next save.
+5. **Remove Duplicates backs up only when `glossary_auto_backup` is explicitly true**
+   (`config.get('glossary_auto_backup', False)`, GM 9284). Every other action treats a missing
+   setting as on (`create_glossary_backup`, Backup Settings dialog).
+6. **Trim on a JSON-object glossary** computes `entries_to_remove` from `len(data)` (the number of
+   top-level keys, normally 1) instead of the entry count (GM 9611), so the backup is skipped or
+   misnamed. A negative "Keep first" value trims from the end (`data[:-n]`).
+7. **Filter Entries Preview on a JSON-object glossary with search text raises** inside the slot:
+   `check_entry_matches` calls `.values()` on the entry string (GM 9910, dict branch 9956).
+8. **The external-change watcher restarts after every Save and Undo/Redo**
+   (`_editor_auto_reload_timer.start()`, GM 10553 and 8537), even when it was stopped. Actions
+   that write the file without updating `_editor_last_mtime` (Delete, Clean, Trim, Filter,
+   Convert) therefore trigger a second reload on the next 500 ms tick.
+9. **`_update_html_files_legacy`** (GM 10113-10287) is dead code; left in place.
+10. **Different fallback defaults.** `update_html_files` falls back to
+    `enable_parallel_extraction=False` when the owner lacks the attribute, while
+    `ConfigStateMixin` defaults it to True. The custom-entry-type fallback dicts in the editor use
+    `terms`; the owner default (owner_state 567) uses `term`. Neither differs on a real desktop
+    (the attributes always exist).
+11. **The Balanced/Full and Minimal profile combo boxes keep typed names.** They are editable
+    without `setInsertPolicy(NoInsert)` (GM 773-774; the refinement combo sets it). Typing a name
+    and pressing Enter adds it to the dropdown although no profile exists, and "+ New Profile"
+    then skips that number ("New Profile #2"), since it also avoids names in the dropdown.
+12. **Profile configs edited by hand.** A Balanced/Full or Minimal bucket holding a profile named
+    "Default" (any case) or a non-text prompt is kept as is by the desktop actions. After a delete
+    the desktop picks the first non-Default profile, while the shared Default-plus-named engine
+    picks the first key. The UI cannot create such entries.
+
+### GUI-free semantics for mobile (GlossaryDocument)
+
+- `GlossaryDocument` runs each desktop action's shared steps in the same order, without the
+  dialogs: confirmations are asked by the caller first, error boxes raise
+  `GlossaryEditorError(text)`, information boxes come back as `(title, text)` with the desktop
+  strings. Tier M replays every tier F operation sequence on a third copy of each real glossary:
+  the glossary, tracker, backups, output files, data, sections, gender state, baseline and undo
+  history match the frozen desktop editor after every step.
+- `EditorOwner(config)` holds the TranslatorGUI state the editor reads (`custom_entry_types`, the
+  gender-tracker settings, the parallel-update settings, the seeded `custom_glossary_fields`),
+  computed like `ConfigStateMixin._init_config_state` (checked against HeadlessOwner).
+- `editor_rows()` gives the rows the desktop tree shows, including the tracker label the tree
+  puts in the gender column; Find/Replace on those rows changes the same cells as the desktop.
+- Backups go through a caller-supplied `backup(doc, operation_name)` (the desktop's
+  `create_glossary_backup`, which glossary_files owns). `list_editor_backups` lists what that
+  function writes and `_clean_old_backups` prunes. `restore_backup` is mobile-only: the desktop
+  has no restore button for editor backups (users copy files out of the Backups folder); it
+  takes a backup of the current state and then saves the backup's entries like an edit.
+- Remove Duplicates sets `GLOSSARY_DISABLE_HONORIFICS_FILTER` in `os.environ`, as the desktop
+  does. A mobile caller should not run it while a job thread reads the environment.
+- **Glossary Manager prompt profiles.** `GlossaryPromptProfiles` (Balanced/Full, Minimal) and
+  `RefinementPromptProfiles` (system + user pairs) run prompt_profiles' Default-plus-named engine
+  (`PrefillState` and `prefill_*`, as the "Asst. Prompt" dialog does). A refinement pair travels
+  through the engine as one canonical JSON text. They write the same config keys as the desktop
+  actions. The desktop action handlers (`_on_glossary_prompt_profile_selected`, `_auto_save_...`,
+  `_new_...`, `_save_...`, `_delete_...` and the `_create_refinement_prompt_profile_controls`
+  closures) are unchanged and still carry their own copy of the Default-plus-named steps.
+  Tier P pins them to the shared engine on 60 random action sequences per bucket. Moving the
+  desktop handlers onto `prefill_*` is left for a later milestone; item 12 is the only case that
+  would change.
+- Opening a profile row: the desktop stages the prompt shown in the editor into the selected
+  profile (or Default) before applying the active profile. The classes take that prompt as
+  `current_text` / `system` + `user`; the mobile settings layer supplies the value its prompt
+  field shows.
+
+### U6 parity harness additions (tests/test_glossary_document.py)
+
+- Tier D runs the frozen methods, and closures extracted from the frozen file with their free
+  variables as fakes, against the working-tree wrappers and the shared functions on 500 seeded
+  states each. Covered: parsing, saving, Convert Format, the view helpers, Filter Entries,
+  Find/Replace (Find Next / Replace / Replace All with the output-file fallback), Update output
+  files, auto-selection and the hide-unused helpers and worker.
+- Tier F builds the real editor tab twice offscreen: the frozen module and the working-tree
+  module, both loaded with `__file__` in an empty temp folder so the user's src/Glossary is never
+  listed. It drives both through their buttons, shortcuts and dialogs on copies of five real
+  src/Glossary books plus JSON-list, JSON-object, comma-CSV and \x1F-CSV variants. Every step is
+  compared on files, tree rows (texts, refs, hidden flags, highlight brushes), editor state,
+  undo stacks, boxes and logs. The gender tracker's `updated_at` stamp is masked, backup names use
+  a deterministic clock, and the 500 ms watcher only runs when the test triggers it.
+- Tier G pins the frozen desktop's save and Convert Format output for 49 synthetic glossaries as
+  hashes. glossary_document is checked against them without Qt (CI, Python 3.10); a Qt test
+  re-derives them from the frozen closures.
+- Tier P drives the frozen and working-tree prompt-profile rows (real widgets) and the
+  GUI-free classes through random select / edit / rename / new / save / delete / failed-save
+  sequences. Each step compares the config, owner attributes, editor text, boxes and logs. The
+  Balanced/Full rows are selected through their handler, without Qt's insert-on-Enter (item 11).
+
+## U6 Glossary file actions, Parallel EPUB pair core and the glossary Stop (glossary_files, parallel_epub_core, stop_control.request_glossary_stop)
+
+Frozen sources: translator_gui.py and parallel_epub_glossary.py at e28e3a0f (U6 base; "TG n" /
+"PEG n" below). HEAD's src tree is identical to e28e3a0f, so the e28e3a0f parity oracles (legacy,
+legacy_trace, golden) are the HEAD freeze.
+
+### What moved (and how the desktop calls it)
+
+- `src/parallel_epub_core.py` (new, GUI-free, Python 3.10):
+  - PEG 52-512 verbatim: the constants, `chapter_filename/text`, `compact_parallel_epub_selection`,
+    `restore_parallel_epub_pairs`, the auto-mapping helpers and `auto_map_epub_chapters`,
+    `apply_parallel_epub_wrapper` and `write_parallel_epub`. parallel_epub_glossary re-exports
+    every name and keeps its top-level Qt import; parallel_epub_core imports without Qt.
+  - The pure halves of `ParallelEpubPairDialog` methods: `load_parallel_epub_documents`
+    (`_start_epub_load`'s loader), `prepare_persisted_parallel_epub_selection` /
+    `parallel_epub_selection_matches` / `persisted_parallel_epub_rows`
+    (`restore_persisted_selection`, `_apply_pending_persisted_mapping`),
+    `translated_mapping_label`, `offset_parallel_epub_mapping` (`_apply_mapping_offset`),
+    `valid_parallel_epub_rows`, `selected_parallel_epub_mapping`, `unpaired_file_counts`,
+    `unpaired_warning_text`, `parallel_epub_mapping_status` (`_update_mapping_status`),
+    `validate_parallel_epub_pair` / `build_parallel_epub_pairs` (`_accept_pair`),
+    `parallel_epub_profiles` / `active_parallel_epub_profile` (`__init__`),
+    `parallel_epub_prompt_settings` (`_persist_prompt_settings`). The dialog keeps the widgets.
+  - TranslatorGUI pair helpers with `config` in place of `self.config`:
+    `load_parallel_epub_chapters` (TG 28458), `build_parallel_epub_pair_artifact` (TG 28469),
+    `resolve_parallel_epub_glossary_output_dir` (TG 20032; the selected-pair lookup for an empty
+    raw path stays in TranslatorGUI), `parallel_epub_mapping_sidecar_path` /
+    `write_parallel_epub_mapping_sidecar` / `read_parallel_epub_mapping_sidecar` (TG 20073-20128),
+    `parallel_epub_pair_source_state` (the `_parallel_epub_pair_source` record of
+    `_activate_parallel_epub_pair_source`) and `rebuild_parallel_epub_pair_result`
+    (`_start_parallel_epub_pair_restore`'s worker up to the working EPUB).
+- `src/glossary_files.py` (new, GUI-free, Python 3.10): `create_glossary_backup` /
+  `clean_old_backups` (TG 10344, 10434; the editor path, data and "Continue anyway?" question
+  are parameters), the 🗑️ / ↩️ closures of the auto-glossary row (TG 19463-19736) as
+  `selected_glossary_epubs`, `collect_glossary_files_for_inputs`, `glossary_delete_display`,
+  `delete_glossary_files`, `find_latest_glossary_backup`, `restore_glossary_backup` (the
+  boxes, sounds, owner-state resets and auto-load re-trigger stay in the closures), the Map
+  Glossaries to EPUBs data steps (TG 31572: `normalize_glossary_drop_path`,
+  `is_allowed_glossary_file`, `mapped_glossary_for_input`, `build_glossary_mapping`,
+  `copy_mapped_glossaries_to_outputs`) and `comprehensive_json_fix` / `analyze_json_errors`
+  (TG 32288-32414). The U3 auto-mapping helpers stay in `translation_pipeline`
+  (GlossaryPipelineMixin); `guess_glossary_for_input_file` / `copy_glossary_to_output_folders`
+  run those methods on a bare owner (config / base_dir / append_log; no HeadlessOwner, no env
+  writes) for GUI-free callers.
+- `stop_control.request_glossary_stop` + `kill_glossary_helper_subprocesses`: the non-widget
+  part of `stop_glossary_extraction` (TG 26528-26748) in desktop order: GRACEFUL_STOP ->
+  graceful: silence the HTTP loggers -> `set_stop_requested()` -> immediate:
+  TRANSLATION_CANCELLED=1 / GRACEFUL_STOP_COMPLETED=0, `glossary_stop_flag(True)`, the extractor
+  and client stop flags, then the run-id-guarded cleanup thread (hard cancel, helper processes,
+  GLOSSARY_STOP_FILE) -> the stop-mode log line. `stop_glossary_extraction` keeps the button /
+  label code, the double-click rule (now through `register_stop_click`) and the idle-reset poll.
+  This closes DISCREPANCIES U3 item 4's "the glossary stop was not rewired".
+- translator_gui.py differs from the frozen file only in 40 rewired spans and
+  parallel_epub_glossary.py in 39 (tests/test_glossary_files.py `TG_REWIRE_SPANS`,
+  tests/test_parallel_epub_core.py `PEG_REWIRE_SPANS`). Every moved body is the frozen text plus
+  documented edits (`MOVED_BODIES`, 16 + 18 bodies); the restructured dialog cores (offset, saved
+  rows, selected mapping, status, validation, prompt settings) are pinned by the differential
+  tiers instead.
+
+### Behaviour deltas (intentional, parity-neutral)
+
+- Evaluation order: `_accept_pair` reads the wrapper / system prompt and the selected mapping
+  before its "still loading" check; `_apply_pending_persisted_mapping` writes each row once
+  (the final state of the old clear-then-restore passes); `_apply_mapping_offset` computes every
+  row before touching the table; `create_glossary_backup` reads the editor path once;
+  `_delete_current_glossary` resolves `self._guess_glossary_for_input_file` before the loop and
+  reads the auto / manual glossary attributes once. All are reads without side effects.
+- `kill_glossary_helper_subprocesses` returns at once where subprocesses are unavailable
+  (mobile); on desktop `subprocesses_available()` is always true. The graceful logger silencing
+  goes through `silence_http_loggers` (the same six loggers).
+- parallel_epub_glossary no longer imports `html`, `re`, `uuid`, `ebooklib.epub` and
+  `special_file_flags` (their only users moved).
+- GUI-free defaults: `create_glossary_backup` without `ask_continue` answers No after a failed
+  backup; `copy_mapped_glossaries_to_outputs` returns (copied, already in place, failed);
+  `resolve_parallel_epub_glossary_output_dir` returns "" for an empty raw path.
+- `comprehensive_json_fix`: one line of its replacement table continues a triple-quoted key, so
+  it keeps its absolute indentation (the key's text is unchanged; see bug 4).
+
+### Desktop bugs found (recorded, not fixed)
+
+1. **Delete Glossary leaves a migrated legacy glossary behind.** The collection lists a flat
+   `Glossary/<book>_glossary.*`, then the auto-map guess (`_get_glossary_dir_candidates` ->
+   `migrate_all_legacy_glossary_files`) moves that file into `Glossary/<book>/` before the
+   delete step, which logs "⚠️ Failed to delete … [WinError 2]" and leaves the migrated file in
+   place (seen in the offscreen real-GUI smoke on both trees).
+2. **Restore Glossary restores one backup folder.** Delete moves every file into a
+   `Backups/<timestamp>/` beside it (several folders, one timestamp). `_find_latest_backup`
+   keeps the first folder with the greatest name, so Restore brings back only that folder's
+   files.
+3. **Some backups are never offered.** `_find_latest_backup` never looks in
+   `<book>/Glossary/Backups` (where Delete puts the per-book `Glossary/<book>_glossary.*`); without
+   an output override it also mixes cwd-relative `Glossary/` folders with `_get_app_dir()` ones,
+   while Delete uses `_get_app_dir()` only.
+4. **The JSON repair cannot fix curly quotes.** `_comprehensive_json_fix`'s table maps `"` to `"`
+   twice and has one accidental key, the triple-quoted text `: "'",  # Left smart apostrophe` +
+   newline + indentation; only dashes, the ellipsis, ZWSP and NBSP are normalised.
+   `_analyze_json_errors`' smart-quote check `r'[''""…]'` is the string `[""…]`. Load Glossary's
+   JSON auto-fix branch is dead code (a duplicated `elif file_extension == '.json'` passes
+   first), so only `_convert_json_to_txt` runs the repair.
+5. **Delete Glossary computes an unused mode.** `mode = config.get('auto_glossary_mode',
+   'off').lower()` / `is_balanced_full` are never read; a `null` mode in config.json makes the
+   whole delete fail with "⚠️ Error deleting glossary".
+6. **Two Manual Glossary Only output resolvers.** Map Glossaries' Save copies into
+   `<override>/<book>` (`_resolve_out_dir`, no subtitle-ZIP grouping) while Load Glossary uses
+   `_copy_glossary_to_output_folders` -> `_resolve_translation_output_dir`; the log texts differ.
+7. **The glossary Stop's helper list is shorter** than the translation Stop's (no AuthND /
+   Gemini-Free token helpers), so a glossary run on those routes can leave a token helper
+   running after an immediate Stop. Kept (`kill_glossary_helper_subprocesses`).
+
+### GUI-free semantics for mobile
+
+- Mobile glossary jobs should stop through `stop_control.request_glossary_stop(graceful=,
+  set_stop_requested=, log=, glossary_stop_flag=, get_run_id=)`. The latch is
+  `stop_requested` only (the desktop glossary Stop never sets `graceful_stop_active`). The
+  desktop's force rule needs its "Finishing..." label, so a mobile force stop is the
+  JobService's own second-tap path calling it with `graceful=False`. Switching
+  `services/jobs.py` is the mobile-glossary agent's task; until then glossary jobs still use
+  the translation protocol (U3 item 4).
+- The mobile Parallel EPUB pair screen and job can drop their local copies:
+  `load_parallel_epub_documents` (pair_load), `offset_parallel_epub_mapping` /
+  `unpaired_file_counts` / `unpaired_warning_text` / `parallel_epub_mapping_status` /
+  `valid_parallel_epub_rows` / `persisted_parallel_epub_rows` (MappingModel),
+  `validate_parallel_epub_pair` / `build_parallel_epub_pairs` (Accept),
+  `parallel_epub_profiles` / `active_parallel_epub_profile` / `parallel_epub_prompt_settings`
+  (profiles), and for the job `rebuild_parallel_epub_pair_result` +
+  `build_parallel_epub_pair_artifact` + `parallel_epub_pair_source_state` (the desktop restore
+  path; tier F checks this route against the frozen desktop's working EPUB, record and sidecar).
+- `collect_glossary_files_for_inputs` defaults its guess to `guess_glossary_for_input_file` for
+  the given config, so a Library "Delete glossary files" needs no owner.
+
+### Settings schema (for Integrate)
+
+- `src/mobile/tools/schema_extract.py` reads config keys from its module lists only. With the
+  moves, HEAD + the chain-2 files regenerates `settings_schema_data.py` with three changes:
+  `glossary_max_backups` loses its `read` origin, `parallel_epub_glossary_profiles` and
+  `parallel_epub_glossary_wrapper_prompt` disappear (their reads now live in glossary_files /
+  parallel_epub_core), and `last_epub_path` becomes a read-origin key with `main.file` first.
+  The last one is static analysis only: `_find_latest_backup` now passes
+  `get_current_epub_path` to `selected_glossary_epubs` instead of calling it, so the
+  generator no longer sees the startup call edge (`_update_restore_visibility`, 500 ms after
+  start). Adding `glossary_files.py` and `parallel_epub_core.py` to `OWNER_MODULES` restores
+  the first two and adds `parallel_epub_glossary_active_profile` (read by the dialog, which
+  the generator never scanned). The freshness test already needs a regeneration for the
+  Glossary Manager changes.
+
+### U6 parity harness additions
+
+- tests/test_parallel_epub_core.py: hygiene; verbatim block + 18 lifted bodies + rewire spans;
+  the moved functions vs the frozen module (500 random chapter sets); the frozen dialog methods
+  vs the working-tree ones on recording fakes (500 states of offset / unmap / saved mapping /
+  accept / persist / restore sequences); the background loader closure and the profile set-up;
+  the frozen TranslatorGUI pair helpers vs the wrappers (500 glossary-folder / sidecar states);
+  fixture EPUB pairs through the frozen and working-tree desktop flow (load, map, accept,
+  activate, sidecar, working EPUB, saved-pair restore) and through the GUI-free mobile route;
+  the real dialog offscreen, frozen vs working tree.
+- tests/test_glossary_files.py: hygiene; 16 moved bodies, the Stop protocol statements in order,
+  the translator_gui rewire spans; editor backups (frozen method vs wrapper vs shared function),
+  delete / latest backup / restore closures and the GUI-free sequence on random layouts, JSON
+  repair, the owner-free adapters vs the mixin methods (500 states each, same fresh folder for
+  every side, `_get_app_dir` always sandboxed); the glossary Stop trace (frozen vs wrapper vs a
+  direct `request_glossary_stop`); the Map Glossaries dialog offscreen, frozen vs working tree.
+- Tier T: two scenarios, `glossary_immediate_stop` and `glossary_graceful_stop`
+  (tests/parity/trace_scenarios.py). For glossary entries the harness desktop run is now the
+  Extract Glossary button (`run_glossary_extraction_thread`: run-start resets, then the direct
+  run on the inline executor), a click is `stop_glossary_extraction`, and the mobile click is
+  `stop_control.request_glossary_stop`. The mobile projection treats an absent
+  `graceful_stop_active` as False (the pipelines read it with `getattr(..., False)`; a fresh mobile
+  glossary job has none until a stop latches it). legacy / desktop / stop_control / mixins agree.
+- Offscreen real-GUI smoke (scratch `desktop_smoke_u6c2.py`): the live TranslatorGUI of the
+  working tree and of `git archive HEAD src` in sandboxes drive the 🗑️ / ↩️ buttons, editor
+  backups, Load Glossary -> Map Glossaries (Auto-Fill, Save, Manual Glossary Only copy), the
+  Parallel EPUB Pair dialog (load, offset, accept, activate, saved-pair restore) and immediate /
+  graceful glossary Stop; both trees report identical files, logs, boxes and state.
+
+## U6 Integrate (wiring, packaging, glossary / QA / compile on the shared U6 cores)
+
+Oracles were re-frozen at HEAD e604e5a0 (its `src/` is byte-identical to U5 e28e3a0f, the U6 base):
+`freeze_legacy.py --sha HEAD`, `capture_golden.py`, `trace_harness.py --freeze --sha HEAD`. All
+parity tiers pass (448 tests; the two skips are the GLOSSARION_PY310 probe, run separately and
+passing, and the documented desktop-only trace race).
+
+### Desktop changes made by the integration (each pinned)
+
+- **Unified glossary "Rebuild Now" helpers.** `glossary_document.unified_glossary_shared_dir(config)`
+  and `unified_rebuild_settings(config, shared_dir)` are `GlossaryManagerMixin._unified_glossary_shared_dir`
+  and the settings snapshot of `_rebuild_unified_glossary_now`, verbatim (frozen U6-base lines
+  5800-5809 and 5854-5859; documented edits: `self.config` -> `config`, and
+  `from translator_gui import _get_app_dir` -> `from app_paths import _get_app_dir`, the same
+  function object since U1). GlossaryManager_GUI calls them (two more `REWIRE_SPANS`);
+  tests/test_glossary_document.py pins both blocks and compares the frozen method / snapshot with the
+  working-tree wrapper and the shared functions on 500 random configs. The mobile `unified_glossary`
+  job uses them instead of its copied dict.
+- **Refusal patterns (U4 carry-over, finished).** `TransateKRtoEN.is_qa_failed_response` imports
+  `key_pool_service.DEFAULT_REFUSAL_PATTERNS` (same 30 strings, same order; the list is only
+  iterated). 5,000 random responses (refusal phrases, mixed case, lengths around the 1,000-char
+  window) give the same verdict from the HEAD function and the working tree.
+  tests/test_key_pool_service.py now asserts that neither scan_html_folder nor TransateKRtoEN keeps
+  a copy (`scan_html_folder.DEFAULT_REFUSAL_PATTERNS is key_pool_service.DEFAULT_REFUSAL_PATTERNS`).
+- **Settings schema generator.** `schema_extract` scans `glossary_files.py` and
+  `parallel_epub_core.py` as owner modules and `glossary_document.py` as a dialog module (UI-site
+  roots: the editor functions -> `glossary.editor`, the prompt-profile helpers ->
+  `glossary.balanced_full`, the refinement defaults -> `glossary.refinement`, the unified helpers ->
+  `glossary.unified`). The new `SCAN_EXCLUDE` keeps glossary_document's mobile-only API
+  (`EditorOwner`, `EditorRow`, `editor_rows`, `GlossaryPromptProfiles`, `RefinementPromptProfiles`,
+  `GlossaryEditorError`, `GlossaryDocument`) out of the scan, so it adds no records of its own.
+  The regenerated `settings_schema_data.py` differs from HEAD only in static-analysis detail:
+  - every key's settings section is unchanged except `enabled` (a `.get('enabled')` on entry-type
+    dicts that the generator reads as a setting): its first UI site is now `main.model` instead of
+    `glossary.editor`, because the editor code it was reached from is no longer nested in the
+    Glossary Manager tab function;
+  - `parallel_epub_glossary_active_profile` is a new record (read by the Parallel EPUB dialog code
+    now in a scanned module; section `glossary.parallel_epub`);
+  - `last_epub_path` keeps its default `None`; `default_source` / `init_default` / `origins` change
+    (chain 2 note above: the `get_current_epub_path` call edge moved);
+  - `custom_glossary_fields`, `output_directory`, `unified_glossary_source_language` and
+    `unified_glossary_combine_all_languages` gain or reorder UI sites (`glossary.editor`,
+    `glossary.other`); none of them changes section;
+  - `output_language` gains the `glossary.editor` UI site (after `other.response`), because
+    `glossary_document.unified_glossary_folder_key` and `unified_rebuild_settings` read
+    `config['output_language']`; its section stays `main.run` (the first mapped site).
+
+### Mobile wiring (no desktop change)
+
+- `app.py` installs `GlossaryFeature` then `ToolsFeature` after the Reader (each in try/except);
+  `SHIPPED_MILESTONES` gains U6. The `tools.text` route (TextEditor, UI_SPEC §4.10) and the File
+  browser's Open with / Rename / Delete move to U7 with the rest of §4.10: they were not part of
+  the U6 build, and with U6 shipped they would have read "arrives in U6".
+- `services/glossary.CONTRACT` names the real `glossary_files` / `parallel_epub_core` functions (one
+  name per operation); the "Delete Glossary" text uses `glossary_files.glossary_delete_display`.
+  A host test runs delete -> latest backup -> restore and the editor backup (pruned to
+  `glossary_max_backups`) through the real `glossary_files`.
+- Parallel EPUB pair: `ui/glossary/parallel_pair.PairMapping` keeps only the table cells; offset,
+  unmap, restore, selection, unpaired counts / warning, status line, the Accept checks
+  (`validate_parallel_epub_pair`), the pairs, the profile set-up and the persisted prompt settings
+  are the dialog's `parallel_epub_core` functions (the earlier mobile re-implementation is gone).
+  Accept is refused with "EPUB Still Loading" while an EPUB loads (the dialog's `_active_load`).
+  The `parallel_pair` job is the desktop's saved-pair restore + activation:
+  `rebuild_parallel_epub_pair_result` -> `build_parallel_epub_pair_artifact` ->
+  `parallel_epub_pair_source_state`.
+- Glossary jobs stop through `stop_control.request_glossary_stop` with the desktop's hooks: the
+  loaded extractor's `set_stop_flag` (`glossary_stop_flag`) and the owner's `_glossary_run_id`
+  (`get_run_id`); a forced stop is the desktop's double click (graceful False).
+- Library / Book page "Compile EPUB" / "Compile PDF" use the desktop's compiler choice
+  (`library_core._workspace_compile_kind`): a PDF workspace compiles with `compile_pdf`; an EPUB
+  workspace's PDF is the EPUB compile with "Create PDF after EPUB" on (as the Converter does). Before,
+  "Compile PDF" on an EPUB workspace ran the PDF workspace compiler.
+- Hand-offs that said "arrives in U6": the Book page ⋯ "QA scan" opens Tools › QA Scanner for the
+  book (`?out=<bid>`); the chat approval card's raw editor offers "Open in table editor" (the
+  Glossary Manager on the same file); the Reader selection's and a chat response's "Add to
+  glossary" open the book's (or the chat workspace's glossary.csv) editor with a new entry whose raw
+  name is filled in (kept once the user Saves). The chat attachment card's "QA scan" stays disabled,
+  now with the reason: the desktop never QA-scans Direct Text workspaces
+  (`qa_scan_runtime.is_direct_text_qa_path`).
+
+### Self-test and offline E2E additions
+
+- `smoke` suite `glossary_qa` (also run by `tools/host_smoke.py`, android and ios simulations): a
+  token-CSV glossary parsed, edited (one undo step), saved, re-parsed and saved again byte-stable
+  through `glossary_document.GlossaryDocument`; a QA quick scan of a three-chapter workspace through
+  `qa_scan_runtime.run_qa_scan_path`, which must run on threads on mobile (host_smoke's process
+  tripwires stay silent), report every chapter and be found by `find_latest_qa_report`. The job lock
+  is held meanwhile.
+- `e2e` `glossary_edit_qa_pdf`: `extract_glossary` job -> the Glossary Manager document changes
+  이서연's translation to "Seo-yeon Lumen" and saves (a `before_save` backup first) -> a Balanced
+  `translate` job sends the edited entry in every chapter prompt that names 이서연 and never the old
+  name -> `qa_scan` job (quick scan) reports the 12 chapters -> the Book page's "Compile PDF" spec
+  writes the PDF through the PyMuPDF shim (12 pages, 12 outline entries, the translation marker in
+  the text). The fake server records the injected glossary lines of each prompt (`glossary_lines`).
+  Process hygiene now covers 11 jobs.
+
+### Mobile divergences recorded from the U6 build reports (not fixed)
+
+- **QA Scanner orchestration still dialog-only on desktop** (mobile rebuilds it over the shared
+  helpers and desktop strings, pinned by tests_host/test_tools_ui.py): `QA_Scanner_GUI`'s bulk
+  `run_scan` loop (the desktop file-name EPUB search is replaced by the Library's resolved raw
+  source), the `stop_qa_scan` escalation (mobile: the translation stop protocol plus the scanner's
+  own stop flag), `other_settings.delete_translated_headers_file` / `delete_toc_txt_file`,
+  `validate_epub_structure_gui`'s result wording and the Load Font handler, and
+  `metadata_batch_translator.configure_metadata_fields`' save / merge rules. The QA `mode_data`
+  card texts are compared with the desktop source by AST. Each should become one shared function
+  both front ends call.
+- **Translate Headers Now** runs `translate_headers_standalone.run_translation` per EPUB and rebuilds
+  the first EPUB (the desktop button's `run_translate_headers_gui` imports QMessageBox first). An
+  existing translated_headers.txt is translated again instead of re-applied, PDF workspaces are
+  skipped (Compile PDF translates bookmarks) and keyless models are allowed.
+- **Metadata from the Library** passes `output_roots` as a list that can fall out of step with the
+  inputs (the job then uses the default output root); the Library home and Book page do not ask
+  the desktop "Metadata Already Exists" question (the Headers screen does).
+- **QA "Reset to default"** is the Settings page's section reset (the keys are removed, the shared
+  defaults apply); the desktop QA dialog writes hard-coded values that differ in places (see the U6
+  QA section above).
+- **Delete glossary files** clears `manual_glossary_path` only when that file was among the deleted
+  ones; the desktop closure resets its owner state (manual / auto-loaded glossary) unconditionally.
+- **Manual glossary refinement** ("✨ Refine this" / "✨ Refinement") stays disabled with its reason:
+  `Retranslation_GUI._run_manual_glossary_refinement` and the plan step of the Glossary Progress
+  confirm closure are not shared yet (`glossary_progress_core.plan_manual_glossary_refinement` /
+  `run_manual_glossary_refinement` are the names the `glossary_refine` job binds to).
+
+### Test isolation fix (integration)
+
+- tests/test_glossary_files.py's Stop trace test set `TRANSLATION_CANCELLED=1` / `GRACEFUL_STOP=0` /
+  `GRACEFUL_STOP_COMPLETED=0` directly while monkeypatch held earlier records of the same keys; the
+  autouse `_isolated` fixture restored the environment and then monkeypatch's teardown re-applied
+  those values, so a later test in the same pytest process (the QA desktop-vs-mobile quick scan's
+  subprocesses) started already cancelled and wrote no report. The three U6 fixtures now call
+  `monkeypatch.undo()` before restoring the environment captured at the start, and the QA E2E
+  test drops the stop-signal keys from its subprocess environment.
+- tests/test_glossary_document.py tier F (frozen vs working-tree editor tab) used only the user's
+  src/Glossary books, which CI does not have (empty parameter set there). It now falls back to a
+  synthetic book glossary in the same five layouts (token CSV + gender tracker with a tracked
+  conflict, JSON list / dict, legacy CSV, \x1f CSV); `PARITY_U6_SYNTHETIC=1` forces it locally
+  (5 / 5 pass).
+
+### Desktop offscreen smoke (integration)
+
+`scratchpad/u6_integ/desktop_smoke_u6.py`: the REAL `TranslatorGUI` (offscreen, sandboxed app dir /
+home / temp / Library, the U6 E2E's translated workspace and book glossary as the fixture) for the
+working tree and `git archive HEAD src`: the Glossary Manager (all five tabs built and visited:
+every checkbox / combo / spin / line-edit / button state; the editor loads the book glossary, a
+translated name is edited and Ctrl+S saves it), the QA Scanner's post-translation quick scan
+(`run_qa_scan(mode_override='quick-scan', non_interactive=True)`: report files, progress statuses)
+and `epub_converter(folder=...)` with "Create PDF after EPUB" (desktop WeasyPrint: the shim's
+"PDF engine: mupdf-story" line never appears; EPUB members / chapter documents, PDF pages, outline
+and text) give identical results in both trees (timestamps, the src path and thread completion
+order normalised).
+
+## U6 review: mobile fixes (no desktop change)
+
+- **Glossary editor.** Swipe-to-delete's snackbar Undo works: `GlossaryService.delete(keep_snapshot=True)`
+  takes the shared undo snapshot (`push_undo_snapshot`) before `GlossaryDocument.delete` (which, like
+  the desktop, re-reads the file and clears the undo history), and Undo restores it with
+  `undo_step` + save + load (`restore_snapshot`). The Undo is refused when the glossary changed
+  after that delete (an edit, save, reload or other delete). The shared `delete()` is unchanged.
+- **Unsaved state.** A tool box counts as saved only when the shared call wrote and re-read the file
+  ("Success"); an "Info" box (Clean Empty Fields "No empty fields found", Remove Duplicates "No
+  duplicates found") and Convert Format to another path leave unsaved edits unsaved (Back still asks,
+  the Save dot stays, the auto-reload does not discard them).
+- **View after a reload.** Every reload (Reload, the auto-reload, Delete, a tool, Undo of a glossary
+  step, a backup restore, the swipe Undo) derives the view again like the desktop's load: column
+  filters of vanished columns are dropped (`prune_column_filters`) and Hide unused is re-run
+  (`_apply_hide_unused_entries_filter` runs after every desktop load), so Replace All targets the
+  used rows again instead of shifted source indices.
+- **Performance (UI_SPEC §7.3).** Tapping a row in selection mode changes that row in place (1.4 ms
+  with 1,500 mounted rows, from ~0.8 s); only entering / leaving selection mode rebuilds the mounted
+  rows. Search is debounced (0.25 s) and filtered on the io pool; Replace All runs on the io pool.
+  The Parallel EPUB pair screen loads its prompt profiles on the io pool after it opens (the built-in
+  default imports the glossary extractor); the Extract sheet resolves Library raw sources on the io
+  pool.
+- **Dialogs.** The glossary `ask()` / `prompt_text()` dialogs answer No / None when closed any other
+  way (Android back): Save no longer stays stuck after a dismissed "Update output files" question.
+  "Unsaved changes" › Cancel when switching files keeps the screen's title, gid and input.
+- **Prompt profiles.** The Balanced/Full, Minimal and Refinement profile bars use the shared
+  `glossary_document.GlossaryPromptProfiles` / `RefinementPromptProfiles` (the classes
+  tests/test_glossary_document.py replays against the desktop controls) over a copy of config.json;
+  the mobile-only `ProfileBucket` reimplementation is gone. Each action writes the changed keys
+  (`GlossaryService.persist_prompt_profiles`; Balanced/Full and Minimal write only their own entry
+  of the dicts they share). The stale-Default case (Default text older than a prompt edited in
+  Settings) now keeps the edited prompt, and Default delete shows the desktop "glossary prompt
+  profile" text.
+- **Find / Replace.** UI_SPEC §4.1 / §5 listed scope (Raw / Translated / All), Match case and Whole
+  word; the sheet is the desktop dialog (case-insensitive, every column, the shared `row_has_match`
+  / `replace_in_row`) and the spec was amended to it rather than adding mobile-only matching rules.
+- **Tools.** Compile PDF of an EPUB workspace (`compile_epub` + `pdf_after_epub`) lists the PDFs the
+  run wrote as job outputs (Result card Share / Open; the offline E2E checks it). The QA report
+  viewer falls back to the native view when the WebView page never posts "ready" (8 s) or a
+  resource error is not followed by it (4 s), like the Reader. The Quick Scan sample size typed
+  without leaving the field is saved at Start (the desktop persists it when a mode is picked; a
+  tap on Start does not unfocus the field on phones). Rebuild Now reads `JobService.busy` as the
+  property it is and stays disabled while its job is queued or running. Recorded divergence: while
+  another run is active the desktop logs its warning and refuses ("try again when it finishes");
+  mobile shows the same warning and queues the rebuild behind the run (jobs run one at a time).
+
+### Second review round (U6; mobile and test-only, no desktop change)
+
+- **Unsaved glossary edits.** The shell has a leave guard: before a navigation disposes screens
+  (`AppShell.leaving_entries` for a drawer / sidebar destination, a chat row, a link from outside the
+  app; `entries_above` for the main-area screens behind a popped full-screen View on a tablet) the app
+  awaits each screen's optional `confirm_leave()`. `GlossaryScreen.confirm_leave` asks the same
+  "Unsaved changes" question as Back; Keep editing cancels the navigation (an outside link puts the
+  client route back). The client has already popped a full-screen View when its `view_pop` arrives, so
+  there Keep editing drops only that View and the editor stays in the main area
+  (`pop_view(keep_above=True)`). The desktop dialog only hides on close and keeps its edits; this is
+  the mobile counterpart, not a desktop behaviour.
+- **Add to glossary over the Reader (tablet).** The editor screen would open in the main area behind
+  the full-screen Reader; with a full-screen View on top the new-entry sheet now opens over it
+  (UI_SPEC §3.11: "EntrySheet prefilled with the raw term") and Add writes the entry off the UI loop
+  (`open_document`, `add_entry`, `save_edits` with the "before_save" backup; a fresh document plus a
+  new row has no translated-name change, so no output files are touched). Phones keep the editor.
+- **Editor file switch.** Like the desktop (`_apply_hide_unused_entries_filter` runs after every
+  load while the checkbox stays checked), Hide unused entries stays on across ◀ ▶ / file name ▾ /
+  Save As and is re-run for the new file. Mobile-only: the search box's text keeps filtering the new
+  file (it was shown but no longer applied); column filters, the selection and the sort start over.
+  The app bar (phone) / main-area title (tablet) shows the new file name (`Screen.app_bar_title`).
+- **UI loop.** The Glossaries list behind ◀ ▶ / file name ▾ is read on the io pool when the editor
+  opens without it (Book page, chat card, Add to glossary, a deep link) and after Save As; the
+  glossary's Library input (`LibraryService.raw_source`) is resolved once on the io pool, including a
+  "not found". Parallel EPUB pair "From Library…" reads the books' EPUBs on the io pool and, for the
+  translated side, now offers a book's compiled EPUB (`compiled_outputs_blocking`; the method it
+  called did not exist), never the raw Library file that list also contains.
+- **Jobs of an earlier visit.** A reopened Unified glossary, QA Scanner, Converter or Headers &
+  metadata screen follows the queued or running job of its kinds (`JobWatch.adopt`; the Converter
+  only a job of its output folder): Stop shows and Rebuild Now / Start / Compile / Translate Headers
+  Now stay disabled, so a second tap no longer queues a duplicate job.
+- **Use as manual glossary.** The "Use as manual glossary" sheet (with a chat open) answers "nothing"
+  when it is closed by its Cancel row, Android back or an outside tap (`ActionSheet(on_cancel=)`), so
+  the call returns instead of waiting forever.
+- **Parity harness (tests/test_glossary_document.py, test-only).** Tier G hashes the JSON outputs
+  with CRLF normalised to LF: `json.dump` in text mode writes CRLF on Windows and LF on Linux (the
+  frozen desktop and glossary_document alike), so the pins only held on Windows; the 25 JSON-save
+  pins were re-derived (the CSV writers pass `newline=''` and keep their exact pins). Without the
+  user's src/Glossary corpus (CI) `real_trackers` falls back to the synthetic 루나 female/male
+  tracker, so the file-parser tier still sees collapsed gender variants, and tier F starts the
+  synthetic-token fixture with edit · edit · undo · redo · resolve · resolve (the rng draw is kept,
+  so later steps are unchanged) so `test_editor_operations_were_exercised` holds on the synthetic
+  fixtures. Real-corpus runs are unchanged.

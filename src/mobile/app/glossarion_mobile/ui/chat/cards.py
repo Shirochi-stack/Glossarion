@@ -52,11 +52,18 @@ ATTACHMENT_ACTIONS = (
     ("read", "Read", "AUTO_STORIES", None),
     ("export", "Share / Export", "IOS_SHARE", None),
     ("compile", "Compile", "MENU_BOOK", None),
-    ("qa", "QA scan", "FACT_CHECK", "U6"),
+    ("qa", "QA scan", "FACT_CHECK", None),
     ("open_output", "Open output", "FOLDER_OPEN", None),
     ("retry", "Retry failed", "REPLAY", None),
     ("migrate", "Migrate", "DRIVE_FILE_MOVE", "U7"),
 )
+#: Attachment actions that stay disabled for a reason other than a later milestone.
+ATTACHMENT_ACTION_REASONS = {
+    # The desktop QA scan skips Direct Text workspaces ("⏭️ Excluding Direct Text source from QA
+    # scan"; qa_scan_runtime.is_direct_text_qa_path), and a chat attachment workspace is one.
+    "qa": "Chat workspaces are not QA-scanned (desktop: Direct Text is excluded); "
+          "use Save to Library, then Tools › QA Scanner",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +207,8 @@ class GlossaryApprovalCard(ft.Container):
 
 
 class GlossaryEditorView:
-    """Full-screen "Edit Generated Glossary — <file>" (Raw mode; Table mode arrives with U6)."""
+    """Full-screen "Edit Generated Glossary — <file>" (Raw mode). ``on_table`` (U6) opens the file in
+    the Glossary Manager's table editor instead (the chat's GlossaryFeature hook)."""
 
     def __init__(
         self,
@@ -212,9 +220,11 @@ class GlossaryEditorView:
         on_close: Optional[Callable[[], Any]] = None,
         save: Callable[[str, str, bool], Any] = save_text_keep_bom,
         mono: str = "monospace",
+        on_table: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.path = path
         self.has_bom = has_bom
+        self.on_table = on_table
         self.on_saved = on_saved
         self.on_close = on_close
         self._save = save
@@ -243,7 +253,9 @@ class GlossaryEditorView:
                     content=ft.Column(
                         [
                             ft.Text(path, theme_style=ft.TextThemeStyle.LABEL_SMALL, selectable=True, color=_MUTED),
-                            ft.Row([ReasonChip(reason="Table editor arrives in U6")]),
+                            ft.Row([ft.TextButton(content="Open in table editor", icon=ft.Icons.TABLE_ROWS,
+                                                  on_click=lambda e: self.open_table(), key="gloss-edit-table")],
+                                   visible=on_table is not None),
                             self.editor,
                             self.error_text,
                         ],
@@ -254,6 +266,13 @@ class GlossaryEditorView:
             ],
             padding=12,
         )
+
+    def open_table(self) -> None:
+        """Leave the raw editor for the Glossary Manager's table editor on the same file."""
+        if self.on_table is None:
+            return
+        self.close()
+        self.on_table()
 
     def save(self) -> bool:
         try:
@@ -467,7 +486,8 @@ class JobCard(ft.Container):
             for action_id, label, _icon, milestone in ATTACHMENT_ACTIONS:
                 if action_id == "retry" and name == "done" and "failed" not in (status or ""):
                     continue
-                buttons.append(self._button(action_id, label, disabled_reason=f"Arrives in {milestone}" if milestone else None))
+                reason = ATTACHMENT_ACTION_REASONS.get(action_id) or (f"Arrives in {milestone}" if milestone else None)
+                buttons.append(self._button(action_id, label, disabled_reason=reason))
             if name in ("stopped", "interrupted"):
                 buttons.insert(0, self._button("resume", "Resume", "filled"))
         self.buttons.controls = buttons

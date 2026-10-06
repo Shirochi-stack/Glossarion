@@ -470,6 +470,10 @@ def test_selftest_smoke_on_host(storage, capsys):
     library = by_name["library_reader"]["detail"]
     assert library["library"]["shelf"] == "in_progress" and library["library"]["pill"].startswith("\u23f3 ")
     assert library["chapters_tab"]["statuses"]["qa_failed"] == 1 and library["reader"]["mode"] == "overlay"
+    glossary_qa = by_name["glossary_qa"]
+    if glossary_qa["status"] == "pass":  # skipped on a host without the backend packages
+        assert glossary_qa["detail"]["glossary"]["format"] == "token_csv"
+        assert glossary_qa["detail"]["qa_scan"]["files"] == 3
     assert result["ok"] is True
 
     err = capsys.readouterr().err

@@ -314,6 +314,11 @@ app_files = [
     ('progress_core.py', '.'),
     ('progress_actions.py', '.'),
     ('glossary_progress_core.py', '.'),
+    # Mobile rewrite U6: the Glossary Editor document, the main window's glossary file actions and the
+    # Parallel EPUB pair core (GlossaryManager_GUI, translator_gui and parallel_epub_glossary import them)
+    ('glossary_document.py', '.'),
+    ('glossary_files.py', '.'),
+    ('parallel_epub_core.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -500,6 +505,11 @@ app_modules = [
     'progress_core',
     'progress_actions',
     'glossary_progress_core',
+    # Mobile rewrite U6: the Glossary Editor document, the main window's glossary file actions and the
+    # Parallel EPUB pair core (GlossaryManager_GUI, translator_gui and parallel_epub_glossary import them)
+    'glossary_document',
+    'glossary_files',
+    'parallel_epub_core',
 ]
 # GUI Framework
 gui_modules = [

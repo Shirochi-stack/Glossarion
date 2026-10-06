@@ -4,8 +4,9 @@ Run on device by the deep link ``glossarion://app/__selftest__?suite=smoke`` (CI
 emulator smoke) or the "Run self-test" button; on the host by
 ``tests_host/test_bootstrap.py`` or ``python -m glossarion_mobile.diagnostics.selftest``.
 
-Suites: ``smoke`` (packages, env contract, offline assets, and the Library / Book page /
-Chapters tab / Reader on a translated workspace of the self-test EPUB; seconds) and ``e2e``
+Suites: ``smoke`` (packages, env contract, offline assets, the Library / Book page /
+Chapters tab / Reader on a translated workspace of the self-test EPUB, and the Glossary
+Manager's document + a QA quick scan on scratch files; seconds) and ``e2e``
 (``diagnostics.e2e``: real chat / translate / stop / resume jobs against the fake
 OpenAI server on 127.0.0.1; minutes), run on device by
 ``glossarion://app/__selftest__?suite=e2e`` or the "Run end-to-end test" button, on the
@@ -468,6 +469,33 @@ def check_library_reader(ctx: Context) -> dict[str, Any]:
         job_runner.JOB_LOCK.release()
 
 
+def check_glossary_qa(ctx: Context) -> dict[str, Any]:
+    """U6: the Glossary Manager's document (``glossary_document``: parse -> edit -> save ->
+    re-parse, byte-stable) and a QA quick scan (``qa_scan_runtime.run_qa_scan_path``, forced
+    onto threads on mobile) on scratch files (``diagnostics.glossary_qa_check``). The job lock
+    is held meanwhile: the scan sets QA env variables for its length, like a ``qa_scan`` job."""
+    for module in ("bs4", "lxml", "tiktoken"):
+        ctx.need(module)
+    import shutil
+
+    import job_runner
+
+    from glossarion_mobile.diagnostics import glossary_qa_check
+
+    paths = ctx.paths
+    if not job_runner.JOB_LOCK.acquire(timeout=5.0):
+        raise CheckSkipped("a job is running; the glossary / QA check waits for it")
+    work = fixtures.scratch_dir(paths.temp if paths is not None else None) / f"glossary-qa-{os.getpid()}-{threading.get_ident()}"
+    try:
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        return {"glossary": glossary_qa_check.check_glossary_document(work),
+                "qa_scan": glossary_qa_check.check_qa_quick_scan(work)}
+    finally:
+        job_runner.JOB_LOCK.release()
+        shutil.rmtree(work, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # e2e suite (diagnostics.e2e; one session shared by the checks of one run)
 # --------------------------------------------------------------------------
@@ -522,6 +550,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("onnxruntime", check_onnxruntime),
         ("thread_stack", check_thread_stack),
         ("library_reader", check_library_reader),
+        ("glossary_qa", check_glossary_qa),
     ),
     "e2e": _e2e_checks(),
 }

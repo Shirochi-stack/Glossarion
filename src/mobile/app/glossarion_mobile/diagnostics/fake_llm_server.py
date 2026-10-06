@@ -212,6 +212,8 @@ class RequestRecord:
     parked: bool = False  # waited in hold()
     chapters: list = field(default_factory=list)  # 제N화 headings in the last user message
     glossary_applied: list = field(default_factory=list)  # raw names substituted from the prompt's glossary
+    # prompt lines outside the last user message that name a raw glossary term (the injected glossary)
+    glossary_lines: list = field(default_factory=list)
     prompt_chars: int = 0
     reply_chars: int = 0
     reply: str = ""
@@ -222,7 +224,8 @@ class RequestRecord:
             "id": self.id, "path": self.path, "kind": self.kind, "model": self.model, "stream": self.stream,
             "started": self.started, "finished": self.finished, "status": self.status, "parked": self.parked,
             "chapters": list(self.chapters),
-            "glossary_applied": list(self.glossary_applied), "prompt_chars": self.prompt_chars,
+            "glossary_applied": list(self.glossary_applied), "glossary_lines": list(self.glossary_lines),
+            "prompt_chars": self.prompt_chars,
             "reply_chars": self.reply_chars, "preview": self.preview,
         }
 
@@ -529,6 +532,9 @@ class FakeLLMServer:
             return glossary_csv(last_user or full_text, self.glossary)
         applied = applied_entries(full_text, self.glossary)
         record.glossary_applied = [e.raw_name for e in applied if e.raw_name in last_user]
+        user_lines = set(last_user.splitlines())
+        record.glossary_lines = [line for line in full_text.splitlines() if line not in user_lines
+                                 and any(e.raw_name and e.raw_name in line for e in self.glossary)]
         return fake_translate(last_user, applied, marker=self.marker)
 
     def _serve_chat(self, handler: _Handler, payload: dict, path: str) -> None:

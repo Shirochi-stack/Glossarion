@@ -439,27 +439,9 @@ AI_JSON_LINE_MARKERS = [
     '{"role"', '{"content"', '[{', '}]'
 ]
 
-# Default AI refusal patterns (mirrors RefusalPatternsDialog._get_default_patterns)
-DEFAULT_REFUSAL_PATTERNS = [
-    "i cannot assist", "i can't assist", "i'm not able to assist",
-    "i cannot help", "i can't help", "i'm unable to help",
-    "i'm afraid i cannot help with that", "designed to ensure appropriate use",
-    "as an ai", "as a language model", "as an ai language model",
-    "i don't feel comfortable", "i apologize, but i cannot",
-    "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
-    "against my programming", "against my guidelines",
-    "violates content policy", "i'm not programmed to",
-    "cannot provide that kind", "unable to provide that",
-    "i cannot assist with this request",
-    "that's not within my capabilities to appropriately assist with",
-    "is there something different i can help you with",
-    "careful ethical considerations",
-    "i could help you with a different question or task",
-    "what other topics or questions can i help you explore",
-    "i cannot and will not translate",
-    "i cannot translate this content",
-    "i can't translate this content",
-]
+# Default AI refusal patterns: RefusalPatternsDialog's defaults, the single list in
+# key_pool_service (same strings, same order as the copy that used to live here)
+from key_pool_service import DEFAULT_REFUSAL_PATTERNS
 
 def _config_json_in(base_dir):
     """``<base_dir>/config.json``; Glossarion Mobile resolves it through mobile_runtime.

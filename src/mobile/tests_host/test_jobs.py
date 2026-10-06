@@ -1016,8 +1016,8 @@ def test_result_fields_and_compiled_outputs(tmp_path):
     (tmp_path / "chapter1.html").write_text("x", encoding="utf-8")
     assert [os.path.basename(p) for p in job_kinds.compiled_outputs([str(tmp_path), None])] == [
         "Book.epub", "Book_translated.txt"]
-    with pytest.raises(KeyError):
-        job_kinds.get_kind("qa_scan")
+    with pytest.raises(KeyError):  # a kind of a later milestone (qa_scan is registered since U6)
+        job_kinds.get_kind("manga")
 
 
 # ==========================================================================

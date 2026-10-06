@@ -498,6 +498,37 @@ SCENARIOS = {
             _expect_logs("⏹️ Translation cancelled during glossary extraction"),
         ),
     },
+    # U6: Extract Glossary stopped mid-chunk. Desktop: the glossary button calls
+    # stop_glossary_extraction; mobile: stop_control.request_glossary_stop (the same protocol).
+    "glossary_immediate_stop": {
+        "description": "Extract Glossary, immediate stop mid-chunk: cancel env, extractor/client stop flags, cleanup.",
+        "entry": GLOSSARY,
+        "config": _base_config(auto_glossary_mode="balanced"),
+        "files": _files("Glossary Stop Novel"),
+        "run_attrs": _with(_inputs("Glossary Stop Novel"), graceful_stop_var=False, wait_for_chunks_var=True),
+        "plan": {G: [CallPlan(chunks=3, actions={1: (("click",),)}, glossary=False)]},
+        "expect": _all(
+            _expect_entries(G),
+            _expect_after_click(stop_callback=True, TRANSLATION_CANCELLED="1", GRACEFUL_STOP="0",
+                                GRACEFUL_STOP_COMPLETED="0"),
+            _expect_stop_api("unified_api_client.hard_cancel_all"),
+            _expect_logs("❌ Glossary extraction stop requested."),
+        ),
+    },
+    "glossary_graceful_stop": {
+        "description": "Extract Glossary, graceful stop mid-chunk: no cancel env, the extractor stops at its next check.",
+        "entry": GLOSSARY,
+        "config": _base_config(auto_glossary_mode="balanced"),
+        "files": _files("Glossary Graceful Novel"),
+        "run_attrs": _with(_inputs("Glossary Graceful Novel"), **STOP_ATTRS),
+        "plan": {G: [CallPlan(chunks=3, actions={1: (("click",),)}, glossary=False)]},
+        "expect": _all(
+            _expect_entries(G),
+            _expect_after_click(stop_callback=True, GRACEFUL_STOP="1", TRANSLATION_CANCELLED=None),
+            _expect_stop_api(absent=("unified_api_client.hard_cancel_all",)),
+            _expect_logs("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)"),
+        ),
+    },
     "direct_text_glossary_approved": {
         "description": "Direct Text attachment run, balanced glossary generated, approval answered Yes.",
         "config": _base_config(auto_glossary_mode="balanced"),

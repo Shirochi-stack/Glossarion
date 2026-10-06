@@ -35,15 +35,24 @@ Scenarios (one self-test check each, in this order):
    the Book page, the Chapters tab (12 completed rows) and the Reader (every translated
    chapter carries the fake marker, the Original side the Korean source; built as the
    mobile page) through ``diagnostics.library_check`` (U5).
-3. ``e2e_graceful_stop_resume``: Stop after the first chapter response; the job ends
+3. ``e2e_glossary_edit_qa_pdf`` (U6): an ``extract_glossary`` job (the Glossaries "Extract
+   glossary" spec) writes the book glossary; the Glossary Manager's document
+   (``services.glossary.GlossaryService`` over ``glossary_document``) changes one translated
+   name and saves (the desktop backup first); a ``translate`` job then sends that edited
+   entry in every chapter prompt (never the old name); a ``qa_scan`` job (quick scan through
+   ``qa_scan_runtime.run_qa_scan_path``, threads only) reports every chapter; and the Book
+   page's "Compile PDF" (``LibraryService.compile_spec``: the EPUB compile with "Create PDF
+   after EPUB") writes a PDF through the PyMuPDF shim with one page per chapter at least and
+   an outline entry per chapter.
+4. ``e2e_graceful_stop_resume``: Stop after the first chapter response; the job ends
    gracefully within 30 s with its progress saved, and Resume translates exactly the
    chapters that were missing.
-4. ``e2e_force_stop_kill_resume``: the model stops answering; Stop twice (graceful, then
+5. ``e2e_force_stop_kill_resume``: the model stops answering; Stop twice (graceful, then
    force) must end the job within 30 s anyway. The ``active.state`` checkpoint taken
    before the stop is then handed to a fresh JobService (an app killed and relaunched):
    it is adopted as an Interrupted job, ``recover()`` restores its progress rows, and
    Resume finishes only the missing chapters.
-5. ``e2e_process_hygiene``: after every job ``os.environ``, ``sys.argv``,
+6. ``e2e_process_hygiene``: after every job ``os.environ``, ``sys.argv``,
    ``sys.stdout``/``sys.stderr``, the cwd, the ``large_env`` store and the
    ``UnifiedClient`` key pools are what they were before it; Glossarion code asked for
    no process (tripwire on the spawn APIs, as in ``tools/host_smoke.py``; a stdlib
@@ -1151,7 +1160,127 @@ class E2ESession:
         except library_check.LibraryCheckFailure as exc:
             raise E2EFailure(f"Library / Reader: {exc}") from exc
 
-    # ---- scenario 3: graceful stop, then Resume ----------------------------------------------------------------
+    # ---- scenario 3: extract glossary -> edit -> save -> translate -> QA quick scan -> PDF (U6) -----------------
+
+    #: The entry the scenario edits (a recurring name of the self-test EPUB) and its new translation.
+    EDIT_RAW = "이서연"
+    EDIT_NAME = "Seo-yeon Lumen"
+
+    def glossary_edit_qa_pdf(self) -> dict:
+        from glossarion_mobile.job_kinds.qa import report_path_for
+        from glossarion_mobile.services.glossary import GlossaryService
+        from glossarion_mobile.services.jobs import JobSpec
+        from glossarion_mobile.services.library import LibraryService
+
+        self.setup()
+        self.configure("balanced")
+        server = self.server
+        name = "e2e-glossary-edit.epub"
+        path = self.import_epub(name)
+        glossaries = GlossaryService(config=self.store)
+
+        # 1. Extract glossary (Glossaries › Extract glossary)
+        mark = server.mark()
+        extracted = self.run_job(self.service, glossaries.extract_spec([path]), "extract glossary")
+        _check(extracted.state == "DONE", f"glossary job ended {extracted.state}: {extracted.error}")
+        records = server.records(since=mark)
+        _check([r for r in records if r.kind == "glossary"], "no glossary extraction request reached the model")
+        _check(not [r for r in records if r.kind == "translation"], "the glossary job sent translation requests")
+        csvs = [p for p in extracted.outputs if p.lower().endswith(".csv") and os.path.isfile(p)]
+        _check(csvs, f"the glossary job listed no glossary file: {extracted.outputs}")
+        glossary = csvs[0]
+        _check(_under(_norm(glossary), [_norm(self.root / "Output")]), f"glossary outside the sandbox: {glossary}")
+
+        # 2. Edit one entry in the Glossary Manager's document and save it
+        doc = glossaries.open_document(glossary, source_path=path)
+        specs = glossaries.row_specs(doc)
+        target = next((s for s in specs if str(s.entry.get("raw_name") or "") == self.EDIT_RAW), None)
+        _check(target is not None, f"{self.EDIT_RAW} is not in the extracted glossary ({len(specs)} rows)")
+        old_name = str(target.entry.get("translated_name") or "")
+        glossaries.update_entry(doc, target.ref, {"translated_name": self.EDIT_NAME})
+        _check(glossaries.translated_changes(doc) == [(old_name, self.EDIT_NAME)],
+               f"translated changes {glossaries.translated_changes(doc)}")
+        saved = glossaries.save_edits(doc, update_outputs=False)
+        _check(saved.get("saved"), f"the edited glossary was not saved: {saved} {glossaries.log_lines[-3:]}")
+        backups = sorted(Path(glossary).parent.glob("Backups/*_before_save_*.json"))
+        _check(backups, "no 'before_save' backup was written (glossary_files.create_glossary_backup)")
+        reread = glossaries.open_document(glossary)
+        names = {str(s.entry.get("raw_name")): str(s.entry.get("translated_name"))
+                 for s in glossaries.row_specs(reread)}
+        _check(names.get(self.EDIT_RAW) == self.EDIT_NAME, f"re-read glossary has {names.get(self.EDIT_RAW)!r}")
+
+        # 3. Translate with the edited glossary
+        mark = server.mark()
+        outcome = self.run_job(self.service, self.translate_spec(path, name), "translate (edited glossary)")
+        _check(outcome.state == "DONE", f"translate job ended {outcome.state}: {outcome.error}")
+        records = server.records(since=mark)
+        chapter_records = [r for r in records if r.kind == "translation" and len(r.chapters) == 1]
+        _check(sorted(_chapter_requests(records)) == list(range(1, CHAPTERS + 1)),
+               f"chapter requests {sorted(_chapter_requests(records))}")
+        mentions = [r for r in chapter_records if self.EDIT_RAW in str(r.preview) or
+                    any(self.EDIT_RAW in line for line in r.glossary_lines)]
+        edited = [r.chapters[0] for r in chapter_records
+                  if any(self.EDIT_RAW in line and self.EDIT_NAME in line for line in r.glossary_lines)]
+        stale = [r.chapters[0] for r in chapter_records
+                 if any(self.EDIT_RAW in line and old_name and old_name in line and self.EDIT_NAME not in line
+                        for line in r.glossary_lines)]
+        _check(edited, "no chapter prompt carried the edited glossary entry "
+                       f"({self.EDIT_RAW} = {self.EDIT_NAME}); {len(mentions)} prompt(s) name {self.EDIT_RAW}")
+        _check(not stale, f"chapter prompts still carried the old name {old_name!r}: {stale}")
+        output_dir = outcome.output_dir
+        _check(output_dir and _under(_norm(output_dir), [_norm(self.root / "Output")]),
+               f"output folder {output_dir!r} is not under the sandbox Output")
+        book = self._expect_complete_book(output_dir, "translate (edited glossary)")
+
+        # 4. QA quick scan (Tools › QA Scanner)
+        qa = self.run_job(self.service, JobSpec(
+            kind="qa_scan", title=os.path.basename(output_dir), inputs=(output_dir,),
+            params={"mode": "quick-scan", "targets": [{"folder": output_dir, "source": path}]},
+            origin={"type": "e2e", "label": "E2E"}), "QA quick scan")
+        _check(qa.state == "DONE", f"QA job ended {qa.state}: {qa.error}")
+        report = report_path_for(output_dir)
+        _check(os.path.isfile(report), f"no QA report at {report}")
+        rows = json.loads(Path(report).with_name("validation_results.json").read_text(encoding="utf-8"))
+        scanned = sorted(str(r.get("filename") or "") for r in rows if str(r.get("filename") or "").startswith("response_"))
+        _check(scanned == [f"response_chapter{n:04d}.html" for n in range(1, CHAPTERS + 1)],
+               f"the QA report lists the chapter files {scanned}")
+        _check(any(os.path.normcase(p) == os.path.normcase(report) for p in qa.outputs), f"QA outputs {qa.outputs}")
+
+        # 5. Compile PDF (Book page › Compile PDF on an EPUB workspace: the EPUB compile + PDF, shim)
+        spec = LibraryService(config=self.store).compile_spec(
+            {"name": os.path.basename(output_dir), "output_folder": output_dir}, "compile_pdf")
+        _check(spec.kind == "compile_epub" and spec.params.get("config_overrides") == {"enable_pdf_output": True},
+               f"Compile PDF of an EPUB workspace planned {spec.kind} {spec.params}")
+        before = {p: p.stat().st_mtime for p in Path(output_dir).glob("*.pdf")}
+        compiled = self.run_job(self.service, spec, "compile PDF (shim)")
+        _check(compiled.state == "DONE", f"compile job ended {compiled.state}: {compiled.error}")
+        pdfs = [p for p in Path(output_dir).glob("*.pdf") if before.get(p) != p.stat().st_mtime]
+        _check(pdfs, f"no PDF was written to {output_dir} (outputs {compiled.outputs})")
+        listed = {os.path.normcase(os.path.abspath(p)) for p in compiled.outputs}
+        _check(all(os.path.normcase(os.path.abspath(str(p))) in listed for p in pdfs),
+               f"the compile job's outputs {compiled.outputs} miss the PDF(s) {[p.name for p in pdfs]}")
+        import fitz
+
+        pdf = max(pdfs, key=lambda p: p.stat().st_size)
+        with fitz.open(str(pdf)) as document:
+            pages = document.page_count
+            toc = document.get_toc()
+            text = "".join(document[i].get_text() for i in range(min(pages, 40)))
+            producer = str((document.metadata or {}).get("producer") or "")
+        from glossarion_mobile.diagnostics.fake_llm_server import FAKE_MARKER
+
+        _check(pages >= CHAPTERS, f"the PDF has {pages} page(s) for {CHAPTERS} chapters")
+        _check(len(toc) >= CHAPTERS, f"the PDF outline has {len(toc)} entr(ies) for {CHAPTERS} chapters")
+        _check(FAKE_MARKER in text, "the PDF text lacks the translation marker")
+        self._expect_complete_book(output_dir, "compile PDF")
+        return {"glossary": os.path.basename(glossary), "edited": {self.EDIT_RAW: [old_name, self.EDIT_NAME]},
+                "backups": len(backups), "edited_prompts": len(edited), "book": book,
+                "qa": {"files": len(rows), "chapters": len(scanned), "issues": sum(len(r.get("issues") or []) for r in rows),
+                       "secs": round(qa.secs, 1)},
+                "pdf": {"name": pdf.name, "pages": pages, "outline": len(toc), "bytes": pdf.stat().st_size,
+                        "producer": producer, "secs": round(compiled.secs, 1)}}
+
+    # ---- scenario 4: graceful stop, then Resume ----------------------------------------------------------------
 
     def graceful_stop_resume(self) -> dict:
         self.setup()
@@ -1207,7 +1336,7 @@ class E2ESession:
         return {"stop_secs": round(stop_secs, 1), "saved_before_resume": sorted(done),
                 "sent_before_stop": len(first), "resumed": sorted(again), "book": book}
 
-    # ---- scenario 4: model stuck, force stop, kill & relaunch, Resume ----------------------------------------
+    # ---- scenario 5: model stuck, force stop, kill & relaunch, Resume ----------------------------------------
 
     def force_stop_kill_resume(self) -> dict:
         self.setup()
@@ -1291,7 +1420,7 @@ class E2ESession:
         return {"stop_secs": round(stop_secs, 1), "parked_at_stop": taps.get("parked"), "parked_after": still_parked,
                 "saved_before_resume": sorted(done), "resumed": sorted(again), "book": book}
 
-    # ---- scenario 5: hygiene ----------------------------------------------------------------------------------------
+    # ---- scenario 6: hygiene ----------------------------------------------------------------------------------------
 
     def process_hygiene(self) -> dict:
         self.setup()
@@ -1341,6 +1470,7 @@ class E2ESession:
 SCENARIOS = (
     ("e2e_chat_balanced_glossary", "chat_balanced_glossary"),
     ("e2e_translate_glossary_off", "translate_glossary_off"),
+    ("e2e_glossary_edit_qa_pdf", "glossary_edit_qa_pdf"),
     ("e2e_graceful_stop_resume", "graceful_stop_resume"),
     ("e2e_force_stop_kill_resume", "force_stop_kill_resume"),
     ("e2e_process_hygiene", "process_hygiene"),

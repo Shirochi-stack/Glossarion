@@ -104,7 +104,7 @@ TOOL_ROUTES: dict[str, Optional[str]] = {
     "retranslate": None,
 }
 _NOT_YET = {
-    "extract_glossary": "Glossary extraction from the chat arrives in U6",
+    "extract_glossary": "Glossary extraction is not available in this session",
     "retranslate": "Retranslating chapters arrives in U7",
 }
 _LATER = {
@@ -145,6 +145,10 @@ class ChatView:
         self._env_unsubs: list[Callable[[], None]] = []
         self.plus_sheet: Optional[PlusSheet] = None
         self.mode_sheet: Optional[ModeOptionsSheet] = None
+        # Set by GlossaryFeature (U6): open a glossary file in the Glossary Manager's table editor /
+        # add a term to the chat workspace's glossary (None: the actions stay disabled).
+        self.glossary_table_opener: Optional[Callable[[str], Any]] = None
+        self.glossary_term_adder: Optional[Callable[..., Any]] = None
         self.model_sheet: Any = None
         self.settings_sheet: Any = None
         self.glossary_sheet: Any = None
@@ -1107,9 +1111,11 @@ class ChatView:
             if not info.get("exists"):
                 self.notify("The generated glossary file could not be found.")
                 return
+            table = self.glossary_table_opener  # GlossaryFeature (U6): the Glossary Manager's editor
             editor = GlossaryEditorView(path, info.get("text") or "", has_bom=bool(info.get("bom")), mono=self.env.mono,
                                         on_close=lambda: self._close_overlay(editor.view),
-                                        on_saved=lambda p: self.notify(f"Saved edited glossary: {os.path.basename(p)}"))
+                                        on_saved=lambda p: self.notify(f"Saved edited glossary: {os.path.basename(p)}"),
+                                        on_table=(lambda: table(path)) if table is not None else None)
             if self.env.push_overlay is not None:
                 self.env.push_overlay(editor.view)
 
@@ -1443,12 +1449,24 @@ class ChatView:
             ActionItem("Open output folder", (lambda: self.env.open_output(folder)) if (folder and self.env is not None
                        and self.env.open_output is not None) else None, icon="FOLDER_OPEN",
                        disabled_reason=None if folder else "No output folder for this response"),
-            ActionItem("Add term to glossary", disabled_reason="Arrives in U6", icon="BOOKMARK_ADD"),
+            self._add_term_item(folder),
             ActionItem("Delete message", disabled_reason="Arrives in U7", icon="DELETE_OUTLINE", destructive=True),
         ]
         sheet = ActionSheet(items, title=card.request_label or "Response", tablet=bool(self.layout.persistent_sidebar))
         sheet.show(self.page)
         return sheet
+
+    def _add_term_item(self, folder: str) -> ActionItem:
+        """Response ⋯ › Add term to glossary: a new entry in the workspace's glossary.csv (GlossaryFeature)."""
+        adder = self.glossary_term_adder
+        glossary = os.path.join(folder, "glossary.csv") if folder else ""
+        if adder is None:
+            return ActionItem("Add term to glossary", disabled_reason="The Glossary Manager is not available",
+                              icon="BOOKMARK_ADD")
+        if not glossary or not os.path.isfile(glossary):
+            return ActionItem("Add term to glossary", disabled_reason="This response's workspace has no glossary.csv",
+                              icon="BOOKMARK_ADD")
+        return ActionItem("Add term to glossary", lambda: adder("", glossary_path=glossary), icon="BOOKMARK_ADD")
 
     def _user_actions(self, bubble: UserBubble) -> ActionSheet:
         sheet = ActionSheet(

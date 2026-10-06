@@ -1159,8 +1159,26 @@ class LibraryService:
         folder = str(book.get("output_folder") or "")
         if not folder:
             raise ValueError("This book has no output workspace to compile")
+        params: dict = {"folder": folder}
+        # The desktop compiles a workspace with the compiler of its source format
+        # (library_core._workspace_compile_kind): a PDF workspace through the PDF workspace
+        # compiler, an EPUB workspace through the EPUB converter, whose "Create PDF after EPUB"
+        # (enable_pdf_output) gives its PDF - the Converter's compile_spec does the same.
+        workspace_kind = "epub"
+        decide = self.core.fn("library_core", "_workspace_compile_kind")
+        if decide is not None:
+            try:
+                workspace_kind = str(decide(dict(book), folder) or "epub")
+            except Exception:
+                workspace_kind = "epub"
+        if workspace_kind == "pdf":
+            kind = "compile_pdf"
+        elif kind == "compile_pdf":
+            kind = "compile_epub"
+            params["config_overrides"] = {"enable_pdf_output": True}
+            params["pdf_after_epub"] = True
         return JobSpec(kind=kind, title=str(book.get("name") or os.path.basename(folder)), inputs=(folder,),
-                       params={"folder": folder}, origin=self.origin_for(book))
+                       params=params, origin=self.origin_for(book))
 
     def translate_spec(self, books: Sequence[Mapping[str, Any]], *, review_glossary: bool = False,
                        sources: Optional[Sequence[str]] = None) -> Any:
