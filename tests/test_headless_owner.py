@@ -537,22 +537,29 @@ def test_library_core_is_moved_verbatim_and_reexported():
             for t in node.targets:
                 if isinstance(t, ast.Name):
                     legacy_defs[t.id] = ast.unparse(node)
-    moved = {}
+    defined = {}
     for node in _tree("library_core").body:
         if isinstance(node, ast.FunctionDef):
-            moved[node.name] = ast.unparse(node)
+            defined[node.name] = ast.unparse(node)
         elif isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id not in ("logger", "__all__"):
-                    moved[t.id] = ast.unparse(node)
-    assert sorted(moved) == sorted(library_core.__all__)
+                    defined[t.id] = ast.unparse(node)
+    # U5 extended library_core with new shared APIs (LibraryEnv, plain shelf / details
+    # objects, mixins); every name that epub_library defined at BASE_SHA is a move and
+    # must stay verbatim, except the documented U5 seams (tests/parity/DISCREPANCIES.md).
+    adapted = {"_default_output_root"}  # LibraryEnv output-root seam (desktop never installs one)
+    moved = {name: text for name, text in defined.items() if name in legacy_defs}
+    assert set(moved) <= set(library_core.__all__)
     for name, text in moved.items():
+        if name in adapted:
+            continue
         assert text == legacy_defs[name], f"library_core.{name} differs from epub_library @ {BASE_SHA[:12]}"
     # epub_library no longer defines them; it imports the same objects
     current = {n.name for n in _tree("epub_library").body if isinstance(n, ast.FunctionDef)}
     assert not current & set(moved)
     reexport = [n for n in _tree("epub_library").body if isinstance(n, ast.ImportFrom) and n.module == "library_core"]
-    assert sorted(a.name for a in reexport[0].names) == sorted(library_core.__all__)
+    assert set(moved) <= {a.name for a in reexport[0].names}
 
 def test_headless_owner_never_writes_config_json(tmp_path, monkeypatch):
     import app_paths
@@ -570,6 +577,28 @@ def test_headless_owner_never_writes_config_json(tmp_path, monkeypatch):
     assert cfg == original  # the caller's dict is not mutated
     assert owner.config["sanitization_korean_quotes_fixed"] is True  # sanitizer ran in memory
     assert owner.config["auto_update_check"] is True
+
+
+def test_headless_owner_records_library_raw_inputs_like_the_desktop(tmp_path, monkeypatch):
+    """U5: the run set-up's registry hook goes through library_core (desktop: epub_library -> the same function)."""
+    import library_core
+    import translation_pipeline
+    from headless_owner import HeadlessOwner
+
+    library = tmp_path / "Library"
+    monkeypatch.setenv("GLOSSARION_LIBRARY_DIR", str(library))
+    book = tmp_path / "Book.epub"
+    book.write_bytes(b"PK")
+    owner = HeadlessOwner.__new__(HeadlessOwner)  # the hook needs no owner state
+    assert owner._record_library_raw_inputs([str(book), str(tmp_path / "missing.epub"), "", None]) is None
+    assert [os.path.normcase(p) for p in library_core.load_library_raw_inputs()] == [os.path.normcase(str(book))]
+    # the mixin default stays GUI-free and inert for other owners; desktop keeps its epub_library hook
+    assert translation_pipeline.PipelineHooksMixin._record_library_raw_inputs(owner, [str(book)]) is None
+    tg_hook = " ".join(_desktop_method_source("_record_library_raw_inputs"))
+    assert "from epub_library import record_library_raw_input" in tg_hook
+    reexports = {a.name for n in _tree("epub_library").body
+                 if isinstance(n, ast.ImportFrom) and n.module == "library_core" for a in n.names}
+    assert "record_library_raw_input" in reexports  # desktop and mobile write through one function
 
 
 def test_fresh_install_headless_owner_runs_like_the_desktop(tmp_path, monkeypatch):

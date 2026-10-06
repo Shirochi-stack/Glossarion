@@ -425,6 +425,12 @@ def test_offline_e2e_suite(tmp_path):
     markers = [ln for ln in proc.stderr.splitlines() if ln.startswith("GLOSSARION_SELFTEST ")]
     assert markers and markers[-1].startswith('GLOSSARION_SELFTEST PASS {"suite":"e2e"')
 
+    # U5: the translated + compiled workspace opens in the Library, Book page, Chapters tab and Reader.
+    library = checks["e2e_translate_glossary_off"]["detail"]["library"]
+    assert library["library"]["shelf"] == "completed" and library["library"]["card"] == f"{e2e.CHAPTERS}/{e2e.CHAPTERS}"
+    assert library["raw_inputs_registered"] >= 1 and library["book_page"]["chapters"] == e2e.CHAPTERS
+    assert library["chapters_tab"]["statuses"].get("completed") == e2e.CHAPTERS
+    assert library["reader"]["mode"] == "dual" and library["reader"]["translated"] == e2e.CHAPTERS
     chat = checks["e2e_chat_balanced_glossary"]["detail"]
     assert chat["requests"]["glossary"] >= 1 and chat["requests"]["chapters"] == e2e.CHAPTERS
     assert chat["approval_entries"] == len(DEFAULT_GLOSSARY) and chat["live_cards"] >= 1

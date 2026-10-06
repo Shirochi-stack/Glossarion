@@ -88,7 +88,12 @@ jobs:
           tests/test_model_catalog_core.py \
           tests/test_prompt_profiles.py \
           tests/test_key_pool_service.py \
-          tests/test_mobile_auth_splits.py
+          tests/test_mobile_auth_splits.py \
+          tests/test_library_core.py \
+          tests/test_reader_doc.py \
+          tests/test_progress_core.py \
+          tests/test_progress_actions.py \
+          tests/test_glossary_progress_core.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -111,6 +116,9 @@ jobs:
             "direct_text_store", "direct_text_stream",
             # U4: settings rules, model catalog, prompt profiles, key pools, shared OAuth helpers
             "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
+            # U5: Library covers, reader document, live stream, Progress Manager / Glossary Progress cores
+            "library_covers", "reader_doc", "live_stream", "progress_core", "progress_actions",
+            "glossary_progress_core",
         )
         failed = []
         for name in SHARED:

@@ -127,7 +127,8 @@ HOOK_NAMES = frozenset({
     "_create_watchdog_snapshot",
     "_start_autoscroll_delay",
     "_update_manual_glossary_status",
-    # U3 fix pass: the set-up's Library raw-input registry write (desktop: epub_library)
+    # U3 fix pass: the set-up's Library raw-input registry write (desktop: epub_library;
+    # U5: HeadlessOwner records through library_core, the mixin default stays a no-op)
     "_record_library_raw_inputs",
     "_process_image_file",
     "_process_rpgmaker_game",
@@ -169,6 +170,16 @@ SHARED_MODULES = (
     "prompt_profiles",          # other_settings profile actions + the assistant prefill dialog
     "key_pool_service",         # MultiAPIKeyDialog / RefusalPatternsDialog / unified_api_client refusal defaults
     "oauth_session",            # authgem / authcd / authgrok begin/complete sign-in helpers
+    # U5 (library_core is listed with U2 above): Library covers, the reader document + live
+    # stream, the Progress Manager / Glossary Progress cores (tests/test_library_core.py,
+    # test_reader_doc.py, test_progress_core.py, test_progress_actions.py and
+    # test_glossary_progress_core.py pin the moves)
+    "library_covers",
+    "reader_doc",
+    "live_stream",
+    "progress_core",
+    "progress_actions",
+    "glossary_progress_core",
 )
 
 _RUN_ENV = ("run_env", "RunEnvMixin")

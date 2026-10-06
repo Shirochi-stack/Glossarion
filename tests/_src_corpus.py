@@ -56,10 +56,26 @@ INIT_BLOCK_METHODS = (
 )
 
 
+#: Retranslation_GUI plus the shared modules holding Progress Manager / Glossary Progress
+#: code that moved out of it in U5 (progress_core, progress_actions, glossary_progress_core).
+PROGRESS_MANAGER_MODULES = ("Retranslation_GUI", "progress_core", "progress_actions", "glossary_progress_core")
+
+
 @lru_cache(maxsize=None)
 def module_source(module: str) -> str:
     """src/<module>.py decoded with utf-8-sig (translator_gui has a BOM), LF line endings."""
     return (SRC_DIR / f"{module}.py").read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
+
+
+def progress_manager_source() -> str:
+    """Retranslation_GUI.py followed by the U5 progress modules (one string, LF).
+
+    Tests that grep Retranslation_GUI.py for Progress Manager / Glossary Progress code
+    search this instead, so they keep checking the same code wherever it now lives.
+    """
+    return "\n".join(
+        module_source(m) for m in PROGRESS_MANAGER_MODULES if (SRC_DIR / f"{m}.py").exists()
+    )
 
 
 @lru_cache(maxsize=None)
@@ -136,4 +152,6 @@ __all__ = [
     "method_source",
     "module_source",
     "module_tree",
+    "progress_manager_source",
+    "PROGRESS_MANAGER_MODULES",
 ]

@@ -11,6 +11,8 @@ APK checks (Android SDK build-tools: ``apksigner`` + ``aapt2``):
     false = forbidden);
   * a ``<service>`` declaring ``foregroundServiceType`` dataSync (the job foreground service);
   * the ``glossarion://app`` deep-link intent filter;
+  * every ``[tool.flet.android.manifest_application]`` attribute of pyproject.toml on the merged
+    ``<application>`` (U5: ``networkSecurityConfig``, the Reader WebView's loopback cleartext);
   * native libraries only for the allowed ABIs, and a split APK holds exactly its own ABI;
   * a size warning above ``--max-size-mb``.
 
@@ -284,6 +286,22 @@ def permission_expectations(pyproject: Path | None) -> tuple[set[str], set[str],
     return required - forbidden, forbidden, notes, config_errors
 
 
+def manifest_application_expectations(pyproject: Path | None) -> list[str]:
+    """``[tool.flet.android.manifest_application]`` attribute names the merged manifest must carry."""
+    if pyproject is None or tomllib is None:
+        return []
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    table = data.get("tool", {}).get("flet", {}).get("android", {}).get("manifest_application", {})
+    return sorted(str(name) for name in table)
+
+
+def missing_application_attributes(tree: XmlElement, names: list[str]) -> list[str]:
+    applications = list(tree.iter("application"))
+    if not applications:
+        return list(names)
+    return [name for name in names if not any(name in app.attrs for app in applications)]
+
+
 def abis_in_zip(path: Path) -> set[str]:
     with zipfile.ZipFile(path) as archive:
         return {m.group(1) for m in (LIB_RE.match(n) for n in archive.namelist()) if m}
@@ -402,6 +420,10 @@ def check_apk(report: Report, args, build_tools: Path | None, required: set[str]
             report.error("no <service> declares foregroundServiceType=dataSync (job foreground service missing from the merged manifest)")
         if not has_deep_link(tree, args.url_scheme, args.url_host):
             report.error(f"no VIEW intent filter for {args.url_scheme}://{args.url_host}")
+        missing = missing_application_attributes(tree, manifest_application_expectations(args.pyproject))
+        if missing:
+            report.error("merged <application> lacks the pyproject manifest_application attribute(s): "
+                         + ", ".join(missing) + " (the Reader WebView needs networkSecurityConfig for 127.0.0.1)")
         debuggable = manifest_flag(tree, "application", "debuggable")
         if debuggable and debuggable.lower() in ("true", "0xffffffff", "-1"):
             report.warn("application is debuggable")

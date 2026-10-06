@@ -13,7 +13,10 @@ runs for the same action:
 * ``extract_glossary``: ``owner.run_glossary_extraction_direct()`` over the
   selected files (it dispatches to ``_extract_glossary_from_text_file``);
 * ``compile_epub`` / ``compile_pdf``: ``owner._run_epub_compile(folder)`` /
-  ``owner._run_pdf_compile(folder)`` (``text_jobs.TextJobsMixin``).
+  ``owner._run_pdf_compile(folder)`` (``text_jobs.TextJobsMixin``);
+* ``single_chapter``: the translate pair with the owner's ``_single_chapter_filter`` /
+  ``_force_stream_all`` set (desktop ``start_single_chapter_translation``; the Reader's
+  "Translate this chapter" and the Book page's chapter rows).
 
 No backend logic lives here. ``get_kind(kind)`` returns a ``KindInfo`` (verb and
 icon for the strip and notifications, the ``stop_control.reset_for_new_run``
@@ -36,6 +39,7 @@ KIND_MODULES = {
     "extract_glossary": "glossary",
     "compile_epub": "compile",
     "compile_pdf": "compile",
+    "single_chapter": "single_chapter",
 }
 
 

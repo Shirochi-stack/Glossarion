@@ -318,8 +318,16 @@ def test_ollama_settings_constants_are_verbatim_and_reexported(name):
     "_library_origins_raw_sources_for_stem", "_library_raw_inputs_for_stem", "_rename_output_files_for_retain",
 ])
 def test_output_naming_functions_are_verbatim_and_reexported(name):
-    assert dump(top_function(current_tree("output_naming"), name)) == dump(
-        top_function(legacy_tree("src/other_settings.py"), name))
+    current = top_function(current_tree("output_naming"), name)
+    legacy = top_function(legacy_tree("src/other_settings.py"), name)
+    if name in ("_library_origins_raw_sources_for_stem", "_library_raw_inputs_for_stem"):
+        # U5 (tests/parity/DISCREPANCIES.md): the Library folder honours
+        # GLOSSARION_LIBRARY_DIR through output_naming._library_dir(); nothing else changed.
+        home_library = "os.path.join(os.path.expanduser('~'), 'Documents', 'Glossarion', 'Library')"
+        assert home_library in ast.unparse(legacy)
+        assert ast.unparse(current) == ast.unparse(legacy).replace(home_library, "_library_dir()")
+    else:
+        assert dump(current) == dump(legacy)
     reexports = [n for n in current_tree("other_settings").body
                  if isinstance(n, ast.ImportFrom) and n.module == "output_naming"]
     assert len(reexports) == 1 and name in {a.name for a in reexports[0].names}

@@ -14,6 +14,17 @@ import os
 from epub_package import find_epub_opf_member, find_opf_path
 
 
+def _library_dir():
+    """The Library folder (``library_core.get_library_dir``'s path, not created here).
+
+    U5: honours ``GLOSSARION_LIBRARY_DIR`` like the Library itself (Glossarion Mobile
+    keeps its Library in app storage); desktop resolves ``~/Documents/Glossarion/Library``
+    exactly as before.
+    """
+    from library_core import library_root_path
+    return library_root_path()
+
+
 def _library_origins_raw_sources_for_stem(folder_stem):
     """Raw source paths in library_origins.txt whose stem matches *folder_stem*.
 
@@ -24,8 +35,7 @@ def _library_origins_raw_sources_for_stem(folder_stem):
     """
     if not folder_stem:
         return []
-    library_dir = os.path.join(
-        os.path.expanduser('~'), 'Documents', 'Glossarion', 'Library')
+    library_dir = _library_dir()
     origins_path = os.path.join(library_dir, 'library_origins.txt')
     try:
         with open(origins_path, 'r', encoding='utf-8') as f:
@@ -64,8 +74,7 @@ def _library_raw_inputs_for_stem(folder_stem):
     """
     if not folder_stem:
         return []
-    lib_dir = os.path.join(
-        os.path.expanduser('~'), 'Documents', 'Glossarion', 'Library')
+    lib_dir = _library_dir()
     matches = []
     seen = set()
     for reg_path in (os.path.join(lib_dir, 'library_raw_inputs.txt'),

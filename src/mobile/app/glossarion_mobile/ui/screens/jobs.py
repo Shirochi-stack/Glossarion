@@ -55,6 +55,7 @@ from glossarion_mobile.services.jobs import (
     strip_model_for,
 )
 from glossarion_mobile.services.notifications import ACTION_RESUME, ACTION_SHARE, JobNotifications, chat_of
+from glossarion_mobile.services.wakelock import SharedWakelock
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
@@ -370,7 +371,11 @@ class JobsFeature:
         )
         native = getattr(app, "native", None)
         self.notifications = JobNotifications(native, platform=self.platform)
-        self.wakelock = self._make_wakelock()
+        # One reference-counted owner of the platform wakelock: the job service and the
+        # Reader ("Keep screen on") each hold it through their own holder (U5 review).
+        raw_wakelock = self._make_wakelock()
+        self.wakelock_owner = SharedWakelock(raw_wakelock) if raw_wakelock is not None else None
+        self.wakelock = self.wakelock_owner.holder("jobs") if self.wakelock_owner is not None else None
         self.background = BackgroundExecution(
             native,
             platform=self.platform,

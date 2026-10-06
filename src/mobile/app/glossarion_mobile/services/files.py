@@ -4,13 +4,24 @@ Import
   ``FilePicker.pick_files`` returns a cache copy on Android/iOS (the app has no
   storage permissions; the picker goes through SAF / UIDocumentPicker). Each
   file is copied (in a worker thread) into ``<data>/Inbox`` or, for "Add to
-  Library", into ``Library/Raw`` and registered with the shared
+  Library", into ``Library/Raw`` (``Library/Translated`` for "Add translation").
+  Library files go through ``library_import`` (set by the Library feature to
+  ``LibraryService.import_paths_blocking``: the shared
+  ``library_core.import_paths(copy_into_library=True)``, which copies with the
+  Library's Keep Both rule, registers the file and scaffolds its workspace -
+  ``source_epub.txt`` + an empty v2.1 progress file). A file that stays in app
+  storage (an Inbox copy shared with "Add to Library") is copied by
+  ``import_paths`` itself with ``record_origins`` (Undo moves it back to the
+  Inbox); a picker cache copy is first copied here under its display name and
+  then registered in place. Without the feature, the copy is registered with
   ``library_core.record_library_raw_input``. Names are kept, so the translation
   output folder keeps the book's name; a different file with the same name gets
-  a `` (2)`` suffix (the Library's own ``_unique_dest`` scheme), while the same
-  content imported again reuses the existing copy, so re-importing a book
-  resumes its translation. Cache copies under the app's cache/temp folders are
-  removed after the copy; a path outside them (desktop dev) is never touched.
+  a `` (2)`` suffix through the shared collision rule
+  (``library_core.unique_destination``, the desktop Import/Organize
+  ``_unique_dest``), while the same content imported again reuses the existing
+  copy, so re-importing a book resumes its translation. Cache copies under the
+  app's cache/temp folders are removed after the copy; a path outside them
+  (desktop dev) is never touched.
 
 Folders
   ``FilePicker.get_directory_path`` + a recursive copy into ``Inbox/<folder>``.
@@ -90,7 +101,7 @@ class ImportedFile:
     name: str
     size: int
     source: str  # the picker / share path it came from
-    target: str  # "inbox" | "library"
+    target: str  # "inbox" | "library" (Library/Raw) | "translated" (Library/Translated)
     reused: bool = False  # identical content was already there
 
     @property
@@ -135,13 +146,33 @@ def safe_name(name: Any, fallback: str = "file") -> str:
     return text
 
 
-def unique_destination(directory: str, name: str) -> str:
-    """``directory/name``, or ``name (2)``, ``name (3)``... when taken (files and folders)."""
+def _shared_unique_destination() -> Optional[Callable[..., str]]:
+    """``library_core.unique_destination`` (the desktop Organize/Import ``_unique_dest`` rule)."""
+    try:
+        import library_core  # shared (Library)
+    except Exception:
+        return None
+    fn = getattr(library_core, "unique_destination", None)
+    return fn if callable(fn) else None
+
+
+def unique_destination(directory: str, name: str, *, folder: bool = False) -> str:
+    """``directory/name``, or ``name (2)``, ``name (3)``... when taken.
+
+    The shared Library rule (``library_core.unique_destination``): for files the
+    counter goes before the extension and only files count as taken; ``folder=True``
+    (a picked folder copied into the Inbox) also counts folders and numbers the
+    whole name.
+    """
+    shared = _shared_unique_destination()
+    if shared is not None:
+        return os.fspath(shared(directory, name, include_dirs=folder))
+    # Without library_core (host tools): files and folders both count as taken
     candidate = os.path.join(directory, name)
     if not os.path.exists(candidate):
         return candidate
     stem, ext = os.path.splitext(name)
-    if os.path.isdir(candidate):
+    if folder or os.path.isdir(candidate):
         stem, ext = name, ""
     counter = 2
     while True:
@@ -233,10 +264,16 @@ class FileBridge:
         native: Any = None,
         run_io: Optional[RunIo] = None,
         files_visible_root: Optional[str] = None,
+        library_translated_dir: Any = None,
+        library_import: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.inbox_dir = os.fspath(inbox_dir)
         self._library_raw_dir = library_raw_dir
+        self._library_translated_dir = library_translated_dir
         self._record_library_input = record_library_input
+        #: ``(paths, target, record_origins)`` -> ``ImportReport`` (``LibraryService.import_paths_blocking``:
+        #: ``library_core.import_paths(copy_into_library=True)``); the Library feature sets it.
+        self.library_import = library_import
         self.cache_dirs = [os.fspath(d) for d in cache_dirs if d]
         self.platform = platform
         self._picker_factory = picker_factory
@@ -261,20 +298,63 @@ class FileBridge:
         os.makedirs(target, exist_ok=True)
         return os.fspath(target)
 
-    def _record(self, path: str) -> None:
+    def library_translated_dir(self) -> str:
+        target = self._library_translated_dir
+        if callable(target):
+            target = target()
+        if target is None:
+            import library_core  # shared (Library registry)
+
+            target = library_core.get_library_translated_dir()
+        os.makedirs(target, exist_ok=True)
+        return os.fspath(target)
+
+    def _record(self, path: str, target: str = "library") -> None:
+        """Register a copy already inside the Library folder (see the module docstring).
+
+        A translation copied into ``Library/Translated`` is not registered: the shelf scan
+        lists that folder (``library_core.import_paths`` does the same for its own copies).
+        """
         record = self._record_library_input
+        if record is None and target == "translated" and self.library_import is not None:
+            return
+        if record is None and self.library_import is not None:
+            try:
+                self.library_import([path], "translated" if target == "translated" else "raw", False)
+            except Exception:
+                log.exception("registering %s in the Library failed", path)
+            return
         if record is None:
             try:
                 import library_core
 
-                record = library_core.record_library_raw_input
-            except ImportError:
+                record = (library_core.record_library_translated_input if target == "translated"
+                          else library_core.record_library_raw_input)
+            except (ImportError, AttributeError):
                 log.warning("library_core unavailable; %s is not registered in the Library", path)
                 return
         try:
             record(path)
         except Exception:
             log.exception("registering %s in the Library failed", path)
+
+    def _import_kept_source(self, source: str, target: str) -> Optional[tuple]:
+        """``library_import`` copies a file that stays in app storage (Inbox) and records its origin.
+
+        Returns ``(dest, reused)`` or None when the shared import did not take the file.
+        """
+        report = self.library_import([source], "translated" if target == "translated" else "raw", True)
+        copied = list(getattr(report, "copied", ()) or ())
+        if copied:
+            entry = copied[0]
+            return os.fspath(entry.get("path")), bool(entry.get("reused"))
+        imported = list(getattr(report, "imported", ()) or ())
+        if imported and os.path.isfile(os.fspath(imported[0])):
+            return os.fspath(imported[0]), False
+        errors = list(getattr(report, "errors", ()) or ()) + list(getattr(report, "skipped", ()) or ())
+        if errors:
+            log.warning("Library import of %s: %s", source, errors[0])
+        return None
 
     def is_cache_copy(self, path: str) -> bool:
         """Only picker/share copies inside the app's cache or temp folders may be removed."""
@@ -309,10 +389,15 @@ class FileBridge:
 
     def import_paths(self, paths: Iterable[Any], *, target: str = "inbox",
                      names: Optional[Sequence[Optional[str]]] = None) -> list[ImportedFile]:
-        """Copy files into the Inbox (or Library/Raw) and return what landed where."""
+        """Copy files into the Inbox, Library/Raw (``library``) or Library/Translated (``translated``)."""
         names = list(names or [])
         out: list[ImportedFile] = []
-        directory = self.library_raw_dir() if target == "library" else self.inbox_dir
+        if target == "library":
+            directory = self.library_raw_dir()
+        elif target == "translated":
+            directory = self.library_translated_dir()
+        else:
+            directory = self.inbox_dir
         for index, raw in enumerate(paths):
             if not raw:
                 continue
@@ -321,9 +406,17 @@ class FileBridge:
                 log.warning("import skipped, not a file: %s", source)
                 continue
             display = names[index] if index < len(names) and names[index] else os.path.basename(source)
-            dest, reused = self._copy_into(source, directory, display)
-            if target == "library":
-                self._record(dest)
+            kept = None
+            if (target in ("library", "translated") and self.library_import is not None
+                    and self._record_library_input is None and not self.is_cache_copy(source)
+                    and safe_name(display) == os.path.basename(source) and _under(source, [self.inbox_dir])):
+                kept = self._import_kept_source(source, target)
+            if kept is not None:
+                dest, reused = kept
+            else:
+                dest, reused = self._copy_into(source, directory, display)
+                if target in ("library", "translated"):
+                    self._record(dest, target)
             if self.is_cache_copy(source) and os.path.realpath(source) != os.path.realpath(dest):
                 try:
                     os.remove(source)
@@ -333,11 +426,14 @@ class FileBridge:
                                     source=source, target=target, reused=reused))
         return out
 
-    def add_to_library(self, path: str) -> ImportedFile:
-        """Copy an imported file into Library/Raw and register it (Add to Library)."""
-        if os.path.splitext(path)[1].lower() not in LIBRARY_EXTENSIONS:
+    def add_to_library(self, path: str, *, translated: bool = False) -> ImportedFile:
+        """Copy an imported file into Library/Raw (or Translated) and register it (Add to Library)."""
+        ext = os.path.splitext(path)[1].lower()
+        if translated and ext != ".epub":
+            raise ValueError("Only EPUB files go to the Completed shelf")
+        if ext not in LIBRARY_EXTENSIONS:
             raise ValueError("Only EPUB, TXT, PDF and HTML files go to the Library")
-        imported = self.import_paths([path], target="library")
+        imported = self.import_paths([path], target="translated" if translated else "library")
         if not imported:
             raise FileNotFoundError(path)
         return imported[0]
@@ -352,7 +448,7 @@ class FileBridge:
             raise FolderPickUnavailable(f"The folder could not be read ({exc.__class__.__name__})") from exc
         base = target_dir or self.inbox_dir
         os.makedirs(base, exist_ok=True)
-        dest = unique_destination(base, safe_name(os.path.basename(os.path.normpath(folder)), "Folder"))
+        dest = unique_destination(base, safe_name(os.path.basename(os.path.normpath(folder)), "Folder"), folder=True)
         files = size = 0
         for root, dirs, names in os.walk(folder):
             dirs[:] = [d for d in dirs if not d.startswith(".")]

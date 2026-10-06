@@ -6643,7 +6643,9 @@ def test_progress_manager_shell_uses_slightly_wider_default():
 def test_progress_manager_manual_editing_generation_does_not_block_gui_thread():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
     start = source.index("def _generate_manual_editing_sidecars(on_finished=None)")
-    end = source.index("def _bool_setting", start)
+    # U5: _bool_setting (the next closure) moved to glossary_progress_core.glossary_progress_locator;
+    # the closure after it is the same end of the manual-editing block.
+    end = source.index("def _confirm_manual_glossary_refinement(", start)
     body = source[start:end]
     toggle_start = source.index("def _on_manual_editing_toggled", start)
     toggle_end = source.index("def _update_text_analysis_button", toggle_start)

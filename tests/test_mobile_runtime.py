@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1-U4 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1-U5 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -323,6 +323,18 @@ U4_SHARED_MODULES = (
     "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
 )
 
+# U5: epub_library re-imports the Library cover / reader document / live stream moves,
+# Retranslation_GUI inherits progress_core.ProgressViewMixin and binds the progress_actions /
+# glossary_progress_core closures, and TransateKRtoEN's cleanup_missing_files delegates to
+# progress_core (all at module level). They are GUI-free, so every tier ships them, including
+# the Lite builds that leave epub_library (QtWebEngine, ~152 MB) out on purpose.
+U5_SHARED_MODULES = (
+    "library_covers", "reader_doc", "live_stream", "progress_core", "progress_actions",
+    "glossary_progress_core",
+)
+#: Specs that deliberately do not bundle epub_library (it drags in Chromium WebEngine).
+LITE_WITHOUT_EPUB_LIBRARY = ("translator_lite.spec", "translator_TurboLite.spec", "translator_linux_TurboLite.spec")
+
 
 def _spec_list(source, name):
     lines = source.splitlines()
@@ -338,7 +350,27 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         source = spec.read_text(encoding="utf-8")
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
-        for name in U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES + U4_SHARED_MODULES:
+        for name in (U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES + U4_SHARED_MODULES
+                     + U5_SHARED_MODULES):
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")
+
+
+def test_u5_modules_ship_where_epub_library_is_left_out():
+    """The Lite tiers keep epub_library commented out; the U5 cores never need it at import time."""
+    for spec in sorted(SRC_DIR.glob("translator*.spec")):
+        source = spec.read_text(encoding="utf-8")
+        files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
+        modules = _spec_list(source, "app_modules")
+        bundled = spec.name not in LITE_WITHOUT_EPUB_LIBRARY
+        assert (files.count("epub_library"), modules.count("epub_library")) == ((1, 1) if bundled else (0, 0)), spec.name
+    for name in ("library_core",) + U5_SHARED_MODULES:
+        tree = ast.parse((SRC_DIR / f"{name}.py").read_text(encoding="utf-8-sig"))
+        top = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top |= {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                top.add(node.module.split(".")[0])
+        assert not top & {"epub_library", "PySide6", "translator_gui", "Retranslation_GUI", "dpi_setup"}, (name, top)

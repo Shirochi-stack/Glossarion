@@ -54,6 +54,13 @@ modules = [
   # glossarion-key-pools v1, key tests, refusal defaults) and the OAuth begin/complete helpers
   # authgem/authcd/authgrok share. The profile screens load prompt_profiles via importlib.
   "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
+  # U5 shared core: the Library (library_core above: scans, resolvers, card data, Book Details,
+  # Organize / Undo / Delete / Import / Scan for raw), covers, the reader document (mobile page
+  # shell, bilingual chapters) and live stream the Reader renders, and the Progress Manager /
+  # Glossary Progress cores the Book page's Chapters and Glossary tabs bind to. The Library and
+  # the Reader load them through services/library.SharedCore (importlib), hence listed here.
+  "library_covers", "reader_doc", "live_stream", "progress_core", "progress_actions",
+  "glossary_progress_core", "reader_overlay",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).

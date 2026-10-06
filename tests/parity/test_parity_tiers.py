@@ -456,9 +456,38 @@ def test_tier_d_catches_a_difference_injected_into_a_real_moved_method(session, 
 # but its decisions / data steps come from settings_rules / model_catalog_core
 # ===========================================================================
 
+#: The parent of the U4 move. Rewired handlers are always compared with the handler as it was
+#: BEFORE the rewire: an oracle frozen at a later commit (every milestone re-freezes at HEAD)
+#: already holds the rewired handler, which calls the LIVE settings_rules / model_catalog_core
+#: exactly like the working tree, so tier D could no longer see a change in those modules and
+#: the rewired code's own fuzz coverage would be measured against itself (U5 integration).
+U4_BASE_SHA = "9f06f8b3efa6195a0486bddeed1c07e4af719b3c"
+
+
+@pytest.fixture(scope="module")
+def rewired_session(session):
+    """A FuzzSession over the oracle frozen at ``U4_BASE_SHA`` (frozen on demand, LATEST kept)."""
+    from parity import freeze_legacy
+
+    try:
+        bundle = freeze_legacy.load_legacy(U4_BASE_SHA)
+    except FileNotFoundError:
+        marker = freeze_legacy.LEGACY_DIR / "LATEST.txt"
+        latest = marker.read_text(encoding="utf-8") if marker.exists() else None
+        try:
+            freeze_legacy.freeze(U4_BASE_SHA)
+        except Exception as exc:  # e.g. a shallow clone without the U4 parent
+            pytest.skip(f"cannot freeze the pre-U4 oracle @ {U4_BASE_SHA[:8]}: {exc}")
+        finally:
+            if latest is not None:
+                marker.write_text(latest, encoding="utf-8")
+        bundle = freeze_legacy.load_legacy(U4_BASE_SHA)
+    return fm.FuzzSession(bundle)
+
 
 @pytest.mark.parametrize("name", [m.name for m in mf.REWIRED_FUZZED])
-def test_rewired_desktop_method_matches_legacy(session, name):
+def test_rewired_desktop_method_matches_legacy(rewired_session, name):
+    session = rewired_session
     spec = mf.get(name)
     try:
         fm.check_available(spec, session)
@@ -522,10 +551,11 @@ REWIRED_INJECTIONS = {
 
 
 @pytest.mark.parametrize("name", sorted(REWIRED_INJECTIONS))
-def test_tier_d_catches_a_difference_injected_into_shared_rules(session, monkeypatch, name):
+def test_tier_d_catches_a_difference_injected_into_shared_rules(rewired_session, monkeypatch, name):
     """Harness self-test: a rare-branch change in the shared module a rewired handler calls."""
     import importlib
 
+    session = rewired_session
     spec = mf.get(name)
     try:
         fm.check_available(spec, session)

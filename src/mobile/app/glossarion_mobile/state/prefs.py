@@ -4,8 +4,13 @@ Holds what the desktop has no place for and therefore never belongs in the
 shared ``config.json``:
 
 * ``last_routes``: the last whitelisted route per slot (``"main"``, tabs);
-* ``reader_positions``: ``{bid: {href, fraction, page, mode, updated}}``;
+* ``reader_positions``: ``{bid: {href, fraction, page, mode, updated}}`` (+ ``chapter``,
+  ``pages`` and ``last`` when the Reader knows them: the chapter index, its page count
+  and "on the last page", for the proportional page hint);
 * ``reader_bookmarks``: ``{bid: [{href, fraction, label, created}]}``;
+* ``reader_book_settings``: ``{bid: {font_size, line_spacing, theme, ...}}``, the Aa
+  sheet's "This book" overrides of the ``epub_reader_*`` config keys ("All books"
+  writes config.json); ``reader_prefs`` holds the mobile-only reader switches;
 * ``file_refs``: the FileRef registry, an LRU (2,000 entries) mapping opaque
   12-hex ids (``fid``, used in routes such as ``/tools/text/<fid>``) to paths,
   so a route never carries a file path;
@@ -100,6 +105,7 @@ def _empty() -> dict:
         "last_routes": {},
         "reader_positions": {},
         "reader_bookmarks": {},
+        "reader_book_settings": {},
         "file_refs": OrderedDict(),
     }
 
@@ -165,7 +171,7 @@ class Prefs:
             if not isinstance(loaded, dict):
                 raise ValueError("mobile_state.json does not contain a JSON object")
             data.update(loaded)
-            for name in ("last_routes", "reader_positions", "reader_bookmarks"):
+            for name in ("last_routes", "reader_positions", "reader_bookmarks", "reader_book_settings"):
                 if not isinstance(data.get(name), dict):
                     data[name] = {}
             refs = data.get("file_refs")
@@ -291,16 +297,61 @@ class Prefs:
             return copy.deepcopy(entry) if isinstance(entry, dict) else None
 
     def set_reader_position(
-        self, bid: str, href: str, fraction: float = 0.0, *, page: Optional[int] = None, mode: Optional[str] = None
+        self,
+        bid: str,
+        href: str,
+        fraction: float = 0.0,
+        *,
+        page: Optional[int] = None,
+        mode: Optional[str] = None,
+        chapter: Optional[int] = None,
+        pages: Optional[int] = None,
+        last: Optional[bool] = None,
     ) -> dict:
         bid = _clean_id(bid, "book id")
         entry = {"href": str(href or ""), "fraction": _fraction(fraction), "page": page, "mode": mode,
                  "updated": self._clock()}
+        if chapter is not None:
+            entry["chapter"] = max(0, int(chapter))
+        if pages is not None:
+            entry["pages"] = max(0, int(pages))
+        if last is not None:
+            entry["last"] = bool(last)
         with self._lock:
             self._data["reader_positions"][bid] = entry
             self._changed()
         self._schedule()
         return dict(entry)
+
+    def clear_reader_position(self, bid: str) -> bool:
+        with self._lock:
+            if self._data["reader_positions"].pop(str(bid), None) is None:
+                return False
+            self._changed()
+        self._schedule()
+        return True
+
+    def reader_book_settings(self, bid: str) -> dict:
+        """The Aa sheet's "This book" overrides for ``bid`` (empty when the book follows All books)."""
+        with self._lock:
+            entry = self._data["reader_book_settings"].get(str(bid))
+            return copy.deepcopy(entry) if isinstance(entry, dict) else {}
+
+    def set_reader_book_settings(self, bid: str, values: dict) -> dict:
+        """Replace ``bid``'s overrides (an empty mapping removes them)."""
+        bid = _clean_id(bid, "book id")
+        clean = {str(k): v for k, v in dict(values or {}).items()}
+        with self._lock:
+            store = self._data["reader_book_settings"]
+            if clean:
+                if store.get(bid) == clean:
+                    return dict(clean)
+                store[bid] = copy.deepcopy(clean)
+            elif store.pop(bid, None) is None:
+                return {}
+            self._changed()
+        self._schedule()
+        return dict(clean)
 
     def bookmarks(self, bid: str) -> list[dict]:
         with self._lock:

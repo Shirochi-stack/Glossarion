@@ -976,6 +976,8 @@ class ChatView:
             self._spawn(self._compile())
         elif action == "migrate":
             self.notify("Migrating attachment workspaces arrives with the attachments manager (U7)")
+        elif action in ("read", "open_reader"):
+            self._spawn(self._open_reader(item))
         elif action == "open_output":
             folder = self._last_output_folder()
             if folder and self.env.open_output is not None:
@@ -986,6 +988,35 @@ class ChatView:
             self._resume_last()
         else:
             self.notify("This action arrives in a later milestone")
+
+    async def _open_reader(self, item: Any = None) -> None:
+        """Job card Read / Open reader (U5): the turn's workspace in the Reader."""
+        opener = self.env.open_reader if self.env is not None else None
+        if opener is None:
+            self.notify("The Reader is not available in this session")
+            return
+        folder, source = self._reader_target(item)
+        result = opener(folder, source)
+        if hasattr(result, "__await__"):
+            await result
+
+    def _reader_target(self, item: Any = None) -> tuple:
+        """(workspace folder, attachment path) of the job card's turn (default: the chat's run)."""
+        runs = self.env.runs if self.bound else None
+        run = runs.run_for(self.cid) if runs is not None else None
+        index = getattr(item, "index", None)
+        if index is None and run is not None:
+            index = run.user_index
+        source = ""
+        messages = self._messages()
+        if index is not None and 0 <= int(index) < len(messages):
+            message = messages[int(index)]
+            if message and len(message) > 2 and str(message[0]) == "user_file":
+                source = str(message[2] or "")
+        folder = ""
+        if run is not None and (index is None or run.user_index == index):
+            folder = str(run.output_dir or run.output_folder or "")
+        return folder or self._last_output_folder(), source
 
     def _last_output_folder(self) -> str:
         run = self.env.runs.run_for(self.cid) if self.env.runs is not None else None

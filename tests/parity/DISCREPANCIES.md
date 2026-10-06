@@ -1152,3 +1152,604 @@ change in each shared function is caught):
   (the default model stays `authgpt/gpt-6-luna` until one is chosen).
 - Key-pool export writes the plain-text file only after an export option is chosen (a dismissed
   sheet left it in `<data>/Exports`).
+
+## U5 Progress Manager / Glossary Progress core (progress_core, progress_actions, glossary_progress_core)
+
+Moved at BASE_SHA 20b446b0 (the U4 commit; parity oracle and goldens re-frozen there, the
+Progress Manager oracle in `tests/parity/legacy_progress/20b446b06b10/`). Line numbers refer to
+`git show 20b446b0:src/Retranslation_GUI.py` (RG) and `src/TransateKRtoEN.py` (TK). The moved
+bodies are byte-for-byte copies (pinned by tests/test_progress_core.py,
+tests/test_progress_actions.py and tests/test_glossary_progress_core.py, `*_are_verbatim`);
+`RetranslationMixin(ProgressViewMixin)` and module re-exports keep every desktop name resolving
+to the same code. The deliberate behaviour change is the write path below; the other deltas
+listed follow from the split.
+
+### Writes switched to lock + re-read + three-way merge + atomic replace
+
+Each former whole-file `open(..., 'w') + json.dump(...)` of `translation_progress.json` now
+goes through `progress_core.mutate_progress(path, fn)` (actions: under the per-path lock,
+re-read the newest file, apply the action to a copy, merge only the action's change, atomic
+replace; nothing is written when nothing changed) or `progress_core._commit_view_progress(path,
+baseline, prog)` (the view: merge the change since the view's last read/write into the newest
+file via the existing `_merge_and_write_retranslation_progress`; an unparsable newest file is
+replaced by the snapshot, as before). Before, a translator save that landed after the dialog had
+loaded the JSON was overwritten by the dialog's stale copy.
+
+| Legacy write (RG) | Where | Now |
+|---|---|---|
+| 20870 (atomic, not merged) | build: subtitle-ZIP member seeding | `_commit_view_progress` |
+| 21000 | build: save after `cleanup_missing_files` | `_commit_view_progress` |
+| 21009 / 21016 / 21024 | build: PDF outline seeding, metadata row, TOC/header rows | `_commit_view_progress` |
+| 21153 / 21212 | build: auto-discovery from the output folder (no-OPF fallback / OPF-aware) | `_commit_view_progress` |
+| 21605 | build: entries auto-discovered while matching the spine | `_commit_view_progress` |
+| 31405 (atomic, not merged) | refresh: `_write_progress_json_safely`, used for subtitle-ZIP seeding, cleanup, TTS reconcile, PDF outline, metadata and TOC/header rows | `_commit_view_progress` against `data['_progress_view_baseline']` (the snapshot the refresh read) |
+| 31405 via recreate | refresh: progress JSON recreated by auto-discovery after it was deleted | merge-write against an empty baseline |
+| 32059 | `_rematch_spine_chapters` | `_commit_view_progress` |
+| 28025 | Restore In Progress Status | `progress_actions.restore_in_progress` (`mutate_progress`) |
+| 28155 | Remove QA Failed Mark (menu + button) | `progress_actions.remove_qa_marks` |
+| 28246 | Remove refinement status | `progress_actions.remove_refinement_status` |
+| 28482 | Retranslate Selected in audio mode (TTS reset) | `progress_actions.reset_tts` |
+| 30564 | Delete Audio File (TTS reset) | `progress_actions.delete_row_audio` |
+| 30723 (atomic, not merged) | Resolve QA issue (LLM token) | `progress_actions.resolve_llm_token_qa` |
+| 31099 | Insert Missing Image (QA marker clean-up) | `progress_actions.insert_missing_images` |
+
+Remove Pending Mark (RG 414) and Retranslate Selected (RG 1626 / 29240) were already merge
+writes and are unchanged. Proof: `test_progress_core.py::test_mutate_progress_keeps_a_concurrent_translator_save`,
+`::test_build_writes_keep_a_concurrent_translator_save`,
+`::test_refresh_writes_keep_a_concurrent_translator_save`,
+`::test_mutate_progress_serialises_writers`, and
+`test_progress_actions.py::test_action_keeps_a_concurrent_translator_save[*]` (8 actions: a
+translator save between the dialog's load and the action survives; the frozen desktop closure
+is run on the same scenario and is asserted to lose it, except Remove Pending Mark).
+
+Glossary progress (`Glossary/<book>/<book>_glossary_progress.json`): Mark as Completed (RG 25131)
+and Remove from progress (RG 26235) re-read and write the file under
+`glossary_refinement._progress_lock` + `locked_progress_file` (the lock the extractor's save and
+`update_refinement_progress` take) and replace it atomically (temp file + `os.replace`); before,
+they wrote it in place without the lock. Proof:
+`test_glossary_progress_core.py::test_writes_wait_for_the_extractor_lock_and_keep_its_save`.
+
+Not switched (left as they were): the two writes that create an empty progress file in a
+freshly created output folder (router cache reuse RG 20695, build RG 20832; no other writer can
+exist yet) and the image-folder view's retranslate / delete writes (RG 35406 / 35486; that view
+stays in Retranslation_GUI and Retranslate Selected's plan/apply is U7).
+
+Retry on a locked file (U5 review fix): the former refresh writer `_write_progress_json_safely`
+(RG 31394-31421) retried 20 times with backoff on `PermissionError` / `OSError` (sleeps
+`min(0.5, 0.03·2^min(n,5))` + 0-0.03 s jitter: 8.4-9.0 s before it gave up). The merge path that
+replaced it reads the newest file once before writing, and `_write_progress_snapshot_atomic`
+(verbatim-pinned) retries only its `os.replace`: 20 attempts, sleeps `min(0.4, 0.03·2^min(n,4))`
+(6.45 s in all), on winerror 5 / 32 and, on Windows, on any `PermissionError`; any other error it
+raises at once. So a Windows sharing violation while the translator replaced the file aborted the
+whole refresh tick ("Progress file locked during refresh"). `_commit_view_progress` now retries
+the read-merge-write on `OSError` with the former writer's 20-attempt backoff, checks a 10 s
+deadline before every retry, and does not run the write again when the error comes out of the
+atomic writer after its own retries (`_atomic_write_retried`: the traceback passes through
+`_write_progress_snapshot_atomic` and the error is one it retries). Worst cases (virtual clock,
+real atomic writer, longest jitter): a persistently refused `os.replace` blocks 6.45 s (20 replace
+calls, one atomic write; it took 12.9 s and 40 calls before this fix, 8.4-9.0 s at HEAD); a
+persistently refused read blocks 7.9-8.5 s (20 attempts). Only a read lock that lifts just before
+the deadline, followed at once by a persistent replace lock, can add one atomic write to the read
+retries (at most about 16.5 s). A `PermissionError` from creating the temporary file on Windows
+also counts as retried by the writer and is not retried again (the temporary name is unique per
+process, thread and nanosecond, so that error does not come from a sharing violation).
+`_write_progress_json_safely` itself is unused but stays inside the verbatim-pinned refresh block
+(`test_split_refresh_and_stats_hold_the_frozen_blocks`, RG 31373-31421). Proof:
+`test_progress_core.py::test_view_commit_retries_a_sharing_violation_on_read`,
+`::test_view_commit_gives_up_after_the_retry_budget`,
+`::test_view_commit_on_a_persistent_lock_blocks_no_longer_than_the_former_writer[replace|read]`
+(runs the frozen `_write_progress_json_safely` on the same clock as the bound).
+
+Error handling is unchanged: the former in-place writes of Restore In Progress, Remove QA Failed
+Mark, Remove refinement status and Delete Audio File had no `try`, so a write failure still
+raises out of the action; the audio-mode TTS reset's `try` (print the failure, refresh, report
+the counts) is kept through `reset_tts(...)['error']`
+(`test_progress_actions.py::test_reset_tts_reports_a_failed_progress_write`), and the LLM-token
+resolution's through `resolve_llm_token_qa(...)['error']`.
+
+### Behaviour deltas introduced by the move (intentional, parity-neutral on the fixtures)
+
+- **Merge caveats.** The three-way merge (verbatim `_merge_retranslation_progress_changes`) keeps
+  every value the dialog did not change, and the dialog's value wins on a field both changed.
+  A key the translator deleted after the dialog's read is re-added when it sits in a dict on the
+  path of the dialog's change (e.g. another chapter under `chapters` when an action changed one
+  chapter); deletions elsewhere stay. The per-path lock is in-process: the translator's
+  `ProgressManager.save` does not take it, so a translator save landing between the re-read and
+  the `os.replace` (one merge, milliseconds) can still be lost; before, the window was the whole
+  time since the dialog last read the file.
+- **Actions apply to the newest file**, not the dialog's cached copy: an entry the translator
+  removed or re-keyed since the last refresh is not touched (counts and messages reflect what
+  was found on disk). The audio-mode TTS reset deletes nothing when the newest file cannot be
+  read (before, it deleted the audio and wrote the cached snapshot over the file).
+- **Display-time state is no longer persisted by actions.** The frozen actions wrote the dialog's
+  whole in-memory snapshot, which also carried what the view reconciled for display (chunk-ledger
+  schema normalisation, `tts_status` synced to the audio files on disk, `last_updated` stamps).
+  The shared actions write only their own change to the newest file; the next refresh reconciles
+  the same way. The action parity tests compare both sides after that reconciliation
+  (`test_progress_actions.py::_normalize_chunks`).
+- **Cleanup no longer builds a TransateKRtoEN ProgressManager.** The view called
+  `ProgressManager(dir).cleanup_missing_files(output_dir)` on a temporary manager whose `prog`
+  was replaced by the view's; it now calls `progress_core.cleanup_missing_files(prog, output_dir)`
+  (TK 6632-6778, verbatim; the TK method delegates to it). The temporary manager's constructor
+  side effects are gone: `_init_or_load` re-reading the file and, for a file that had become
+  unparsable since the view read it, its repair save / `translation_progress_backup_<t>.json`
+  copy; the subtitle-mirror restore and `ENABLE_PROGRESS_DEDUP` pass (whose result was discarded).
+  The "TransateKRtoEN still loading" deferral is kept (`_progress_cleanup_ready`).
+- **Insert Missing Image** imports `TransateKRtoEN.ContentProcessor` when the restore runs
+  (`progress_actions._default_restore_fn`) instead of before reading the chapter files; a failing
+  import is still reported as "Failed to restore images: ...", but only after the source /
+  output checks (whose own errors now come first).
+- The output-folder lookup imports `_get_app_dir` from `app_paths` (U1 home of the function
+  `translator_gui` re-exports) instead of `translator_gui`.
+- **Free-variable `re` (side effect of the move, not a fix).** In
+  `_force_retranslation_epub_or_text`, `import re` at RG 21734 (filename fallback of the row
+  builder) made `re` a local of the whole method, bound only when some row needed that fallback.
+  The Glossary Progress closures `_gp_context_target_label` (RG 24929) and
+  `_gp_write_completed_summary` (RG 25793) used it as a free variable, so with no such row they
+  raised `NameError` (context-menu target label; the completed-glossary summary). The build moved
+  to `ProgressViewMixin._build_progress_view_data`, so both now use the module's `re`.
+- The status icon/label/colour dicts of `_format_progress_list_display_text` /
+  `_apply_progress_list_item_visuals` are module constants (`PM_STATUS_ICONS` / `_LABELS` /
+  `_COLORS`), and the statistics numbers / label texts of `_update_statistics_display` and the
+  initial stats bar are `_progress_statistics` / `progress_stats_labels`; same values (fuzzed
+  against the frozen methods).
+- Opening the Progress Manager still registers the Library workspace through
+  `epub_library.record_library_raw_input` on desktop; the GUI-free default
+  (`ProgressOwner`) records through `library_core.record_library_raw_input`.
+
+### Desktop bugs found (recorded, not fixed)
+
+1. **Refresh auto-discovery regex** (RG 31494, now in `ProgressViewMixin._reload_progress_view_data`):
+   `re.findall(r"(\\d+)", base)` matches a literal backslash + `d`, so every output file
+   rediscovered after the progress JSON was deleted gets `special_<base>` / no chapter number
+   (the build at RG 20936 uses `r"(\d+)"`).
+2. **Chapter 0 treated as missing** in `_update_chapter_status_info` (RG 32899, 32920, 32967):
+   `actual_num or chapter_num` falls through for chapter 0. The method has no caller in the
+   current tree (dead code), kept verbatim.
+3. **Image-folder view reads a pre-2.1 progress shape** (RG 35047), so its progress-based hash
+   removal never matches current files.
+4. **Audio-mode label mismatch.** The context menu says "🔁 Retranslate Selected" while the button
+   says "Reset TTS Selected" for the same TTS reset (RG 29496 vs 30900).
+5. **Two "failed" rules.** The Library card (`library_core._read_progress_summary`) counts a
+   completed parent with chunk QA failures as failed; the Progress Manager shows it Completed.
+   `progress_core.compute_book_summary` exposes both (`chapters_failed` and
+   `chunk_qa_failed_parents`).
+
+(An earlier draft listed a "free-variable `sys`" bug in the Glossary Progress "Open glossary"
+button. It does not exist: `_open_glossary_file` does `import subprocess, shutil, sys` itself
+(RG 26485), and symtable shows only `re` as a free variable of the method's closures -- the
+separately documented `re` item above. Removed in the U5 review fix.)
+
+### GUI-free semantics for mobile
+
+- `ProgressOwner(config)` is a widget-free `ProgressViewMixin` owner: special-file rules come from
+  `translation_pipeline.GlossaryPipelineMixin`, the output mode from `RunEnvMixin._get_output_mode`
+  over config-seeded `*_var`s (`settings_rules._config_var`). `build_book_progress` runs the same
+  build (output folder, seeding, cleanup, spine matching, rows) and `present_row` / `compute_stats`
+  give the row text pieces and the statistics bar the desktop shows (compared with the dialog on
+  the four fixtures). `compute_book_summary` is read-only and cached by the progress snapshot
+  signature (the desktop prefetch's `_progress_snapshot_listing`).
+- Cleanup on mobile always runs (`_progress_cleanup_ready` is True; desktop defers while
+  TransateKRtoEN is importing).
+- The actions return counts / message data instead of showing dialogs (`*_message` helpers give
+  the desktop texts); `row_actions(info)` lists the context-menu actions the desktop offers for a
+  row (checked against the menu).
+- `glossary_progress_core.open_glossary_progress` builds the same panel model the desktop panel
+  binds; `mark_glossary_completed` / `remove_glossary_progress` use the locked writes above.
+
+### U5 parity harness additions
+
+- `tests/parity/progress_legacy.py`: freezes RG / the TK cleanup method at BASE_SHA into
+  `legacy_progress/20b446b06b10/`, runs frozen statement ranges as functions (`block_function`),
+  builds fixture workspaces (EPUB with chunk ledger, metadata and TOC/header rows; PDF outline
+  sections; subtitle ZIP bundle; plain text; image folder; glossary progress), opens the real
+  Progress Manager offscreen (legacy and current) with recorded, auto-answered dialogs and an
+  auto-picking `QMenu`, and snapshots rows / colours / statistics plus the progress JSON and
+  output tree before and after each action. Library registration is pointed at a temporary
+  `GLOSSARION_LIBRARY_DIR` so no test touches `~/Documents/Glossarion/Library`. The autouse
+  isolation fixtures of test_progress_core / test_progress_actions / test_glossary_progress_core
+  also clear `OUTPUT_DIRECTORY` / `OUTPUT_DIR` (both cores resolve workspaces there before the
+  config's output directory; with either set, 34 tests wrote their workspaces outside tmp_path
+  and failed).
+- Existing tests retargeted to the moved code: `_src_corpus.progress_manager_source()` (RG + the
+  three modules) for source greps in test_glossary_progress_status_precedence,
+  test_glossary_minimal_pass(_row), test_glossary_refinement_status_display,
+  test_progress_model_metadata, test_sdlxliff_support and test_unified_glossary_wiring.
+
+## U5 Library (library_core, library_covers, reader_doc, live_stream; epub_library rewired)
+
+Moved at BASE_SHA 20b446b0. EL = `git show 20b446b0:src/epub_library.py`. Module functions
+moved byte-for-byte into `library_core` (scans, resolvers, search / sort / format, card data,
+Book Details helpers, Library actions), `library_covers` (cover chain) and `reader_doc`
+(reader document, caches, TOC, overlay signature, themes); `epub_library` re-imports every
+moved name, so desktop callers and monkeypatches of the module attribute keep resolving.
+Qt classes now inherit GUI-free mixins listed first (plan §2): `_DualScannerThread`
+(`DualScanMixin`), `_LibraryDeleteThread` (`LibraryDeleteMixin`), `_CoverLoader`
+(`CoverLoaderMixin`), `_RawScanWorker` (`RawScanMixin`), `_ScanForRawDialog`
+(`ScanForRawMixin`), `EpubLibraryDialog` (`LibraryShelfMixin`), `_BookDetailsLoader`
+(`BookDetailsLoaderMixin`), `BookDetailsDialog` (`BookDetailsMixin`), the six reader threads
+(`EpubCacheLoaderMixin`, `OverlayMergeMixin`, `ReaderImagePreloadMixin`,
+`WorkspaceReaderLoaderMixin`, `EpubSearchMixin`, `EpubLoaderMixin`) and `EpubReaderDialog`
+(`ReaderDocMixin`, `LiveStreamMixin`). Pinned by tests/test_library_core.py and
+tests/test_reader_doc.py (`*_are_verbatim*`, `test_qt_reader_classes_changed_only_the_documented_methods`)
+plus differential fuzz, file-system fixtures and offscreen dialog smoke against EL.
+
+### Phase-1 splits inside desktop methods (behaviour unchanged, each pinned)
+
+These desktop method bodies were rewritten into calls of helpers EXTRACTED from them into the
+mixins (the helpers did not exist at 20b446b0; the epub_library placeholder comments say
+"extracted from <method>"). The complete set of changed Qt-class methods is pinned:
+`test_library_core.py::test_qt_library_classes_changed_only_the_documented_methods`
+(`LIBRARY_CLASSES_CHANGED`) and `test_reader_doc.py::test_qt_reader_classes_changed_only_the_documented_methods`;
+behaviour by the differential fuzz / file-system fixtures against EL.
+
+- `_DualScannerThread.run` = `run` + `_merge_scan_rows` (statement-for-statement).
+- `EpubReaderDialog._render_current` LAYOUT_ALL loop -> `_all_chapters_html`;
+  `_drain_live_queue` loop -> `_drain_live_lines`; `_finish_live_translation` completion
+  check / cleanup -> `_live_outcome` + `live_stream.live_outcome_text`; `_finalize_post_load`
+  numbering -> `reader_doc._chapter_display_numbers`; `_open_google_translate` /
+  `_open_web_define` URL building -> `_google_translate_url` / `_define_url` (AST and
+  behaviour checks against EL).
+- `_BookCard.__init__`: card progress / badge / size -> `_card_progress_view`,
+  `_card_type_badge` (+ `_CARD_TYPE_BADGES`), `_card_size_text`.
+- `_ScanForRawDialog`: `__init__` -> `_init_scan_state`; `_populate_tree` -> `_scan_status_text`;
+  `_apply_matches` -> `_write_raw_pairings`.
+- `EpubLibraryDialog`: `_library_page_bounds` / `_update_library_pagination_controls` ->
+  `_page_bounds` / `_page_label`; `_update_organize_counts` -> `_organize_counts`,
+  `_missing_raw_count`; `_import_paths_into_library` -> `_run_import`, `_import_toast_text`,
+  `_import_summary`; `_ensure_output_override_matches` -> `_output_override_mismatch`,
+  `_output_override_prompt_text`, `_apply_output_override_config`; `_organize_into_library` ->
+  `_plan_organize`, `_organize_preview_lines`, `_organize_collisions`, `_execute_organize`,
+  `_organize_summary` (and its nested `_unique_dest`, lifted to `library_core._unique_dest`);
+  `_undo_organize_prompt` -> `_plan_undo`, `_undo_prompt_text`, `_undo_collisions`,
+  `_execute_undo`, `_undo_summary`; `_on_auto_scan_done` -> `_scan_diff`;
+  `_clear_saved_raw_link` -> `_plan_clear_raw_link`, `_clear_raw_link_prompt_text`,
+  `_execute_clear_raw_link`; `_delete_books_prompt` -> `_plan_delete`, `_unregister_cards`,
+  `_all_targets_not_started`; `_on_delete_finished` -> `_delete_result_summary`;
+  `_confirm_delete_simple` -> `_delete_simple_prompt_text`.
+- `_BookMetadataEditDialog.changed_values` -> `_metadata_changed_values`.
+- `BookDetailsDialog`: `_update_progress_strip` -> `_progress_strip_text`;
+  `_on_edit_metadata_clicked` -> `_save_metadata_edits` (raising `_MetadataEditError` with the
+  dialog texts); `_update_toc_toggle_label` -> `_toc_toggle_state`; `_chapter_page_bounds` /
+  `_update_chapter_pagination_controls` -> `_page_bounds` / `_page_label`; `_open_reader` ->
+  `_plan_open_reader`. The wait cursor keeps its place: `_plan_open_reader(..., busy=)` calls the
+  hook exactly where the pre-split method set `QApplication.setOverrideCursor(Qt.WaitCursor)` +
+  `processEvents()` (entering the PDF-workspace branch / the EPUB branch, before the translated
+  overlay is built; never on the system-viewer path). The first split set the cursor only after
+  the plan, so a large in-progress book built its overlay with no busy cursor (U5 review fix;
+  pinned by the cursor / overlay / reader call-order trace in
+  `test_book_details_loader_and_reader_plan_match_legacy`).
+- Renamed class references inside moved bodies: `_ScanForRawDialog.MATCH_EXACT` ->
+  `ScanForRawMixin.MATCH_EXACT`; `EpubLibraryDialog._raw_is_in_library_raw` /
+  `._library_raw_match_for_book` -> `LibraryShelfMixin.*` (same objects through inheritance).
+
+### Qt replacements (pure computations only)
+
+1. `QUrl(src).scheme().lower()` (EL 18226, 24968, 25048) -> `reader_doc._url_scheme(src)`,
+   QUrl's own rule (text before the first `:` that precedes `?` / `#`, RFC 3986 scheme
+   chars, no trimming, a bad authority keeps the scheme). Identical on a 40k-string corpus
+   (`test_url_scheme_agrees_with_qurl`); `urllib.parse.urlsplit` would have differed on
+   leading whitespace and malformed IPv6 hosts.
+2. `QUrl.fromLocalFile(path).toString()` in `_process_html` (EL 24894, 24916) ->
+   `self._reader_file_url(path)`. `EpubReaderDialog` overrides the hook with the Qt original;
+   `ReaderDocument` uses `image_url_for` (mobile: the in-app server) or `Path.as_uri()`.
+3. `_reader_image_is_sizeable` (EL 858): `QImageReader(buffer).size()` ->
+   `library_covers._probe_image_size` (PNG / GIF / JPEG / BMP / WebP headers, SVG geometry,
+   Pillow for the other formats Qt sniffs). Same sizes as QImageReader for complete files.
+   Differences (only reachable for images <= 5120 bytes, the byte rule decides above that):
+   an SVG with neither width/height nor viewBox has no size here (Qt measures the drawing's
+   bounding box) so it is not full-page; truncated headers that QImageReader gives up on still
+   report a size; TGA / PCX / multi-size ICO headers are not read (QImageReader misreports
+   Pillow's TGA and reports the first ICO entry).
+4. `_download_remote_cover_image` (EL 663): `QImage.fromData(data).isNull()` ->
+   `library_covers._image_bytes_decodable(data)`: SVG root parse; Pillow decode limited to the
+   formats Qt sniffs by content, with Qt's truncation rules (partial JPEG / GIF / BMP / XBM
+   accepted once pixel data follows the header, PNG needs `IEND`); image signature without
+   Pillow. Same answer as Qt on PNG / JPEG / GIF / BMP / WebP / TIFF / PPM / XBM / PCX / TGA
+   samples and truncations (`test_image_probes_agree_with_qt`). Known gaps: ICO files cut
+   inside the icon directory, a JPEG cut inside its SOS header (3 bytes).
+5. `_animated_image_reader` and every pixmap / widget path stay in `epub_library` (Qt only).
+
+### Seams (desktop never triggers them)
+
+- `library_core._default_output_root` gained a 3-line prefix: when a `LibraryEnv` with output
+  roots is installed (`install_library_env`, mobile start-up) its first root is the default
+  output root; otherwise the EL body runs unchanged.
+- `_cover_cache_dir` / `_epub_cache_dir` honour `set_cover_cache_dir` / `set_epub_cache_dir`
+  (`_COVER_CACHE_DIR_OVERRIDE or ...`), set only by `install_library_env(cache_dir=...)`.
+- `GLOSSARION_LIBRARY_DIR` (U3 seam of `get_library_dir`) is set by `install_library_env`.
+
+### U1 gap fixed: output_naming honours GLOSSARION_LIBRARY_DIR
+
+`output_naming._library_origins_raw_sources_for_stem` and `_library_raw_inputs_for_stem`
+(U1, from other_settings) built `~/Documents/Glossarion/Library` by hand, so with
+`GLOSSARION_LIBRARY_DIR` set (mobile, tests) output-folder naming read the real desktop
+Library registries. Both now call `output_naming._library_dir()` ->
+`library_core.library_root_path()` (lazy import): the same path on desktop when the variable
+is unset (`test_output_naming_functions_are_verbatim_and_reexported` pins the one-token
+change).
+
+### U5 Library card counts (decided semantics)
+
+`library_core.book_summary(progress_file, config)` (mobile cards) returns exactly what the
+desktop card reads, `_read_progress_summary(progress_file, exclude_special=not
+translate_special_files)`: sidecar entries, metadata / TOC / header rows
+(`is_metadata_progress_entry`, `metadata_progress_key`), translation artifacts and gallery
+pages never count; with special files excluded, configured special files drop from total and
+tallies; a multi-chunk parent takes `effective_parent_status` and counts as **failed** when any
+chunk failed QA even if the parent says completed; a `completed` row whose `output_file` is
+missing counts as **in progress** (phantom completion); `pending` counts with in progress;
+other statuses (e.g. `skipped`) count only in the total. `progress_core.compute_book_summary`
+(the Progress Manager's rules, landed concurrently) reports QA-failed chunk parents separately
+(`chunk_qa_failed_parents`); the integrator may route mobile cards through it only if it
+reproduces these numbers. The desktop card keeps `_read_progress_summary`.
+
+**Integration decision (U5 Integrate): cards stay on these numbers, desktop and mobile.**
+`compute_book_summary` does not reproduce them. Measured read-only on the 217 real output
+folders under `src/` (143 with a resolvable raw source; script
+`scratchpad/u5_integ/card_compare.py`): the two agree on 1 book and differ on 142. The Progress
+Manager total is the card total +1 on 78 books and +3 on 56 (the `__metadata__` row and the
+`__translation_artifact__:toc` / header rows the PM lists, which the card excludes by design),
+its completed count is higher on 62 (output files it auto-discovers and tracks count as
+completed; the card counts only JSON-completed rows), and 8 books the desktop card shows as
+"✨ Ready to compile" would have dropped back to "⏳ In progress" on mobile. So the mobile
+Library card, the Book page Overview strip ("⏳ Translation in progress — d/t chapters") and
+the shelf placement all come from `library_core.scan_library` rows (`_read_progress_summary`
+plus the spine count, `card_progress_view`), exactly like the desktop card and Book Details;
+the Book page's Chapters tab shows the Progress Manager's own statistics (`compute_stats` /
+`BookProgress`), exactly like the desktop Progress Manager. The two numbers differ on mobile
+where they differ on desktop. `compute_book_summary` remains the plain API for a
+Progress-Manager-rules summary (cached, read-only). The `TODO(U5 integrator)` marker in
+`library_core.book_summary` is replaced by this decision.
+
+### Plain (mobile) API notes
+
+- `load_book_details(phase="preview")` returns the preview payload as emitted (captured at
+  emit, `on_preview` gets a deep copy). On desktop the queued `preview_ready` hands the same
+  dict to the dialog, so for a non-EPUB source the dialog may see phase-2 fields the loader
+  added meanwhile (harmless race; the full payload follows). Recorded only.
+- `reader_doc.chapter_display_numbers(filenames)` lower-cases basenames first, as
+  `_finalize_post_load` does before numbering.
+- Mobile reader shell (`wrap_reader_html(..., mobile=True)` / `ReaderDocument.wrap(mobile=True)`):
+  adds the viewport meta (`viewport-fit=cover`), safe-area padding, `100dvh` and `-webkit-`
+  column-break fallbacks and a paging bridge; removing the three inserted pieces gives the
+  desktop page byte-for-byte. Events: `console.log("GLRDR:" + json)` and a same-origin
+  `fetch(POST /__ev)` with the same JSON (`{type, seq, chapter, ...}`: `ready`, `page`
+  {page, count, reason}, `edge` {edge}, `tap` {zone}, `link` {href}, `selection` {text},
+  `scroll` {fraction}, `scale` {scale}); `seq` de-duplicates the two transports and
+  `GLRDR.setTransport('console'|'fetch'|'both')` narrows them. Checked in QtWebEngine
+  offscreen (`test_mobile_bridge_pages_in_webengine`).
+
+### Desktop bugs found (recorded, not fixed)
+
+1. **Non-atomic progress writes** in `_mark_chapter_pending_for_retranslation` (EL 1159) and
+   `_cleanup_incomplete_chapter_output` (EL 1264): `open(progress_file, "w") + json.dump`
+   without lock, re-read or atomic replace, so a translator save between their read and write
+   is lost and a crash mid-write truncates `translation_progress.json`. Candidates for
+   `progress_core.mutate_progress` (U5 Progress) in a separate change.
+2. **Book Details synthetic spine sort** (`_BookDetailsLoader.run`, EL 13916 `_sort_key`):
+   `info.get(...)` runs before the `isinstance(info, dict)` check, so a non-dict chapter entry
+   raises AttributeError (not caught by `except (TypeError, ValueError)`) and the details load
+   fails; `actual_num` 0 falls through to `chapter_num` (`or`).
+3. **Special-file cache signature** (`_special_file_settings_signature`, EL 310):
+   `TRANSLATE_ALL_NUMBERED_HTML == '1' or config.get(..., True)` ignores
+   `TRANSLATE_ALL_NUMBERED_HTML=0`, which `_resolve_translate_all_numbered` honours, so the
+   reader / spine caches are not invalidated when only that variable flips to 0.
+4. **Security: the desktop reader runs book scripts in a `file://` page** (`EpubReaderDialog`;
+   already at HEAD, unchanged by U5, found in the U5 review). Chapter `<script>` elements, `on*`
+   attributes and `javascript:` URLs survive `reader_doc._process_html` / `_wrap_html` (the only
+   script handling in reader_doc is the search-text helper). `_set_html` (EL 14821-14837) writes
+   the page to `_reader_<id>.html` in the cache and loads it with `QUrl.fromLocalFile`; the view
+   keeps Qt's defaults `JavascriptEnabled` and `LocalContentCanAccessFileUrls`, and
+   `_configure_epub_reader_web_settings` (EL 272-283) turns `LocalContentCanAccessRemoteUrls` on.
+   A crafted EPUB can therefore read any local file the user can read (an OAuth token JSON, for
+   example) and send it to a remote host, whatever `_reader_image_resource` (item 5) does.
+   Verified in the review on HEAD and on the working tree: the real dialog, offscreen, on a
+   one-chapter EPUB whose chapter `fetch()`es a scratch token file and beacons it with
+   `new Image().src`; a 127.0.0.1 server received the token. This is a security bug, not a
+   low-risk deferral. The hardening is a separate, labelled desktop change with its own tests:
+   strip book `<script>`, `on*` handlers and `javascript:` URLs by extracting the mobile
+   `sanitize_book_html` (mobile/app/glossarion_mobile/ui/reader/document.py) into shared code
+   (reader_doc) for both readers instead of copying it; optionally add a per-page nonce CSP, and
+   check whether book images still load with `LocalContentCanAccessFileUrls` off. Setting
+   `JavascriptEnabled` to False is not an option: the reader's own pagination script
+   (`_wrap_html`, reader_doc.py 2182) needs JavaScript. Mobile is not exposed: book HTML is
+   sanitised and the page CSP allows only the page's own nonce scripts ("U5 review: mobile
+   fixes").
+5. **Reader image path traversal** (`reader_doc._reader_image_resource`, a verbatim move of EL
+   `_reader_image_resource`; found in the U5 review): a chapter `<img src>` is resolved with
+   `os.path.join(epub_dir, src)` (+ `normpath`), so `../..` and absolute paths reach any readable
+   file, which `_process_html` then copies into the reader image cache next to the reader page.
+   With item 4 a book script does not need this to read local files; on its own it puts a copy of
+   any readable file in the cache. Hardening the resolver is a desktop-shared change and belongs
+   in the same separate, labelled change as item 4, with its own tests. Mobile is protected
+   without it: the ReaderServer serves only bytes that are an image by content and the page runs
+   no book script.
+
+### U5 parity harness additions
+
+- tests/test_library_core.py: verbatim / re-export / import-hygiene checks, differential fuzz
+  (`PARITY_U5_STATES`, default 500), file-system fixtures through the legacy and new dialog
+  methods (`PARITY_U5_FS_STATES`, default 40: scans + merge, Organize / Undo per conflict
+  policy, Delete, Clear raw link, Import, output override, Scan for Raw, Book Details loader,
+  reader-open plan, metadata save, single-chapter helpers), offscreen smoke of
+  `EpubLibraryDialog` / `BookDetailsDialog`, the plain API, image probes vs Qt. Comparisons that
+  depend on the row order take the scan tabs in `scan_order` (mtime newest first, then path and
+  output folder): the scans append output-folder rows in thread-completion order and then
+  stable-sort by mtime, so two folders with the same mtime come out in either order, in legacy
+  and new alike (EL 2848 / 2857, preserved; it made the metadata-save comparison flaky).
+- tests/test_reader_doc.py: reader / live verbatim and Phase-1 extraction checks, `_url_scheme`
+  vs QUrl, reader threads vs the plain API, `_process_html` / `_get_embedded_css` /
+  `_wrap_html` through EL, the new desktop class and `ReaderDocument`
+  (`PARITY_U5_READER_STATES`, default 40), live stream classify / drain / wrap / output folder /
+  finish vs EL, the mobile shell and its WebEngine bridge, bilingual / native blocks,
+  offscreen `EpubReaderDialog` smoke (every layout, legacy vs new).
+- Retargeted monkeypatches (moved names live in the shared modules now):
+  tests/test_epub_library_layout.py (reader_doc / library_covers / library_core targets;
+  `test_large_raw_image_classification_does_not_decode_bitmap` now records calls of
+  `reader_doc._probe_image_size`, the probe `_reader_image_is_sizeable` reaches since it moved,
+  instead of patching the no-longer-used `epub_library.QImageReader`),
+  tests/test_progress_model_metadata.py (numbering source), tests/test_headless_owner.py
+  (library_core verbatim check limited to moved names), tests/test_shared_core_p1.py
+  (output_naming `_library_dir()`), tests/test_glossary_usage.py (local, untracked:
+  `test_ui_hooks_are_wired` greps `_src_corpus.progress_manager_source()` for the moved Glossary
+  Progress strings; it still fails only on the pre-existing `GlossaryHideUnused`).
+- Library isolation: every Library test sets `GLOSSARION_LIBRARY_DIR` / `OUTPUT_DIRECTORY` (and
+  the default output root / cover cache) to tmp. tests/test_epub_library_layout.py did not
+  (pre-existing at HEAD: 8 tests built a real `EpubLibraryDialog`, which mkdirs
+  `~/Documents/Glossarion/Library` and reads its origins / shelves); the U5 review fix adds the
+  autouse `isolated_library` fixture there (verified with a sandboxed USERPROFILE: nothing is
+  created under it).
+
+## U5 Integrate (wiring, packaging, Library / Reader / Progress on the shared U5 cores)
+
+Desktop source is unchanged by the integration except for `headless_owner.py` (mobile-only
+class) and the `library_core.book_summary` comment; the desktop smoke below and every parity
+tier show legacy == working tree. Oracles were re-frozen at HEAD 410354ac (its `src/` is
+byte-identical to U4 20b446b0): `freeze_legacy.py --sha HEAD`, `capture_golden.py`,
+`trace_harness.py --freeze --sha HEAD`.
+
+### Mobile run set-up records its raw inputs (trace parity)
+
+- `HeadlessOwner._record_library_raw_inputs(files)` calls
+  `library_core.record_library_raw_inputs(files)`, the function desktop's
+  `TranslatorGUI._record_library_raw_inputs` reaches through `epub_library`'s re-export. A mobile
+  translation now lists its input in `<Library>/library_raw_inputs.txt` like a desktop run, so the
+  Library resolves the book's raw source through the registry. The
+  `PipelineHooksMixin` default stays a no-op (other owners, tests).
+- `trace_harness.MOBILE_IGNORED_TREES` / `MOBILE_IGNORED_PARENT_DIRS` are empty: the mobile
+  projection's file delta now includes the Library tree and equals the desktop one (tier T passes).
+- The offline E2E (`translate_glossary_off`) asserts the registry write; with the hook stubbed out
+  it fails with "the translate job did not record e2e-glossary-off.epub in library_raw_inputs.txt"
+  (negative control run during integration).
+
+### Library card counts
+
+Decided in the Library section above ("Integration decision"): cards (desktop and mobile), the
+Book page Overview strip and shelf placement keep the desktop card numbers; the Chapters tab shows
+the Progress Manager's statistics. `progress_core.compute_book_summary` disagreed with the card on
+142 of 143 real workspaces measured (metadata / TOC-artifact rows, auto-discovered outputs) and
+would have taken "Ready to compile" away from 8 books.
+
+### Tier D for the U4 rewired handlers is pinned to the U4 parent oracle (harness fix)
+
+After re-freezing at a post-U4 commit, `test_rewired_desktop_method_matches_legacy[on_model_change]`
+(clean fraction 19% < 25%) and the three `test_tier_d_catches_a_difference_injected_into_shared_rules`
+self-tests failed: the oracle then holds the rewired handlers, which call the LIVE
+`settings_rules` / `model_catalog_core` exactly like the working tree, so an injected change in
+those modules reaches both sides and the rewired code's fuzz coverage is measured against itself.
+Verified independent of U5 and of `src/config.json`: a clean worktree at HEAD failed the same four
+with the current config, with the U4-era config and with no config.json. The REWIRED tests now use
+a `rewired_session` over the oracle frozen at `U4_BASE_SHA` (9f06f8b3, the U4 parent; frozen on
+demand without moving `LATEST.txt`), as `test_u4_dialog_parity.py` already does. All 430 parity
+tests pass (one documented desktop-only trace race skipped).
+
+### Mobile wiring (no desktop change)
+
+- `app.py` installs `LibraryFeature` then `ReaderFeature` after the U4 pages (each in
+  try/except); the Library folders are pinned with `library_core.install_library_env` on the io pool
+  right after install. `SHIPPED_MILESTONES` gains U5 (Tools hub: Progress manager, Glossary
+  progress), `job_kinds.KIND_MODULES` gains `single_chapter` (`JobKind.SINGLE_CHAPTER`).
+- `base.build_screen_view` lets a screen with its own `build_view(route)` build its View (the
+  Reader: edge to edge, its chapters end drawer and back handling from the first frame).
+- The chat job card's **Read** (finished) and **Open reader** (running) are enabled: the turn's
+  output workspace (the run's pipeline folder, else the chat folder's per-attachment workspace)
+  goes to `ReaderFeature.open_book` as a Library-scanner-shaped row over the attachment (else the
+  shared raw-source resolvers); with no workspace yet an EPUB attachment opens on its own.
+- Android: `[tool.flet.android.manifest_application] networkSecurityConfig` points at the
+  extension's `res/xml/glossarion_network_security_config.xml`, which allows cleartext HTTP to
+  `127.0.0.1` / `localhost` only (the Reader's page server); every other host keeps the platform
+  default. `ci/verify_apk.py` fails a build whose merged `<application>` lacks a
+  `manifest_application` attribute.
+- `schema_extract` scans library_covers / reader_doc / live_stream (Library sites) and
+  progress_core / progress_actions / glossary_progress_core (Progress sites); the regenerated
+  `settings_schema_data.py` is byte-identical to the committed one.
+
+### Self-test additions (recorded divergence)
+
+- `smoke` suite `library_reader` (also run by `tools/host_smoke.py`): a partly translated
+  workspace of the self-test EPUB in a scratch Library / Output, opened through
+  `LibraryService.scan_blocking`, `load_details_blocking`, `progress_model.load_progress_view`
+  and the Reader (`plan_open` + `ReaderSession` + `DocumentBuilder`, mobile page shell). It pins
+  the shared Library env (`install_library_env`, `GLOSSARION_LIBRARY_DIR`, `OUTPUT_DIRECTORY`) to
+  the scratch folders for a few seconds and holds `JOB_LOCK` meanwhile (a job started from the
+  app waits; it can never resolve its output folder into the scratch Output). A Library screen
+  refresh that happens during those seconds lists the scratch book once; the next refresh is
+  normal (the E2E sandbox has the same property for its whole run).
+- `e2e` `translate_glossary_off` opens its translated + compiled workspace in the Library
+  (Completed shelf, 12/12), Book page, Chapters tab (12 completed rows) and the Reader (dual
+  mode: 12 chapters carry the fake marker, the Original side the Korean source).
+
+### Desktop offscreen smoke (integration)
+
+`scratchpad/u5_integ/desktop_smoke_u5.py`: the REAL `TranslatorGUI` (offscreen, sandboxed app
+dir / home / temp, fixture book from `tests/parity/progress_legacy`) for the working tree and
+`git archive HEAD src`: Library dialog shelves + counters, Book Details rows / strip / metadata
+editor, the Reader opened from Book Details (pages of the first chapters in all four layouts, TOC,
+numbering), the Progress Manager rows + statistics and the Glossary Progress rows + labels are
+identical in both trees.
+
+## U5 review: mobile fixes (no desktop change)
+
+- **Navigation.** `AppShell.show` pushes a full-screen route (Reader, metadata editor) and a child
+  whose static parents are already on the stack (Scan for raw from the Book page) on top of the
+  current stack; re-opening a screen already on it (or another book) returns to that depth. Back
+  from the Reader returns to the Book page instead of the chat home (UI_SPEC §1.6 rule 5).
+  Screens with a selection mode override `Screen.handle_back` (`base.build_screen_view` then sets
+  `can_pop=False` + `on_confirm_pop`): Android back leaves selection mode first (rule 2).
+- **Reader.** ▶ Continue / "Continue · Ch N · P%" open at the saved position (`resume`); a plain
+  open that offers "Resume" does not overwrite the saved position with the untouched start until
+  the reader moves. Open arguments (chapter file, raw-only, resume) are one-shot. The overlay of
+  an in-progress book is polled only while a job for the book runs (one refresh when it ends).
+  The Reader and the job service hold one reference-counted wakelock (`services/wakelock.py`).
+- **Reader security.** Chapter HTML is sanitised (no `<script>` / frames / objects / `<base>` /
+  meta refresh / `on*` / `javascript:`), the book CSS cannot close its `<style>`, the page's own
+  scripts carry a per-page CSP nonce (`script-src 'nonce-…'`, no `'unsafe-inline'`), images are
+  served only when they are images by content (with a sandboxing CSP), events only as JSON
+  `POST`s (a book `<img src="/__ev?d=…">` carried the cookie), and a book's external link opens
+  only after a confirmation (http / https / mailto).
+- **Library / Book page.** "Retranslate this chapter" follows desktop Book Details: busy check,
+  confirmation for a completed chapter, progress entry reset to pending before the job is queued.
+  The Glossary tab notices a progress file written later and stops re-rendering every tick after
+  one is deleted (one signature representation). Pull-to-refresh runs one full refresh at a time.
+  The "⚙ COMPILING…" ribbon clears when a compile ends without changing the workspace. Quiet
+  scans that change nothing push nothing. A TXT card / PDF without a workspace goes to the share
+  sheet (else the Book page) instead of the Reader's error. The TranslateSheet reuses the sources
+  it resolved on the io pool. A keyword delete view already dismissed by back is not popped again,
+  and a failed delete re-enables it. The Chapters list mounts at most 1,500 rows (a window
+  selector beyond that; 150-row steps with "Rows per page: All").
+
+### Second review round (mobile, no desktop change)
+
+- **Navigation.** Any route with static parents opened in the app over other screens (Files from
+  the Book page / Library card / Output tab, the Overview "Last job" link, a settings page) is
+  pushed on top like the Reader (`AppShell.show(in_app=True)` for `source="app"`); the static
+  chain stays for an empty stack, top-level destinations without parents, drawer navigation
+  (`navigate_to(..., reset=True)` from `_drawer_navigate`, the drawer status chip and Help items)
+  and links from outside the app (deep links, notifications: on top only when full-screen or when
+  their static parents are already open, as before). Screens kept below the new top are
+  not shown again (`did_show` runs for new entries and the top only), so the Book page under the
+  Reader no longer reloads its details and progress.
+- **Back.** The keyword delete view has its own `View.route` (`/library/delete-confirm`; it was
+  `/library`, so Flet resolved Android back to the Library's View and disposed the Library and
+  the Book page under the still-visible overlay); `AppShell.push_overlay` gives any overlay whose
+  route collides with another View an `/overlay-<n>` suffix (the Model manager sub-screens reused
+  the current route too). On tablets the root View cannot pop while the main area shows a screen:
+  system back runs the screen's `handle_back` (selection mode), else pops the main-area stack, and
+  answers `confirm_pop(False)`; with the chat in the main area it leaves the app.
+- **Reader.** Leaving while the first chapter still loads no longer acquires the wakelock or
+  offers "Resume" for the disposed screen; the overlay is polled only for this book's running
+  job, not a queued one. `SharedWakelock.acquire` counts a holder only after the platform call
+  succeeded (a failed enable left a stale "jobs" holder that kept the screen on later).
+- **Library.** The card ⋯ "Open in Reader" is disabled for a PDF without a workspace (the card tap
+  shares it, as for TXT). Selection actions and leaving selection keep the Chapters window.
+- **ReaderServer.** An oversized event body (up to 1 MiB) is read and dropped before the 413, so
+  the close does not reset the connection (on Windows the client lost the 413).
+- **Reader content isolation (verification round).** `sanitize_book_html` left a `<script>` that sits
+  inside an SVG / MathML `<style>` untouched (html.parser keeps style contents as raw text; a
+  browser parses markup there), and the page-wide nonce stamp then authorised it. Style text
+  holding `<` is now made inert (`inert_css`, serialised verbatim as a bs4 `Stylesheet`), and
+  `DocumentBuilder.build` defangs any `<script` / `</script` left in book-derived markup
+  (`defang_book_scripts`) before the shell wraps it, so only the page's own scripts can carry
+  the nonce. Mobile only; regression test
+  `test_style_raw_text_in_svg_and_math_never_becomes_a_nonced_script`.

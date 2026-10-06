@@ -162,13 +162,14 @@ MOBILE_CHANNELS = ("backend", "check", "stopapi", "hook", "action", "ask")
 MOBILE_IGNORED_FILES = (
     "src/config.json",  # desktop stop_translation persists config.json; mobile config writes are sparse
 )
-#: sandbox trees left out of the mobile projection's file delta: the Library raw-input registry
-#: (``library_raw_inputs.txt`` + the Library layout under the sandbox home) is written by the
-#: desktop's ``_record_library_raw_inputs`` hook (epub_library, a Qt module); the GUI-free default
-#: skips it (the mobile FileBridge imports into Library/Raw itself; U3 fix pass)
-MOBILE_IGNORED_TREES = ("home/Documents/Glossarion/Library",)
-#: parents the Library layout creates (ignored as added/removed directories only)
-MOBILE_IGNORED_PARENT_DIRS = ("home/Documents", "home/Documents/Glossarion")
+#: sandbox trees left out of the mobile projection's file delta. Empty since U5: HeadlessOwner
+#: records the run's raw inputs in the Library registry (``library_raw_inputs.txt`` + the Library
+#: layout under the sandbox home) through ``library_core.record_library_raw_inputs``, exactly as
+#: the desktop's ``_record_library_raw_inputs`` hook does through epub_library, so the mobile file
+#: delta must equal the desktop one there too (U3 fix pass ignored the tree; U5 integration).
+MOBILE_IGNORED_TREES: tuple = ()
+#: parents the Library layout creates (ignored as added/removed directories only; none since U5)
+MOBILE_IGNORED_PARENT_DIRS: tuple = ()
 
 
 def _mobile_fs_keep(kind: str, path: str) -> bool:

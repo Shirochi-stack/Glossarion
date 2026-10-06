@@ -72,6 +72,35 @@ def profile_names(config_get: Callable[[str, Any], Any]) -> list:
         return ["Universal"]
 
 
+def _reader_workspace(folder: str, source: str = "") -> str:
+    """The translation workspace (``translation_progress.json``) of a chat run (blocking).
+
+    ``folder`` is the run's pipeline output folder, or for older turns the chat's output
+    folder, whose per-attachment workspaces are subfolders: the one named after the
+    attachment wins, else the most recently written one.
+    """
+    if not folder or not os.path.isdir(folder):
+        return ""
+    if os.path.isfile(os.path.join(folder, "translation_progress.json")):
+        return folder
+    stem = os.path.splitext(os.path.basename(str(source or "")))[0].lower()
+    candidates = []
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return ""
+    for entry in entries:
+        progress = os.path.join(entry.path, "translation_progress.json")
+        if entry.is_dir() and os.path.isfile(progress):
+            if stem and entry.name.lower() == stem:
+                return entry.path
+            try:
+                candidates.append((os.path.getmtime(progress), entry.path))
+            except OSError:
+                continue
+    return max(candidates)[1] if candidates else ""
+
+
 class ChatFeature:
     def __init__(self, app: Any, *, chats: Optional[ChatStoreAdapter] = None, jobs: Any = None, oauth: Any = None) -> None:
         self.app = app
@@ -162,6 +191,7 @@ class ChatFeature:
             share_files=self.share_files,
             export_file=self.export_file,
             open_output=self.open_output,
+            open_reader=self.open_reader,
             pick_files=self.pick_files,
             import_file=self.import_file,
             push_overlay=self.push_overlay,
@@ -208,10 +238,10 @@ class ChatFeature:
                     return chat_view.open_chat_settings()
                 return original_show_sheet(match)
 
-            def show(match: RouteMatch) -> bool:
+            def show(match: RouteMatch, **kwargs: Any) -> bool:
                 if match.name in ("chat", "chat.message"):
                     self._select_chat(match.params.get("cid"))
-                return original_show(match)
+                return original_show(match, **kwargs)
 
             shell.show_sheet = show_sheet
             shell.show = show
@@ -505,6 +535,51 @@ class ChatFeature:
         if self._share is None:
             self._share = ft.Share()
         return await self._share.share_files([ft.ShareFile.from_path(p) for p in paths])
+
+    async def open_reader(self, folder: str, source: str = "") -> Optional[str]:
+        """A chat run's translation in the Reader (U5): its output workspace over the raw source.
+
+        The row uses the Library scanner's field names, so the Reader takes the shared desktop
+        decision (``library_core.plan_open_reader``: overlay for an EPUB workspace, workspace mode
+        for PDF / TXT); the raw file is the chat attachment, else the shared resolvers
+        (``LibraryService.raw_source``: registry, ``source_epub.txt``). Without a workspace yet, an
+        EPUB attachment opens on its own (raw). Returns the Reader's route id.
+        """
+        app = self.app
+        reader = getattr(app, "reader", None)
+        notify = getattr(app, "notify", None)
+        if reader is None or not hasattr(reader, "open_book"):
+            if notify is not None:
+                notify("The Reader is not available in this session")
+            return None
+        library = getattr(app, "library", None)
+
+        def target() -> Optional[dict]:
+            workspace = _reader_workspace(str(folder or ""), str(source or ""))
+            if workspace:
+                name = os.path.basename(os.path.normpath(workspace))
+                progress = os.path.join(workspace, "translation_progress.json")
+                book = {"name": name, "folder_name": name, "path": workspace, "output_folder": workspace,
+                        "type": "in_progress", "is_in_progress": True, "in_library": False,
+                        "progress_file": progress if os.path.isfile(progress) else ""}
+                raw = str(source or "") if source and os.path.isfile(str(source)) else ""
+                if not raw and library is not None and hasattr(library, "raw_source"):
+                    raw = library.raw_source(book)
+                if raw:
+                    book["raw_source_path"] = raw
+                return {"book": book}
+            if source and os.path.isfile(str(source)) and str(source).lower().endswith(".epub"):
+                return {"path": str(source)}
+            return None
+
+        found = await self._run_io(target)
+        if not found:
+            if notify is not None:
+                notify("Nothing to read yet: the first chapter is not saved")
+            return None
+        if "book" in found:
+            return reader.open_book(found["book"])
+        return reader.open_book(path=found["path"])
 
     def open_output(self, folder: str) -> None:
         opener = getattr(getattr(self.app, "files", None), "open_folder", None)

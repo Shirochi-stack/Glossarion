@@ -49,7 +49,7 @@ _MUTED = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
 
 #: (id, label, icon, milestone when it ships or None)
 ATTACHMENT_ACTIONS = (
-    ("read", "Read", "AUTO_STORIES", "U5"),
+    ("read", "Read", "AUTO_STORIES", None),
     ("export", "Share / Export", "IOS_SHARE", None),
     ("compile", "Compile", "MENU_BOOK", None),
     ("qa", "QA scan", "FACT_CHECK", "U6"),
@@ -458,7 +458,7 @@ class JobCard(ft.Container):
                                                "force_stopping": "Force stopping…"}.get(name, "Translating")
             buttons = [
                 self._button("stop", "Stop", "error") if name == "running" else self._button("force_stop", "Force stop", "error"),
-                self._button("open_reader", "Open reader", disabled_reason="Reader arrives in U5"),
+                self._button("open_reader", "Open reader"),
                 self._button("log", "Log", "text"),
             ]
         else:

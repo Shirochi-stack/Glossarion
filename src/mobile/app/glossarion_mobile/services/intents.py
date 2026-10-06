@@ -6,9 +6,13 @@ events afterwards. Shared files arrive as copies in the app's cache
 through ``FileBridge`` (the cache copy is removed) and then offered:
 
 * **Translate in new chat** (the chat's handler opens a chat with the file attached);
-* **Add to Library** (copy into ``Library/Raw`` + ``library_core`` registry;
-  EPUB / TXT / PDF / HTML only);
-* **Open in Reader** (disabled until the Reader ships, U5).
+* **Add to Library** (copy into ``Library/Raw``, then the shared
+  ``library_core.import_paths`` registers it and scaffolds its workspace, through
+  ``FileBridge.library_import``; EPUB / TXT / PDF / HTML only; the Library feature
+  adds a handler that also offers "Open" on the new book);
+* **Open in Reader** (EPUB; the Library feature's handler routes to
+  ``/reader/<bid>`` with the file's opaque id; disabled while no handler is
+  registered).
 
 Shared text (and http(s) links) prefill the composer. Nothing here is ever
 routed: ``glossarion://`` launch links are left to the app's router
@@ -37,6 +41,7 @@ __all__ = [
     "IntentAction",
     "IntentImport",
     "IntentRouter",
+    "READER_EXTENSIONS",
 ]
 
 log = logging.getLogger("glossarion.intents")
@@ -47,7 +52,10 @@ ACTION_OPEN_IN_READER = "open_in_reader"
 ACTION_COMPOSE = "compose"
 
 _BLOCKED_SCHEMES = ("content:", "file:", "intent:", "data:", "javascript:")
-READER_REASON = "The Reader arrives in U5"
+READER_REASON = "The Reader is not available in this session"
+READER_TYPES_REASON = "The Reader opens EPUB files"
+#: Shared files the Reader opens straight from the Inbox.
+READER_EXTENSIONS = (".epub",)
 LIBRARY_REASON = "Only EPUB, TXT, PDF and HTML files go to the Library"
 
 
@@ -130,8 +138,12 @@ class IntentRouter:
         library_ok = imp.imported.extension in LIBRARY_EXTENSIONS
         actions.append(IntentAction(ACTION_ADD_TO_LIBRARY, "Add to Library", "LOCAL_LIBRARY",
                                     None if library_ok else LIBRARY_REASON))
-        reader_reason = None if ACTION_OPEN_IN_READER in self.handlers and imp.imported.extension == ".epub" \
-            else READER_REASON
+        if ACTION_OPEN_IN_READER not in self.handlers:
+            reader_reason: Optional[str] = READER_REASON
+        elif imp.imported.extension not in READER_EXTENSIONS:
+            reader_reason = READER_TYPES_REASON
+        else:
+            reader_reason = None
         actions.append(IntentAction(ACTION_OPEN_IN_READER, "Open in Reader", "AUTO_STORIES", reader_reason))
         return actions
 

@@ -1058,6 +1058,65 @@ def test_approval_card_and_bom_preserving_editor(tmp_path):
     assert glossary_preview(str(json_glossary))["entries"] == 7
 
 
+def test_reader_workspace_finds_the_turns_translation(tmp_path):
+    from glossarion_mobile.ui.chat.integration import _reader_workspace
+
+    chat = tmp_path / "Direct Text" / "chat_1"
+    first, second = chat / "Book", chat / "Other"
+    for folder in (first, second):
+        folder.mkdir(parents=True)
+        (folder / "translation_progress.json").write_text("{}", encoding="utf-8")
+    os.utime(first / "translation_progress.json", (1_000, 1_000))
+    os.utime(second / "translation_progress.json", (2_000, 2_000))
+    assert _reader_workspace(str(first)) == str(first)  # the run's pipeline folder
+    assert _reader_workspace(str(chat), str(tmp_path / "Inbox" / "Book.epub")) == str(first)  # named after the file
+    assert _reader_workspace(str(chat), "") == str(second)  # else the newest workspace
+    assert _reader_workspace(str(tmp_path / "missing")) == "" and _reader_workspace("") == ""
+
+
+def test_open_reader_hands_the_reader_a_library_row(tmp_path):
+    """Job card Read / Open reader (U5): the run's workspace over its attachment, else the EPUB alone."""
+    from glossarion_mobile.ui.chat.integration import ChatFeature
+
+    opened, notes = [], []
+    reader = types.SimpleNamespace(open_book=lambda book=None, **kw: opened.append((book, kw)) or "abcdef012345")
+    library = types.SimpleNamespace(raw_source=lambda book: str(tmp_path / "resolved.epub"))
+    feature = ChatFeature.__new__(ChatFeature)
+    feature.dispatcher = None
+    feature.app = types.SimpleNamespace(reader=reader, library=library, notify=notes.append)
+    workspace = tmp_path / "Output" / "Book"
+    workspace.mkdir(parents=True)
+    (workspace / "translation_progress.json").write_text("{}", encoding="utf-8")
+    source = tmp_path / "Inbox" / "Book.epub"
+    source.parent.mkdir()
+    source.write_bytes(b"PK")
+    assert asyncio.run(feature.open_reader(str(workspace), str(source))) == "abcdef012345"
+    book, _kw = opened[-1]
+    assert book["path"] == book["output_folder"] == str(workspace) and book["is_in_progress"]
+    assert book["raw_source_path"] == str(source) and book["progress_file"].endswith("translation_progress.json")
+    asyncio.run(feature.open_reader(str(workspace), ""))  # no attachment: the shared resolvers
+    assert opened[-1][0]["raw_source_path"] == str(tmp_path / "resolved.epub")
+    asyncio.run(feature.open_reader(str(tmp_path / "not-yet"), str(source)))  # no workspace yet: the EPUB
+    assert opened[-1] == (None, {"path": str(source)})
+    assert asyncio.run(feature.open_reader("", "")) is None and notes[-1].startswith("Nothing to read yet")
+    feature.app = types.SimpleNamespace(notify=notes.append)
+    assert asyncio.run(feature.open_reader(str(workspace), str(source))) is None
+    assert notes[-1] == "The Reader is not available in this session"
+
+
+@needs_flet
+def test_job_card_read_actions_are_enabled():
+    from glossarion_mobile.ui.chat.cards import JobCard
+
+    actions = []
+    card = JobCard(attachment={"name": "Book.epub", "path": "/x/Book.epub", "extension": ".epub", "size": 1},
+                   phase=CardPhase("running"), on_action=actions.append)
+    card.set_phase(CardPhase("running"))
+    assert not card.action_buttons["open_reader"].disabled
+    card.set_phase(CardPhase("done"), status="Done")
+    assert not card.action_buttons["read"].disabled
+
+
 def test_job_binding_progress_line_and_card_phase(tmp_path):
     snap = types.SimpleNamespace(progress={"total": 48, "completed": 12, "failed": 1}, in_flight=3, started=None)
     clock = [0.0]

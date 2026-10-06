@@ -26,6 +26,7 @@ class ChatEnv(SettingsContext):
     share_files: Optional[Callable[[list], Any]] = None  # async (paths)
     export_file: Optional[Callable[[str], Any]] = None  # ExportSheet for one file (Share / Save to / Downloads)
     open_output: Optional[Callable[[str], Any]] = None  # output folder -> file browser
+    open_reader: Optional[Callable[..., Any]] = None  # async (workspace folder, attachment path) -> Reader (U5)
     pick_files: Optional[Callable[..., Any]] = None  # async (extensions, multiple) -> [paths]
     import_file: Optional[Callable[[str], Any]] = None  # picked path -> app-owned copy (FileBridge); blocking
     push_overlay: Optional[Callable[[Any], Any]] = None  # full-screen ft.View

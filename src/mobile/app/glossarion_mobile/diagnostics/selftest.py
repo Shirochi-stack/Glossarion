@@ -4,7 +4,8 @@ Run on device by the deep link ``glossarion://app/__selftest__?suite=smoke`` (CI
 emulator smoke) or the "Run self-test" button; on the host by
 ``tests_host/test_bootstrap.py`` or ``python -m glossarion_mobile.diagnostics.selftest``.
 
-Suites: ``smoke`` (packages, env contract, offline assets; seconds) and ``e2e``
+Suites: ``smoke`` (packages, env contract, offline assets, and the Library / Book page /
+Chapters tab / Reader on a translated workspace of the self-test EPUB; seconds) and ``e2e``
 (``diagnostics.e2e``: real chat / translate / stop / resume jobs against the fake
 OpenAI server on 127.0.0.1; minutes), run on device by
 ``glossarion://app/__selftest__?suite=e2e`` or the "Run end-to-end test" button, on the
@@ -429,6 +430,44 @@ def check_thread_stack(ctx: Context) -> dict[str, Any]:
     return outcome
 
 
+def check_library_reader(ctx: Context) -> dict[str, Any]:
+    """U5: Library scan, Book page, Chapters tab and Reader page on a translated workspace.
+
+    ``diagnostics.library_check``: a partly translated workspace of the self-test EPUB in a
+    scratch Library / Output (the shared Library env is pinned there and put back after),
+    opened through the app's own Library, Progress and Reader code over the shared cores.
+    The job lock is held meanwhile, so a translation started from the app cannot resolve
+    its output folder into the scratch Output.
+    """
+    for module in ("ebooklib", "lxml", "bs4"):
+        ctx.need(module)
+    paths = ctx.paths
+    asset = fixtures.find_selftest_epub(paths.assets_dir if paths is not None else None)
+    base = paths.temp if paths is not None else None
+    title = None
+    if asset is None:
+        if ctx.strict:
+            raise AssertionError("selftest EPUB missing from assets/selftest (tools/prepare_assets.py)")
+        asset = fixtures.build_tiny_epub(fixtures.scratch_dir(base) / "selftest-library-tiny.epub", chapters=8)
+        title = "글로사리온 자가진단"
+    else:
+        manifest = asset.parent / "MANIFEST.toml"
+        data = rb._load_toml(manifest) if manifest.is_file() else None
+        epub_info = data.get("epub", {}) if isinstance(data, dict) else {}
+        title = epub_info.get("title") if isinstance(epub_info, dict) else None
+    import job_runner
+
+    from glossarion_mobile.diagnostics import library_check
+
+    if not job_runner.JOB_LOCK.acquire(timeout=5.0):
+        raise CheckSkipped("a job is running; the Library check pins the Library folders and waits for it")
+    try:
+        work = fixtures.scratch_dir(base) / f"library-{os.getpid()}-{threading.get_ident()}"
+        return library_check.check_selftest_library(work, asset, expect_title=title)
+    finally:
+        job_runner.JOB_LOCK.release()
+
+
 # --------------------------------------------------------------------------
 # e2e suite (diagnostics.e2e; one session shared by the checks of one run)
 # --------------------------------------------------------------------------
@@ -482,6 +521,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("cv2", check_cv2),
         ("onnxruntime", check_onnxruntime),
         ("thread_stack", check_thread_stack),
+        ("library_reader", check_library_reader),
     ),
     "e2e": _e2e_checks(),
 }

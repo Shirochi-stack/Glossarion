@@ -126,6 +126,7 @@ class JobKind(str, enum.Enum):
     EXTRACT_GLOSSARY = "extract_glossary"
     COMPILE_EPUB = "compile_epub"
     COMPILE_PDF = "compile_pdf"
+    SINGLE_CHAPTER = "single_chapter"
 
 
 class JobState(str, enum.Enum):

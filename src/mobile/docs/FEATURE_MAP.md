@@ -179,7 +179,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 33 | Input / output token limits | Settings › Translation defaults; Plan card |  |
 | 34 | Context mode (Off / Contextual History / Rolling Summary Replace/Append) | Settings › Context & memory; Plan card |  |
 | 35 | Batch translation / request merging | Settings › Translation defaults; Settings › Processing › Request merging |  |
-| 36 | Output directory override | Data › Storage › Output folder | Adapted: output root limited to app storage / iOS Files-visible Documents (+ Android "Mirror outputs to Documents/Glossarion"); arbitrary SAF folders are not supported |
+| 36 | Output directory override | Data › Storage › Output folder | Adapted: output root limited to app storage / iOS Files-visible Documents (+ Android "Mirror outputs to Downloads/Glossarion"); arbitrary SAF folders are not supported |
 | 37 | Save glossary copy in output | Settings › Glossary › General |  |
 | 38 | Multi API key pools | Keys |  |
 | 39 | Vertex AI credentials | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule: SDK when its wheels resolve, else Vertex REST + google-auth |
@@ -554,7 +554,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 40 | RS Keys (rolling summary key pool) | Context & memory › KeyPoolTile |  |
 | 41 | Application Updates: Check for Updates + Check on startup | About › Updates | Install excluded |
 | 42 | Config Backup: Create Backup / Restore Backup | Data › Backup & restore |  |
-| 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android "Mirror outputs to Documents/Glossarion") |
+| 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android "Mirror outputs to Downloads/Glossarion") |
 | 44 | Auto DPI Scale / GUI Scale Factor / GUI Font Scale | Settings › Appearance › "Auto DPI / GUI scale" (disabled row + ReasonChip); Appearance › Text scale replaces it | **Excluded**: DPI scaling (the OS handles it); value preserved |
 | 45 | Enable streaming responses (OpenAI-compatible) | Settings › Response handling › Streaming |  |
 | 46 | Stream thinking/reasoning logs | Streaming |  |
@@ -1052,7 +1052,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 4 | Notifications (progress + completion) | Native extension channels (spec §1.9) | Replaced |
 | 5 | Open-with / Share intent import | IntentRouter | Replaced |
 | 6 | Native file picker (SAF) with copy-to-Library | FileBridge | Replaced |
-| 7 | SD card / external volume detection | Data › Storage | Adapted: SAF is used for picking only; the output root is app storage / iOS Documents (+ Android mirror to Documents/Glossarion) |
+| 7 | SD card / external volume detection | Data › Storage | Adapted: SAF is used for picking only; the output root is app storage / iOS Documents (+ Android mirror to Downloads/Glossarion) |
 | 8 | Library: scan and list books | Library | Replaced |
 | 9 | Library: EPUB cover thumbnails | BookCard covers | Replaced |
 | 10 | Library: import file FAB and add scan folder | Library FAB + Scan for raw | Replaced |

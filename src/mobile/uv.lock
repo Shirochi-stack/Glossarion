@@ -463,6 +463,18 @@ wheels = [
 ]
 
 [[package]]
+name = "flet-webview"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/85/bba29bca68e8c1dcc10784accc83cfdcfcf8a74619ab0553e3348b8a381c/flet_webview-1.0.3.tar.gz", hash = "sha256:d6210bc6f5a3f475b55bb9312f7b6788b7577bea8dfe80a1e6ef3ee334d1b53d", size = 14657, upload-time = "2026-09-30T02:14:38.788Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/ac/15f57ae5898d790060f6c674ad8ed1ccfaf5a16d75c208f9e6eddee38167/flet_webview-1.0.3-py3-none-any.whl", hash = "sha256:ea2fe3b59155d72e60800e8f60bd4bf065d2c4261e1c0de26f8efe4eb4d352a1", size = 18346, upload-time = "2026-09-30T02:14:37.74Z" },
+]
+
+[[package]]
 name = "glossarion"
 version = "0.0.0"
 source = { virtual = "." }
@@ -485,6 +497,7 @@ dependencies = [
     { name = "flet-glossarion-native" },
     { name = "flet-permission-handler" },
     { name = "flet-secure-storage" },
+    { name = "flet-webview" },
     { name = "google-auth" },
     { name = "google-genai" },
     { name = "html2text" },
@@ -546,6 +559,7 @@ requires-dist = [
     { name = "flet-glossarion-native", editable = "extensions/flet_glossarion_native" },
     { name = "flet-permission-handler", specifier = "==1.0.3" },
     { name = "flet-secure-storage", specifier = "==1.0.3" },
+    { name = "flet-webview", specifier = "==1.0.3" },
     { name = "google-auth", specifier = "==2.49.1" },
     { name = "google-genai", specifier = ">=1.73.1,<2" },
     { name = "html2text", specifier = "==2025.4.15" },

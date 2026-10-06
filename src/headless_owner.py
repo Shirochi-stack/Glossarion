@@ -492,6 +492,22 @@ class HeadlessOwner(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         reset_api_watchdog(clear_stale_external_files=clear_stale_external_files)
 
+    def _record_library_raw_inputs(self, files):
+        """Run set-up (``_prepare_translation_run``) -> the Library raw-inputs registry.
+
+        Desktop parity (TranslatorGUI._record_library_raw_inputs): every selected raw input
+        that exists is recorded through the shared GUI-free ``library_core`` (the module
+        ``epub_library`` re-exports it from), so the Library finds a translated book's raw
+        source later. Builds without library_core skip it, like desktop builds without
+        epub_library.
+        """
+        try:
+            from library_core import record_library_raw_inputs
+        except Exception:
+            return None
+        record_library_raw_inputs(files)
+        return None
+
     def save_config(self, show_message=True):
         """The in-memory half of TranslatorGUI.save_config (no backup, dialogs or file write).
 

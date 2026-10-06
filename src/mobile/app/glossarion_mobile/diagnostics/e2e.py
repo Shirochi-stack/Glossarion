@@ -30,7 +30,11 @@ Scenarios (one self-test check each, in this order):
    desktop v2 format (the shared ChatStore reads it back).
 2. ``e2e_translate_glossary_off``: a ``translate`` job with the welcome's "Off" choice:
    no glossary request at all, compiled EPUB complete; then a ``compile_epub`` job
-   recompiles the output folder.
+   recompiles the output folder, and the workspace opens in the Library (Completed shelf,
+   12/12, its raw source found through the raw-inputs registry the job's set-up wrote),
+   the Book page, the Chapters tab (12 completed rows) and the Reader (every translated
+   chapter carries the fake marker, the Original side the Korean source; built as the
+   mobile page) through ``diagnostics.library_check`` (U5).
 3. ``e2e_graceful_stop_resume``: Stop after the first chapter response; the job ends
    gracefully within 30 s with its progress saved, and Resume translates exactly the
    chapters that were missing.
@@ -1119,8 +1123,33 @@ class E2ESession:
         epubs = [p for p in compiled.outputs if p.lower().endswith(".epub") and os.path.isfile(p)]
         _check(epubs, f"compile outputs {compiled.outputs}")
         self._expect_complete_book(output_dir, "compile")
+        library = self._expect_library_book(output_dir, path)
         return {"secs": round(outcome.secs, 1), "requests": len(records), "book": book,
-                "compile_secs": round(compiled.secs, 1), "compiled": os.path.basename(epubs[0])}
+                "compile_secs": round(compiled.secs, 1), "compiled": os.path.basename(epubs[0]),
+                "library": library}
+
+    def _expect_library_book(self, output_dir: str, raw_path: str) -> dict:
+        """The translated + compiled workspace in the Library, Book page, Chapters tab and Reader (U5)."""
+        from glossarion_mobile.diagnostics import library_check
+        from glossarion_mobile.diagnostics.fake_llm_server import FAKE_MARKER
+
+        try:
+            with library_check.isolated_library(self.root, self.store.snapshot()) as service:
+                import library_core
+
+                # The translate job's set-up recorded its raw input like the desktop run does
+                # (HeadlessOwner._record_library_raw_inputs -> library_core.record_library_raw_inputs).
+                registered = [_norm(p) for p in library_core.load_library_raw_inputs()]
+                _check(_norm(raw_path) in registered,
+                       f"the translate job did not record {os.path.basename(raw_path)} in library_raw_inputs.txt")
+                detail = library_check.verify_book(
+                    service, output_dir=Path(output_dir), raw_path=Path(raw_path), shelf="completed",
+                    completed=CHAPTERS, total=CHAPTERS, statuses={"completed": CHAPTERS}, marker=FAKE_MARKER,
+                    translated_chapters=CHAPTERS)
+                detail["raw_inputs_registered"] = len(registered)
+                return detail
+        except library_check.LibraryCheckFailure as exc:
+            raise E2EFailure(f"Library / Reader: {exc}") from exc
 
     # ---- scenario 3: graceful stop, then Resume ----------------------------------------------------------------
 

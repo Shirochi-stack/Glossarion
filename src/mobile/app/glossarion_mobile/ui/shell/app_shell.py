@@ -277,6 +277,7 @@ class AppShell:
         if self.tablet:
             self.main_area.content = self._main_content()
             pushed = [e for e in self.stack if e.fullscreen]
+            self._sync_root_back()
         else:
             pushed = list(self.stack)
         for entry in pushed:
@@ -285,6 +286,34 @@ class AppShell:
         self.page.views.clear()
         self.page.views.extend(views)
         self._place_strip()
+
+    def _sync_root_back(self) -> None:
+        """Tablet: the system / gesture back on the one root View pops the main-area stack.
+
+        While the main area shows a screen the root View cannot pop (``can_pop=False``), so the
+        back reaches ``on_confirm_pop``: the screen's ``handle_back`` first (leave selection mode,
+        UI_SPEC §1.6 rule 2), else the main-area stack pops (rule 5). With the chat in the main
+        area the root can pop and the system default applies (rule 6: leave the app).
+        """
+        root = self.root_view
+        if root is None:
+            return
+        root.can_pop = self._top_panel_entry() is None
+        root.on_confirm_pop = self._on_root_confirm_pop
+
+    async def _on_root_confirm_pop(self, e: Any = None) -> None:
+        view = getattr(e, "control", None) or self.root_view
+        leave = self._top_panel_entry() is None
+        if not leave:
+            try:
+                self._on_tablet_back()
+            except Exception:
+                log.exception("tablet back failed")
+        try:
+            # Never let Flutter pop the only View while a screen was showing (that leaves the app).
+            await view.confirm_pop(leave)
+        except Exception as exc:  # no client (host tests) / the View was replaced
+            log.debug("confirm_pop failed: %s", exc)
 
     def _place_strip(self) -> None:
         """The global JobStrip sits on the top pushed View (phone) or the sidebar (tablet)."""
@@ -321,8 +350,44 @@ class AppShell:
             parent = spec.parent
         return chain
 
-    def show(self, match: RouteMatch) -> bool:
-        """Show a whitelisted route. Returns False when nothing changed."""
+    def _push_base(self, match: RouteMatch, wanted: list[RouteMatch], in_app: bool = False) -> Optional[list[StackEntry]]:
+        """The stack entries a pushed route keeps below it, or None to use its static chain.
+
+        A full-screen surface (Reader, metadata editor) is pushed on top of the current
+        stack, and so is a route with static parents opened in the app (``in_app``: Scan for
+        raw, Files, a job's detail, a settings page), so Back returns to the screen it was
+        opened from instead of the route's static parents (UI_SPEC §1.2 and §1.6 rule 5: a
+        pushed View pops; §7.2: a quick look returns to context). A link from outside the app
+        (deep link, notification) goes on top only when its static parents are already on
+        the stack. Re-opening a screen already on the stack -- the same route, or another
+        instance of it such as a second book -- returns to that depth first. The static chain
+        stays for an empty stack (cold deep links, the chat root), for top-level destinations
+        without parents (Library, Jobs, Glossaries, Tools, Settings) and for drawer
+        navigation (``show(reset=True)``).
+        """
+        if not self.stack:
+            return None
+        if match.presentation != FULLSCREEN:
+            if len(wanted) < 2:
+                return None
+            if not in_app:
+                current = {entry.route for entry in self.stack}
+                if not all(item.route in current for item in wanted[:-1]):
+                    return None
+        below: list[StackEntry] = []
+        for entry in self.stack:
+            if entry.route == match.route or entry.match.name == match.name:
+                break
+            below.append(entry)
+        return below
+
+    def show(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False) -> bool:
+        """Show a whitelisted route. Returns False when nothing changed.
+
+        ``in_app``: opened from a screen of the app, so it goes on top of the current screens
+        (``_push_base``). ``reset`` (drawer navigation) rebuilds the stack from the route's
+        static parents instead.
+        """
         presentation = match.presentation
         if presentation == HANDLED:
             return False
@@ -341,12 +406,21 @@ class AppShell:
             self._install_views()
             return True
         wanted = self._chain(match)
-        existing = {entry.route: entry for entry in self.stack}
+        below = None if reset else self._push_base(match, wanted, in_app)
+        if below is not None:
+            # Pushed on top of the screens the user came from (UI_SPEC §1.6 rule 5).
+            existing = {entry.route: entry for entry in self.stack[len(below):]}
+            wanted = [entry.match for entry in below] + [match]
+            existing.update({entry.route: entry for entry in below})
+        else:
+            existing = {entry.route: entry for entry in self.stack}
         new_stack: list[StackEntry] = []
+        created: list[StackEntry] = []
         for item in wanted:
             entry = existing.pop(item.route, None)
             if entry is None:
                 entry = StackEntry(item, self.screen_factory(item))
+                created.append(entry)
             new_stack.append(entry)
         for leftover in existing.values():
             leftover.screen.dispose()
@@ -354,7 +428,10 @@ class AppShell:
         self.stack = new_stack
         self._install_views()
         for entry in new_stack:
-            entry.screen.did_show()
+            # A screen kept below the new top was shown before and keeps its own refresh;
+            # showing it again would reload a hidden page (the Book page under the Reader).
+            if entry is new_stack[-1] or any(entry is new for new in created):
+                entry.screen.did_show()
         return changed
 
     def show_sheet(self, match: RouteMatch) -> InfoSheet:
@@ -394,10 +471,37 @@ class AppShell:
         return self.current_route
 
     def push_overlay(self, view: ft.View) -> None:
+        """Push a non-routable full-screen View on top (device checks, the keyword delete view,
+        a Model manager sub-screen).
+
+        Its ``route`` must differ from every other View's: the client keys Views by route and
+        Flet resolves ``view_pop`` to the first View with the popped route, so an overlay that
+        reused a screen's route would make Android back pop that screen and leave the overlay.
+        A colliding route gets an ``/overlay-<n>`` suffix.
+        """
+        taken = {getattr(v, "route", None) for v in self.page.views if v is not view}
+        taken.update(entry.route for entry in self.stack)
+        taken.update(getattr(v, "route", None) for v in self.overlays if v is not view)
+        route = getattr(view, "route", None) or "/"
+        if route in taken:
+            base = route.rstrip("/")
+            index = 1
+            while f"{base}/overlay-{index}" in taken:
+                index += 1
+            view.route = f"{base}/overlay-{index}"
+            log.debug("overlay route %r is taken; using %r", route, view.route)
         self.overlays.append(view)
         self.page.views.append(view)
 
     def _on_tablet_back(self, e: Any = None) -> None:
+        entry = self._top_panel_entry()
+        handler = getattr(entry.screen, "handle_back", None) if entry is not None else None
+        if callable(handler):
+            try:
+                if handler():  # e.g. leave selection mode first (UI_SPEC §1.6 rule 2)
+                    return
+            except Exception:
+                log.exception("back handler failed")
         if self.on_back is not None:
             self.on_back()
         else:

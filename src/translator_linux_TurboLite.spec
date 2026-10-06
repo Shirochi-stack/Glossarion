@@ -260,6 +260,14 @@ app_files = [
     ('prompt_profiles.py', '.'),
     ('key_pool_service.py', '.'),
     ('oauth_session.py', '.'),
+    # Mobile rewrite U5: Library covers, the reader document + live stream and the Progress Manager /
+    # Glossary Progress cores (epub_library, Retranslation_GUI and TransateKRtoEN import them)
+    ('library_covers.py', '.'),
+    ('reader_doc.py', '.'),
+    ('live_stream.py', '.'),
+    ('progress_core.py', '.'),
+    ('progress_actions.py', '.'),
+    ('glossary_progress_core.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -438,6 +446,14 @@ app_modules = [
     'prompt_profiles',
     'key_pool_service',
     'oauth_session',
+    # Mobile rewrite U5: Library covers, the reader document + live stream and the Progress Manager /
+    # Glossary Progress cores (epub_library, Retranslation_GUI and TransateKRtoEN import them)
+    'library_covers',
+    'reader_doc',
+    'live_stream',
+    'progress_core',
+    'progress_actions',
+    'glossary_progress_core',
 ]
 # GUI Framework
 gui_modules = [

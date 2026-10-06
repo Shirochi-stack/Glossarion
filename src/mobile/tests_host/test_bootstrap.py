@@ -465,8 +465,11 @@ def test_selftest_smoke_on_host(storage, capsys):
     assert set(by_name) == {name for name, _ in selftest.SUITES["smoke"]}
     failed = {n: c.get("error") for n, c in by_name.items() if c["status"] == "fail"}
     assert not failed, failed
-    for name in ("env_contract", "writable_dirs", "thread_stack"):
+    for name in ("env_contract", "writable_dirs", "thread_stack", "library_reader"):
         assert by_name[name]["status"] == "pass", by_name[name]
+    library = by_name["library_reader"]["detail"]
+    assert library["library"]["shelf"] == "in_progress" and library["library"]["pill"].startswith("\u23f3 ")
+    assert library["chapters_tab"]["statuses"]["qa_failed"] == 1 and library["reader"]["mode"] == "overlay"
     assert result["ok"] is True
 
     err = capsys.readouterr().err

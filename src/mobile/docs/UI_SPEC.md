@@ -106,10 +106,13 @@
 - `page.views` is a stack:
   - `View("/")` is the chat home: `appbar=ChatHeader`, `drawer=ChatDrawer`, and body `SafeArea(Column[Transcript(expand), JobStrip?, StatusCaption?, Composer])`.
 - Every destination is pushed as its own `View(route)`. Back pops it.
+- A screen opened from another screen (Files or the Reader from the Book page, a job's detail from the Overview) is pushed on top of it, so back returns there. A drawer destination and a top-level destination (Library, Jobs, Glossaries, Tools, Settings) start from the route's static parents instead, and so does a deep link or notification, unless it opens a full-screen surface or its static parents are already open. Re-opening a screen that is already on the stack returns to that depth.
+- Views that are not routes (the keyword delete confirmation, the device checks) carry a `View.route` that no other View uses: the client keys Views by route, and back resolves to the first View with the popped route.
 
 **Tablet**
 - One root `View` with `Row[Sidebar, MainArea(expand), SidePanel?]`.
 - The router swaps `MainArea.content` and keeps an internal back stack per destination. The sidebar never unmounts.
+- The system / gesture back pops that stack (§1.6; the root View cannot pop while the main area shows a screen). With the chat in the main area it leaves the app.
 - The Reader and full-screen editors are always pushed as top-level Views, so they take the whole screen even on tablets.
 
 **Router (`ui/router.py`)**
@@ -1419,10 +1422,11 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 ### 3.11 Reader (`/reader/<bid>`; full-screen View on every size class; `flet_webview.WebView` + native fallback)
 
 **Document**
-- `reader_doc.wrap_reader_html(mobile=True)`, served from the in-app localhost HTTP server (`http://127.0.0.1:<port>/reader.html?v=N`).
+- `reader_doc.wrap_reader_html(mobile=True)` (`ReaderDocument.wrap(..., mobile=True)`), served from the in-app localhost HTTP server (`services/reader_server.py`: `http://127.0.0.1:<port>/<token>/reader.html?v=N`, a random 192-bit path token, Host-header guard, document CSP; Android allows cleartext for the loopback host only through the extension's `glossarion_network_security_config.xml`).
+- Book content never runs code in the page: chapter HTML loses `<script>`, frames, objects, `<base>`, meta refresh, `on*` handlers and `javascript:` URLs (`document.sanitize_book_html`), the book's CSS cannot close its `<style>` (`inert_css`), and the page's own scripts carry a per-page nonce that the document CSP (`script-src 'nonce-…'`) allows exclusively. `/img/<id>` serves only bytes that are an image by content, events are accepted only as JSON `POST`s, and a book's external link opens after an "Open link?" confirmation (http/https/mailto only).
 - Mobile additions: a viewport meta tag, `-webkit-column-break-*`, 16–20 dp padding, safe-area insets, `100dvh`.
 - Pagination uses CSS columns. Tap zones (left / right thirds) and swipes are handled in page JS.
-- Events reach Python through `on_console_message` (`__GLOSS__{json}`); a `fetch('/event')` fallback is used if that fails.
+- Events reach Python as console messages `GLRDR:{json}` (`reader_doc.MOBILE_EVENT_PREFIX`, read through `on_console_message`) and, as a twin, `fetch` POSTs to `/<token>/__ev` (`MOBILE_EVENT_PATH`). Every event carries `{type, seq, chapter, …}`; `seq` de-duplicates the two transports and `GLRDR.setTransport('console'|'fetch'|'both')` narrows them. The Reader's own extras (`ui/reader/bridge.py`) add find / anchor / live restyle, a cleared-selection event and the selection rectangle.
 
 **Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls, scroll only. It is used:
 - automatically on Windows/Linux dev, because flet-webview raises outside Android, iOS and macOS;
@@ -1438,7 +1442,7 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
   - chapter `Slider` with haptic ticks, plus "Ch 12/48 · 43%" and "Page 3/9" in paged mode;
   - icons ◀ prev chapter · ☰ **Chapters** · **Aa** · 🌐 **Translate** · ▶ next chapter.
 
-**Modes** (from `reader_doc.plan_open_reader`): plain · overlay (in-progress raw + translated response files; refreshed every 3 s only while a job for this book runs) · dual-path (compiled + raw) · PDF workspace.
+**Modes** (from `library_core.plan_open_reader`, the desktop Book Details decision): plain · overlay (in-progress raw + translated response files; refreshed every 3 s only while a job for this book runs) · dual-path (compiled + raw) · PDF workspace.
 
 **Toggle availability.**
 - **Original** and **Translated** are available when an overlay, dual path or raw workspace content exists.
@@ -1842,7 +1846,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
   - paths: Output, Library, Inbox, cache;
   - per-folder usage bars; clear caches (reader / covers / temp); ONNX models manager;
   - output folder choice (app storage or iOS Files-visible Documents; arbitrary SAF folders are not supported);
-  - Android "Mirror outputs to Documents/Glossarion".
+  - Android "Mirror outputs to Downloads/Glossarion" (every finished output is copied there through MediaStore).
 - **Backup & restore:**
   - automatic backups list (72 h retention, shared); Create backup / Restore (confirm) / Delete;
   - Export config (keys excluded, or encrypted with a passphrase) / Import config;
@@ -2384,7 +2388,7 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 **Recorded mobile divergences (accepted in the plan)**
 - Chat switching during a run, queued sends (the `queue` state), delete message, and edit-and-resend versions.
 - Reader double page only on tablets in landscape. SDLXLIFF Notepad layout only on tablets.
-- **Output root.** It is limited to app storage or the iOS Files-visible Documents folder, plus the Android "Mirror outputs to Documents/Glossarion" option. SAF is used for picking only.
+- **Output root.** It is limited to app storage or the iOS Files-visible Documents folder, plus the Android "Mirror outputs to Downloads/Glossarion" option. SAF is used for picking only. (U5: the mirror uses the native `save_to_downloads`, i.e. the MediaStore Downloads collection, which accepts only `Download/...` relative paths and also works below API 29; a Documents/Glossarion target would need the MediaStore Files collection in the native extension.)
 - Config is snapshotted at job start; desktop reads live widgets per file.
 - The Book page uses the Progress Manager status vocabulary. The Library-only "✔ Translated" / "⏳ Working" badges are not shown.
 - **Paging.** Chapter and library lists append pages instead of showing pager buttons. The page-size keys still round-trip and set the append increment.

@@ -12,6 +12,8 @@ pytest.importorskip("PySide6")
 
 import epub_library
 import library_core
+import library_covers
+import reader_doc
 from PySide6.QtCore import QEventLoop, QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
@@ -32,6 +34,27 @@ from epub_library import (
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def isolated_library(tmp_path, monkeypatch):
+    """Never create or read the real ~/Documents/Glossarion/Library or output roots.
+
+    ``EpubLibraryDialog`` resolves the Library folder (``get_library_dir`` mkdirs it)
+    and reads its origins / shelves registries while it builds; the same isolation
+    as ``tests/test_library_core.py::isolated_library``.
+    """
+    library = tmp_path / "_isolated" / "Library"
+    output = tmp_path / "_isolated" / "Output"
+    library.mkdir(parents=True)
+    output.mkdir(parents=True)
+    monkeypatch.setenv("GLOSSARION_LIBRARY_DIR", str(library))
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(output))
+    for module in (library_core, epub_library):
+        monkeypatch.setattr(module, "_default_output_root", lambda: str(output))
+    monkeypatch.setattr(library_covers, "_COVER_CACHE_DIR_OVERRIDE",
+                        str(tmp_path / "_isolated" / "covers"))
+    yield
 
 
 def _pump_events(app: QApplication, timeout: float = 0.8) -> None:
@@ -1528,7 +1551,8 @@ def test_reader_refresh_retries_transient_read_failure_without_stat_change(
                 raise PermissionError("The translator is replacing the response file")
         return actual_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(epub_library, "open", temporarily_locked_open, raising=False)
+    # the overlay merge moved to reader_doc (epub_library's thread inherits it)
+    monkeypatch.setattr(reader_doc, "open", temporarily_locked_open, raising=False)
     before = translated.stat()
     reader = make_reader(overlay)
     assert reader._chapters[0][0] == "Raw one"
@@ -1566,7 +1590,8 @@ def test_reader_refresh_read_failure_keeps_last_translation_until_retry(
                 raise PermissionError("The response file is temporarily locked")
         return actual_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(epub_library, "open", temporarily_locked_open, raising=False)
+    # the overlay merge moved to reader_doc (epub_library's thread inherits it)
+    monkeypatch.setattr(reader_doc, "open", temporarily_locked_open, raising=False)
     expected = _write_reader_translation(translated, "Updated translation", "Updated body.")
     before = translated.stat()
     reader._on_overlay_refresh_tick()
@@ -2280,8 +2305,9 @@ def test_reader_lazily_extracts_only_referenced_epub_images_and_caches_html(
     reads = []
     classifications = []
     original_read = epub_library._read_epub_member_from_zip
+    # the reader document builder moved to reader_doc (EpubReaderDialog inherits it)
     monkeypatch.setattr(
-        epub_library,
+        reader_doc,
         "_read_epub_member_from_zip",
         lambda archive, member, lookup=None: (
             reads.append(member)
@@ -2289,7 +2315,7 @@ def test_reader_lazily_extracts_only_referenced_epub_images_and_caches_html(
         ),
     )
     monkeypatch.setattr(
-        epub_library,
+        reader_doc,
         "_reader_image_is_sizeable",
         lambda data: classifications.append(len(data)) or True,
     )
@@ -2340,7 +2366,9 @@ def test_epub_loader_caches_image_members_without_eager_payloads(
 
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    monkeypatch.setattr(epub_library, "_epub_cache_dir", lambda: str(cache_dir))
+    # the EPUB loader / cache moved to reader_doc (epub_library re-exports them)
+    for module in (epub_library, reader_doc):
+        monkeypatch.setattr(module, "_epub_cache_dir", lambda: str(cache_dir))
     archive_reads = []
     original_read_file = epub.EpubReader.read_file
     monkeypatch.setattr(
@@ -2395,8 +2423,9 @@ def test_next_chapter_image_preloader_materializes_only_its_references(
 
     reads = []
     original_read = epub_library._read_epub_member_from_zip
+    # the preload thread's run moved to reader_doc (the Qt thread inherits it)
     monkeypatch.setattr(
-        epub_library,
+        reader_doc,
         "_read_epub_member_from_zip",
         lambda archive, member, lookup=None: (
             reads.append(member)
@@ -2427,13 +2456,23 @@ def test_next_chapter_image_preloader_materializes_only_its_references(
 
 
 def test_large_raw_image_classification_does_not_decode_bitmap(monkeypatch):
-    class UnexpectedDecoder:
-        def __init__(self, *_args, **_kwargs):
-            raise AssertionError("large images should not be decoded for sizing")
+    # _reader_image_is_sizeable moved to reader_doc, which probes dimensions with
+    # library_covers._probe_image_size (imported into reader_doc) instead of
+    # QImageReader. The probe sits inside ``except Exception``, so record calls
+    # rather than raising: the byte-size rule must answer before any probe runs.
+    probes = []
 
-    monkeypatch.setattr(epub_library, "QImageReader", UnexpectedDecoder)
+    def recording_probe(data):
+        probes.append(len(data))
+        return (1000, 1000)
+
+    monkeypatch.setattr(reader_doc, "_probe_image_size", recording_probe)
 
     assert epub_library._reader_image_is_sizeable(b"large-scan" * 700) is True
+    assert probes == []
+    # Control: a small image does reach the (patched) probe, so the patch is live.
+    assert epub_library._reader_image_is_sizeable(b"tiny") is True
+    assert probes == [4]
 
 
 def test_reader_schedules_next_chapter_image_preload_off_thread(
@@ -2612,9 +2651,10 @@ def test_remote_cover_page_is_downloaded_and_cached(tmp_path, monkeypatch):
         )
 
     seen_urls = []
-    monkeypatch.setattr(epub_library, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    # the cover helpers moved to library_covers (epub_library re-exports them)
+    monkeypatch.setattr(library_covers, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
     monkeypatch.setattr(
-        epub_library,
+        library_covers,
         "_download_remote_cover_image",
         lambda url: seen_urls.append(url) or remote_bytes,
     )
@@ -2631,7 +2671,7 @@ def test_pdf_cover_extracts_first_embedded_image_and_reuses_cache(tmp_path, monk
     fitz = pytest.importorskip("fitz")
     Image = pytest.importorskip("PIL.Image")
     cache_dir = tmp_path / "cache"
-    monkeypatch.setattr(epub_library, "_cover_cache_dir", lambda: str(cache_dir))
+    monkeypatch.setattr(library_covers, "_cover_cache_dir", lambda: str(cache_dir))
     pdf_path = tmp_path / "source.pdf"
     first_image = tmp_path / "first.png"
     second_image = tmp_path / "second.png"
@@ -2664,7 +2704,7 @@ def test_pdf_without_embedded_images_does_not_fall_back_to_page_screenshot(
 ):
     fitz = pytest.importorskip("fitz")
     monkeypatch.setattr(
-        epub_library, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+        library_covers, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
     pdf_path = tmp_path / "vector-only.pdf"
     with fitz.open() as document:
         page = document.new_page(width=300, height=500)
@@ -2681,7 +2721,7 @@ def test_pdf_cover_image_search_stops_after_first_five_pages(
     fitz = pytest.importorskip("fitz")
     Image = pytest.importorskip("PIL.Image")
     monkeypatch.setattr(
-        epub_library, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+        library_covers, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
     late_image = tmp_path / "late-cover.png"
     Image.new("RGB", (120, 180), "green").save(late_image)
     pdf_path = tmp_path / "late-image.pdf"
@@ -2704,8 +2744,9 @@ def test_in_progress_pdf_uses_raw_source_first_image_as_cover(tmp_path, monkeypa
     raw_pdf.write_bytes(b"%PDF-test")
     rendered = str(tmp_path / "first-image.png")
     seen = []
+    # _CoverLoader.run moved to library_covers (the Qt thread inherits it)
     monkeypatch.setattr(
-        epub_library,
+        library_covers,
         "_extract_pdf_cover",
         lambda path: seen.append(path) or rendered,
     )
@@ -2964,10 +3005,12 @@ def test_output_card_uses_source_epub_when_only_artifact_progress_exists(
         json.dumps(progress), encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        epub_library, "_resolve_output_roots",
-        lambda _config=None: [str(output_root)],
-    )
+    # the scans moved to library_core (epub_library re-exports them)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_resolve_output_roots",
+            lambda _config=None: [str(output_root)],
+        )
     # the source-EPUB resolver moved to library_core (epub_library re-exports it)
     for module in (epub_library, library_core):
         monkeypatch.setattr(
@@ -3040,9 +3083,11 @@ def test_exact_named_partial_source_epub_remains_linked(
         json.dumps({"chapters": chapters}), encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        epub_library, "_resolve_output_roots", lambda _config=None: [str(output_root)],
-    )
+    # the scans moved to library_core (epub_library re-exports them)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_resolve_output_roots", lambda _config=None: [str(output_root)],
+        )
     # the source-EPUB resolver moved to library_core (epub_library re-exports it)
     for module in (epub_library, library_core):
         monkeypatch.setattr(

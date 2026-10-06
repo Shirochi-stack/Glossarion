@@ -12,6 +12,7 @@ the rest (nothing silently missing, UI_SPEC §0 item 6).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
@@ -21,10 +22,13 @@ from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import ROUTES, ROUTES_BY_NAME, RouteMatch, RouteSpec
 
-__all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "ROUTE_ICONS", "build_screen_view"]
+__all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "ROUTE_ICONS", "build_screen_view",
+           "intercepts_back"]
+
+log = logging.getLogger("glossarion.ui")
 
 # Milestones whose surfaces exist in this build.
-SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4"})
+SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5"})
 
 ROUTE_ICONS = {
     "library": "LOCAL_LIBRARY",
@@ -73,6 +77,33 @@ class Screen:
 
     def dispose(self) -> None:
         """Called when the screen leaves the stack."""
+
+    def handle_back(self) -> bool:
+        """Android back on this screen: True when the screen consumed it (UI_SPEC §1.6 rule 2:
+        back leaves selection mode before it leaves the screen). A screen that overrides this
+        gets a View that asks before popping (``can_pop=False`` + ``on_confirm_pop``)."""
+        return False
+
+
+def intercepts_back(screen: Any) -> bool:
+    """Whether ``screen`` overrides ``Screen.handle_back``."""
+    handler = getattr(type(screen), "handle_back", None)
+    return handler is not None and handler is not Screen.handle_back
+
+
+def _confirm_pop_handler(screen: Screen, view: ft.View) -> Callable[[Any], Any]:
+    async def on_confirm_pop(e: Any = None) -> None:
+        try:
+            consumed = bool(screen.handle_back())
+        except Exception:
+            log.exception("back handler of %s failed", type(screen).__name__)
+            consumed = False
+        try:
+            await view.confirm_pop(not consumed)
+        except Exception as exc:  # no client (host tests) / the View already left
+            log.debug("confirm_pop failed: %s", exc)
+
+    return on_confirm_pop
 
 
 class PlaceholderScreen(Screen):
@@ -129,8 +160,16 @@ class HubScreen(Screen):
 
 
 def build_screen_view(screen: Screen, route: str) -> ft.View:
-    """A pushed phone View: app bar with the implied back arrow + the screen body."""
-    return ft.View(
+    """A pushed phone View: app bar with the implied back arrow + the screen body.
+
+    A screen with its own ``build_view(route)`` (the full-screen Reader: no app bar, edge to
+    edge, its chapters drawer and back handling) builds the View itself; its first control
+    holds the ``content`` the shell wraps with the JobStrip footer, like the SafeArea here.
+    """
+    custom = getattr(screen, "build_view", None)
+    if callable(custom):
+        return custom(route)
+    view = ft.View(
         route=route,
         appbar=ft.AppBar(
             title=ft.Text(screen.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600),
@@ -144,6 +183,10 @@ def build_screen_view(screen: Screen, route: str) -> ft.View:
         spacing=0,
         controls=[ft.SafeArea(content=screen.get_body(), expand=True)],
     )
+    if intercepts_back(screen):
+        view.can_pop = False
+        view.on_confirm_pop = _confirm_pop_handler(screen, view)
+    return view
 
 
 def spec_for(name: str) -> RouteSpec:

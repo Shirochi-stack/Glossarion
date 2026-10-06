@@ -12,18 +12,24 @@ import chapter_splitter
 import extract_glossary_from_epub as extractor
 import glossary_refinement
 import Retranslation_GUI as gui_module
+import glossary_progress_core  # U5: the Glossary Progress panel closures moved here
 
 
 @pytest.fixture(scope="module")
 def glossary_progress_codes():
-    source_path = Path(gui_module.__file__)
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
     functions = {}
+    for source_path in (Path(gui_module.__file__), Path(glossary_progress_core.__file__)):
+        _collect_glossary_progress_codes(source_path, functions)
+    return functions
+
+
+def _collect_glossary_progress_codes(source_path, functions):
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name not in {
             "_gp_refinement_rows", "_gp_apply_mark_completed_to_progress",
             "_apply_gp_mark_completed_result",
-        }:
+        } or node.name in functions:
             continue
         target = node
         if node.name == "_apply_gp_mark_completed_result":
@@ -35,7 +41,6 @@ def glossary_progress_codes():
             ast.fix_missing_locations(ast.Module(body=[target], type_ignores=[])),
             str(source_path), "exec",
         )
-    return functions
 
 
 @pytest.fixture(scope="module")
@@ -99,7 +104,7 @@ def test_completed_refinement_rows_do_not_inherit_another_types_interruption(
             "total_chunks": 1,
         }
     original_progress = copy.deepcopy(progress)
-    namespace = dict(vars(gui_module))
+    namespace = {**vars(gui_module), **vars(glossary_progress_core)}
     namespace.update({
         "_glossary_refinement_expected_entries": lambda _entries: copy.deepcopy(expected),
         "_gp_glossary_entries": lambda _data: [],
@@ -143,7 +148,7 @@ def test_refinement_rows_use_latest_state_across_type_aliases(refinement_rows_co
             "entry_type": "term", "last_updated": 200, "status": latest_status,
         },
     }
-    namespace = dict(vars(gui_module))
+    namespace = {**vars(gui_module), **vars(glossary_progress_core)}
     namespace.update({
         "_glossary_refinement_expected_entries": lambda _entries: expected,
         "_gp_glossary_entries": lambda _data: [],
@@ -260,7 +265,7 @@ def test_marking_refinement_completed_persists_current_identities_for_auto_resum
     progress_path.write_text(json.dumps(original), encoding="utf-8")
     output_path = str(tmp_path / "glossary.csv")
     config = {"glossary_refinement_chunking_mode": "all"}
-    namespace = dict(vars(gui_module))
+    namespace = {**vars(gui_module), **vars(glossary_progress_core)}
     namespace.update({
         "self": SimpleNamespace(config=config),
         "panel_state": {"_glossary_path": output_path},
@@ -332,7 +337,7 @@ def test_marking_refinement_completed_persists_current_identities_for_auto_resum
 def test_manual_completion_immediately_refreshes_all_refinement_rows(glossary_progress_codes):
     calls = []
     updated_data = {"refinement": {"type::terms": {"status": "completed"}}}
-    namespace = dict(vars(gui_module))
+    namespace = {**vars(gui_module), **vars(glossary_progress_core)}
     namespace.update({
         "panel_state": {},
         "gp_listbox": SimpleNamespace(

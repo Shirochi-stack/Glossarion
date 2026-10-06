@@ -10,7 +10,7 @@ import types
 import zipfile
 
 import pytest
-from _src_corpus import desktop_gui_source
+from _src_corpus import desktop_gui_source, progress_manager_source
 from bs4 import BeautifulSoup
 
 
@@ -34,6 +34,8 @@ def test_progress_legend_counts_all_chunk_statuses_and_refreshes():
         _progress_display_status=lambda info, data: info['status'],
         _current_progress_output_mode=lambda data: 'translation',
     )
+    # U5: the numbers come from the shared ProgressViewMixin._progress_statistics.
+    harness._progress_statistics = types.MethodType(RetranslationMixin._progress_statistics, harness)
     rows = [{'status': 'completed'}]
     rows.extend({'status': status, 'is_chunk_progress': True} for status in (
         'completed', 'in_progress', 'pending', 'not_translated', 'qa_failed', 'merged',
@@ -399,9 +401,8 @@ def test_sequential_pre_send_callback_captures_filename_before_dispatch():
 
 def test_all_requested_chapter_views_use_shared_nonreset_numbering():
     source_root = Path(__file__).resolve().parents[1] / "src"
-    progress_source = (source_root / "Retranslation_GUI.py").read_text(
-        encoding="utf-8"
-    )
+    # U5: the Progress Manager / Glossary Progress code moved to the progress modules.
+    progress_source = progress_manager_source()
     reader_source = (source_root / "epub_library.py").read_text(
         encoding="utf-8"
     )
@@ -409,7 +410,11 @@ def test_all_requested_chapter_views_use_shared_nonreset_numbering():
     assert "chapter['display_chapter_num'] = display_number" in progress_source
     assert "panel_state['_chapter_display_numbers']" in progress_source
     assert 'metadata["display_chapter_num"] = display_chapter_num' in progress_source
-    assert "self._chapter_display_numbers = nonreset_chapter_display_numbers(" in reader_source
+    # U5: the reader's numbering moved to reader_doc._chapter_display_numbers (shared
+    # with Glossarion Mobile); EpubReaderDialog calls it.
+    assert "self._chapter_display_numbers = _chapter_display_numbers(" in reader_source
+    reader_doc_source = (source_root / "reader_doc.py").read_text(encoding="utf-8")
+    assert "    return nonreset_chapter_display_numbers(" in reader_doc_source
 
 
 def test_translation_progress_displays_nonreset_number_without_mutating_raw_num():
@@ -472,9 +477,7 @@ def test_pending_progress_rows_hide_model_metadata_in_both_progress_views():
     assert "(model unknown)" not in display
     assert " -> " not in display
 
-    glossary_source = Path(retranslation_gui_module.__file__).read_text(
-        encoding="utf-8"
-    )
+    glossary_source = progress_manager_source()  # U5: panel closures in glossary_progress_core
     glossary_start = glossary_source.index("def _gp_display_for(")
     glossary_end = glossary_source.index(
         "def _gp_refinement_rows(", glossary_start
@@ -703,9 +706,7 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
         encoding="utf-8"
     )
     translator_gui = desktop_gui_source()
-    progress_gui = (source_root / "Retranslation_GUI.py").read_text(
-        encoding="utf-8"
-    )
+    progress_gui = progress_manager_source()  # U5: + glossary_progress_core
 
     assert '"Skip title/header-only chapters"' in glossary_gui
     assert "self.config.get('glossary_skip_title_header_only', True)" in glossary_gui
@@ -726,9 +727,7 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
 
 
 def test_glossary_progress_does_not_infer_cover_as_completed():
-    progress_gui = (
-        Path(__file__).resolve().parents[1] / "src" / "Retranslation_GUI.py"
-    ).read_text(encoding="utf-8")
+    progress_gui = progress_manager_source()  # U5: + glossary_progress_core
 
     assert "_gp_auto_completed_indices" not in progress_gui
     assert "panel_state['_auto_completed']" not in progress_gui
@@ -923,6 +922,12 @@ def test_insert_missing_image_context_action_uses_targeted_qa_cleanup():
         start,
     )
     action_block = source[start:end]
+    # U5: the restoration itself is progress_actions.insert_missing_images.
+    assert "insert_missing_images(" in action_block
+    actions_source = (Path(__file__).resolve().parents[1] / "src" / "progress_actions.py").read_text(
+        encoding="utf-8"
+    )
+    action_block += actions_source[actions_source.index("def _missing_image_qa_targets("):]
 
     assert "_clear_missing_image_qa_markers(target)" in action_block
     assert "Other QA issues remain." in action_block
@@ -3602,11 +3607,13 @@ def test_progress_manager_source_link_updates_epub_library_scan(
         monkeypatch.setattr(
             module, "get_library_dir", lambda: str(library_dir)
         )
-    monkeypatch.setattr(
-        epub_library,
-        "_resolve_output_roots",
-        lambda _config=None: [str(output_root)],
-    )
+    # scan_output_folders moved to library_core (epub_library re-exports it)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module,
+            "_resolve_output_roots",
+            lambda _config=None: [str(output_root)],
+        )
 
     assert _persist_progress_manager_source_link(source_epub, workspace)
     assert (workspace / "source_epub.txt").read_text(
@@ -3628,8 +3635,9 @@ def test_progress_manager_source_link_updates_epub_library_scan(
 
 
 def test_initial_spine_matching_has_no_directory_scan_inside_spine_loop():
+    # U5: the initial matching is the data half ProgressViewMixin._build_progress_view_data.
     source = textwrap.dedent(
-        inspect.getsource(RetranslationMixin._force_retranslation_epub_or_text)
+        inspect.getsource(RetranslationMixin._build_progress_view_data)
     )
     tree = ast.parse(source)
 
@@ -3740,9 +3748,7 @@ def test_progress_manager_routes_parallel_pair_through_raw_epub(tmp_path):
 
 
 def test_progress_managers_use_event_driven_differential_refresh():
-    source = (
-        Path(__file__).resolve().parents[1] / "src" / "Retranslation_GUI.py"
-    ).read_text(encoding="utf-8")
+    source = progress_manager_source()  # U5: + progress_core / glossary_progress_core
 
     assert "QFileSystemWatcher" in source
     assert "progress_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source

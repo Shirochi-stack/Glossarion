@@ -18,7 +18,8 @@ ran in ``app/main.py`` before Flet was imported):
    layer (JobService, FileBridge, IntentRouter, background execution, Jobs /
    Files screens, U3) and the chat (ChatStoreAdapter over the shared
    ``direct_text_store``, ChatRuns, ChatGPT sign-in, Accounts / Welcome screens,
-   U3); the backend warm import starts right after Settings, once the keys are in
+   U3), models / keys and the settings pages (U4), then the Library (Book page,
+   Progress manager) and the Reader (U5); the backend warm import starts right after Settings, once the keys are in
    (prints ``GLOSSARION_BACKEND_READY``; Send stays "Preparing engine…" until then);
 6. dispatch the initial route (a cold-start ``/__selftest__`` deep link runs
    the self-test, which prints ``GLOSSARION_SELFTEST PASS|FAIL``); on a first run
@@ -143,6 +144,13 @@ class GlossarionApp:
         # Prefill, Appearance, Storage, Backup, Import, About, Danger zone).
         self.models_keys: Any = None
         self.pages_feature: Any = None
+        # U5: LibraryFeature.install sets library (LibraryService: scans, opaque book ids, the
+        # shared Library actions) and library_feature (Library / Book page / Progress manager
+        # screens, Open-in-Reader + Add-to-Library intents, job-finished refresh); ReaderFeature
+        # .install sets reader (open_book / open_file, /reader/<bid>, the localhost page server).
+        self.library: Any = None
+        self.library_feature: Any = None
+        self.reader: Any = None
 
     @staticmethod
     def _make_secure_storage() -> Any:
@@ -223,6 +231,8 @@ class GlossarionApp:
         await self._install_chat()  # chat history (decrypted keys), runs, sign-in, welcome
         await self._install_models_keys()  # model catalog + ModelSheet services, keys, endpoints
         await self._install_pages()  # accounts (all providers), profiles, prefill, data pages
+        await self._install_library()  # Library shelves, Book page, Progress manager, intents
+        await self._install_reader()  # /reader/<bid> (after the Library: it resolves book ids)
         self.dispatcher.spawn(self._after_ready())
         match = await self.dispatch_route(page.route, source="initial")
         await self._maybe_welcome(match)
@@ -296,6 +306,38 @@ class GlossarionApp:
             await AccountsProfilesFeature.install(self)  # sets self.pages_feature; wraps shell.screen_factory
         except Exception:
             log.exception("accounts & profiles feature unavailable; those settings pages show placeholders")
+
+    async def _install_library(self) -> None:
+        """The Library (shelves, Scan for raw, Book page with Overview / Chapters / Glossary /
+        Output, metadata editor), the standalone Progress manager / Glossary progress, the
+        "Add to Library" / "Open in Reader" intents and the job-finished Library refresh (U5).
+        The Library folders are pinned (``library_core.install_library_env``) on the io pool
+        right away, before any scan, import, cover or Reader call."""
+        try:
+            from glossarion_mobile.ui.library.feature import LibraryFeature
+
+            feature = await LibraryFeature.install(self)  # sets self.library / library_feature
+        except Exception:
+            log.exception("library feature unavailable; /library shows a placeholder")
+            return
+        self.dispatcher.spawn(self._pin_library_env(feature))
+
+    async def _pin_library_env(self, feature: Any) -> None:
+        try:
+            await feature.run_io(feature.service.ensure_env)
+        except Exception:
+            log.exception("pinning the Library folders failed")
+
+    async def _install_reader(self) -> None:
+        """The Reader at ``/reader/<bid>`` (flet-webview page from the in-app localhost server,
+        native fallback) and ``open_book`` / ``open_file`` for the Library, job cards and the
+        IntentRouter (U5)."""
+        try:
+            from glossarion_mobile.ui.reader.feature import ReaderFeature
+
+            await ReaderFeature.install(self)  # sets self.reader; wraps shell.screen_factory
+        except Exception:
+            log.exception("reader feature unavailable; /reader shows a placeholder")
 
     async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
         """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome
@@ -383,7 +425,10 @@ class GlossarionApp:
     async def on_route_change(self, e: Any) -> None:
         await self.dispatch_route(getattr(e, "route", None), source="event")
 
-    async def dispatch_route(self, raw: Optional[str], *, source: str) -> Optional[RouteMatch]:
+    async def dispatch_route(self, raw: Optional[str], *, source: str, reset: bool = False) -> Optional[RouteMatch]:
+        """Apply a route. In-app navigation (``source="app"``) pushes a route opened over other
+        screens on top of them; ``reset`` (drawer navigation) rebuilds the stack from the route's
+        static parents; a link from outside the app keeps the static parents unless they are open."""
         match = self.router.handle(raw)
         self._spike_routes_changed()
         if match is None:
@@ -406,7 +451,7 @@ class GlossarionApp:
                 return match  # the client echoing a route the app pushed (overlays stay)
             if not self.shell.overlays:
                 return match  # echo of an in-app navigation
-        self.shell.show(match)
+        self.shell.show(match, reset=reset, in_app=source == "app")
         self.page.update()
         return match
 
@@ -436,25 +481,28 @@ class GlossarionApp:
     async def _restore_route(self) -> None:
         await self._push_client_route(self.shell.current_route if self.shell is not None else "/")
 
-    async def navigate(self, route: str) -> Optional[RouteMatch]:
+    async def navigate(self, route: str, *, reset: bool = False) -> Optional[RouteMatch]:
         """In-app navigation to a route string: apply it now, then sync the client route."""
-        match = await self.dispatch_route(route, source="app")
+        match = await self.dispatch_route(route, source="app", reset=reset)
         if match is not None and match.presentation not in (HANDLED, "sheet"):
             await self.close_drawer()
             await self._push_client_route(self.shell.current_route)
         return match
 
-    def navigate_to(self, route_name: str, params: Optional[dict] = None, query: Optional[dict] = None) -> None:
-        """Navigate by route name (the only way UI code builds routes)."""
+    def navigate_to(self, route_name: str, params: Optional[dict] = None, query: Optional[dict] = None, *,
+                    reset: bool = False) -> None:
+        """Navigate by route name (the only way UI code builds routes). A route opened over other
+        screens is pushed on top of them (back returns there); ``reset`` is drawer navigation."""
         try:
             route = build_route(route_name, params, query)
         except RouteError as exc:
             log.error("bad in-app route %s: %s", route_name, exc)
             return
-        self.dispatcher.spawn(self.navigate(route))
+        self.dispatcher.spawn(self.navigate(route, reset=reset))
 
     def _drawer_navigate(self, route_name: str) -> None:
-        self.navigate_to(route_name)
+        """A drawer / sidebar destination: the stack restarts from the route's static parents."""
+        self.navigate_to(route_name, reset=True)
 
     async def on_view_pop(self, e: Any) -> None:
         route = self.shell.pop_view(getattr(e, "view", None))
@@ -541,7 +589,7 @@ class GlossarionApp:
     def _on_status_chip(self, e: Any = None) -> None:
         block = self.state.send_block()
         if block is not None and block.fix_action == "sign_in_chatgpt":
-            self.navigate_to("settings.accounts")
+            self._drawer_navigate("settings.accounts")
         else:
             self.chat_view.open_model_sheet("model")
 
@@ -549,8 +597,8 @@ class GlossarionApp:
         sheet = ActionSheet(
             [
                 ActionItem("User guide", disabled_reason="Arrives with the bundled user guide", icon="MENU_BOOK"),
-                ActionItem("Logs & diagnostics", lambda: self.navigate_to("settings.logs"), icon="TERMINAL"),
-                ActionItem("About", lambda: self.navigate_to("settings.about"), icon="INFO_OUTLINE"),
+                ActionItem("Logs & diagnostics", lambda: self._drawer_navigate("settings.logs"), icon="TERMINAL"),
+                ActionItem("About", lambda: self._drawer_navigate("settings.about"), icon="INFO_OUTLINE"),
             ],
             title="Help",
             tablet=self.shell.tablet,

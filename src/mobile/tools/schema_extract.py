@@ -111,7 +111,13 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     "manga_settings_dialog.py",
     "epub_library.py",
     "library_core.py",      # epub_library's GUI-free half (re-imported by the Library)
+    "library_covers.py",    # U5: the rest of epub_library's GUI-free half (covers, reader, live view)
+    "reader_doc.py",
+    "live_stream.py",
     "Retranslation_GUI.py",
+    "progress_core.py",     # the Progress Manager's GUI-free half (Retranslation_GUI inherits it, U5)
+    "progress_actions.py",
+    "glossary_progress_core.py",
     "multi_api_key_manager.py",
 )
 EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py")
@@ -244,7 +250,13 @@ UI_SITE_ROOTS = (
     ("manga_settings_dialog.py", "*", "manga"),
     ("epub_library.py", "*", "library"),
     ("library_core.py", "*", "library"),
+    ("library_covers.py", "*", "library"),
+    ("reader_doc.py", "*", "library"),
+    ("live_stream.py", "*", "library"),
     ("Retranslation_GUI.py", "*", "progress"),
+    ("progress_core.py", "*", "progress"),
+    ("progress_actions.py", "*", "progress"),
+    ("glossary_progress_core.py", "*", "progress"),
     ("multi_api_key_manager.py", "*", "keys"),
 )
 UI_REACH_DEPTH = 3

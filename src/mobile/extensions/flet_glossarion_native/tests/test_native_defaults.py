@@ -508,3 +508,47 @@ def test_gradle_follows_builtin_kotlin_plugin_template():
 def test_job_service_id_matches_dart():
     dart = DART_SERVICE.read_text(encoding="utf-8")
     assert f"_kJobServiceId = {gn.JOB_SERVICE_NOTIFICATION_ID};" in dart
+
+
+def test_network_security_config_allows_cleartext_to_the_reader_server_only():
+    """U5 Reader: the WebView loads http://127.0.0.1:<port>/<token>/ (services/reader_server.py)."""
+    import tomllib
+
+    config = FLUTTER_PKG / "android" / "src" / "main" / "res" / "xml" / "glossarion_network_security_config.xml"
+    root = ET.parse(config).getroot()
+    assert root.tag == "network-security-config"
+    assert root.find("base-config") is None  # every other host keeps the platform default
+    permitted = set()
+    for domain_config in root.findall("domain-config"):
+        assert domain_config.get("cleartextTrafficPermitted") == "true"
+        for domain in domain_config.findall("domain"):
+            assert domain.get("includeSubdomains") == "false"
+            permitted.add(domain.text.strip())
+    assert permitted == {"127.0.0.1", "localhost"}
+
+    pyproject = tomllib.loads((ROOT.parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    application = pyproject["tool"]["flet"]["android"]["manifest_application"]
+    assert application == {"networkSecurityConfig": "@xml/" + config.stem}
+
+    server = (ROOT.parents[1] / "app" / "glossarion_mobile" / "services" / "reader_server.py").read_text(encoding="utf-8")
+    assert 'host: str = "127.0.0.1"' in server
+
+
+def test_verify_apk_checks_the_manifest_application_attributes():
+    sys.path.insert(0, str(ROOT.parents[1] / "ci"))
+    try:
+        import verify_apk
+    finally:
+        sys.path.pop(0)
+    names = verify_apk.manifest_application_expectations(ROOT.parents[1] / "pyproject.toml")
+    assert names == ["networkSecurityConfig"]
+    merged = (
+        "N: android=http://schemas.android.com/apk/res/android\n"
+        "  E: manifest (line=2)\n"
+        "    E: application (line=12)\n"
+        "      A: http://schemas.android.com/apk/res/android:label(0x01010001)=\"Glossarion\" (Raw: \"Glossarion\")\n"
+        "      A: http://schemas.android.com/apk/res/android:networkSecurityConfig(0x01010527)=@0x7f150001\n"
+    )
+    assert verify_apk.missing_application_attributes(verify_apk.parse_xmltree(merged), names) == []
+    bare = merged.replace("networkSecurityConfig", "icon")
+    assert verify_apk.missing_application_attributes(verify_apk.parse_xmltree(bare), names) == ["networkSecurityConfig"]
