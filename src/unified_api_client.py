@@ -11051,6 +11051,10 @@ class UnifiedClient:
                         
                         # Add some jitter and cap the wait time
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
+                        if self.client_type == "groq":
+                            groq_delay = self._groq_retry_after_seconds(e)
+                            if groq_delay is not None:
+                                wait_time = groq_delay + 1.0
                         
                         print(f"🔄 Rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt ∞)")
                         # Wait with cancellation check
@@ -11067,6 +11071,10 @@ class UnifiedClient:
                         # Always back off at least once even when indefinite retry is disabled
                         rate_limit_retry_count += 1
                         wait_time = 60
+                        if self.client_type == "groq":
+                            groq_delay = self._groq_retry_after_seconds(e)
+                            if groq_delay is not None:
+                                wait_time = groq_delay + 1.0
                         if self.client_type == "antigravity" and "quota exhausted" in error_str:
                             print(
                                 f"⏳ Antigravity quota exhausted; waiting {wait_time}s cooldown before "
@@ -11380,6 +11388,10 @@ class UnifiedClient:
                         
                         # Add some jitter and cap the wait time
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
+                        if self.client_type == "groq":
+                            groq_delay = self._groq_retry_after_seconds(e)
+                            if groq_delay is not None:
+                                wait_time = groq_delay + 1.0
                         
                         print(f"🔄 Unexpected rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt ∞)")
                         
@@ -11397,6 +11409,10 @@ class UnifiedClient:
                         continue  # Retry the attempt
                     else:
                         wait_time = 60
+                        if self.client_type == "groq":
+                            groq_delay = self._groq_retry_after_seconds(e)
+                            if groq_delay is not None:
+                                wait_time = groq_delay + 1.0
                         print(f"⚠️ Rate limited, sleeping {wait_time}s (single-key, indefinite retry disabled, rate-limit retry #{rate_limit_retry_count})")
                         wait_start = time.time()
                         while time.time() - wait_start < wait_time:
@@ -17176,6 +17192,52 @@ class UnifiedClient:
                 read = None
         return (connect, read)
 
+    def _groq_retry_after_seconds(self, error=None, response=None) -> Optional[float]:
+        """Read Groq's cooldown without rounding or capping long daily-limit waits."""
+        import math
+        import re
+
+        def valid_seconds(value):
+            try:
+                seconds = float(value)
+                return seconds if math.isfinite(seconds) and seconds >= 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        if response is None and error is not None:
+            response = getattr(error, 'response', None)
+        headers = getattr(response, 'headers', {}) or {}
+        header = headers.get('retry-after') or headers.get('Retry-After')
+        if header is not None:
+            seconds = valid_seconds(header)
+            if seconds is not None:
+                return seconds
+            # Retry-After also permits an HTTP date.
+            seconds = self._parse_retry_after(str(header))
+            if seconds > 0:
+                return float(seconds)
+
+        details = getattr(error, 'details', None)
+        if isinstance(details, dict):
+            seconds = valid_seconds(details.get('retry_after_seconds'))
+            if seconds is not None:
+                return seconds
+
+        message = str(error) if error is not None else ''
+        if response is not None:
+            message += ' ' + str(getattr(response, 'text', '') or '')
+        match = re.search(
+            r'please\s+try\s+again\s+in\s+((?:\d+(?:\.\d+)?\s*[hms]\s*)+)(?!\w)',
+            message, re.IGNORECASE,
+        )
+        if match:
+            seconds = sum(
+                float(value) * {'h': 3600, 'm': 60, 's': 1}[unit.lower()]
+                for value, unit in re.findall(r'(\d+(?:\.\d+)?)\s*([hms])', match.group(1), re.IGNORECASE)
+            )
+            return valid_seconds(seconds)
+        return None
+
     def _parse_retry_after(self, value: str) -> int:
         """Parse Retry-After header (seconds or HTTP-date) into seconds."""
         if not value:
@@ -17411,6 +17473,10 @@ class UnifiedClient:
                 
                 # Add jitter and cap wait time
                 wait_time = min(wait_time + random.uniform(1, 5), 300)  # Max 5 minutes
+                if provider == 'groq' and not ignore_retry_after:
+                    groq_delay = self._groq_retry_after_seconds(response=resp)
+                    if groq_delay is not None:
+                        wait_time = groq_delay + 1.0
                 
                 # During rate-limit waits, graceful stop should prevent any further retries from starting.
                 def _sleep_rate_limit(wait_seconds: float) -> None:
@@ -17444,6 +17510,12 @@ class UnifiedClient:
                     continue
                 
                 # If we reach here, indefinite retry is disabled and we've exhausted max_retries
+                if provider == 'groq':
+                    raise UnifiedClientError(
+                        f"{provider} rate limit: {_sanitize_for_log(resp.text, 300)}",
+                        error_type="rate_limit", http_status=429,
+                        details={"retry_after_seconds": self._groq_retry_after_seconds(response=resp)},
+                    )
                 raise UnifiedClientError(f"{provider} rate limit: {_sanitize_for_log(resp.text, 300)}", error_type="rate_limit", http_status=429)
 
             # Transient server errors with optional Retry-After
@@ -25936,6 +26008,11 @@ class UnifiedClient:
                     
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
                         # Preserve the full error message from OpenRouter/ElectronHub
+                        if provider == 'groq':
+                            raise UnifiedClientError(
+                                str(e), error_type="rate_limit", http_status=429,
+                                details={"retry_after_seconds": self._groq_retry_after_seconds(e)},
+                            ) from e
                         raise UnifiedClientError(str(e), error_type="rate_limit")
                     # Fallback: If SDK has trouble parsing OpenRouter response, retry via direct HTTP with full diagnostics
                     if provider == 'openrouter' and ("expecting value" in error_str or "json" in error_str):
