@@ -23,8 +23,6 @@ module only shapes the result for the cards:
 
 from __future__ import annotations
 
-from safe_image import open_image
-
 import difflib
 import json
 import os
@@ -139,6 +137,9 @@ def image_size(path: str) -> Optional[tuple]:
     size: Optional[tuple] = None
     try:
         from PIL import Image
+        # Backend module, imported here like every backend import in the app's pure modules
+        # (they must import without the backend on sys.path); no raw-Pillow fallback.
+        from safe_image import open_image
 
         with open_image(path) as image:
             width, height = image.size
