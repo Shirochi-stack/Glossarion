@@ -113,10 +113,17 @@ library itself does not declare:
 - **Android 15+ timeout.** Android 15 ends `dataSync` services after 6 h in
   any 24 h (`onTimeout`). That arrives as `type="timeout"`, `is_timeout=True`.
   Stop gracefully and post a "tap to resume" notification.
-- **Stop with task.** `stopWithTask="true"` is the plan's default (an open
-  question): swiping the app away stops the service, and jobs stay resumable.
-  If that changes, flip the manifest flag and the
-  `ForegroundTaskOptions.stopWithTask` value in `native_service.dart` together.
+- **Stop with task.** The manifest's `android:stopWithTask="true"` is the
+  plan's default: swiping the app away stops the service, and jobs stay
+  resumable. `ForegroundTaskOptions.stopWithTask` in `native_service.dart`
+  must stay unset (null). It is not the same switch: flutter_foreground_task
+  11.x then stops the service whenever no activity of the app is resumed
+  (`TrackVisibilityUtils`), i.e. on Home or as soon as the sign-in Custom Tab
+  opens, which leaves jobs and the OAuth loopback listener unprotected (the app
+  is cached and frozen, and the browser hangs on `http://localhost/...`).
+  With the option unset the library falls back to the manifest flag
+  (`onTaskRemoved` -> `stopSelf`), and the next start clears a value saved by
+  an older build.
 - **No auto-restart.** `allowAutoRestart` is false, because a restarted
   service would have no Python job behind it.
 - **Icon.** The service and `show_notification` use

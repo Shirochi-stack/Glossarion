@@ -362,16 +362,25 @@ CLAUDE_CODE_LOGIN_SCOPES = (
 OAuthSession = oauth_session.LoopbackOAuthSession
 
 
-def _bind_oauth_callback_server(handler_cls):
-    """Bind 127.0.0.1 on a free port in Claude Code's callback port range."""
+def _bind_oauth_callback_server(handler_cls, mobile: bool = False):
+    """Bind 127.0.0.1 on a free port in Claude Code's callback port range.
+
+    *mobile*: Glossarion Mobile's threaded listener with a read timeout
+    (``oauth_session.make_mobile_loopback_server``).
+    """
+    def make(address):
+        if mobile:
+            return oauth_session.make_mobile_loopback_server(address, handler_cls)
+        return HTTPServer(address, handler_cls)
+
     low, high = (39152, 49151) if os.name == "nt" else (49152, 65535)
     for _ in range(50):
         port = secrets.randbelow(high - low + 1) + low
         try:
-            return HTTPServer(("127.0.0.1", port), handler_cls)
+            return make(("127.0.0.1", port))
         except OSError:
             continue
-    return HTTPServer(("127.0.0.1", 0), handler_cls)
+    return make(("127.0.0.1", 0))
 
 
 def _authorize_query(code_challenge: str, state: str, redirect_uri: str) -> str:
@@ -404,7 +413,10 @@ class _AutomaticLoginCallbackHandler(BaseHTTPRequestHandler):
     A code with the right state is sent on to Anthropic's success page (or,
     with GLOSSARION_OAUTH_RETURN_URL set, to a page that returns to the app);
     anything else gets a plain-text error. Either way the session records the
-    callback, which ends the sign-in.
+    callback, which ends the sign-in. With GLOSSARION_OAUTH_RETURN_URL set
+    (Glossarion Mobile) it is recorded before the answer is written: the
+    answer can come late (the app was paused while the browser waited) and a
+    tab closed in the meantime must not lose the code.
     """
 
     def log_message(self, *_args):
@@ -427,27 +439,31 @@ class _AutomaticLoginCallbackHandler(BaseHTTPRequestHandler):
             code = query["code"][0]
         else:
             error = "no authorization code in the sign-in callback"
-        if code:
-            return_url = oauth_session.oauth_return_url()
-            if return_url:
-                body = oauth_session.oauth_return_page(return_url, "authcd", "&#10004; Claude signed in!").encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+        return_url = oauth_session.oauth_return_url()
+        if return_url:
+            # Glossarion Mobile: record first, then answer (a closed tab is not an error).
+            session._record_callback(code, query.get("state", [None])[0], error)
+            if code:
+                oauth_session.send_page_quietly(
+                    self, 200, oauth_session.oauth_return_page(return_url, "authcd", "&#10004; Claude signed in!"),
+                )
             else:
+                oauth_session.send_page_quietly(
+                    self, 400, f"Claude sign-in failed: {error}", "text/plain; charset=utf-8",
+                )
+        else:
+            if code:
                 self.send_response(302)
                 self.send_header("Location", CLAUDE_AI_SUCCESS_URL)
                 self.end_headers()
-        else:
-            body = f"Claude sign-in failed: {error}".encode("utf-8")
-            self.send_response(400)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        session._record_callback(code, query.get("state", [None])[0], error)
+            else:
+                body = f"Claude sign-in failed: {error}".encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            session._record_callback(code, query.get("state", [None])[0], error)
         if session.server_running:
             # Listeners serving on their own threads (begin_oauth): one callback ends the sign-in.
             threading.Thread(target=session.close, daemon=True).start()
@@ -490,7 +506,10 @@ def begin_oauth(
 
     code_verifier, code_challenge = generate_pkce()
     state = secrets.token_urlsafe(32)
-    server = _bind_oauth_callback_server(_AutomaticLoginCallbackHandler)
+    # Glossarion Mobile serves on its own threads (serve=True): a threaded listener
+    # with a read timeout, so an idle browser connection cannot hold back the redirect.
+    mobile = serve and oauth_session.is_mobile()
+    server = _bind_oauth_callback_server(_AutomaticLoginCallbackHandler, mobile=mobile)
     server.timeout = 0.5
     port = server.server_address[1]
     redirect_uri = f"http://localhost:{port}/callback"
@@ -507,7 +526,7 @@ def begin_oauth(
     try:
         session._add_server(server)
         if dual_stack:
-            server_v6 = oauth_session.make_ipv6_loopback_server(port, _AutomaticLoginCallbackHandler, 0.5)
+            server_v6 = oauth_session.make_ipv6_loopback_server(port, _AutomaticLoginCallbackHandler, 0.5, mobile=mobile)
             if server_v6 is not None:
                 session._add_server(server_v6)
         if serve:

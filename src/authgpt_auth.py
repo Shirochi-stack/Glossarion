@@ -31,7 +31,6 @@ import socket
 import sys
 import threading
 import webbrowser
-from html import escape as _html_escape
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, List, Tuple, Any
@@ -203,18 +202,13 @@ def extract_account_info(id_token: str) -> Dict:
 # Local callback server
 # ===========================================================================
 
-def _oauth_return_target(return_url: str) -> str:
-    """'<return_url>?p=authgpt' ('&p=authgpt' when it already has a query)."""
-    separator = "&" if "?" in return_url else "?"
-    return f"{return_url}{separator}p=authgpt"
-
-
 def _oauth_success_html() -> str:
     """HTML of the loopback /success page.
 
     When GLOSSARION_OAUTH_RETURN_URL is set (Glossarion Mobile) the page also
     sends the user back to the app: a button plus an automatic redirect to
-    '<return_url>?p=authgpt'. Desktop leaves it unset and gets the original page.
+    '<return_url>?p=authgpt' (``oauth_session.oauth_return_page``). Desktop
+    leaves it unset and gets the original page.
     """
     return_url = os.environ.get("GLOSSARION_OAUTH_RETURN_URL", "").strip()
     if not return_url:
@@ -224,21 +218,7 @@ def _oauth_success_html() -> str:
             "<p>You can close this tab and return to Glossarion.</p>"
             "</body></html>"
         )
-    target = _html_escape(_oauth_return_target(return_url), quote=True)
-    return (
-        "<html><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
-        "<body style='font-family:sans-serif;text-align:center;padding-top:60px'>"
-        "<h1>&#10004; Authenticated!</h1>"
-        "<p>Returning to Glossarion&hellip;</p>"
-        f"<p><a id='glossarion-return' href='{target}' "
-        "style='display:inline-block;margin-top:16px;padding:12px 20px;border-radius:20px;"
-        "background:#E18F98;color:#121826;text-decoration:none;font-weight:bold'>"
-        "Return to Glossarion</a></p>"
-        "<script>setTimeout(function(){location.href="
-        "document.getElementById('glossarion-return').href;},300);</script>"
-        "</body></html>"
-    )
+    return oauth_session.oauth_return_page(return_url, "authgpt")
 
 
 class _OAuthCallbackHandler(BaseHTTPRequestHandler):
@@ -267,6 +247,13 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
                     self.server._auth_code, self.server._returned_state, self.server._error
                 )
 
+            if oauth_session.oauth_return_url():
+                # Glossarion Mobile: the code is recorded above. Answer with the
+                # page itself (no second request the app has to serve) and do not
+                # fail when the tab was closed before this (late) answer.
+                self._send_mobile_callback_page(session)
+                return
+
             # Redirect to a friendly success page
             self.send_response(302)
             self.send_header("Location", f"http://{CALLBACK_HOST}:{self.server.server_port}/success")
@@ -286,6 +273,28 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _send_mobile_callback_page(self, session) -> None:
+        """GLOSSARION_OAUTH_RETURN_URL: the return-to-app page, or a plain error for a bad redirect.
+
+        Then the listeners stop, as after the /success page: the callback ends
+        the sign-in (``OAuthSession.wait()`` callers such as run_oauth_flow).
+        """
+        code, state, error = self.server._auth_code, self.server._returned_state, self.server._error
+        if error or not code:
+            problem = error or "no authorization code in the sign-in callback"
+        elif session is not None and state != session.state:
+            problem = "state mismatch in the sign-in callback"
+        else:
+            problem = None
+        if problem is None:
+            oauth_session.send_page_quietly(self, 200, _oauth_success_html())
+        else:
+            oauth_session.send_page_quietly(
+                self, 400, f"ChatGPT sign-in failed: {problem}", "text/plain; charset=utf-8"
+            )
+        stop = session.close if session is not None else self.server.shutdown
+        threading.Thread(target=stop, daemon=True).start()
 
 
 def _is_mobile() -> bool:
@@ -547,15 +556,24 @@ def begin_oauth(
     )
 
     try:
-        # Start local callback server
-        server = HTTPServer((CALLBACK_HOST, port), _OAuthCallbackHandler)
+        # Start local callback server. Glossarion Mobile gets the threaded
+        # listener with a read timeout: an idle browser connection must not
+        # hold back the redirect (oauth_session.make_mobile_loopback_server).
+        mobile = _is_mobile()
+        if mobile:
+            server = oauth_session.make_mobile_loopback_server((CALLBACK_HOST, port), _OAuthCallbackHandler)
+        else:
+            server = HTTPServer((CALLBACK_HOST, port), _OAuthCallbackHandler)
         server._auth_code = None
         server._returned_state = None
         server._error = None
         server.timeout = timeout
         session._add_server(server)
         if dual_stack:
-            server_v6 = _make_ipv6_loopback_server(port, timeout)
+            if mobile:
+                server_v6 = oauth_session.make_ipv6_loopback_server(port, _OAuthCallbackHandler, timeout, mobile=True)
+            else:
+                server_v6 = _make_ipv6_loopback_server(port, timeout)
             if server_v6 is not None:
                 session._add_server(server_v6)
         session._start(auto_close)

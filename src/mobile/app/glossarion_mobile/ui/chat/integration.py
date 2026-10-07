@@ -293,6 +293,12 @@ class ChatFeature:
                     self.chats.flush()
                 except Exception:
                     log.exception("flushing the chat history failed")
+            oauth_lifecycle = getattr(self.oauth, "on_lifecycle", None)
+            if callable(oauth_lifecycle):  # back from the browser with the sign-in still waiting
+                try:
+                    oauth_lifecycle(str(getattr(state, "value", state)))
+                except Exception:
+                    log.exception("sign-in lifecycle check failed")
             if original is not None:
                 result = original(e)
                 if hasattr(result, "__await__"):

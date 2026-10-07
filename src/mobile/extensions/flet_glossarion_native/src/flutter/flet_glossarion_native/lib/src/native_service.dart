@@ -453,8 +453,12 @@ class GlossarionNativeService extends FletService {
         allowWifiLock: a['wifi_lock'] != false,
         // A restarted service would have no Python job behind it.
         allowAutoRestart: false,
-        // Matches android:stopWithTask="true" in the merged manifest.
-        stopWithTask: true,
+        // stopWithTask stays unset (null): android:stopWithTask="true" in the
+        // merged manifest already stops the service when the app is swiped
+        // away. Setting it here makes flutter_foreground_task 11.x stop the
+        // service as soon as no activity of the app is resumed
+        // (TrackVisibilityUtils), i.e. when Home is pressed or the sign-in
+        // Custom Tab opens - which left the OAuth loopback unprotected.
       ),
     );
 

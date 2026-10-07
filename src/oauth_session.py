@@ -20,11 +20,15 @@ behaviour of authgpt's U1 code:
   end of every ``complete_from_redirect()``;
 * :func:`oauth_success_html` - the ``GLOSSARION_OAUTH_RETURN_URL`` seam of the
   loopback success pages;
+* :func:`make_mobile_loopback_server` / :func:`send_page_quietly` - Glossarion
+  Mobile's callback listeners (a thread per connection, a read timeout) and
+  callback answers that tolerate a browser tab closed in the meantime;
 * :func:`default_token_dir` - ``~/.glossarion``, or ``GLOSSARION_TOKEN_DIR``;
 * :func:`is_mobile`.
 
-Desktop sets neither ``GLOSSARION_OAUTH_RETURN_URL`` nor ``GLOSSARION_TOKEN_DIR``,
-so its success pages and token paths are unchanged.
+Desktop sets neither ``GLOSSARION_OAUTH_RETURN_URL`` nor ``GLOSSARION_TOKEN_DIR``
+and never asks for the mobile listeners, so its success pages, listeners and token
+paths are unchanged.
 
 Stdlib only (``token_encryption`` is imported lazily); Python 3.10; no Qt.
 """
@@ -35,7 +39,7 @@ import sys
 import threading
 import time
 from html import escape as _html_escape
-from http.server import HTTPServer
+from http.server import HTTPServer, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs
 
@@ -50,16 +54,20 @@ __all__ = [
     "finish_completion",
     "is_mobile",
     "make_ipv6_loopback_server",
+    "make_mobile_loopback_server",
     "oauth_return_page",
     "oauth_return_target",
     "oauth_return_url",
     "oauth_success_html",
     "parse_oauth_redirect",
     "resolve_completion",
+    "send_page_quietly",
     "session_of",
 ]
 
 PENDING_OAUTH_MAX_AGE_SECONDS = 3600  # saved PKCE/state for the paste fallback
+#: Glossarion Mobile listeners: seconds a connection may take to send its request line.
+MOBILE_REQUEST_TIMEOUT = 15.0
 
 
 # ===========================================================================
@@ -110,7 +118,11 @@ def oauth_return_page(return_url: str, provider: str, heading_html: str = "&#100
     """The success page that sends the browser back to the app.
 
     A button plus an automatic redirect to '<return_url>?p=<provider>' (the
-    page authgpt_auth serves when GLOSSARION_OAUTH_RETURN_URL is set).
+    page authgpt_auth serves when GLOSSARION_OAUTH_RETURN_URL is set). Nothing
+    depends on that custom-scheme redirect: the app already has the code from
+    the request this page answers and finishes the sign-in on its own, and the
+    page says the tab can simply be closed (Android Custom Tabs may refuse a
+    script-started jump to another app).
     """
     target = _html_escape(oauth_return_target(return_url, provider), quote=True)
     return (
@@ -118,15 +130,42 @@ def oauth_return_page(return_url: str, provider: str, heading_html: str = "&#100
         "<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
         "<body style='font-family:sans-serif;text-align:center;padding-top:60px'>"
         f"<h1>{heading_html}</h1>"
-        "<p>Returning to Glossarion&hellip;</p>"
+        "<p>Glossarion finishes the sign-in on its own. Returning to Glossarion&hellip;</p>"
         f"<p><a id='glossarion-return' href='{target}' "
         "style='display:inline-block;margin-top:16px;padding:12px 20px;border-radius:20px;"
         "background:#E18F98;color:#121826;text-decoration:none;font-weight:bold'>"
         "Return to Glossarion</a></p>"
+        "<p style='color:#666'>If the app does not open, close this page "
+        "(&#10005; or Done at the top) to go back to Glossarion.</p>"
         "<script>setTimeout(function(){location.href="
         "document.getElementById('glossarion-return').href;},300);</script>"
         "</body></html>"
     )
+
+
+def send_page_quietly(handler: Any, status: int, body: str,
+                      content_type: str = "text/html; charset=utf-8") -> bool:
+    """Answer a loopback callback request; False when the browser was already gone.
+
+    Glossarion Mobile: the answer can come late (the app was paused while the
+    browser waited) and the tab may have been closed in the meantime. That is
+    not an error - the caller records the callback *before* answering, so the
+    sign-in still finishes.
+    """
+    data = body.encode("utf-8")
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(data)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(data)
+        return True
+    except OSError as exc:  # BrokenPipe / ConnectionReset / ConnectionAborted / timeout
+        logger.info("OAuth callback: the browser closed the connection before the page was sent (%s)",
+                    type(exc).__name__)
+        handler.close_connection = True
+        return False
 
 
 def oauth_success_html(provider: str, default_html: str, heading_html: str = "&#10004; Authenticated!") -> str:
@@ -183,15 +222,55 @@ class _IPv6LoopbackServer(HTTPServer):
     address_family = socket.AF_INET6
 
 
-def make_ipv6_loopback_server(port: int, handler_cls: Any, timeout: Optional[float] = None) -> Optional[HTTPServer]:
+class _MobileLoopbackServer(ThreadingHTTPServer):
+    """Glossarion Mobile's callback listener: one thread per connection, and a
+    connection that has not sent its request line within
+    :data:`MOBILE_REQUEST_TIMEOUT` is dropped.
+
+    The desktop's single-threaded ``HTTPServer`` serves one connection at a time
+    with no read timeout, so one idle socket (a browser preconnect, a load the
+    user aborted) holds back the real redirect and the page just spins.
+    """
+
+    daemon_threads = True
+    request_timeout = MOBILE_REQUEST_TIMEOUT
+
+    def get_request(self):
+        sock, address = super().get_request()
+        try:
+            sock.settimeout(self.request_timeout)
+        except OSError:
+            pass
+        return sock, address
+
+
+class _MobileIPv6LoopbackServer(_MobileLoopbackServer):
+    address_family = socket.AF_INET6
+
+
+def make_mobile_loopback_server(address: Tuple[str, int], handler_cls: Any, ipv6: bool = False) -> HTTPServer:
+    """Glossarion Mobile's callback listener on *address* (see :class:`_MobileLoopbackServer`).
+
+    Raises OSError when the address cannot be bound, like ``HTTPServer``.
+    """
+    server_cls = _MobileIPv6LoopbackServer if ipv6 else _MobileLoopbackServer
+    return server_cls(address, handler_cls)
+
+
+def make_ipv6_loopback_server(port: int, handler_cls: Any, timeout: Optional[float] = None,
+                              mobile: bool = False) -> Optional[HTTPServer]:
     """A second callback listener on [::1]:*port*, or None when IPv6 (or the port) is unavailable.
 
-    Mobile browsers may resolve 'localhost' to ::1 before 127.0.0.1.
+    Mobile browsers may resolve 'localhost' to ::1 before 127.0.0.1. *mobile*
+    gives it Glossarion Mobile's threaded listener (:func:`make_mobile_loopback_server`).
     """
     if not getattr(socket, "has_ipv6", False):
         return None
     try:
-        server = _IPv6LoopbackServer(("::1", port), handler_cls)
+        if mobile:
+            server = make_mobile_loopback_server(("::1", port), handler_cls, ipv6=True)
+        else:
+            server = _IPv6LoopbackServer(("::1", port), handler_cls)
     except Exception:
         return None
     server._auth_code = None

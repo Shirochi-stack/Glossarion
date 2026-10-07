@@ -30,7 +30,7 @@ from glossarion_mobile.services.oauth import PROVIDER_INFO, PROVIDERS, OAuthBrid
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip
 from glossarion_mobile.ui.screens.base import Screen
@@ -132,6 +132,9 @@ class LoginPanel(ft.Column):
     except when a loopback sign-in of this slot is still saved (the app or its loopback
     listener was killed after the browser opened): starting again would replace the saved
     PKCE verifier and state, so the panel offers the paste first and "Start over".
+
+    While waiting, a ``SignInState.notice`` (the sign-in service is gone, the user came back
+    with no callback yet, the listener is gone) is shown and opens the paste field at once.
     """
 
     def __init__(
@@ -161,11 +164,15 @@ class LoginPanel(ft.Column):
         self.ring = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
         self.error_text = ft.Text("", color=ft.Colors.ERROR, theme_style=ft.TextThemeStyle.BODY_SMALL, visible=False,
                                   selectable=True)
+        # SignInState.notice: still waiting and maybe stuck (sign-in service gone, back in the app with no
+        # callback, listener gone); the paste field opens with it.
+        self.notice_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                   visible=False, key="sign-in-notice")
         self.start_button = ft.FilledButton(content=self.sign_in_label, on_click=self._start)
         self.reopen_button = ft.TextButton(content="Reopen browser", on_click=lambda e: self.oauth.reopen_browser())
         loopback = self.info.flow == "loopback"
         self.paste_field = ft.TextField(hint_text=self.info.paste_hint or PASTE_HINT, dense=True, visible=False,
-                                        multiline=False)
+                                        multiline=False, on_submit=self._finish_paste)
         self.paste_button = ft.TextButton(content="Paste redirect URL / code", on_click=self._toggle_paste,
                                           visible=loopback)
         # Claude: Anthropic's code page shows code#state to paste when the return to the app fails.
@@ -195,6 +202,7 @@ class LoginPanel(ft.Column):
         self.controls = [
             ft.Row([self.ring, self.step_text], spacing=8),
             self.error_text,
+            self.notice_text,
             self.device_box,
             ft.Row([self.start_button, self.reopen_button], wrap=True, spacing=8),
             self.manual_button,
@@ -293,12 +301,18 @@ class LoginPanel(ft.Column):
         self.reopen_button.visible = state.step == "waiting" and not device
         self.manual_button.visible = state.step == "waiting" and bool(state.manual_url)
         self.cancel_button.visible = busy
+        stalled = state.step == "waiting" and bool(state.notice) and not device
+        self.notice_text.visible = stalled
+        self.notice_text.value = state.notice if stalled else ""
         if self.info.flow != "loopback":
             self.paste_field.visible = False
             self.finish_button.visible = False
-        elif self.pending and idle:
+        elif (self.pending and idle) or stalled:
             self.paste_field.visible = True
             self.finish_button.visible = True
+        elif state.step == "done":
+            self.paste_field.visible = False
+            self.finish_button.visible = False
 
     def _on_state(self, state: SignInState) -> None:
         self.apply(state)
@@ -422,8 +436,9 @@ class LoginSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        # By identity: pop_dialog() would close a newer SnackBar (e.g. "Copied") instead of the sheet.
+        if self._page is not None:
+            close_dialog(self._page, self.dialog)
 
 
 class AccountsScreen(Screen):

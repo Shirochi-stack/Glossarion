@@ -1126,14 +1126,16 @@ def test_success_page_returns_to_the_app_when_return_url_set(authgpt, monkeypatc
     monkeypatch.setenv("GLOSSARION_OAUTH_RETURN_URL", "glossarion://app/oauth/return?x=1")
     assert "href='glossarion://app/oauth/return?x=1&amp;p=authgpt'" in authgpt._oauth_success_html()
 
-    # The live loopback page carries it too.
+    # The live loopback page carries it too. With the return URL set the callback itself is
+    # answered with it (no /success hop the app would also have to serve), and the callback
+    # ends the sign-in like the /success page does (run_oauth_flow's session.wait()).
     monkeypatch.setenv("GLOSSARION_OAUTH_RETURN_URL", "glossarion://app/oauth/return")
     store = authgpt.AuthGPTTokenStore(token_file=str(tmp_path / "t.json"))
     session = authgpt.begin_oauth(store, timeout=30)
     try:
-        _http_get("127.0.0.1", authgpt.CALLBACK_PORT, f"/auth/callback?code=c&state={session.state}")
-        status, _, body = _http_get("127.0.0.1", authgpt.CALLBACK_PORT, "/success")
+        status, _, body = _http_get("127.0.0.1", authgpt.CALLBACK_PORT, f"/auth/callback?code=c&state={session.state}")
         assert status == 200 and "glossarion://app/oauth/return?p=authgpt" in body
+        assert session.wait_for_callback(5) and session.wait(5) and not session.server_running
     finally:
         session.close()
 

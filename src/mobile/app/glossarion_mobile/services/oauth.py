@@ -26,14 +26,23 @@ Flow (``LoginSheet`` steps Opening browser -> Waiting for sign-in -> Exchanging 
    bootstrap routes to ``UrlLauncher.launch_url(mode=IN_APP_BROWSER_VIEW)`` (Custom
    Tabs / SFSafariViewController);
 2. on Android a short "Signing in…" foreground service keeps the process (and the
-   loopback server) alive while the browser is in front - only when no job service
-   is already running;
-3. the loopback success page redirects to ``glossarion://app/oauth/return?p=<provider>``
-   (``GLOSSARION_OAUTH_RETURN_URL``); the app routes it to ``on_return_link`` which
-   closes the iOS in-app browser;
-4. the waiter sees the callback and exchanges the code; or the user taps **Paste
-   redirect URL / code** and ``complete_with_paste`` finishes from the saved pending
-   state (works after the app or the loopback server was killed).
+   loopback server) alive while the browser is in front. Without it Android caches
+   and then freezes the app behind the Custom Tab: the kernel still accepts the
+   browser's connection to the loopback, nobody answers, and the page spins after
+   the account / organization is chosen. A running job service is shared
+   (``ServiceHolds``: whoever finishes last stops it). When the service is gone
+   once the browser is in front (checked after ``fgs_check_delay`` seconds and on
+   its ``destroyed`` event) the sign-in gets a ``notice`` and the LoginPanel shows
+   the paste field at once; **Reopen browser** then starts the service again first;
+3. the loopback answers the callback with a page that returns to the app
+   (``glossarion://app/oauth/return?p=<provider>``, ``GLOSSARION_OAUTH_RETURN_URL``)
+   and says the tab can be closed; nothing waits for that deep link (the app routes
+   it to ``on_return_link``, which closes the iOS in-app browser);
+4. the waiter sees the callback and exchanges the code at once; or the user taps
+   **Paste redirect URL / code** and ``complete_with_paste`` finishes from the saved
+   pending state (works after the app or the loopback server was killed). Coming
+   back to the app while the sign-in still waits (``on_lifecycle("resume")``) checks
+   the loopback listener and shows the paste field with a ``notice``.
 
 Account slots are the desktop's: slot 0 is ``<provider>_tokens.json``, slot N is
 ``<provider>_tokens_N.json`` (``get_store(N)``) and the routes ``authgptN/``,
@@ -60,6 +69,7 @@ import inspect
 import logging
 import os
 import re
+import socket
 import threading
 import time
 import webbrowser
@@ -78,11 +88,15 @@ __all__ = [
     "sign_in_satisfied",
     "sign_in_slot",
     "slot_key",
+    "stall_notice",
 ]
 
 log = logging.getLogger("glossarion.oauth")
 
 DEFAULT_TIMEOUT = 300  # seconds (authgpt run_oauth_flow default)
+SIGN_IN_HOLD = "sign-in"  # ServiceHolds name of a sign-in waiting in the browser
+FGS_CHECK_DELAY = 2.0  # seconds after opening the browser: is the sign-in service still running?
+RESUME_CHECK_DELAY = 1.0  # seconds after the app came back: a delayed callback lands first
 _AUTO = object()
 
 
@@ -138,6 +152,27 @@ STEP_LABELS = {
     "error": "Sign-in failed",
     "cancelled": "Sign-in cancelled",
 }
+
+_PASTE_ADDRESS = "paste the address of that page (…?code=…&state=…) below"
+_STALL_NOTICES = {
+    # The "Signing in…" foreground service did not start, or is gone while the browser is in front.
+    "service": ("Glossarion’s sign-in service is not running, so Android may pause Glossarion while the browser "
+                "is open and the page there may hang after you sign in. If it does, come back here: the sign-in "
+                f"usually finishes once Glossarion is open again. Otherwise {_PASTE_ADDRESS}."),
+    # The app came back to the front and no callback has arrived yet.
+    "waiting": f"Still waiting for the browser. If its page keeps loading or shows an error, {_PASTE_ADDRESS}.",
+    # The app came back and its loopback listener no longer accepts connections.
+    "listener": ("Glossarion stopped listening for the browser while it was in the background, so the page there "
+                 f"cannot finish. {_PASTE_ADDRESS[0].upper()}{_PASTE_ADDRESS[1:]}, or tap Cancel and sign in again."),
+}
+_MANUAL_NOTICE = " Claude can also show a code: tap “Get a code to paste instead” and paste the code#state it shows."
+
+
+def stall_notice(kind: str, provider: str = "authgpt", manual: bool = False) -> str:
+    """The LoginPanel notice for a loopback sign-in that may be stuck (``service`` / ``waiting`` /
+    ``listener``); *manual* adds Claude's code page."""
+    text = _STALL_NOTICES.get(kind, _STALL_NOTICES["waiting"])
+    return text + (_MANUAL_NOTICE if manual else "")
 
 _MODEL_PATTERNS = (
     ("authgpt", re.compile(r"^authgpt(\d{0,4})$")),
@@ -259,6 +294,7 @@ class SignInState:
     user_code: str = ""  # device-code flow (Grok)
     verification_uri: str = ""
     manual_url: str = ""  # Claude: the code page (code#state to paste)
+    notice: str = ""  # waiting, but maybe stuck: the LoginPanel shows this and the paste field
 
     @property
     def busy(self) -> bool:
@@ -288,6 +324,8 @@ class OAuthBridge:
         is_android: bool = False,
         config_get: Optional[Callable[[str, Any], Any]] = None,
         safe_root: Any = _AUTO,
+        fgs_check_delay: float = FGS_CHECK_DELAY,
+        resume_check_delay: float = RESUME_CHECK_DELAY,
     ) -> None:
         self._modules: dict[str, Any] = dict(auth_modules or {})
         if auth_module is not None:
@@ -301,16 +339,29 @@ class OAuthBridge:
         self.is_android = is_android
         self.config_get = config_get  # MobileConfigStore.get (slots from the model / key pools)
         self._safe_root = safe_root
+        self.fgs_check_delay = fgs_check_delay
+        self.resume_check_delay = resume_check_delay
         self.state = SignInState()
         self._listeners: list = []
         self._session: Any = None
         self._cancel = threading.Event()
         self._lock = threading.RLock()
-        self._fgs_started = False
+        self._fgs_started = False  # this sign-in started the foreground service
+        self._fgs_held = False  # this sign-in relies on the foreground service (started or shared)
+        self._fgs_failed = False  # Android: the sign-in service could not be started
+        self._watch_task: Any = None  # checks the sign-in service once the browser is in front
+        self._reopen_task: Any = None
+        self._resume_task: Any = None
         self._pasting = False
         self._paste_claimed = False
         self.signed_in: set = set()
         self.pending_slots: dict[str, set] = {}  # "+ Add account" slots not signed in yet
+        add_listener = getattr(native, "add_listener", None)
+        if callable(add_listener):
+            try:
+                add_listener("foreground", self._on_foreground_event)
+            except Exception:
+                log.debug("listening for foreground-service events failed", exc_info=True)
 
     # ---- plumbing ------------------------------------------------------------------------
 
@@ -535,7 +586,7 @@ class OAuthBridge:
         self._pasting = False
         self._paste_claimed = False
         self._set(provider=provider, step="opening", message="", account_id=account_id, auth_url="",
-                  email="", plan="", user_code="", verification_uri="", manual_url="")
+                  email="", plan="", user_code="", verification_uri="", manual_url="", notice="")
         if info.flow == "device":
             return await self._sign_in_device(provider, account_id)
         try:
@@ -553,12 +604,15 @@ class OAuthBridge:
         self._set(step="waiting", auth_url=str(getattr(session, "auth_url", "") or ""),
                   manual_url=str(getattr(session, "manual_auth_url", "") or ""))
         self._open(self.state.auth_url)
+        if self._fgs_failed:
+            self._flag_stalled("service")
+        self._watch_task = asyncio.ensure_future(self._watch_fgs()) if self._fgs_held else None
         try:
             received = await self._io(self._wait_for_callback, session)
             if self._cancel.is_set():
                 if self._paste_claimed:
                     return {}  # complete_with_paste finishes (and reports) this sign-in
-                self._close_session()
+                await self._io(self._close_session)  # off the UI loop: stopping a listener takes up to 0.5 s
                 self._set(step="cancelled", message="")
                 await self._stop_fgs()
                 return {}
@@ -567,10 +621,14 @@ class OAuthBridge:
             self._set(step="exchanging")
             await self._io(module.complete_from_redirect, session)
         except Exception as exc:
-            self._close_session()
+            await self._io(self._close_session)
             self._set(step="error", message=str(exc))
             await self._stop_fgs()
             raise
+        finally:
+            watch, self._watch_task = self._watch_task, None
+            if watch is not None:
+                watch.cancel()
         return await self._finished(account_id, provider)
 
     def _begin_loopback(self, provider: str, account_id: int) -> tuple:
@@ -661,7 +719,7 @@ class OAuthBridge:
         return False
 
     async def _finished(self, account_id: int, provider: str = "authgpt") -> dict:
-        self._close_session()
+        await self._io(self._close_session)
         status = await self._io(self.status, account_id, provider)
         self._set(step="done", message="", email=status.get("email", "") or status.get("name", ""),
                   plan=status.get("plan", ""))
@@ -680,8 +738,31 @@ class OAuthBridge:
         url = self.state.auth_url or getattr(self._session, "auth_url", "")
         if not url:
             return False
+        if self._service_missing():
+            # Android: the sign-in service is gone (the app is in front again, so it may start now):
+            # restart it before the browser covers the app once more.
+            try:
+                self._reopen_task = asyncio.get_running_loop().create_task(self._restart_fgs_then_open(url))
+                return True
+            except RuntimeError:
+                pass
         self._open(url)
         return True
+
+    def _service_missing(self) -> bool:
+        state = self.state
+        return (self.is_android and self.native is not None and not self._fgs_held
+                and state.step == "waiting" and not state.device)
+
+    async def _restart_fgs_then_open(self, url: str) -> None:
+        await self._start_fgs(self.info(self.state.provider))
+        if self.state.step != "waiting":
+            await self._stop_fgs()  # the sign-in ended meanwhile
+            return
+        if self._fgs_held:
+            self._set(notice="")
+            self._watch_task = asyncio.ensure_future(self._watch_fgs())
+        self._open(url)
 
     def open_manual_page(self) -> bool:
         """Claude: open the code page (shows ``code#state``) of the sign-in in progress."""
@@ -887,23 +968,191 @@ class OAuthBridge:
             log.debug("seeding the AuthGem project cache failed", exc_info=True)
 
     # ---- Android short sign-in FGS -------------------------------------------------------------
+    #
+    # While the browser is in front the app's activity is stopped. Without a foreground
+    # service Android makes the process "previous", then cached (60 s, or at once when the
+    # user switches to another app to read a code) and freezes it 10 s later: the loopback
+    # socket still accepts the browser's connection but no thread answers, so the page
+    # spins with no error. The service keeps the process perceptible (never frozen).
+
+    def _holds(self) -> Any:
+        from glossarion_mobile.services.native import service_holds
+
+        return service_holds(self.native)
 
     async def _start_fgs(self, info: Optional[ProviderInfo] = None) -> None:
+        self._fgs_started = False
+        self._fgs_held = False
+        self._fgs_failed = False
         if not self.is_android or self.native is None:
             return
         label = info.label if info is not None else "ChatGPT"
+        title, text = f"Signing in to {label}", "Waiting for sign-in…"
+        holds = self._holds()
         try:
             if await self.native.is_job_service_running():
-                return  # a translation already holds the foreground service
-            self._fgs_started = bool(await self.native.start_job_service(f"Signing in to {label}", "Waiting for sign-in…"))
+                if holds is None:
+                    return  # a translation already holds the foreground service
+                # Share the job's service: its end must not stop it while the browser is open.
+                holds.hold(SIGN_IN_HOLD, title, text)
+                self._fgs_held = True
+                return
+            started = bool(await self.native.start_job_service(title, text))
         except Exception as exc:
-            log.info("sign-in foreground service unavailable: %s", exc)
+            log.warning("sign-in foreground service unavailable: %s (Android may pause Glossarion while "
+                        "the browser is open)", exc)
+            self._fgs_failed = True
+            return
+        if not started:
+            log.warning("the sign-in foreground service did not start; Android may pause Glossarion while "
+                        "the browser is open")
+            self._fgs_failed = True
+            return
+        self._fgs_started = True
+        self._fgs_held = True
+        if holds is not None:
+            holds.hold(SIGN_IN_HOLD, title, text)
 
     async def _stop_fgs(self) -> None:
-        if not self._fgs_started or self.native is None:
-            return
+        held, started = self._fgs_held, self._fgs_started
+        self._fgs_held = False
         self._fgs_started = False
+        if not held or self.native is None:
+            return
+        holds = self._holds()
+        if holds is not None:
+            remaining = holds.release(SIGN_IN_HOLD)
+            if remaining is not None:
+                # A job still needs the service: give it back its notification.
+                title, text = remaining
+                try:
+                    await self.native.update_job_service(text=text, title=title)
+                except Exception:
+                    pass
+                return
+        elif not started:
+            return
         try:
             await self.native.stop_job_service()
         except Exception:
             pass
+
+    async def _watch_fgs(self) -> None:
+        """Once the browser is in front: is the sign-in service still running? (A build whose service
+        stopped as soon as the app's activity paused left the loopback unprotected.)"""
+        await asyncio.sleep(self.fgs_check_delay)
+        if not self._fgs_held or self.state.step != "waiting":
+            return
+        try:
+            running = bool(await self.native.is_job_service_running())
+        except Exception:
+            return
+        if not running and self._fgs_held:
+            self._service_lost("not running once the browser was open")
+
+    def _service_lost(self, reason: str) -> None:
+        log.warning("the sign-in foreground service is gone (%s): Android may freeze Glossarion while the "
+                    "browser is open, and the browser then hangs on the sign-in redirect", reason)
+        self._fgs_held = False
+        self._fgs_started = False
+        holds = self._holds()
+        if holds is not None:
+            holds.release(SIGN_IN_HOLD)
+        self._flag_stalled("service")
+
+    def _owns_service_alone(self) -> bool:
+        if not self._fgs_held:
+            return False
+        holds = self._holds()
+        if holds is None:
+            return self._fgs_started
+        return holds.names() == [SIGN_IN_HOLD]
+
+    async def _on_foreground_event(self, event: Mapping[str, Any]) -> None:
+        """Foreground-service events (UI loop): the service died, or its notification's Stop was tapped."""
+        if not isinstance(event, Mapping):
+            return
+        kind = str(event.get("type") or "")
+        if kind in ("destroyed", "timeout"):
+            if not self._fgs_held:
+                return
+            # Every stop ends with "destroyed": a late one (an earlier sign-in's or job's service) must not
+            # count against a service that runs again.
+            try:
+                running = bool(await self.native.is_job_service_running())
+            except Exception:
+                running = False
+            if not running and self._fgs_held:
+                self._service_lost(f"service {kind}")
+        elif kind == "button" and str(event.get("button_id") or "") == "stop":
+            if self.state.busy and self._owns_service_alone():
+                log.info("sign-in cancelled from the notification")
+                self.cancel()
+
+    def _flag_stalled(self, kind: str) -> None:
+        """Waiting, but maybe stuck: set the notice (the LoginPanel then shows the paste field)."""
+        with self._lock:
+            state = self.state
+            session = self._session
+        if state.step != "waiting" or state.device or self.info(state.provider).flow != "loopback":
+            return
+        if session is not None and getattr(session, "callback_received", False):
+            return
+        self._set(notice=stall_notice(kind, state.provider, bool(state.manual_url)))
+
+    # ---- app lifecycle ---------------------------------------------------------------------------
+
+    def on_lifecycle(self, name: Any) -> None:
+        """App lifecycle change (UI loop). Back in the app while a loopback sign-in still waits:
+        a moment later (a delayed callback lands first) check the listener and point at the paste."""
+        if str(getattr(name, "value", name) or "").lower() != "resume":
+            return
+        state = self.state
+        if state.step != "waiting" or state.device:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = self._resume_task
+        if task is not None and not task.done():
+            return
+        self._resume_task = loop.create_task(self._after_resume())
+
+    async def _after_resume(self) -> None:
+        await asyncio.sleep(self.resume_check_delay)
+        with self._lock:
+            session = self._session
+            step = self.state.step
+        if session is None or step != "waiting" or getattr(session, "callback_received", False):
+            return
+        try:
+            alive = bool(await self._io(self._listener_alive, session))
+        except Exception:
+            alive = True
+        if not alive:
+            log.warning("the sign-in loopback listener no longer accepts connections")
+        self._flag_stalled("waiting" if alive else "listener")
+
+    @staticmethod
+    def _listener_alive(session: Any) -> bool:
+        """Worker thread: does one of the session's loopback listeners still accept a connection?"""
+        servers = list(getattr(session, "_servers", None) or ())
+        if not servers:
+            return True  # nothing to probe
+        if not getattr(session, "server_running", True):
+            return False
+        for server in servers:
+            try:
+                family = server.address_family
+                address = tuple(server.server_address)[:2]
+            except Exception:
+                continue
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(1.0)
+                    probe.connect(address)
+                return True
+            except OSError:
+                continue
+        return False

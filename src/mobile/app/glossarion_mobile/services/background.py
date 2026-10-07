@@ -28,7 +28,9 @@ iOS
 
 Queued jobs inherit the running job's foreground service, background grant
 and continued-processing task (Android refuses to start a foreground service
-from the background), so they are only released when the queue drains.
+from the background), so they are only released when the queue drains. The
+service is shared with a sign-in waiting in the browser (``OAuthBridge``)
+through the bridge's ``ServiceHolds``: the last one to finish stops it.
 
 Both: ``Wakelock`` while a job runs when "Keep screen on during jobs" is on
 (Prefs ``keep_screen_on_during_jobs``; default on for iOS, off on Android
@@ -47,6 +49,8 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
+from glossarion_mobile.services.native import service_holds
+
 __all__ = [
     "BackgroundExecution",
     "CONTINUED_ID_PREFIX",
@@ -63,6 +67,7 @@ PREF_BATTERY_PROMPT = "jobs_battery_prompt_done"
 PREF_NOTIFICATION_ASKED = "jobs_notification_permission_asked"
 PREF_KEEP_SCREEN_ON = "keep_screen_on_during_jobs"
 UPDATE_INTERVAL = 1.0  # seconds between foreground-service / Live Activity updates
+JOBS_HOLD = "jobs"  # ServiceHolds name of the job runner
 
 #: UI_SPEC §7.6: shown on iOS where jobs start (Jobs page, Plan card).
 IOS_BACKGROUND_NOTICE = (
@@ -260,6 +265,9 @@ class BackgroundExecution:
                                              buttons=[{"id": "stop", "text": "Stop"}, {"id": "open", "text": "Open"}])
                 self.service_running = bool(started)
             self.service_job = snap.id
+            holds = service_holds(self.native)
+            if holds is not None and self.service_running:
+                holds.hold(JOBS_HOLD, "Glossarion", text)
         elif self.is_ios and self.bg_task_id < 0:
             task_id = await self._native("begin_background_task", f"job-{snap.id}", default=-1,
                                          expiration_title="Glossarion paused",
@@ -293,6 +301,9 @@ class BackgroundExecution:
         self._last_update = now
         self._last_text = text
         if self.is_android and self.service_running:
+            holds = service_holds(self.native)
+            if holds is not None:
+                holds.hold(JOBS_HOLD, "Glossarion", text)  # what to show again after a sign-in releases it
             await self._native("update_job_service", title="Glossarion", text=text)
             return True
         if self.is_ios and self.continued_started:
@@ -311,7 +322,14 @@ class BackgroundExecution:
                 await self._native("update_job_service", title="Glossarion", text="Starting the next job…")
             return  # the next queued job inherits the service / background grant / wakelock
         if self.is_android and (self.service_running or self.service_job == snap.id):
-            await self._native("stop_job_service")
+            holds = service_holds(self.native)
+            remaining = holds.release(JOBS_HOLD) if holds is not None else None
+            if remaining is not None:
+                # A sign-in waiting in the browser still needs the service: keep it, with its notification.
+                title, text = remaining
+                await self._native("update_job_service", title=title, text=text)
+            else:
+                await self._native("stop_job_service")
             self.service_running = False
             self.service_job = None
         if self.is_ios:
@@ -360,6 +378,12 @@ class BackgroundExecution:
             if snap is not None and self.navigate_route is not None:
                 self.navigate_route(f"/job/{snap.id}")
             return
+        if kind in ("timeout", "destroyed"):
+            holds = service_holds(self.native)
+            # Every stop ends with "destroyed"; a late one may follow a service that already runs again.
+            if holds is not None and JOBS_HOLD in holds and not await self._native("is_job_service_running",
+                                                                                    default=False):
+                holds.release(JOBS_HOLD)  # the service is gone (OAuthBridge drops its own hold too)
         if kind == "timeout" or (kind == "destroyed" and event.get("is_timeout")):
             self.service_running = False
             if snap is not None and self.jobs is not None:

@@ -10,7 +10,9 @@ so they are registered before the Dart service starts.
 ``NativeBridge`` wraps either one: it normalises results and event payloads to
 plain dicts/lists, applies an outer timeout to every native call (a Dart side
 that never answers must not hang the UI), and fans events out to Python
-callbacks.
+callbacks. Its ``service_holds`` (``ServiceHolds``) records who needs the
+Android foreground service (jobs, a sign-in waiting in the browser), so one of
+them finishing never stops the service under the other.
 
 The extension is imported lazily: importing this module never imports
 ``flet_glossarion_native``.
@@ -28,7 +30,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 log = logging.getLogger("glossarion.native")
 
-__all__ = ["NativeStub", "NativeBridge", "create_native", "load_extension", "to_plain"]
+__all__ = ["NativeStub", "NativeBridge", "ServiceHolds", "create_native", "load_extension", "service_holds", "to_plain"]
 
 EVENTS = ("share", "foreground", "background_task", "notification")
 # Outer guard only; the extension applies its own per-call timeouts (20-30 s).
@@ -182,11 +184,52 @@ def _make_type(type_name: str, **values: Any) -> Any:
         return dict(values)
 
 
+class ServiceHolds:
+    """Who needs the Android foreground service right now, with the notification each one shows.
+
+    The service is one per app: the job runner (``BackgroundExecution``) and a sign-in
+    waiting in the browser (``OAuthBridge``) share it. Each ``hold``s it while it needs it
+    and ``release``s it when done; whoever releases last stops the service, anyone else
+    gets the remaining holder's notification back. Loop-thread only (no locking).
+    """
+
+    def __init__(self) -> None:
+        self._holds: dict = {}
+
+    def hold(self, name: str, title: str, text: str) -> None:
+        """Add (or refresh the notification of) holder *name*."""
+        self._holds.pop(name, None)
+        self._holds[name] = (str(title), str(text))
+
+    def release(self, name: str) -> Optional[tuple]:
+        """Drop *name*; the ``(title, text)`` of the most recent remaining holder, or None when none is left."""
+        self._holds.pop(name, None)
+        if not self._holds:
+            return None
+        return list(self._holds.values())[-1]
+
+    def names(self) -> list:
+        return list(self._holds)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._holds
+
+    def __len__(self) -> int:
+        return len(self._holds)
+
+
+def service_holds(native: Any) -> Optional[ServiceHolds]:
+    """The ``ServiceHolds`` of a native bridge, or None (stubs and test fakes without one)."""
+    holds = getattr(native, "service_holds", None)
+    return holds if isinstance(holds, ServiceHolds) else None
+
+
 class NativeBridge:
     """Timeout-guarded, normalising wrapper around ``GlossarionNative``/``NativeStub``."""
 
     def __init__(self, page: Any = None, *, native: Any = None, timeout: float = DEFAULT_TIMEOUT) -> None:
         self.timeout = timeout
+        self.service_holds = ServiceHolds()
         self._listeners: dict[str, list[Callable[[dict], Any]]] = {name: [] for name in EVENTS}
         handlers = {f"on_{name}": self._make_handler(name) for name in EVENTS}
         if native is None:
