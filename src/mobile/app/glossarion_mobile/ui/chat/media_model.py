@@ -23,6 +23,8 @@ module only shapes the result for the cards:
 
 from __future__ import annotations
 
+from safe_image import open_image
+
 import difflib
 import json
 import os
@@ -138,7 +140,7 @@ def image_size(path: str) -> Optional[tuple]:
     try:
         from PIL import Image
 
-        with Image.open(path) as image:
+        with open_image(path) as image:
             width, height = image.size
         if width > 0 and height > 0:
             size = (int(width), int(height))

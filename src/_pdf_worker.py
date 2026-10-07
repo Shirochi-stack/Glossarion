@@ -8,6 +8,8 @@ Protocol:
   - The config file contains all parameters needed for PDF generation
 """
 
+from safe_image import open_image
+
 import sys
 import os
 import io
@@ -435,7 +437,7 @@ def _run_pdf_generation(config_path):
                     if compression_enabled:
                         # ALL images → JPEG
                         quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
-                        with Image.open(fpath) as img:
+                        with open_image(fpath) as img:
                             if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
                                 bg = Image.new('RGB', img.size, (255, 255, 255))
                                 if img.mode != 'RGBA':
@@ -450,7 +452,7 @@ def _run_pdf_generation(config_path):
                         rel_path = f"_pdf_images/{out_name}"
                     elif ctype == 'image/webp':
                         # WebP → PNG (lossless)
-                        with Image.open(fpath) as img:
+                        with open_image(fpath) as img:
                             if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
                                 img = img.convert('RGBA')
                             out_name = base_name + '.png'
@@ -510,7 +512,7 @@ def _run_pdf_generation(config_path):
                     from PIL import Image
                     quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
                     base_name = os.path.splitext(os.path.basename(fpath))[0]
-                    with Image.open(fpath) as img:
+                    with open_image(fpath) as img:
                         if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
                             img = img.convert('RGBA')
                         out_name = base_name + '.webp'

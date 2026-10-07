@@ -4,6 +4,8 @@ Glossarion Web - Gradio Web Interface
 AI-powered translation in your browser
 """
 
+from safe_image import open_image
+
 import gradio as gr
 import os
 import sys
@@ -2862,7 +2864,7 @@ class GlossarionWeb:
                         
                         # If translation failed, save original with error overlay
                         from PIL import Image as PILImage, ImageDraw, ImageFont
-                        img = PILImage.open(input_path)
+                        img = open_image(input_path)
                         draw = ImageDraw.Draw(img)
                         # Add error message
                         draw.text((10, 10), f"Translation Error: {error_msg[:50]}", fill="red")
@@ -2879,7 +2881,7 @@ class GlossarionWeb:
                     # Save original on error
                     try:
                         from PIL import Image as PILImage
-                        img = PILImage.open(input_path)
+                        img = open_image(input_path)
                         img.save(output_path)
                         translated_files.append(output_path)
                     except:

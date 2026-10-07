@@ -78,7 +78,7 @@ jobs:
           python -m pip install --upgrade pip
           # sentence-transformers also needs torch in the non-NoCuda build environments.
           # Preinstall CPU wheels to avoid downloading CUDA dependencies.
-          python -m pip install --no-cache-dir torch==2.10.0+cpu torchvision==0.25.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --no-cache-dir torch==2.13.0+cpu torchvision==0.28.0+cpu --index-url https://download.pytorch.org/whl/cpu
           python -m pip install --no-cache-dir -r "$REQUIREMENTS_FILE"
 
       - name: Install NoCuda OCR models

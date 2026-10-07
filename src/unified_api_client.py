@@ -128,6 +128,8 @@ Note: Many Chinese model providers (Yi, Qwen, Baichuan, etc.) may require
 API keys from their respective platforms. Some endpoints might need adjustment
 based on your region or deployment.
 """
+
+from safe_image import open_image
 import sys
 import os
 from reasoning_compatibility import (
@@ -12740,7 +12742,7 @@ class UnifiedClient:
             import io as _io
             from PIL import Image as _Image
 
-            img = _Image.open(_io.BytesIO(raw))
+            img = open_image(_io.BytesIO(raw))
             if img.mode not in ('RGB', 'L'):
                 bg = _Image.new('RGB', img.size, (255, 255, 255))
                 if 'A' in img.getbands():
@@ -29962,7 +29964,7 @@ class UnifiedClient:
                 return data_url
 
             raw = _b64.b64decode(b64_data)
-            img = _Image.open(_io.BytesIO(raw))
+            img = open_image(_io.BytesIO(raw))
             if img.mode not in ('RGB', 'L'):
                 bg = _Image.new('RGB', img.size, (255, 255, 255))
                 if 'A' in img.getbands():
@@ -30120,7 +30122,7 @@ class UnifiedClient:
             if not source_size or len(source_size) != 2:
                 return
             from PIL import Image as _Image
-            with _Image.open(out_path) as img:
+            with open_image(out_path) as img:
                 if tuple(img.size) == tuple(source_size):
                     return
                 resized = img.resize(tuple(source_size), _Image.Resampling.LANCZOS)

@@ -62,6 +62,18 @@ python app/main.py                         # same, without the flet CLI
 
 ### Host checks
 
+The security pins require Pillow 12.3.0 and cryptography 50.0.2. The lockfile
+resolves on desktop hosts. As of 7 October 2026, the current PyPI/Flet indexes
+provide Pillow 12.3.0 for iOS, but not the configured Android targets, and do
+not provide cryptography 50.0.2 for Android or iOS. Device builds therefore
+fail the existing wheel check until compatible patched wheels are supplied.
+Do not downgrade these pins or bypass the wheel check to make a release.
+
+Untrusted Pillow image reads use `safe_image.open_image`, which restricts
+parsers before opening headers. EPS, JPEG2000 and McIdas input is rejected;
+ordinary PNG/JPEG/WebP/GIF/BMP/TIFF inputs and Pillow's pixel-bomb guard remain
+supported. This protection complements the package updates.
+
 ```bash
 cd src/mobile
 python -m pytest -p no:cacheprovider tests_host -q        # bootstrap, router, self-test, offline page build

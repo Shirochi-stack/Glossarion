@@ -3,7 +3,7 @@
 pyinstaller
 pyinstaller-hooks-contrib
 ttkbootstrap
-pillow<12.0
+pillow>=12.3.0
 beautifulsoup4
 lxml
 html5lib
@@ -92,21 +92,23 @@ azure-identity
 
 # YOLO Bubble Detection
 onnxruntime
-ultralytics
+ultralytics; platform_machine == "arm64"
 lap>=0.5.12 
 
 # Inpainting
 replicate
 
-# PyTorch (macOS - no +cpu suffix needed)
-torch
-torchvision
+# Patched PyTorch wheels require Apple Silicon and macOS 14+.
+# Intel builds retain ONNX inference; PyTorch features and PT-to-ONNX conversion
+# are optional and omitted rather than resolving an old vulnerable torch wheel.
+torch==2.13.0; platform_machine == "arm64"
+torchvision==0.28.0; platform_machine == "arm64"
 safetensors
 transformers
 huggingface-hub<1.0.0
 
 # Encryption/Decryption
-cryptography
+cryptography>=50.0.2
 
 # Version management
 packaging

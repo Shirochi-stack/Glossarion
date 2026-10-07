@@ -30,6 +30,8 @@ Log records keep the ``epub_library`` logger name so desktop log routing is unch
 Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup.
 """
 
+from safe_image import open_image
+
 import hashlib
 import io
 import logging
@@ -232,7 +234,7 @@ def _probe_image_size(data: bytes):
         return None
     try:
         from PIL import Image
-        with Image.open(io.BytesIO(data)) as image:
+        with open_image(io.BytesIO(data)) as image:
             if str(image.format or "").upper() not in _QT_SNIFFED_FORMATS:
                 return None
             return tuple(image.size)
@@ -266,7 +268,7 @@ def _image_bytes_decodable(data: bytes) -> bool:
         Image = None
     if Image is not None:
         try:
-            image = Image.open(io.BytesIO(data))
+            image = open_image(io.BytesIO(data))
         except Exception:
             return False
         with image:

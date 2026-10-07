@@ -10,6 +10,8 @@ and writes JSON results to stdout (one per line). A blank/empty line or
 EOF signals shutdown.
 """
 
+from safe_image import open_image
+
 import os
 import sys
 import json
@@ -36,7 +38,7 @@ def _compress_single_image(images_dir, original_name, safe_name, quality, is_gif
 
         if is_gif:
             # Compress GIF in place
-            im = Image.open(img_path)
+            im = open_image(img_path)
             if hasattr(im, 'n_frames') and im.n_frames > 1:
                 frames = []
                 try:
@@ -64,7 +66,7 @@ def _compress_single_image(images_dir, original_name, safe_name, quality, is_gif
             webp_name = os.path.splitext(safe_name)[0] + '.webp'
             webp_path = os.path.join(images_dir, os.path.splitext(original_name)[0] + '.webp')
 
-            im = Image.open(img_path)
+            im = open_image(img_path)
             if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
                 im = im.convert('RGBA')
             elif im.mode != 'RGB':

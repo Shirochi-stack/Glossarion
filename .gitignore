@@ -167,6 +167,7 @@ tests/**
 # Mobile rewrite (U1+): desktop-parity tests for mobile_runtime, the shared GUI-free modules and
 # the backend mobile-compat patches (python-app.yml runs them on Python 3.10).
 !tests/test_mobile_runtime.py
+!tests/test_safe_image.py
 !tests/test_mobile_compat_patches_core.py
 !tests/test_mobile_compat_patches_io.py
 !tests/test_mobile_compat_patches_api.py
@@ -220,3 +221,6 @@ tests/**
 !tests/test_u7_tool_cores.py
 junktests/
 warp.md
+
+# Security dependency release notes
+!docs/security-dependency-upgrade.txt

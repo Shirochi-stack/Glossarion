@@ -1,3 +1,5 @@
+
+from safe_image import open_image
 # TransateKRtoEN.py
 # -*- coding: utf-8 -*-
 import json
@@ -15290,7 +15292,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         if combined_ocr_header:
             try:
                 from PIL import Image as PILImage
-                with PILImage.open(img_path) as source_image:
+                with open_image(img_path) as source_image:
                     if source_image.height > image_translator.chunk_height:
                         image_combined_ocr_header = combined_ocr_header
             except Exception:
@@ -16001,7 +16003,7 @@ def _process_chapter_images_vision_ocr_combined(
                 compressed_path = image_translator.compress_image(img_path)
 
             processed_path = image_translator.preprocess_image_for_watermarks(compressed_path)
-            with Image.open(processed_path) as img:
+            with open_image(processed_path) as img:
                 width, height = img.size
                 if img.mode not in ('RGB', 'RGBA'):
                     img = img.convert('RGB')

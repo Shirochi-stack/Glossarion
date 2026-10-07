@@ -1,3 +1,5 @@
+
+from safe_image import open_image
 import sys
 import os
 import json
@@ -9878,7 +9880,7 @@ def _extract_render_data_for_region(self, region_index: int) -> dict:
         # Prepare dimensions and positions (same as _update_single_text_overlay)
         from PIL import Image as _PILImage
         try:
-            src_w, src_h = _PILImage.open(current_image).size
+            src_w, src_h = open_image(current_image).size
         except Exception:
             src_w, src_h = (1, 1)
         
@@ -9939,7 +9941,7 @@ def _extract_render_data_for_region(self, region_index: int) -> dict:
         
         # Scale regions if needed (same logic as _update_single_text_overlay)
         try:
-            base_w, base_h = _PILImage.open(base_image).size
+            base_w, base_h = open_image(base_image).size
             if (src_w, src_h) != (base_w, base_h):
                 sx = base_w / max(1, float(src_w))
                 sy = base_h / max(1, float(src_h))
@@ -10274,7 +10276,7 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
             # Prepare dimensions and last positions
             from PIL import Image as _PILImage
             try:
-                src_w, src_h = _PILImage.open(current_image).size
+                src_w, src_h = open_image(current_image).size
             except Exception:
                 src_w, src_h = (1, 1)
             saved_offsets = {}
@@ -10351,7 +10353,7 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                 # Regions from last_render_positions are already in base image coordinates.
                 try:
                     from PIL import Image as _PILImage
-                    base_w, base_h = _PILImage.open(base_image).size
+                    base_w, base_h = open_image(base_image).size
                     if (src_w, src_h) != (base_w, base_h):
                         sx = base_w / max(1, float(src_w))
                         sy = base_h / max(1, float(src_h))
@@ -10482,8 +10484,8 @@ def render_persisted_translation_state(self, image_path: str, refresh_preview: b
         base_image = _resolve_cleaned_image_for_render(self, image_path) or image_path
         try:
             from PIL import Image as _PIL
-            source_width, source_height = _PIL.open(image_path).size
-            base_width, base_height = _PIL.open(base_image).size
+            source_width, source_height = open_image(image_path).size
+            base_width, base_height = open_image(base_image).size
             if (source_width, source_height) != (base_width, base_height):
                 scale_x = base_width / max(1, float(source_width))
                 scale_y = base_height / max(1, float(source_height))
@@ -10625,8 +10627,8 @@ def save_positions_and_rerender(self):
         # Scale regions if base dims differ
         try:
             from PIL import Image as _PIL
-            src_w, src_h = _PIL.open(current_image).size
-            base_w, base_h = _PIL.open(base_image).size
+            src_w, src_h = open_image(current_image).size
+            base_w, base_h = open_image(base_image).size
             if (src_w, src_h) != (base_w, base_h):
                 sx = base_w / max(1, float(src_w)); sy = base_h / max(1, float(src_h))
                 from manga_translator import TextRegion as _TR
@@ -10807,7 +10809,7 @@ def _render_with_manga_translator(
         # Prepare image as numpy BGR array
         if image_bgr is None:
             print(f"[RENDER] Loading image from path...")
-            pil_image = Image.open(image_path)
+            pil_image = open_image(image_path)
             print(f"[RENDER] Image size: {pil_image.size}")
             image_rgb = np.array(pil_image.convert('RGB'))
             
@@ -10830,7 +10832,7 @@ def _render_with_manga_translator(
                         cand = getattr(self, '_cleaned_image_path', None)
                         cleaned_path = cand if cand and os.path.exists(cand) else None
                     if cleaned_path and os.path.exists(cleaned_path):
-                        pil_clean = Image.open(cleaned_path).convert('RGB')
+                        pil_clean = open_image(cleaned_path).convert('RGB')
                         clean_rgb = np.array(pil_clean)
                         # Convert RGB to BGR
                         cleaned_bgr_full = cv2.cvtColor(clean_rgb, cv2.COLOR_RGB2BGR)

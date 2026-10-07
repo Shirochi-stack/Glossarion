@@ -1,3 +1,5 @@
+
+from safe_image import open_image
 # rpgmaker_handler.py - GTool: RPG Maker Translation Engine
 # Detects RPG Maker version, extracts translatable text, sends through
 # Glossarion's translation pipeline, and patches translations back.
@@ -2262,8 +2264,8 @@ def translate_game_images(
             try:
                 from PIL import Image
                 import io
-                orig_img = Image.open(io.BytesIO(entry.decrypted_png))
-                trans_img = Image.open(io.BytesIO(translated_png))
+                orig_img = open_image(io.BytesIO(entry.decrypted_png))
+                trans_img = open_image(io.BytesIO(translated_png))
                 orig_w, orig_h = orig_img.size
                 trans_w, trans_h = trans_img.size
                 if (trans_w, trans_h) != (orig_w, orig_h):

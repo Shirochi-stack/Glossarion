@@ -3,7 +3,7 @@
 pyinstaller
 pyinstaller-hooks-contrib
 ttkbootstrap
-pillow<12.0
+pillow>=12.3.0
 beautifulsoup4
 lxml
 html5lib
@@ -94,12 +94,13 @@ azure-core
 azure-identity
 
 # Encryption/Decryption
-cryptography
+cryptography>=50.0.2
 
 # Version management
 packaging
 
 # Silent truncation detection (optional - for QA Scanner truncation check)
+torch>=2.13.0
 sentence-transformers
 deep-translator
 scikit-learn

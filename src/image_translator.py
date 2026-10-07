@@ -4,6 +4,8 @@ Handles detection, extraction, and translation of images containing text
 Includes support for web novel images and watermark handling
 """
 
+from safe_image import open_image
+
 import os
 import html
 import json
@@ -543,7 +545,7 @@ class ImageTranslator:
             save_compressed = os.getenv("SAVE_COMPRESSED_IMAGES", "0") == "1"
             
             # Open image
-            with Image.open(image_path) as img:
+            with open_image(image_path) as img:
                 original_format = img.format.lower() if img.format else 'png'
                 has_transparency = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
                 
@@ -1428,7 +1430,7 @@ class ImageTranslator:
                 
         # Check image dimensions
         try:
-            with Image.open(image_path) as img:
+            with open_image(image_path) as img:
                 width, height = img.size
                 # Skip very small images (likely icons)
                 if width < 100 or height < 100:
@@ -1503,7 +1505,7 @@ class ImageTranslator:
         
         # For ambiguous cases, if it's a tall image, assume it might be text
         try:
-            with Image.open(image_path) as img:
+            with open_image(image_path) as img:
                 width, height = img.size
                 if height > width * 2:  # Height is more than twice the width
                     print(f"   📜 Tall image detected, assuming possible text content")
@@ -1626,7 +1628,7 @@ class ImageTranslator:
                 print(f"   🧹 Preprocessing image for watermark removal...")
             
             # Open image
-            img = Image.open(image_path)
+            img = open_image(image_path)
             
             # Convert to RGB if necessary
             if img.mode not in ('RGB', 'RGBA'):
@@ -1921,7 +1923,7 @@ class ImageTranslator:
                 return None
             
             # Open and process the image (now using processed_path)
-            with Image.open(processed_path) as img:
+            with open_image(processed_path) as img:
                 width, height = img.size
                 aspect_ratio = width / height if height > 0 else 1
                 print(f"   📐 Image dimensions: {width}x{height}, aspect ratio: {aspect_ratio:.2f}")
@@ -2099,7 +2101,7 @@ class ImageTranslator:
                 compressed_path = self.compress_image(image_path)
 
             processed_path = self.preprocess_image_for_watermarks(compressed_path)
-            with Image.open(processed_path) as img:
+            with open_image(processed_path) as img:
                 width, height = img.size
                 if not getattr(self, "_suppress_image_detail_logs", False):
                     print(f"   📐 OCR image dimensions: {width}x{height}")

@@ -1,3 +1,5 @@
+
+from safe_image import open_image
 # Chapter_Extractor.py - Module-level chapter extraction functions
 import os
 import re
@@ -476,7 +478,7 @@ def _convert_remote_image_to_png(image_bytes):
 
     from PIL import Image, ImageOps
 
-    with Image.open(io.BytesIO(image_bytes)) as source_image:
+    with open_image(io.BytesIO(image_bytes)) as source_image:
         source_image.seek(0)
         source_image.load()
         image = ImageOps.exif_transpose(source_image)

@@ -3,7 +3,7 @@
 pyinstaller
 pyinstaller-hooks-contrib
 ttkbootstrap
-pillow<12.0
+pillow>=12.3.0
 beautifulsoup4
 lxml
 html5lib
@@ -106,8 +106,8 @@ replicate
 # heavy imports (increases .exe file size by 1.5gb)
 # CPU-only PyTorch wheels (avoid CUDA DLL load errors on Windows)
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.12.1+cpu
-torchvision==0.25.0+cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
 onnxruntime
 safetensors
 transformers
@@ -117,7 +117,7 @@ huggingface-hub<1.0.0
 hf-xet>=1.2.0
 
 # Encryption/Decryption
-cryptography
+cryptography>=50.0.2
 
 # Version management
 packaging

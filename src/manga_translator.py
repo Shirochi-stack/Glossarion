@@ -5,6 +5,8 @@ Handles OCR, translation, and advanced text rendering for manga panels
 Now with proper history management and full page context support
 """
 
+from safe_image import open_image
+
 import os
 import json
 import base64
@@ -4127,7 +4129,7 @@ class MangaTranslator:
                                 if image is None:
                                     from PIL import Image as PILImage
                                     import numpy as np
-                                    pil_image = PILImage.open(image_path)
+                                    pil_image = open_image(image_path)
                                     image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                             
                             
@@ -4531,7 +4533,7 @@ class MangaTranslator:
                 # Probe the actual byte format we will upload
                 try:
                     from PIL import Image as _PILImage
-                    img_probe = _PILImage.open(io.BytesIO(processed_image_data))
+                    img_probe = open_image(io.BytesIO(processed_image_data))
                     fmt = (img_probe.format or '').lower()
                 except Exception:
                     fmt = ''
@@ -4553,7 +4555,7 @@ class MangaTranslator:
                     # Determine if conversion is actually needed based on compression and current format
                     try:
                         from PIL import Image as _PILImage
-                        img2 = _PILImage.open(io.BytesIO(processed_image_data))
+                        img2 = open_image(io.BytesIO(processed_image_data))
                         fmt_lower = (img2.format or '').lower()
                     except Exception:
                         img2 = None
@@ -4598,7 +4600,7 @@ class MangaTranslator:
                         try:
                             if img2 is None:
                                 from PIL import Image as _PILImage
-                                img2 = _PILImage.open(io.BytesIO(processed_image_data))
+                                img2 = open_image(io.BytesIO(processed_image_data))
                             buffer = io.BytesIO()
                             if target_fmt == 'JPEG' and img2.mode != 'RGB':
                                 img2 = img2.convert('RGB')
@@ -4785,7 +4787,7 @@ class MangaTranslator:
                     if image is None:
                         # Try with PIL for Unicode paths
                         from PIL import Image as PILImage
-                        pil_image = PILImage.open(image_path)
+                        pil_image = open_image(image_path)
                         image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                 
                 # Ensure OCR manager is available
@@ -6181,7 +6183,7 @@ class MangaTranslator:
                 return []
 
             # Open original image once
-            pil = Image.open(image_path)
+            pil = open_image(image_path)
             if pil.mode != 'RGB':
                 pil = pil.convert('RGB')
 
@@ -6491,7 +6493,7 @@ class MangaTranslator:
                 data = roi['bytes']
                 try:
                     from PIL import Image as _PILImage
-                    im = _PILImage.open(io.BytesIO(data))
+                    im = open_image(io.BytesIO(data))
                     fmt = (im.format or '').lower()
                     if fmt not in ['jpeg', 'jpg', 'png', 'bmp', 'tiff']:
                         # Choose conversion target based on compression settings if available
@@ -6634,7 +6636,7 @@ class MangaTranslator:
     def _load_image_with_compression_only(self, image_path: str, comp: Dict) -> bytes:
         """Load image and apply compression settings only (no enhancements/resizing)."""
         from io import BytesIO
-        pil = Image.open(image_path)
+        pil = open_image(image_path)
         if pil.mode != 'RGB':
             pil = pil.convert('RGB')
         buf = BytesIO()
@@ -6662,7 +6664,7 @@ class MangaTranslator:
         """
         try:
             # Open image with PIL
-            pil_image = Image.open(image_path)
+            pil_image = open_image(image_path)
             
             # Convert to RGB if necessary
             if pil_image.mode != 'RGB':
@@ -6804,7 +6806,7 @@ class MangaTranslator:
                 img = cv2.imread(image_path)
                 if img is None:
                     # Fallback to PIL for Unicode paths
-                    pil_image = PILImage.open(image_path)
+                    pil_image = open_image(image_path)
                     img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             except Exception as e:
                 self._log(f"   Failed to load image for debug: {str(e)}", "warning")
@@ -7042,7 +7044,7 @@ class MangaTranslator:
             return original_data
 
         from io import BytesIO
-        pil_image = Image.open(image_path)
+        pil_image = open_image(image_path)
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
         buf = BytesIO()
@@ -7082,7 +7084,7 @@ class MangaTranslator:
             img_size_mb = len(img_data) / (1024 * 1024)
             if img_size_mb > 10:
                 # Resize large images to stay within API limits
-                pil_image = PILImage.open(image_path)
+                pil_image = open_image(image_path)
                 max_size = 2048
                 ratio = min(max_size / pil_image.width, max_size / pil_image.height)
                 if ratio < 1:
@@ -7525,7 +7527,7 @@ class MangaTranslator:
                     # Optionally resize if too large (Gemini has limits)
                     if img_size_mb > 10:  # If larger than 10MB
                         self._log(f"📉 Resizing large image for API limits...")
-                        pil_image = PILImage.open(image_path)
+                        pil_image = open_image(image_path)
                         
                         # Calculate new size (max 2048px on longest side)
                         max_size = 2048
@@ -7549,8 +7551,8 @@ class MangaTranslator:
                     if region:
                         x, y, w, h = region.bounding_box
                         # Describe where on the page this text is located
-                        page_width = PILImage.open(image_path).width
-                        page_height = PILImage.open(image_path).height
+                        page_width = open_image(image_path).width
+                        page_height = open_image(image_path).height
                         
                         # Determine position
                         h_pos = "left" if x < page_width/3 else "center" if x < 2*page_width/3 else "right"
@@ -8131,7 +8133,7 @@ class MangaTranslator:
                     self._log(f"📊 Image size: {img_size_mb:.2f} MB")
                     
                     # Get image dimensions
-                    pil_image = PILImage.open(image_path)
+                    pil_image = open_image(image_path)
                     self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
                     
                     # CHECK 4: Before resizing (which can take time)
@@ -11272,7 +11274,7 @@ class MangaTranslator:
                         img_response = requests.get(output_url)
                         
                         # Convert back to numpy
-                        result_pil = PILImage.open(BytesIO(img_response.content))
+                        result_pil = open_image(BytesIO(img_response.content))
                         result_rgb = np.array(result_pil)
                         result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
                         
@@ -14951,7 +14953,7 @@ class MangaTranslator:
                         used_imported_regions = True
             if self.manga_settings.get('advanced', {}).get('format_detection', False):
                 self._log("🔍 Analyzing image format...")
-                img = Image.open(image_path)
+                img = open_image(image_path)
                 width, height = img.size
                 aspect_ratio = height / width
                 
@@ -15068,7 +15070,7 @@ class MangaTranslator:
                     self._log(f"   Using PIL to handle Unicode path...", "info")
                     from PIL import Image as PILImage
                     import numpy as np
-                    pil_image = PILImage.open(image_path)
+                    pil_image = open_image(image_path)
                     image_rgb = np.array(pil_image)
                     image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
                     self._log(f"   ✅ Successfully loaded with PIL", "info")
@@ -15875,7 +15877,7 @@ class MangaTranslator:
             # Load the image
             image = cv2.imread(image_path)
             if image is None:
-                pil_image = PILImage.open(image_path)
+                pil_image = open_image(image_path)
                 image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             
             height, width = image.shape[:2]
