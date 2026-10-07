@@ -1000,7 +1000,9 @@ def send_test_request(request, *, client_cls=None, on_client=None, log=None):
     """
     if client_cls is None:
         from unified_api_client import UnifiedClient as client_cls
-    client = client_cls(**request['client_kwargs'])
+    # Real key probes must not reload or rotate the shared translation pool.
+    client_factory = getattr(client_cls, 'for_key_test', client_cls)
+    client = client_factory(**request['client_kwargs'])
     if on_client is not None:
         on_client(client)
     configure_test_client(client, request, log=log)

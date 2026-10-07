@@ -4267,7 +4267,12 @@ class UnifiedClient:
         with cls._global_cancel_lock:
             return cls._global_cancelled
     
-    def __init__(self, api_key: str, model: str, output_dir: str = "Output", _skip_cancel_reset: bool = False):
+    @classmethod
+    def for_key_test(cls, **kwargs):
+        """Create a single-key probe without reloading the shared translation pool."""
+        return cls(**kwargs, _skip_multi_key_setup=True)
+
+    def __init__(self, api_key: str, model: str, output_dir: str = "Output", _skip_cancel_reset: bool = False, _skip_multi_key_setup: bool = False):
         """Initialize the unified client with enhanced thread safety"""
         # Clear any lingering global stop/cancel state when starting a new client context
         # BUT skip this when creating internal fallback/retry clients during an active stop
@@ -4456,7 +4461,7 @@ class UnifiedClient:
         }
         
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
-        use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
+        use_multi_keys_env = not _skip_multi_key_setup and os.getenv('USE_MULTI_API_KEYS', '0') == '1'
         debug_enabled = (
             os.getenv('DEBUG_MODE', '0') == '1'
             or os.getenv('SHOW_DEBUG_BUTTONS', '0') == '1'

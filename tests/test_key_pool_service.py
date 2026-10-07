@@ -1160,3 +1160,106 @@ def test_parity_unified_client_refusal_patterns(tmp_path, monkeypatch):
             path.write_text(json.dumps(cfg), encoding="utf-8")
         monkeypatch.setenv("CONFIG_FILE", str(path))
         assert legacy_fn(None) == uac.UnifiedClient._get_refusal_patterns(None), i
+
+
+@pytest.mark.parametrize('selected_index', [0, 1])
+@pytest.mark.parametrize('test_pool', ['main', 'fallback', 'glossary'])
+def test_probe_preserves_two_keys_with_stale_environment(monkeypatch, tmp_path, selected_index, test_pool):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    from multi_api_key_manager import APIKeyPool
+    from unified_api_client import UnifiedClient
+
+    key_pool_service = kps
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            received.append((self.headers.get('Authorization'), payload))
+            body = json.dumps({
+                'id': 'key-test', 'object': 'chat.completion', 'created': 0,
+                'model': payload['model'],
+                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'API test successful'},
+                             'finish_reason': 'stop'}],
+            }).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    keys = [
+        {'api_key': 'first-local-test-key', 'model': 'nan/openai/gpt-6-luna', 'enabled': True},
+        {'api_key': 'second-local-test-key', 'model': 'nan/openai/gpt-6-luna-pro', 'enabled': True},
+    ]
+    live_pool = APIKeyPool('Regression test pool')
+    live_pool.load_from_list(keys)
+    original_entries = list(live_pool.keys)
+    monkeypatch.setattr(UnifiedClient, '_api_key_pool', live_pool)
+    monkeypatch.setattr(UnifiedClient, '_in_memory_multi_keys', keys)
+    monkeypatch.chdir(tmp_path)
+    for name, value in {
+        'USE_MULTI_API_KEYS': '1', 'MULTI_API_KEYS': json.dumps(keys[:1]),
+        'USE_CUSTOM_OPENAI_ENDPOINT': '0', 'USE_FALLBACK_KEYS': '0',
+        'USE_GLOSSARY_KEYS': '0', 'GEMINI_SERVICE_TIER': 'off',
+        'ENABLE_STREAMING': '0', 'SEND_INTERVAL_SECONDS': '0',
+        'ENABLE_IMAGE_OUTPUT_MODE': '0', 'ENABLE_VIDEO_OUTPUT_MODE': '0',
+        'ENABLE_GPT_THINKING': '0', 'NO_PROXY': '127.0.0.1,localhost',
+    }.items():
+        monkeypatch.setenv(name, value)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('NANOGPT_API_URL', f'http://127.0.0.1:{server.server_port}')
+    try:
+        request = key_pool_service.build_test_request(original_entries[selected_index], test_pool)
+        client, response = key_pool_service.send_test_request(request)
+        assert key_pool_service.test_response_passed(response, request)
+        assert UnifiedClient._api_key_pool is live_pool
+        assert live_pool.keys == original_entries
+        assert all(actual is original for actual, original in zip(live_pool.keys, original_entries))
+        assert not client.use_multi_keys
+        assert len(received) == 1
+        authorization, payload = received[0]
+        assert authorization == 'Bearer ' + keys[selected_index]['api_key']
+        assert payload['model'] == keys[selected_index]['model'].removeprefix('nan/')
+        assert os.environ['MULTI_API_KEYS'] == json.dumps(keys[:1])
+
+        if test_pool == 'main':
+            from copy import deepcopy
+            from types import SimpleNamespace
+            from PySide6.QtWidgets import QApplication
+            from multi_api_key_manager import MultiAPIKeyDialog
+
+            app = QApplication.instance() or QApplication([])
+            saved = []
+            config = {'multi_api_keys': [entry.to_dict() for entry in live_pool.keys],
+                      'use_multi_api_keys': True}
+            gui = SimpleNamespace(config=config, save_config=lambda **_kwargs: saved.append(deepcopy(config)))
+            dialog = MultiAPIKeyDialog(None, gui)
+            try:
+                dialog._refresh_key_list()
+                assert dialog.tree.topLevelItemCount() == 2
+                dialog._test_results = []
+                dialog._total_tests = 1
+                dialog._completed_tests = 0
+                dialog._tests_in_flight = True
+                dialog._handle_test_result(selected_index, True, 'Test passed')
+                assert dialog.tree.topLevelItemCount() == 2
+                assert dialog.stats_label.text() == 'Test complete: 1/1 passed'
+                assert len(config['multi_api_keys']) == 2
+                assert saved and len(saved[-1]['multi_api_keys']) == 2
+                assert [entry['api_key'] for entry in saved[-1]['multi_api_keys']] == [key['api_key'] for key in keys]
+                assert app is not None
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
