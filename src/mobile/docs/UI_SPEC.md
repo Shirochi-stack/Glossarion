@@ -43,7 +43,7 @@
 
 1. **One home.** The home screen is the Direct Text chat. Every other desktop feature can be reached in at most two taps through one of these:
    - the **drawer**: destinations, with Settings and Help in its footer;
-   - the composer: the **＋ sheet**, the **output-mode row**, **slash commands** or **quick-action chips**;
+   - the composer: the **＋ sheet**, the **output-mode control** (chip or toggles in the action row), **slash commands** or **quick-action chips**;
    - an **action on a card**: job card, book card or chapter row.
 2. **Data parity.**
    - These formats are unchanged:
@@ -411,7 +411,9 @@ On iOS the same text goes to local notifications, plus the `BGContinuedProcessin
 - Radius 24, `bgcolor=surfaceContainerHigh`, padding 8 × 12, no border, horizontal margin 8. The bottom is protected by `SafeArea`.
 - There is no drop target. Flet's `DragTarget` only accepts in-app `Draggable`s, so files from other apps arrive through Share / Open-with (§7.6).
 
-**Rows, top to bottom.** The order follows desktop Direct Text: attachments, input, output mode, actions.
+**Rows, top to bottom.** The order follows desktop Direct Text: attachments, input, output mode, actions. The output mode has no line of its own: it sits in the action row, right after ＋ (item 3).
+
+> **Change (owner request, 2026-10-07).** The output mode used to be a separate row with all six toggles always visible ("Output: Text" + 📝 👁️ 🖼️ 🎬 🔊 ✨). On phones that row took a line from the text field. Now the **active mode is always visible** in the action row, and the six toggles are shown inline from a 600 dp chat column; on narrower columns one chip opens a menu of all six. The ＋ sheet (§2.5) still shows the six toggles on a line of their own.
 
 1. **Chips row** (`Row(scroll=AUTO)`; shown only when non-empty):
    - **Attachment chip (`FileChip`, §5.3):**
@@ -436,25 +438,26 @@ On iOS the same text goes to local notifications, plus the `BGContinuedProcessin
      - the field keeps any text typed before it;
      - a light haptic fires.
      - On send, the chip's text becomes the v2 `["user", text]` content.
-3. **Output-mode row** (`OutputModeRow`, §5.4; height 40; always visible). This is the desktop `_InputOutputDialog` "Output:" row.
-   - A label **"Output: Text"** (labelMedium) is followed by six compact toggles: **📝 👁️ 🖼️ 🎬 🔊 ✨** (Text, Vision, Image, Video, Audio, Refine).
-     - The mode name in the label follows the selection.
-     - After an automatic switch the label reads "Output: Vision · auto".
-   - Width rules:
-
-     | Width | Shown |
-     |---|---|
-     | < 400 dp | the six icon toggles only (no label); the selected toggle has a tonal fill |
-     | 400–899 dp | the label plus six icon toggles |
-     | ≥ 900 dp (tablet) | the label plus toggles that also show their text label ("📝 Text") |
-     | ≥ 160% text scale | icon toggles only, at every width |
-
-   - Each toggle has a 32 dp visual inside a 48 dp hit target, a `tooltip` ("Output mode: Vision") and a `Semantics` label that includes "selected".
-   - **Tap an inactive toggle:** switches the mode (`selection_click` haptic). The choice is persisted as described in §2.6.
-   - **Tap the active toggle:** opens that mode's options sheet (`ModeOptionsSheet`, §2.6). The ＋ sheet shows the same row and its options inline (§2.5).
-   - A mode that cannot fully run in this build stays visible. For example, video playback without flet-video: the options sheet shows the limitation with a `ReasonChip`. Nothing is hidden.
-4. **Action row** (height 40):
+3. **Action row** (height 48; one line that never wraps or overflows):
    - **＋** `IconButton(add)`. It rotates 45° into × while the ＋ sheet is open (`AnimatedRotation` via `rotate`). Long-press (`IconButton.on_long_press`) opens the Photos picker.
+   - **Output mode** (`OutputModeRow(inline=True)`, §5.4). This is the desktop `_InputOutputDialog` "Output:" row: the modes **📝 👁️ 🖼️ 🎬 🔊 ✨** (Text, Vision, Image, Video, Audio, Refine). The active mode is always visible.
+     - Width rules (`responsive.output_row_style`). They use the **chat-column width**, which is the composer's own width. On tablets that is the window minus the 300/320 dp sidebar, capped at 760/860 dp:
+
+       | Chat column | Shown |
+       |---|---|
+       | < 600 dp, or ≥ 160% text scale | **Mode chip:** the active mode's emoji and a small ▾, as a 32 dp tonal pill inside a 48 dp target |
+       | ≥ 600 dp | the six icon toggles inline (no "Output:" label); the selected toggle has a tonal fill |
+       | once they fit next to ＋, the token hint, Send and one option pill (about 810 dp at 100% text: tablets from about 1110 dp, wide screens) | toggles that also show their text label ("📝 Text") |
+
+     - **Mode chip:** `tooltip` "Output mode: Text" and `Semantics(label="Output mode: Text", button=True)`.
+       - Tapping it opens a `PopupMenuButton` menu with the six modes (emoji + label, a check on the active one), a divider, and **"Options for <Mode>…"**, which opens that mode's `ModeOptionsSheet` (§2.6).
+       - Picking a mode switches to it. Picking the checked mode does nothing.
+     - **Toggles:** each has a 32 dp visual inside a 48 dp hit target, a `tooltip` ("Output mode: Vision") and a `Semantics` label that includes "selected".
+       - **Tap an inactive toggle:** switches the mode (`selection_click` haptic).
+       - **Tap the active toggle:** opens that mode's options sheet (`ModeOptionsSheet`, §2.6).
+     - The choice is persisted as described in §2.6. The chip, the toggles and the ＋ sheet's row (§2.5) share one `OutputModeState` Signal, so they always agree.
+     - After an automatic switch to Vision, the chip (or the active toggle) carries a small dot. Its tooltip reads "Output mode: Vision · auto" and it is spoken as "Output mode: Vision, automatic".
+     - A mode that cannot fully run in this build stays visible. For example, video playback without flet-video: the options sheet shows the limitation with a `ReasonChip`. Nothing is hidden.
    - **Option pills.** Shown only when they differ from the default. Tapping a `Chip` opens the related sheet; its trailing × (`on_delete`) resets it.
      - "Glossary: Manual" / "Glossary: Off" / "Glossary: Main";
      - "Thinking off";
@@ -462,8 +465,8 @@ On iOS the same text goes to local notifications, plus the `BGContinuedProcessin
      - "→ Japanese" when the chat target differs from the global default;
      - "Model: once" while a one-shot model is armed.
      - At ≥ 160% text scale, the pills collapse into a single "Options (3)" chip that opens Chat settings.
-   - Spacer.
-   - **Token hint.** labelSmall "≈1.2k tok", shown when the text exceeds 200 characters.
+     - The pills take the space left between the output mode and the token hint (`expand`), and scroll horizontally inside it.
+   - **Token hint.** labelSmall "≈1.2k tok", one line, shown when the text exceeds 200 characters. It hides at ≥ 160% text scale (§7.5), so the row still fits on a 320 dp phone.
      - Counted with tiktoken in io_pool, debounced 450 ms.
      - Encoding fallback order (the desktop's): `encoding_for_model(model)` → o200k_base → cl100k_base.
    - **Send/Stop** button (§2.4).
@@ -500,7 +503,7 @@ On soft keyboards, Enter inserts a newline; you send with the button.
 Unsupported files get the snackbar "Unsupported attachment".
 
 **Auto-switch** (desktop 5336–5383).
-- Attaching an image or CBZ switches the mode to Vision. The row label then reads "Output: Vision · auto".
+- Attaching an image or CBZ switches the mode to Vision. The composer's chip (or active toggle) then shows the "· auto" dot and tooltip, and the ＋ sheet's label reads "Output: Vision · auto".
 - Removing the attachment, or attaching a non-visual file, restores the previous mode.
 
 ### 2.4 Send/Stop state machine (`SendStopButton`: `AnimatedSwitcher`, scale+fade 200 ms, 40 dp circle in a 48 dp target)
@@ -547,7 +550,7 @@ Every tap triggers `HapticFeedback.light_impact`.
    - **Clipboard:** pastes clipboard text (`Clipboard.get()`) as a chip or into the field.
 
    Files are imported through FileBridge. It copies them into `Inbox/`, or into `Library/Raw/` when "Add to Library" is chosen in the chip menu.
-2. **Output mode.** The same `OutputModeRow` as the composer (§2.3). Below it, inline, the active mode's options (the `ModeOptionsSheet` content, §2.6), animated with `AnimatedSwitcher`.
+2. **Output mode.** An `OutputModeRow` on a line of its own, sharing the composer's Signal (§2.3). It shows the label "Output: Text" (labelMedium; "Output: Vision · auto" after an automatic switch) and the six toggles. Where the composer shows the mode chip, the row shows the six icon toggles only. When the composer shows labelled toggles, the row shows the label plus labelled toggles. Below it, inline, the active mode's options (the `ModeOptionsSheet` content, §2.6), animated with `AnimatedSwitcher`.
 3. **Tools** (`ListTile`s; also available as slash commands):
 
    | Tool | Action |
@@ -568,7 +571,7 @@ Every tap triggers `HapticFeedback.light_impact`.
 
 ### 2.6 Output modes and the mode options sheet (`ModeOptionsSheet`)
 
-**Where it opens.** Tapping the **active** toggle of the `OutputModeRow` (§2.3) opens the sheet. Its content is also shown inline in the ＋ sheet.
+**Where it opens.** Tapping the **active** toggle of the `OutputModeRow` (§2.3), or "Options for <Mode>…" in the composer's mode-chip menu, opens the sheet. Its content is also shown inline in the ＋ sheet.
 - Title: "Output: <mode>".
 - A switch **"This chat only"** at the top sends changes to the chat override instead of the global key.
 
@@ -1987,8 +1990,8 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 
 | Component (module) | Anatomy | States | Built from |
 |---|---|---|---|
-| `Composer` (`chat/composer.py`) | Radius-24 tonal card: chips row · TextField · `OutputModeRow` · action row (＋ · option pills · token hint · SendStopButton) | empty · typing · attachment · pasted chip · blocked caption · running · ≥ 160% text ("Options (n)", max_lines 4) | `Container(border_radius=24)`, `Column`, `Row(scroll=AUTO)`, `TextField(multiline=True, min_lines=1, max_lines=6, shift_enter=True)`, `Chip(on_click=…, on_delete=…)` |
-| `OutputModeRow` (`chat/output_mode_row.py`) | "Output: Text" label + six toggles 📝 👁️ 🖼️ 🎬 🔊 ✨ | selected mode · "· auto" · label hidden < 400 dp · text labels ≥ 900 dp · icons only at ≥ 160% | `Row`. Each toggle is `IconButton(icon=Text(emoji), selected=…, tooltip=…, size_constraints=48×48)`; on tablet a `Container(on_click=…)` pill with emoji + label; `Semantics(selected=…)` |
+| `Composer` (`chat/composer.py`) | Radius-24 tonal card: chips row · TextField · action row (＋ · `OutputModeRow` · option pills · token hint · SendStopButton); the output mode has no line of its own | empty · typing · attachment · pasted chip · blocked caption · running · ≥ 160% text ("Options (n)", no token hint, max_lines 4) | `Container(border_radius=24)`, `Column`, `Row(scroll=AUTO)`, `TextField(multiline=True, min_lines=1, max_lines=6, shift_enter=True)`, `Chip(on_click=…, on_delete=…)` |
+| `OutputModeRow` (`chat/output_mode_row.py`) | Composer (`inline=True`, in the action row): the active mode as a chip (emoji + ▾) with a menu of the six modes and "Options for <Mode>…", or six inline toggles 📝 👁️ 🖼️ 🎬 🔊 ✨, without the "Output:" label. ＋ sheet: "Output: Text" label + six toggles, on its own line | selected mode · "· auto" (label in the sheet, a dot + tooltip inline) · chip < 600 dp chat column or ≥ 160% text · icon toggles from 600 dp · text labels once they fit (§2.3) | `Row(tight=True)` inline. The chip is a `PopupMenuButton` (opens on tap) whose 48 dp content holds the 32 dp pill; menu items are `PopupMenuItem(checked=…)`; `Semantics(label="Output mode: Text", button=True)`. Each toggle is `IconButton(icon=Text(emoji), selected=…, tooltip=…, size_constraints=48×48)`; with text labels a 48 dp `Container(on_click=…)` holds the emoji + label pill; `Semantics(selected=…)`. The "· auto" dot is a `Badge` |
 | `ModeOptionsSheet` (`chat/mode_options_sheet.py`) | "Output: <mode>" title · "This chat only" switch · the mode's schema tiles · (Image/Video/Audio) "Generate from prompt (no input)" | per mode · Generate disabled with a reason (empty composer / attachment present) | `BottomSheet(scrollable=True)`, setting tiles (§5.7), `FilledTonalButton` |
 | `SendStopButton` (`chat/send_button.py`) | 40 dp circle (48 dp target), icon by state, long-press menu | `idle_empty` · `idle_ready` · `queue` · `blocked` · `running` · `finishing` · `stopping` (§2.4) | `AnimatedSwitcher` over `FilledIconButton` / `IconButton` / `ProgressRing`; `ContextMenu(primary_trigger=ContextMenuTrigger.LONG_PRESS, primary_items=[PopupMenuItem…])`; `HapticFeedback` |
 | `PlusSheet` (`sheets/plus_sheet.py`; `chat/plus_sheet.py` re-exports it) | Attach tiles · OutputModeRow + active options · Tools list · This chat | — | `BottomSheet(show_drag_handle=True, draggable=True, scrollable=True)`; tiles are `Container(on_click, on_long_press)`; `ListTile`; `FilePicker` |
@@ -2285,7 +2288,7 @@ On tablets, sheets become SidePanel content (persistent tasks) or centered dialo
 ### 7.5 Accessibility at 200% text scale
 - Nothing has a fixed height except images. Variable-height lists never use `first_item_prototype` or `item_extent`, so rows grow.
 - **Header:** the subtitle reduces to the model plus "▾"; the "custom" badge moves into Chat settings.
-- **Composer:** pills collapse into "Options (n)"; the output-mode row shows icons only; the token hint hides; the TextField's max_lines drops to 4; Send stays at 48 dp.
+- **Composer:** pills collapse into "Options (n)"; the output mode is the compact mode chip at every width; the token hint hides; the TextField's max_lines drops to 4; Send stays at 48 dp.
 - **Bottom action bars:** labels hide (icons with `tooltip` + Semantics labels), and anything beyond 4 goes into "More".
 - **Tabs:** `TabBar(scrollable=True)`. Chips wrap instead of scrolling where they are the only way to filter (stats rows wrap at ≥ 160%).
 - **Book cards:** the grid drops one density step automatically (M → L) and titles allow 3 lines.

@@ -155,9 +155,15 @@ def _text(bar) -> str:
 # ==========================================================================
 
 
+_LIVE_SESSION: list = []  # Flet's Page holds its session weakly: keep the fake one alive
+
+
 async def _start_phone(tf, width, height):
     main_module = tf._load_main_module()
     conn, session = tf._fake_session("android")
+    # without a strong reference the next cyclic GC destroys the session mid-test ("An attempt to
+    # fetch destroyed session"); when that happens depends on how many objects the app allocates
+    _LIVE_SESSION[:] = [(conn, session)]
     session.apply_page_patch({"width": width, "height": height})
     page = session.page
     await main_module.main(page)

@@ -1,8 +1,10 @@
 """Direct Text output modes (UI_SPEC §2.3, §2.6). Pure Python, no Flet import.
 
 The six modes, their emoji and labels are the desktop ``_InputOutputDialog``
-``_OUTPUT_MODE_CHOICES`` (translator_gui.py) verbatim: the composer shows the
-same "Output: Text" label followed by 📝 👁️ 🖼️ 🎬 🔊 ✨. Desktop normalises
+``_OUTPUT_MODE_CHOICES`` (translator_gui.py) verbatim: the ＋ sheet shows the
+same "Output: Text" label followed by 📝 👁️ 🖼️ 🎬 🔊 ✨, and the composer's
+action row shows the six toggles or, on phones, the active one as a chip with a
+menu of all six (``OutputModeRow``). Desktop normalises
 ``refine`` to ``refinement`` and anything unknown to ``text``; so does
 ``normalize_mode``. ``tests_host/test_ui_foundations.py`` checks the tuple
 against the desktop source so the two cannot drift.
@@ -24,6 +26,7 @@ __all__ = [
     "OutputMode",
     "OutputModeState",
     "VISION_ARCHIVE_ATTACHMENT_EXTENSIONS",
+    "chip_semantics_label",
     "is_vision_attachment",
     "mode_label",
     "mode_tooltip",
@@ -92,8 +95,15 @@ def mode_label(mode: Optional[str], automatic: bool = False) -> str:
     return f"Output: {output_mode(mode).label}{AUTO_SUFFIX if automatic else ''}"
 
 
-def mode_tooltip(mode: Optional[str]) -> str:
-    return f"Output mode: {output_mode(mode).label}"
+def mode_tooltip(mode: Optional[str], automatic: bool = False) -> str:
+    """"Output mode: Vision" (+ " · auto" after an automatic switch)."""
+    return f"Output mode: {output_mode(mode).label}{AUTO_SUFFIX if automatic else ''}"
+
+
+def chip_semantics_label(mode: Optional[str], automatic: bool = False) -> str:
+    """Spoken label of the composer's mode chip (a button): "Output mode: Vision[, automatic]"."""
+    text = f"Output mode: {output_mode(mode).label}"
+    return f"{text}, automatic" if automatic else text
 
 
 def semantics_label(mode: Optional[str], selected: bool) -> str:

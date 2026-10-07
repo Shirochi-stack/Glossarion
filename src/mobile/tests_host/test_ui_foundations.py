@@ -887,9 +887,10 @@ def test_size_classes(width, size_class):
 def test_layout_metrics():
     assert responsive.drawer_width(412) == pytest.approx(329.6)
     assert responsive.drawer_width(800) == 360
-    assert responsive.output_row_style(380) == "icons"
-    assert responsive.output_row_style(412) == "label"
-    assert responsive.output_row_style(412, text_scale=1.6) == "icons"
+    # composer output mode (§2.3 item 3), from the chat-column width: chip < 600, toggles, labels once they fit
+    assert responsive.output_row_style(380) == "chip" and responsive.output_row_style(412) == "chip"
+    assert responsive.output_row_style(700) == "icons"
+    assert responsive.output_row_style(700, text_scale=1.6) == "chip"
     assert responsive.output_row_style(1000) == "full"
     phone, large, tablet, wide = (responsive.layout_for(w) for w in (412, 700, 1000, 1300))
     assert (phone.chat_max_width, large.chat_max_width, tablet.chat_max_width) == (None, 760, 860)
@@ -1407,11 +1408,12 @@ def test_shell_switches_phone_and_tablet_on_resize(app_env):
             assert app.shell.sidebar.width == 300 and page.views[0].drawer is None
             assert app.drawer.content in _walk(app.shell.sidebar)
             assert app.shell.top_screen is not None and app.shell.top_screen.body in _walk(app.shell.main_area)
-            assert app.chat_view.composer.output_row.style_name == "full"
-            # within the same class nothing is rebuilt
+            assert app.chat_view.composer.output_row.style_name == "icons"  # 700 dp chat column
+            # within the same class nothing is rebuilt; the composer still follows the chat column
             builds_tablet = app.shell.builds
-            await session.dispatch_event(page._i, "resize", {"width": 1100, "height": 800})
+            await session.dispatch_event(page._i, "resize", {"width": 1150, "height": 800})
             assert app.shell.builds == builds_tablet
+            assert app.chat_view.composer.output_row.style_name == "full"  # 850 dp: labelled toggles fit
             await session.dispatch_event(page._i, "resize", {"width": 1300, "height": 800})
             assert app.shell.size_class is responsive.SizeClass.WIDE and app.shell.sidebar.width == 320
             assert app.shell.builds == builds_tablet  # tablet -> wide keeps the panes
@@ -1423,9 +1425,9 @@ def test_shell_switches_phone_and_tablet_on_resize(app_env):
             assert not app.shell.tablet and app.shell.builds > builds
             assert _routes(page) == ["/", "/settings"]
             assert isinstance(page.views[0].drawer, ft.NavigationDrawer)
-            assert app.chat_view.composer.output_row.style_name == "label"
+            assert app.chat_view.composer.output_row.style_name == "chip"
             await session.dispatch_event(page._i, "resize", {"width": 380, "height": 860})
-            assert app.chat_view.composer.output_row.style_name == "label"  # same class: no relayout
+            assert app.chat_view.composer.output_row.style_name == "chip"  # same class, same chip
             assert conn.bytes_sent > 0
         finally:
             await _stop(app)

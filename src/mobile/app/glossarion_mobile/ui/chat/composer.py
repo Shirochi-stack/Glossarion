@@ -2,8 +2,12 @@
 
 Rows, top to bottom (desktop Direct Text order): chips row (attachment /
 pasted-text chips; hidden when empty) · auto-growing TextField (1-6 lines) ·
-the always-visible OutputModeRow · action row (＋ · option pills · token hint ·
-Send/Stop). ``StatusCaption`` is the one-line caption shown directly above the
+action row (＋ · output mode · option pills · token hint · Send/Stop). The output
+mode (``OutputModeRow(inline=True)``) has no line of its own (owner request, so
+the text field keeps that line): a chip with a menu on phones, the six toggles
+from 600 dp, labelled toggles once they fit (``responsive.output_row_style``).
+The token hint hides at >= 160% text scale (§7.5) so the row never overflows.
+``StatusCaption`` is the one-line caption shown directly above the
 composer whenever the Send state is not Ready, with the fix buttons of §2.4.
 
 Paste-to-chip: when one ``on_change`` adds more than 10,000 characters the
@@ -30,6 +34,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import attachment_icon, attachm
 from glossarion_mobile.ui.chat.output_mode_row import OutputModeRow
 from glossarion_mobile.ui.chat.send_button import SendStopButton
 from glossarion_mobile.ui.chat.send_state import BlockReason, SendAction, SendInputs, SendState
+from glossarion_mobile.ui.responsive import ACTION_ROW_GAP
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
 __all__ = [
@@ -180,7 +185,7 @@ class StatusCaption(ft.Container):
 @ft.control
 class Composer(ft.Container):
     mode_signal: Optional[Signal] = field(default=None, metadata={"skip": True})
-    row_style: str = field(default="label", metadata={"skip": True})
+    row_style: str = field(default="chip", metadata={"skip": True})  # responsive.output_row_style
     on_plus: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
     on_plus_long_press: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
     on_send_action: Optional[Callable[[SendAction], Any]] = field(default=None, metadata={"skip": True})
@@ -196,6 +201,7 @@ class Composer(ft.Container):
     def init(self) -> None:
         super().init()
         self._previous_text = ""
+        self._compact_text = False
         self.has_attachment = False
         self.attachment: Optional[dict] = None
         self.attachment_chip: Optional[AttachmentChip] = None
@@ -225,6 +231,7 @@ class Composer(ft.Container):
         self.output_row = OutputModeRow(
             mode_signal=self.mode_signal,
             style_name=self.row_style,
+            inline=True,
             on_open_options=self._open_mode_options,
         )
         self.mode_signal = self.output_row.mode_signal
@@ -238,24 +245,27 @@ class Composer(ft.Container):
             animate_rotation=tokens.MOTION["sheet_ms"],
         )
         self.pills_row = ft.Row([], spacing=6, scroll=ft.ScrollMode.AUTO, visible=False)
-        self.token_hint = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, visible=False)
+        self.token_hint = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, visible=False, no_wrap=True)
         self.send_button = SendStopButton(on_action=self._on_send_action)
+        # ＋ · output mode · option pills (take the rest, scroll) · token hint · Send; one line, never
+        # wrapping (responsive.action_row_width estimates it).
+        self.action_row = ft.Row(
+            [
+                self.plus_button,
+                self.output_row,
+                ft.Container(content=self.pills_row, expand=True),
+                self.token_hint,
+                self.send_button,
+            ],
+            spacing=ACTION_ROW_GAP,
+            height=tokens.SIZES["composer_row"] + 8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         self.content = ft.Column(
             [
                 self.chips_row,
                 ft.Row([self.text_field, self.expand_button], vertical_alignment=ft.CrossAxisAlignment.START, spacing=0),
-                self.output_row,
-                ft.Row(
-                    [
-                        self.plus_button,
-                        ft.Container(content=self.pills_row, expand=True),
-                        self.token_hint,
-                        self.send_button,
-                    ],
-                    spacing=4,
-                    height=tokens.SIZES["composer_row"] + 8,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
+                self.action_row,
             ],
             spacing=2,
             tight=True,
@@ -373,8 +383,9 @@ class Composer(ft.Container):
         self.pills_row.visible = bool(pills)
 
     def set_token_hint(self, text: str) -> None:
+        """"≈1.2k tok"; hidden at >= 160% text scale (§7.5), where it would crowd the action row."""
         self.token_hint.value = text
-        self.token_hint.visible = bool(text)
+        self.token_hint.visible = bool(text) and not self._compact_text
 
     def clear(self) -> None:
         self.text_field.value = ""
@@ -385,7 +396,7 @@ class Composer(ft.Container):
         self.attachment = None
         self.attachment_chip = None
         self.set_attachment_hint(False)
-        self.token_hint.visible = False
+        self.set_token_hint("")
         self._content_changed()
 
     def set_attachment_hint(self, attached: bool) -> None:
@@ -406,13 +417,16 @@ class Composer(ft.Container):
     # ---- layout --------------------------------------------------------------------
 
     def set_row_style(self, style_name: str) -> bool:
+        """The output-mode control for a layout (``Layout.output_row``: chip / icons / full)."""
         changed = self.output_row.set_style(style_name)
         self.row_style = style_name
         return changed
 
     def set_compact_text(self, compact: bool) -> None:
-        """>= 160% text scale: max 4 lines (§7.5)."""
+        """>= 160% text scale: max 4 lines and no token hint (§7.5)."""
+        self._compact_text = bool(compact)
         self.text_field.max_lines = 4 if compact else 6
+        self.set_token_hint(self.token_hint.value or "")
 
     def set_plus_open(self, is_open: bool) -> None:
         """＋ rotates 45° into × while the ＋ sheet is open."""

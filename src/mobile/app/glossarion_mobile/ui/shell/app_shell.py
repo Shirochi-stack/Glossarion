@@ -567,6 +567,10 @@ class AppShell:
             self.layout = new
             if self.nav_drawer is not None:
                 self.nav_drawer.width = new.drawer_width
+            if (new.output_row, new.compact_text) != (old.output_row, old.compact_text):
+                # the composer's output-mode control follows the chat column, which also
+                # changes inside a class on tablets (UI_SPEC §2.3); no shell rebuild
+                self.chat_view.apply_layout(new)
             return False
         self.layout = new
         self.state.size_class.set(new.size_class)
