@@ -882,11 +882,11 @@ def test_tools_hub_tiles_and_availability(tmp_path):
         _mount(page, screen.get_body())
         names = [t.name for _g, tiles in HUB_GROUPS for t in tiles]
         assert names[:4] == ["Async batch", "Review generator", "Headers & metadata", "RPG Maker"]
-        assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.manga")) == "Arrives in U8"
+        assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.manga")) is None  # U8
         assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.async")) is None  # U7
         assert tile_available(next(t for _g, ts in HUB_GROUPS for t in ts if t.key == "tools.qa"),
                               IMPLEMENTED_ROUTES) is None
-        assert screen.tiles["tools.manga"].on_click is None and screen.tiles["tools.manga"].opacity < 1
+        assert screen.tiles["tools.manga"].on_click is not None  # U8
         assert screen.tiles["tools.qa"].content.controls[1].controls[1].value == "My Novel"
         screen.tiles["tools.convert.validate"].on_click(None)
         assert ctx.navigated[-1] == ("tools.convert", None, {"tab": "validate"})

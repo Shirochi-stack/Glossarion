@@ -2,7 +2,7 @@
 
 A grid of tool tiles (icon, name, last source) in the UI_SPEC groups. A tile opens its
 route; a tool whose milestone has not shipped stays visible, disabled, with a ReasonChip
-("Arrives in U8"). The last source a tool ran on comes from ``mobile_state.json``
+("Arrives in U9"). The last source a tool ran on comes from ``mobile_state.json``
 (``ToolsContext.last_source``).
 """
 

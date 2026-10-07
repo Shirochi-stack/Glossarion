@@ -3052,3 +3052,215 @@ deterministic.
   `Retranslation_GUI` `_load_pieces`), and ext4 lists in hash order, so the test now finds the piece
   by its output name and asserts only the file-name part of the header. Verified with the listing
   reversed. The core is unchanged.
+
+## U8 Manga run env, batch runner, Files model and settings defaults (manga_env, manga_runner, manga_files_core, manga_settings_defaults, google_vision_rest; manga_integration / manga_settings_dialog / manga_translator rewired)
+
+Frozen source: manga_integration.py, manga_settings_dialog.py and manga_translator.py at 9355bb5d
+(main with the owner's safe_image upgrade; manga_integration and manga_settings_dialog are unchanged
+since 9a46f869, where the move was first measured). The parity oracles (freeze_legacy, goldens,
+trace oracle) were re-frozen at 9355bb5d. tests/test_manga_env.py pins the move: every moved method
+equals its 9355bb5d text; `_start_translation_heavy` and `__init__` equal it once the split-outs are
+inlined back; run-start parity (15 scenarios: custom-api / Google / Azure / Document Intelligence /
+Qwen2-VL, key pools, batching, own-auth, aborts, existing translator, inpainting modes) and worker
+parity (7 scenarios: sequential, failures, CBZ jobs and "CBZ at end", OUTPUT_DIRECTORY, parallel
+panels, stop, model cleanup) run the frozen and the new code with recording stubs (logs, calls, env
+delta, config, update queue); a per-image trace runs `MangaTranslator.process_image` of the frozen
+module and of the working tree on a fixture page with recording BubbleDetector / OCRManager /
+LocalInpainter / UnifiedClient stand-ins (4 scenarios: batched, full-page context, visual context,
+skip inpainting) and compares the calls with their arguments, the result and the written pixels;
+an offscreen smoke builds the desktop tab and MangaSettingsDialog over a HeadlessOwner.
+
+### What moved
+- 115 `MangaTranslationTab` methods, byte for byte, into five GUI-free mixins the tab now inherits
+  (listed first, `QObject` last): `manga_files_core.MangaFilesMixin` (Files tab: source roots,
+  process groups, image range, skip keys, drop / CBZ extraction, sort, selection persistence, CBZ
+  packaging, output paths), `manga_files_core.MangaHooksMixin` (`_update_progress`,
+  `_update_current_file`, `_stop_startup_heartbeat`, `_update_manga_preview_image_list_for_range`,
+  plus GUI-free defaults of six hooks the tab overrides with its Qt code: `_log`, `_reset_ui_state`,
+  `_monitor_translation_output`, `_update_manga_image_range_display`, `_add_manga_file_item`,
+  `_rebuild_manga_file_listbox`), `manga_env.MangaEnvMixin` (settings state load / save / apply, the
+  font-size presets, default prompts, custom image-edit env, glossary auto-load / paths / backups /
+  debug files / glossary env), `manga_env.MangaOcrSessionMixin` (automatic OCR export, imported-OCR
+  page map) and `manga_runner.MangaRunMixin` (cancellation flags, preflight, start, worker, stop,
+  the manga glossary workflow).
+- `_start_translation_heavy` stays in `MangaRunMixin` with three blocks split out verbatim into
+  `MangaEnvMixin`: `_reset_manga_graceful_stop_env`, `_prepare_manga_run_env` (thread limits, OCR
+  config and credential checks, API key / model / client, key pools, custom-api OCR env,
+  `OCR_SYSTEM_PROMPT`, `MANGA_IMAGE_REQUEST_*`) and `_apply_manga_batch_env` (`BATCH_*`). The only
+  edits: the six early `return`s of the prepare block became `return None`, and it returns
+  `(ocr_config, api_key, model, needs_new_client)`.
+- `__init__` blocks: `apply_manga_startup_thread_limits(main_gui)`, `_init_manga_run_state()`,
+  `_init_manga_prompt_state()` (called from the same places).
+- Module helpers (`_get_app_dir`, `_manga_cmd_debug_*`, `_translation_run_token_matches`,
+  `_natural_sort_key`, `_MANGA_SKIP_PREFIX`, `_manga_filename_without_skip_prefix`) moved to
+  manga_files_core and the Windows thread-priority block to manga_runner; manga_integration
+  re-exports them. (`ImageStateManager` moved to manga_editor_core in the editor-core step.)
+- `MangaSettingsDialog.default_settings` is built by `manga_settings_defaults.default_manga_settings()`
+  (the literal moved with its comments); src/mobile/tools/schema_extract.py reads the
+  `manga_settings.*` defaults there (settings_schema_data.py unchanged).
+- New contract functions (no desktop caller): `manga_env.build_manga_run_env` (the env delta of a
+  batch start), `apply_rendering_settings`, `build_ocr_config`, `prepare_manga_glossary_env` /
+  `restore_manga_glossary_env`, `import_ocr_session`, `font_preset_updates` (the config writes of a
+  font-size preset button, computed by running `_set_font_preset`), the default prompt getters;
+  `manga_runner.HeadlessMangaRunner` / `run_manga_batch` (the MANGA job: the GUI-free lines of the
+  Start click, then the moved start / worker / stop); `manga_settings_defaults.merge_manga_settings`
+  / `MANGA_TOP_LEVEL_DEFAULTS`; `headless_owner.MANGA_OWNER_CONTRACT` (what the manga code reads
+  unguarded from its `main_gui`: `config`, `_get_environment_variables`, `contextual_var`,
+  `trans_history`; HeadlessOwner has all of them).
+
+### Behaviour deltas (intentional)
+- `_get_app_dir()`'s last fallback is `data_dir(os.getcwd())` instead of `os.getcwd()`
+  (mobile_runtime: the same value on desktop, app storage on mobile).
+- manga_translator: when `from google.cloud import vision` raises ImportError, the module import,
+  `_ensure_google_client` and `_google_ocr_rois_batched` use `google_vision_rest.vision` (REST with
+  the service-account JSON via google-auth, or an API key). With the SDK installed nothing changes;
+  a desktop source run without the SDK now OCRs over REST instead of failing with "Google Cloud
+  Vision required".
+- `process_image` no longer replaces `builtins.print` (nor `unified_api_client.print`) on mobile
+  (`_manga_print_hijack_enabled()`: `mobile_runtime.is_mobile()`); a mobile job captures its own
+  output and a process-wide print left pointing at a finished job's log would leak other features'
+  output into it. Desktop keeps the hijack.
+- Tracebacks name the new modules. tests/test_manga_drag_drop.py patches `_get_app_dir` in the module
+  that now defines `_manga_ocr_output_dir`.
+
+### Desktop bugs / defaults found (recorded, not fixed)
+1. **Azure Document Intelligence start check reads the Computer Vision fields.** For
+   `azure-document-intelligence` the batch start (`_prepare_manga_run_env`, formerly
+   manga_integration 15697-15725) requires and saves `azure_vision_key` / `azure_vision_endpoint`
+   (the Azure Computer Vision entries) and puts them into `ocr_config`, while the translator loads
+   the provider with `azure_document_intelligence_key` / `_endpoint` (manga_translator ~4922). A
+   Document Intelligence user must fill the Computer Vision fields too, or the start aborts with
+   "Azure credentials not configured". Pinned by the run-start scenario
+   `document_intelligence_uses_cv_widgets`.
+2. **The manga tab's top-level defaults differ from the startup env defaults.** With no saved value
+   `_load_rendering_settings` runs with `manga_bg_opacity` 0 (startup env 130),
+   `manga_free_text_only_bg_opacity` False (True), `manga_shadow_color` [255, 255, 255]
+   ([204, 128, 128]) and `manga_full_page_context` True (False). `MANGA_TOP_LEVEL_DEFAULTS` holds
+   what the tab runs with; mobile shows those.
+3. **A failed inpainter preload stalls each page for up to an hour.** When
+   `preload_local_inpainters_concurrent` creates no instance (e.g. the model file is missing), the
+   pool keeps an empty entry for the key and `_get_thread_local_inpainter` polls it for
+   `CHUNK_TIMEOUT` seconds (1800 with Retry Timeout off) twice before inpainting gives up. Mobile
+   should only start a local-inpainting run once the model is on disk (manga_models).
+4. **The default numeric sort orders by file name only.** Dropping a folder with chapter
+   subfolders queues them chapter by chapter, then `_apply_manga_file_sort` (`('numeric', False)`)
+   sorts all pages by `_natural_sort_key(basename)` (stable), interleaving chapters
+   (`ch1/1.png, ch2/1.png, ch1/2.png, ch1/10.png`); the image range and an unsplit run follow that
+   order. "Split first-level subfolders" process groups still split per chapter.
+
+## U8 Integrate (editor core, model registry, mobile Tools › Manga, packaging, offline E2E)
+
+The parity oracles stay frozen at 9355bb5d (the manga-env step's re-freeze; HEAD 28079156 adds three
+owner commits that touch only the mobile app and `key_pool_service`, no manga source). This section
+collects what the editor-core, model-registry and mobile-UI steps and the integration found; the
+manga-env step's own section is above.
+
+### Desktop packaging (pinned by tests/test_mobile_runtime.py)
+- The eight U8 modules (`manga_settings_defaults`, `manga_env`, `manga_files_core`, `manga_runner`,
+  `manga_editor_core`, `manga_models`, `google_vision_rest`, `azure_document_intelligence_rest`) follow
+  the manga tiers: both blocks of translator_Heavy / translator_NoCuda / translator_linux_NoCuda,
+  `app_files` only in the two Mac NoCuda specs, none of the nine Lite/standard specs.
+  `test_u8_manga_modules_follow_the_manga_spec_tiers` checks each spec against the tier
+  `manga_integration` itself ships in, that no module a Lite spec ships imports a U8 core at module
+  level, and that translator_gui still gates manga with `importlib.util.find_spec("manga_integration")`.
+- The desktop `ImageStateManager` worker process now unpickles
+  `manga_editor_core._state_manager_worker_process` (the class moved there), so frozen builds need
+  `manga_editor_core` in `app_modules` (done for the full manga tier).
+
+### Editor core (manga_editor_core; ImageRenderer, manga_image_preview, manga_integration rewired)
+Behaviour deltas (intentional):
+- The editor's `google` OCR (`_run_ocr_on_regions`) falls back to `google_vision_rest` when
+  `from google.cloud import vision` fails, like manga_translator. Desktop builds ship the SDK.
+- The `ImageStateManager` worker child imports `manga_editor_core` instead of `manga_integration`
+  (a lighter child process, no Qt). On mobile the class runs without the worker process
+  (`mobile_runtime.processes_available()`).
+
+Desktop bugs found (recorded, not fixed):
+1. **Translate All leaves the preview on the cleaned file.** It queues `load_preview_image` with
+   `<page>_translated/<page>_cleaned.png` and `preserve_rectangles=True`;
+   `MangaImagePreviewWidget.load_image` then sets `current_image_path` (and the tab's
+   `_current_image_path`) to that file, so the next `_persist_current_image_state` (e.g. on a page
+   change) writes an `image_state.json` entry keyed by the cleaned image. The mobile
+   `MangaEditorSession` keeps the original page open and reports the cleaned image as an output.
+2. **Deleting a box does not re-index the page's texts.** `_handle_delete_rectangle` removes the
+   rectangle but not its slot in `recognized_texts` / `translated_texts`; after a delete, the OCR
+   export or a reload can attach the deleted box's text to a remaining box (reproduced with the
+   real `MangaEditorSession`; mobile keeps the desktop behaviour).
+
+### Model registry and OCR providers (manga_models, azure_document_intelligence_rest; bubble_detector, local_inpainter, ocr_manager, settings_schema)
+- Mobile only: the default model caches are `<data>/models/{detector,inpainting,onnx}`
+  (runtime_bootstrap exports BUBBLE_CACHE_DIR / MODEL_CACHE_DIR / ONNX_CACHE_DIR before the
+  backend is importable); desktop keeps `models` and `~/.cache/inpainting`. ocr_manager's Azure
+  Document Intelligence provider uses the REST client on mobile only (desktop: unchanged "SDK not
+  installed" without the SDK). `settings_schema.UNAVAILABLE_RULES` marks the torch-only manga values
+  (manga-ocr, Qwen2-VL, EasyOCR, DocTR, Paddle, RT-DETR torch, YOLO, Torch JIT / Hybrid inpainting,
+  ONNX conversion) and `ollama` / `sd_local` unavailable on mobile, with a reason.
+
+Desktop bugs found (recorded, not fixed):
+3. **Azure Document Intelligence SDK name mismatch.** Every `requirements*.txt` pins
+   `azure-ai-documentintelligence==1.0.2` (module `azure.ai.documentintelligence`), but
+   `ocr_manager.AzureDocumentIntelligenceProvider` imports `azure.ai.formrecognizer`, so a fresh
+   desktop install reports the provider as "SDK not installed".
+4. **`ollama` and `sd_local` local inpainting have no backend.** The desktop combo offers them, but
+   local_inpainter has no `LAMA_JIT_MODELS` entry or handler for either. Mobile shows them disabled
+   ("Not functional on desktop either").
+
+### Found by the offline E2E (recorded, not fixed)
+5. **"Create CBZ at end" logs an error after a CBZ input was packaged.** With a CBZ in the Files list
+   and the default `manga_create_cbz_at_end` on, the worker's end runs `_finalize_cbz_jobs` (which
+   writes `<name>_translated.cbz` from `<name>_translated/`) and then
+   `_create_cbz_from_isolated_folders`, which only looks for per-page `<page stem>_translated`
+   folders next to the first page (or in OUTPUT_DIRECTORY) and logs "⚠️ No translated folders found
+   for CBZ creation" / "❌ Error creating CBZ file: No translated images found" with a traceback. The
+   run and the CBZ are fine; mobile runs the same code (moved verbatim) and shows the same log.
+
+### Mobile (no desktop change)
+- **Font-size presets.** `manga_settings_defaults.font_preset_updates` (manga-env step) measures a
+  preset by running the moved `_set_font_preset` on scratch headless tabs whose set-up writes
+  `os.environ` (and puts it back). The app therefore measures them on the io pool, under
+  `job_runner.JOB_LOCK` (refused with "Presets can be applied once the running job has finished"
+  while a job owns the process state, so a running batch never sees its env reverted), once per
+  session (the desktop presets set constants); the Settings tab only checks
+  `presets_available()` while it builds (the first measurement takes ~4 s on the host). Rendering
+  Reset and the custom image-edit endpoint Test stay disabled with a ReasonChip (their desktop code
+  is still bound to Qt dialogs).
+- The manga box / model sheets use `components.sheet` (scrolling body, bottom inset) and close by
+  identity (`components.dialogs.close_dialog`), following the owner's device fix 57f1835c.
+- Tier-B SDKs stay out of the app: Google Cloud Vision runs through `google_vision_rest` and Azure
+  Document Intelligence through `azure_document_intelligence_rest`. `check_mobile_wheels.py` on a
+  scratch pyproject resolves grpcio==1.81.0 + grpcio-status==1.81.0 + google-cloud-vision 3.16.0
+  and azure-ai-documentintelligence 1.0.2 for every Android/iOS target (no new errors besides the
+  documented cryptography / pillow release blocker), so they can be pinned later.
+- RapidOCR ships as a device-only dependency (`[tool.flet.android/ios].dependencies`:
+  rapidocr-onnxruntime 1.2.3, pyclipper 1.4.0, shapely 2.1.2); `backend_manifest.toml` no longer
+  lists it as unavailable. rapidocr-onnxruntime requires opencv-python, so the device build installs
+  opencv-python and opencv-python-headless 5.0.0.93 (both provide `cv2`); watch the first APK/IPA.
+
+### Self-test, offline E2E and host smoke additions
+- `fake_llm_server`: OCR-response mode (`ocr_text`): vision requests answer with the given text
+  (`FAKE_MANGA_OCR_TEXT`, Korean bubble text); an image request that already carries Hangul is the
+  manga full-page-context translation, and a `[N] text` request gets the JSON object its prompt asks
+  for (`manga_segments` / `manga_reply`). `fixtures.build_manga_cbz` writes a CBZ of Pillow pages.
+- `e2e_manga_cbz`: a 3-page CBZ imported through FileBridge, added by the moved Files logic, run by
+  the `manga` job (HeadlessMangaRunner, HeadlessOwner as `main_gui`): full-page custom-api OCR
+  (bubble detection off, so no model download), translation through the same endpoint, inpainting
+  skipped, text rendered on every page, the automatic OCR export and the translated CBZ.
+- `tools/host_smoke.py` `manga_pipeline`: RT-DETR through the bundled bubble_detector's Python
+  onnxruntime path on a tiny synthetic export planted in BUBBLE_CACHE_DIR (the bytes are pinned to
+  their onnx.helper builder by tests/test_mobile_compat_patches_manga.py), then one fixture page
+  through HeadlessMangaRunner with OCR and translation from the loopback fake server; env, cwd and
+  config.json unchanged.
+
+### Test hygiene fixed by the integration (test-only)
+- tests/test_u7_tool_cores.py's stop-flag test left `GRACEFUL_STOP=1` in the process: it called
+  `monkeypatch.delenv(raising=False)` on the absent key (which records nothing) and the code under
+  test then set the variable directly, so teardown restored "1". In CI's single-process 3.10 run that
+  broke `test_manga_env::test_headless_runner_stop_reaches_the_stop_protocol`. The test now records
+  the original state first; the manga test clears the variable itself.
+- tests/test_manga_env.py and tests/test_google_vision_rest.py no longer write into src/ (automatic
+  OCR export, manga glossary backups, HTTP request logs): an autouse fixture with its own
+  MonkeyPatch (several tests call `monkeypatch.undo()` between the legacy and new runs) points
+  `_get_app_dir` at a temp dir and sets GLOSSARION_HTTP_LOG=0.
+- Still pre-existing and not changed: tests/test_job_runner.py's `scoped_process_state` tests leave
+  PYTHONPATH removed and `test_reset_for_new_run` / tests/test_glossary_files.py's stop trace leave
+  `GRACEFUL_STOP=0` / `TRANSLATION_CANCELLED=1` behind in the process.

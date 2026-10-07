@@ -2679,58 +2679,9 @@ class MangaImagePreviewWidget(QWidget):
                 self.stop_translation_btn.setEnabled(False)
                 self.stop_translation_btn.setText("⏹ Stopping...")
                 
-                if mi and hasattr(mi, '_log'):
-                    mi._log("⚡ Double-click detected — forcing immediate stop!", "warning")
-                
-                os.environ['TRANSLATION_CANCELLED'] = '1'
-                os.environ['GRACEFUL_STOP'] = '0'
-                os.environ['WAIT_FOR_CHUNKS'] = '0'
-                
-                if mi:
-                    if hasattr(mi, 'is_running'):
-                        mi.is_running = False
-                    if hasattr(mi, 'stop_flag') and mi.stop_flag:
-                        mi.stop_flag.set()
-                    if hasattr(mi, '_batch_mode_active'):
-                        mi._batch_mode_active = False
-                    if hasattr(mi, 'set_global_cancellation'):
-                        mi.set_global_cancellation(True)
-                
-                # Hard cancel on MangaTranslator
-                try:
-                    from manga_translator import MangaTranslator
-                    MangaTranslator.set_global_cancellation(True)
-                    if hasattr(MangaTranslator, 'hard_cancel_all'):
-                        MangaTranslator.hard_cancel_all()
-                    print("[STOP] MangaTranslator hard_cancel_all()")
-                except ImportError:
-                    pass
-                
-                # === CRITICAL: Module-level stop — matches main stop_translation ===
-                # This sets global_stop_flag, closes HTTP sessions/httpx/OpenAI SDK
-                # clients, and cancels AuthGPT/AuthGem/Antigravity SSE streams.
-                try:
-                    import unified_api_client
-                    if hasattr(unified_api_client, 'set_stop_flag'):
-                        unified_api_client.set_stop_flag(True)
-                    if hasattr(unified_api_client, 'global_stop_flag'):
-                        unified_api_client.global_stop_flag = True
-                    if hasattr(unified_api_client, 'UnifiedClient'):
-                        unified_api_client.UnifiedClient._global_cancelled = True
-                    # Hard cancel: close active HTTP sessions to abort in-flight requests
-                    if hasattr(unified_api_client, 'hard_cancel_all'):
-                        unified_api_client.hard_cancel_all()
-                    print("[STOP] unified_api_client hard_cancel_all() + set_stop_flag(True)")
-                except Exception as e:
-                    print(f"[STOP] unified_api_client force-cancel failed: {e}")
-                
-                # Also set TransateKRtoEN stop flag
-                try:
-                    import TransateKRtoEN
-                    if hasattr(TransateKRtoEN, 'set_stop_flag'):
-                        TransateKRtoEN.set_stop_flag(True)
-                except ImportError:
-                    pass
+                # Flags, env and module-level hard cancel, shared with the mobile editor (U8)
+                import manga_editor_core
+                manga_editor_core._request_force_stop(mi)
                 
                 # Remove processing overlay
                 try:
@@ -2757,32 +2708,9 @@ class MangaImagePreviewWidget(QWidget):
                     print("[STOP] No manga_integration reference")
                     return
                 
-                if hasattr(mi, '_log'):
-                    mi._log("🛑 Graceful stop requested — waiting for in-flight API call to finish", "warning")
-                
-                # Set GRACEFUL_STOP env so background threads know this is graceful
-                os.environ['GRACEFUL_STOP'] = '1'
-                os.environ['WAIT_FOR_CHUNKS'] = '1'
-                
-                # Set is_running to False (prevents new operations from starting)
-                if hasattr(mi, 'is_running'):
-                    mi.is_running = False
-                
-                # Set stop_flag (checked by _is_translation_cancelled)
-                if hasattr(mi, 'stop_flag') and mi.stop_flag:
-                    mi.stop_flag.set()
-                    print("[STOP] Set stop_flag")
-                
-                # Clear batch mode flag (prevents next image in batch)
-                if hasattr(mi, '_batch_mode_active'):
-                    mi._batch_mode_active = False
-                    print("[STOP] Cleared batch mode flag")
-                
-                # Set _global_cancellation on manga_integration instance
-                # This is checked by _is_translation_cancelled() in ImageRenderer
-                if hasattr(mi, '_global_cancellation'):
-                    mi._global_cancellation = True
-                    print("[STOP] Set _global_cancellation on manga_integration")
+                # Editor-level stop flags, shared with the mobile editor (U8)
+                import manga_editor_core
+                manga_editor_core._request_graceful_stop(mi)
                 
                 # NOTE: We intentionally do NOT call MangaTranslator.set_global_cancellation()
                 # or UnifiedClient.set_global_cancellation() here. Those abort in-flight

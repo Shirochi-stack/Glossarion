@@ -2331,6 +2331,17 @@ class AzureComputerVisionProvider(OCRProvider):
         return results
 
 
+def _azure_doc_intel_rest_allowed():
+    """U8: on Glossarion Mobile the REST client (azure_document_intelligence_rest) stands in
+    for the azure-ai-formrecognizer SDK, which the app does not ship. Desktop keeps its
+    "SDK not installed" path unchanged."""
+    try:
+        import mobile_runtime
+        return mobile_runtime.is_mobile()
+    except Exception:
+        return False
+
+
 class AzureDocumentIntelligenceProvider(OCRProvider):
     """Azure Document Intelligence OCR provider (successor to Azure AI Vision)
     
@@ -2355,6 +2366,9 @@ class AzureDocumentIntelligenceProvider(OCRProvider):
             self.is_installed = True
             return True
         except ImportError:
+            if _azure_doc_intel_rest_allowed():
+                self.is_installed = True  # U8 (mobile): REST client
+                return True
             return False
     
     def install(self, progress_callback=None) -> bool:
@@ -2372,8 +2386,13 @@ class AzureDocumentIntelligenceProvider(OCRProvider):
                 self._log("   Install with: pip install azure-ai-formrecognizer", "info")
                 return False
             
-            from azure.ai.formrecognizer import DocumentAnalysisClient
-            from azure.core.credentials import AzureKeyCredential
+            try:
+                from azure.ai.formrecognizer import DocumentAnalysisClient
+                from azure.core.credentials import AzureKeyCredential
+            except ImportError:
+                if not _azure_doc_intel_rest_allowed():
+                    raise
+                DocumentAnalysisClient = None  # U8 (mobile): REST client below
             
             # Get credentials from multiple sources (kwargs, environment, or fall back to azure_vision_* config)
             # Priority: explicit kwargs > specific env vars > azure_vision config (GUI uses this)
@@ -2402,10 +2421,15 @@ class AzureDocumentIntelligenceProvider(OCRProvider):
                 return False
             
             # Create client
-            self.client = DocumentAnalysisClient(
-                endpoint=self.endpoint,
-                credential=AzureKeyCredential(self.key)
-            )
+            if DocumentAnalysisClient is None:
+                from azure_document_intelligence_rest import DocumentAnalysisRestClient
+                self.client = DocumentAnalysisRestClient(self.endpoint, self.key, stop_check=self._check_stop)
+                self._log("Using the Azure Document Intelligence REST API (SDK not bundled)")
+            else:
+                self.client = DocumentAnalysisClient(
+                    endpoint=self.endpoint,
+                    credential=AzureKeyCredential(self.key)
+                )
             
             self.is_loaded = True
             self._log("✅ Azure Document Intelligence client initialized")

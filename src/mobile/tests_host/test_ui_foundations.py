@@ -1369,8 +1369,8 @@ def test_app_routes_selftest_and_view_stack(app_env):
             await session.dispatch_event(page._i, "view_pop", {"route": "/settings/logs"})
             assert _routes(page) == ["/", "/settings"]
 
-            # the Library (U5), the Glossaries (U6) and a placeholder for a later milestone
-            # (Manga translator, U8); in-app navigation syncs the client route
+            # the Library (U5), the Glossaries (U6), Tools › Manga (U8) and a placeholder for a
+            # later milestone (Series, U9); in-app navigation syncs the client route
             from glossarion_mobile.ui.glossary.home import GlossariesScreen
             from glossarion_mobile.ui.library.home import LibraryScreen
 
@@ -1380,6 +1380,10 @@ def test_app_routes_selftest_and_view_stack(app_env):
             assert _routes(page) == ["/", "/glossary"] and isinstance(app.shell.top_screen, GlossariesScreen)
             await app.navigate("/tools/manga")
             assert _routes(page) == ["/", "/glossary", "/tools/manga"]
+            assert not isinstance(app.shell.top_screen, PlaceholderScreen)
+            assert getattr(app, "manga", None) is not None and "tools.manga" in app.manga.screens_built
+            await app.navigate("/series/s1")
+            assert _routes(page)[-1] == "/series/s1"
             assert isinstance(app.shell.top_screen, PlaceholderScreen)
             app.navigate_to("jobs")
             assert await _wait(lambda: _routes(page) == ["/", "/jobs"])

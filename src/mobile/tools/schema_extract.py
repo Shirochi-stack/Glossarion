@@ -46,7 +46,8 @@ d. Labels and tooltips: widgets created with a text (``QCheckBox("...")``,
    stores the item index as '0', '1', ...) are ints; editable combos flag ``editable_choices``.
 e. Nested dict settings: ``qa_scanner_settings.*`` (``qa_scan_runtime`` defaults, the
    ``save_config`` setdefault block, ``apply_qa_scan_env_from_settings`` env),
-   ``manga_settings.*`` (``MangaSettingsDialog.default_settings``), ``ai_hunter_config.*``
+   ``manga_settings.*`` (``manga_settings_defaults.default_manga_settings()``, which
+   ``MangaSettingsDialog.default_settings`` is built from since U8), ``ai_hunter_config.*``
    (``default_ai_hunter_config()``).
 
 The extraction works on both layouts of the shared-core move: code may live in
@@ -133,7 +134,8 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     "qa_scan_runtime.py",
     "translate_headers_standalone.py",
 )
-EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py")
+EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py",
+                 "manga_settings_defaults.py")
 # Dialog modules scanned for a few moved functions only (the rest of the module is backend code
 # that was never part of the dialog): module -> top-level names. Reach stays inside the list.
 DIALOG_MODULE_FUNCTIONS = {
@@ -226,7 +228,8 @@ NESTED_DEFAULT_SOURCES = (
     # (parent, module, qualname, how): how = "return" (function returning a dict literal)
     # or "attr:<name>" (self.<name> = {...} inside the function).
     ("qa_scanner_settings", "qa_scan_runtime.py", "default_qa_scan_settings", "return"),
-    ("manga_settings", "manga_settings_dialog.py", "MangaSettingsDialog.__init__", "attr:default_settings"),
+    # U8: MangaSettingsDialog.default_settings moved verbatim into manga_settings_defaults
+    ("manga_settings", "manga_settings_defaults.py", "default_manga_settings", "return"),
     ("ai_hunter_config", "ai_hunter_enhanced.py", "default_ai_hunter_config", "return"),
 )
 # Nested dicts that are one value (user data keyed by language etc.), not a settings group.

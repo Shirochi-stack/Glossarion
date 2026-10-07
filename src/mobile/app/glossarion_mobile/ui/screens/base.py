@@ -28,7 +28,7 @@ __all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "RO
 log = logging.getLogger("glossarion.ui")
 
 # Milestones whose surfaces exist in this build.
-SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6", "U7"})
+SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8"})
 
 ROUTE_ICONS = {
     "library": "LOCAL_LIBRARY",

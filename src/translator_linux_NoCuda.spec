@@ -329,6 +329,18 @@ app_files = [
     ('async_batch_core.py', '.'),
     ('output_tools_core.py', '.'),
     ('sdlxliff_review_core.py', '.'),
+    # Mobile rewrite U8 (manga tiers only): the manga settings defaults / run env / Files-tab /
+    # batch-runner / editor cores lifted from manga_integration, manga_settings_dialog and
+    # ImageRenderer, the on-demand ONNX model registry (bubble_detector, local_inpainter) and the
+    # Google Vision / Azure Document Intelligence REST fallbacks (manga_translator, ocr_manager)
+    ('manga_settings_defaults.py', '.'),
+    ('manga_env.py', '.'),
+    ('manga_files_core.py', '.'),
+    ('manga_runner.py', '.'),
+    ('manga_editor_core.py', '.'),
+    ('manga_models.py', '.'),
+    ('google_vision_rest.py', '.'),
+    ('azure_document_intelligence_rest.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -554,6 +566,18 @@ app_modules = [
     'async_batch_core',
     'output_tools_core',
     'sdlxliff_review_core',
+    # Mobile rewrite U8 (manga tiers only): the manga settings defaults / run env / Files-tab /
+    # batch-runner / editor cores lifted from manga_integration, manga_settings_dialog and
+    # ImageRenderer, the on-demand ONNX model registry (bubble_detector, local_inpainter) and the
+    # Google Vision / Azure Document Intelligence REST fallbacks (manga_translator, ocr_manager)
+    'manga_settings_defaults',
+    'manga_env',
+    'manga_files_core',
+    'manga_runner',
+    'manga_editor_core',
+    'manga_models',
+    'google_vision_rest',
+    'azure_document_intelligence_rest',
 ]
 
 # GUI Framework

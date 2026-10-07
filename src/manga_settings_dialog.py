@@ -20,6 +20,7 @@ import time
 import copy
 
 from language_options import TARGET_LANGUAGES
+from manga_settings_defaults import default_manga_settings
 
 # Use the same logging infrastructure initialized by translator_gui
 logger = logging.getLogger(__name__)
@@ -50,137 +51,7 @@ class MangaSettingsDialog(QDialog):
         self.setModal(False)
         
         # Enhanced default settings structure with all options
-        self.default_settings = {
-            'preprocessing': {
-                'enabled': False,
-                'auto_detect_quality': True,
-                'contrast_threshold': 0.4,
-                'sharpness_threshold': 0.3,
-                'noise_threshold': 20,
-                'enhancement_strength': 1.5,
-                'denoise_strength': 10,
-                'max_image_dimension': 2000,
-                'max_image_pixels': 2000000,
-                'chunk_height': 2000,
-                'chunk_overlap': 100,
-                # Inpainting tiling
-                'inpaint_tiling_enabled': False,  # Off by default
-                'inpaint_tile_size': 512,  # Default tile size
-                'inpaint_tile_overlap': 64  # Overlap to avoid seams
-            },
-            'compression': {
-                'enabled': False,
-                'format': 'jpeg',
-                'jpeg_quality': 85,
-                'png_compress_level': 6,
-                'webp_quality': 85
-            },
-            'ocr': {
-                'language_hints': ['ja', 'ko', 'zh'],
-                'confidence_threshold': 0.0,  # DEFAULT 0.0 (accept all, like comic-translate) to avoid missing text
-                'cloud_ocr_confidence': 0.0,  # Explicit default for cloud OCR (Azure/Google)
-                'min_region_size': 50,  # Minimum dimension for cloud OCR regions (0 = disabled)
-                'merge_nearby_threshold': 20,
-                'azure_merge_multiplier': 3.0,
-                'text_detection_mode': 'document',
-                'enable_rotation_correction': True,
-                'bubble_detection_enabled': True,
-                'roi_locality_enabled': False,
-                'bubble_model_path': '',
-                'bubble_confidence': 0.3,
-                'detector_type': 'rtdetr_onnx',
-                'rtdetr_onnx_variant': 'detector.onnx',
-                'rtdetr_confidence': 0.3,
-                'detect_empty_bubbles': True,
-                'detect_text_bubbles': True,
-                'detect_free_text': True,
-                'rtdetr_model_url': '',
-                'use_rtdetr_for_ocr_regions': True,  # On by default for best accuracy
-                'enable_fallback_ocr': False,  # Disabled by default - fallback OCR for empty RT-DETR blocks
-                'ocr_batch_enabled': True,
-                'ocr_batch_size': 8,
-                'ocr_max_concurrency': 2,
-                'ocr_request_delay_ms': 100,  # Existing Google ROI OCR base delay (adds small jitter)
-                'ocr_max_retries': 0,
-                'manga_ocr_disable_thinking': True,
-                # Toggles for RT-DETR behavior customization
-                'skip_rtdetr_merging': False,    # Do not merge overlapping RT-DETR regions (manual mode behavior)
-                'preserve_empty_blocks': False,  # Keep empty RT-DETR blocks even if OCR found no text
-                # Azure settings removed - new API is synchronous, no polling/version settings needed
-                'min_text_length': 0,
-                'exclude_english_text': False,
-                'english_exclude_threshold': 0.7,
-                'english_exclude_min_chars': 4,
-                'english_exclude_short_tokens': False
-            },
-            'advanced': {
-                'format_detection': True,
-                'webtoon_mode': 'auto',
-                'debug_mode': False,
-                'save_intermediate': False,
-                'parallel_processing': True,
-                'max_workers': 2,
-                'parallel_panel_translation': False,
-                'panel_max_workers': 2,
-                'auto_cleanup_models': False,
-                'unload_models_after_translation': False,
-                'auto_convert_to_onnx': False,  # Disabled by default
-                'auto_convert_to_onnx_background': True,
-                'quantize_models': False,
-                'onnx_quantize': False,
-                'torch_precision': 'fp16',
-                # HD strategy defaults (mirrors comic-translate)
-                'hd_strategy': 'resize',                # 'original' | 'resize' | 'crop'
-                'hd_strategy_resize_limit': 1536,       # long-edge cap for resize
-                'hd_strategy_crop_margin': 16,          # pixels padding around cropped ROIs
-                'hd_strategy_crop_trigger_size': 1024,  # only crop if long edge exceeds this
-                # RAM cap defaults
-                'ram_cap_enabled': False,
-                'ram_cap_mb': 4096,
-                'ram_cap_mode': 'soft',
-                'ram_gate_timeout_sec': 15.0,
-                'ram_min_floor_over_baseline_mb': 256
-                },
-            'inpainting': {
-                'batch_size': 10,
-                'enable_cache': True,
-                'method': 'local',
-                'local_method': 'anime'
-            },
-            'font_sizing': {
-            'algorithm': 'smart',  # 'smart', 'conservative', 'aggressive'
-            'prefer_larger': True,  # Prefer larger readable text
-            'max_lines': 10,  # Maximum lines before forcing smaller
-            'line_spacing': 1.3,  # Line height multiplier
-            'bubble_size_factor': True  # Scale font based on bubble size
-            },
-            
-            # Mask dilation settings with new iteration controls
-            'mask_dilation': 0,
-            'dilation_kernel_size': 5,  # Kernel size for dilation operations
-            'use_all_iterations': True,  # Master control - use same for all by default
-            'all_iterations': 2,  # Value when using same for all
-            'text_bubble_dilation_iterations': 2,  # Text-filled speech bubbles
-            'empty_bubble_dilation_iterations': 3,  # Empty speech bubbles
-            'free_text_dilation_iterations': 0,  # Free text (0 for clean B&W)
-            'bubble_dilation_iterations': 2,  # Legacy support
-            'dilation_iterations': 2,  # Legacy support
-            
-            # Cloud inpainting settings
-            'cloud_inpaint_model': 'ideogram-v2',
-            'cloud_custom_version': '',
-            'cloud_inpaint_prompt': 'clean background, smooth surface',
-            'cloud_negative_prompt': 'text, writing, letters',
-            'cloud_inference_steps': 20,
-            'cloud_timeout': 60,
-            'manual_edit': {
-                'translate_prompt': 'output only the {language} translation of this text:',  # Prompt template with {language} placeholder
-                'translate_target_language': 'English',  # Default language
-                'manga_output_token_limit': -1,  # -1 or 0 = use main GUI's output token limit
-                'translate_this_text_tokens': 2048,  # Token limit for "Translate This Text" context menu action
-                'translate_this_text_disable_thinking': True
-            }
-        }
+        self.default_settings = default_manga_settings()  # canonical defaults (manga_settings_defaults, U8)
         
         # Merge with existing config
         self.settings = self._merge_settings(config.get('manga_settings', {}))

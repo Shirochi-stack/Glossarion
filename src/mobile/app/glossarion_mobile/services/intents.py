@@ -12,7 +12,9 @@ through ``FileBridge`` (the cache copy is removed) and then offered:
   adds a handler that also offers "Open" on the new book);
 * **Open in Reader** (EPUB; the Library feature's handler routes to
   ``/reader/<bid>`` with the file's opaque id; disabled while no handler is
-  registered).
+  registered);
+* **Manga translator** (images, CBZ and ZIP only: the manga feature's handler adds
+  the file to Tools › Manga › Files; disabled while no handler is registered).
 
 Shared text (and http(s) links) prefill the composer. Nothing here is ever
 routed: ``glossarion://`` launch links are left to the app's router
@@ -36,11 +38,13 @@ from glossarion_mobile.services.files import LIBRARY_EXTENSIONS, FileBridge, Imp
 __all__ = [
     "ACTION_ADD_TO_LIBRARY",
     "ACTION_COMPOSE",
+    "ACTION_MANGA",
     "ACTION_OPEN_IN_READER",
     "ACTION_TRANSLATE_NEW_CHAT",
     "IntentAction",
     "IntentImport",
     "IntentRouter",
+    "MANGA_EXTENSIONS",
     "READER_EXTENSIONS",
 ]
 
@@ -50,6 +54,7 @@ ACTION_TRANSLATE_NEW_CHAT = "translate_new_chat"
 ACTION_ADD_TO_LIBRARY = "add_to_library"
 ACTION_OPEN_IN_READER = "open_in_reader"
 ACTION_COMPOSE = "compose"
+ACTION_MANGA = "manga"
 
 _BLOCKED_SCHEMES = ("content:", "file:", "intent:", "data:", "javascript:")
 READER_REASON = "The Reader is not available in this session"
@@ -57,6 +62,9 @@ READER_TYPES_REASON = "The Reader opens EPUB files"
 #: Shared files the Reader opens straight from the Inbox.
 READER_EXTENSIONS = (".epub",)
 LIBRARY_REASON = "Only EPUB, TXT, PDF and HTML files go to the Library"
+#: Shared files the manga translator takes (its Files tab: images, CBZ, ZIP).
+MANGA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".cbz", ".zip")
+MANGA_REASON = "The manga translator is not available in this session"
 
 
 @dataclass(frozen=True)
@@ -145,6 +153,9 @@ class IntentRouter:
         else:
             reader_reason = None
         actions.append(IntentAction(ACTION_OPEN_IN_READER, "Open in Reader", "AUTO_STORIES", reader_reason))
+        if imp.imported.extension in MANGA_EXTENSIONS:
+            actions.append(IntentAction(ACTION_MANGA, "Manga translator", "AUTO_STORIES",
+                                        None if ACTION_MANGA in self.handlers else MANGA_REASON))
         return actions
 
     # ---- handling -------------------------------------------------------------------------------

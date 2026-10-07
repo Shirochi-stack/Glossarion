@@ -219,6 +219,16 @@ tests/**
 !tests/test_async_batch_core.py
 !tests/test_review_run_core.py
 !tests/test_u7_tool_cores.py
+# Mobile rewrite (U8+): the manga settings defaults / run env / Files-tab / batch-runner / editor cores,
+# the on-demand ONNX model registry and the Google Vision REST fallback (verbatim pins vs the frozen
+# manga tab, per-page process_image traces, image-diff goldens with a fixed font, local HTTP servers).
+!tests/test_manga_env.py
+!tests/test_manga_editor_core.py
+!tests/test_manga_models.py
+!tests/test_google_vision_rest.py
+!tests/fixtures/
+!tests/fixtures/manga_editor/
+!tests/fixtures/manga_editor/**
 junktests/
 warp.md
 

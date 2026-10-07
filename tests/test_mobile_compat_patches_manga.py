@@ -350,6 +350,14 @@ def test_embedded_models_match_their_builders(models):
     assert models["inpaint"] == _inpaint_model_bytes()
 
 
+def test_host_smoke_plants_the_same_synthetic_rtdetr_export():
+    """src/mobile/tools/host_smoke.py's manga_pipeline check embeds this export (no onnx on the phone)."""
+    tree = ast.parse((SRC / "mobile" / "tools" / "host_smoke.py").read_text(encoding="utf-8"))
+    values = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+              and any(getattr(t, "id", None) == "SYNTHETIC_RTDETR_ONNX_B64" for t in node.targets)]
+    assert values == [_RTDETR_MODEL_B64]
+
+
 _MISSING = object()
 
 

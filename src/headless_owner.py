@@ -599,9 +599,23 @@ OWNER_CONTRACT_MODULES = (
     ("rpgmaker_job", "RpgMakerJobMixin"),
 )
 
+#: U8: the duck-typed ``main_gui`` of the manga pipeline. ``MangaTranslator`` reads ``main_gui.X``
+#: (its constructor argument) and ``self.main_gui.X``; the manga tab code moved out of
+#: manga_integration (``MangaTranslationTab``'s mixins) reads ``self.main_gui.X``. Desktop passes
+#: TranslatorGUI, mobile a HeadlessOwner: (module, class, owner expressions).
+MANGA_OWNER_CONTRACT_MODULES = (
+    ("manga_translator", "MangaTranslator", ("main_gui", "self.main_gui")),
+    ("manga_env", "MangaEnvMixin", ("self.main_gui",)),
+    ("manga_env", "MangaOcrSessionMixin", ("self.main_gui",)),
+    ("manga_files_core", "MangaFilesMixin", ("self.main_gui",)),
+    ("manga_runner", "MangaRunMixin", ("self.main_gui",)),
+)
 
-def _guarded_names(test):
-    """Names X guarded by ``hasattr(self, 'X')`` in an if/elif/ternary/and test."""
+_SELF_OWNER = ('self',)
+
+
+def _guarded_names(test, owners=_SELF_OWNER):
+    """Names X guarded by ``hasattr(<owner>, 'X')`` in an if/elif/ternary/and test."""
     out = set()
     for node in ast.walk(test):
         if (
@@ -609,8 +623,8 @@ def _guarded_names(test):
             and isinstance(node.func, ast.Name)
             and node.func.id == 'hasattr'
             and len(node.args) >= 2
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == 'self'
+            and isinstance(node.args[0], (ast.Name, ast.Attribute))
+            and ast.unparse(node.args[0]) in owners
             and isinstance(node.args[1], ast.Constant)
             and isinstance(node.args[1].value, str)
         ):
@@ -649,15 +663,16 @@ def _try_guards(node):
     return False
 
 
-def _unguarded_reads(class_node):
+def _unguarded_reads(class_node, owners=_SELF_OWNER):
+    """Attributes of the owner (``self``, or e.g. ``self.main_gui``) read unguarded / stored."""
     reads, stores = set(), set()
 
     def visit(node, guarded):
         if isinstance(node, ast.ClassDef) and node is not class_node:
             return  # a class nested in a method: its ``self`` is not the owner
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
-            inner = guarded | _guarded_names(node.test)
-            visit(node.test, guarded | _guarded_names(node.test))
+            inner = guarded | _guarded_names(node.test, owners)
+            visit(node.test, guarded | _guarded_names(node.test, owners))
             for child in (node.body if isinstance(node.body, list) else [node.body]):
                 visit(child, inner)
             for child in (node.orelse if isinstance(node.orelse, list) else [node.orelse]):
@@ -674,9 +689,10 @@ def _unguarded_reads(class_node):
             seen = guarded
             for value in node.values:
                 visit(value, seen)
-                seen = seen | _guarded_names(value)
+                seen = seen | _guarded_names(value, owners)
             return
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, (ast.Name, ast.Attribute))
+                and ast.unparse(node.value) in owners):
             if isinstance(node.ctx, ast.Store):
                 stores.add(node.attr)
             elif isinstance(node.ctx, ast.Load) and node.attr not in guarded:
@@ -688,31 +704,46 @@ def _unguarded_reads(class_node):
     return reads, stores
 
 
-def compute_owner_contract(src_dir=None):
-    """Attribute names the shared mixins read unguarded and never set (sorted tuple)."""
+def compute_owner_contract(src_dir=None, modules=None):
+    """Attribute names the shared code reads unguarded from its owner and never sets (sorted tuple).
+
+    *modules* defaults to :data:`OWNER_CONTRACT_MODULES` (``(module, class)``: the owner is
+    ``self``, the class's own methods/attributes are provided). Entries may name the owner
+    expressions as a third item, e.g. :data:`MANGA_OWNER_CONTRACT_MODULES`
+    (``self.main_gui``): then nothing the class defines counts as provided.
+    """
     src_dir = Path(src_dir) if src_dir else Path(__file__).resolve().parent
     reads, stores, provided = set(), set(), set()
-    for module, class_name in OWNER_CONTRACT_MODULES:
+    for entry in (OWNER_CONTRACT_MODULES if modules is None else modules):
+        module, class_name = entry[0], entry[1]
+        owners = tuple(entry[2]) if len(entry) > 2 else _SELF_OWNER
         tree = ast.parse((src_dir / f"{module}.py").read_text(encoding="utf-8-sig"))
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name == class_name:
-                for stmt in node.body:
-                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        provided.add(stmt.name)
-                    elif isinstance(stmt, ast.Assign):
-                        provided.update(t.id for t in stmt.targets if isinstance(t, ast.Name))
-                r, s = _unguarded_reads(node)
+                if owners == _SELF_OWNER:
+                    for stmt in node.body:
+                        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            provided.add(stmt.name)
+                        elif isinstance(stmt, ast.Assign):
+                            provided.update(t.id for t in stmt.targets if isinstance(t, ast.Name))
+                r, s = _unguarded_reads(node, owners)
                 reads |= r
                 stores |= s
     return tuple(sorted(name for name in reads - stores - provided if not name.startswith('__')))
 
 
+def compute_manga_owner_contract(src_dir=None):
+    """What the manga pipeline reads unguarded from its ``main_gui`` (MANGA_OWNER_CONTRACT)."""
+    return compute_owner_contract(src_dir, MANGA_OWNER_CONTRACT_MODULES)
+
+
 _OWNER_CONTRACT = None
+_MANGA_OWNER_CONTRACT = None
 
 
 def __getattr__(name):
-    """``OWNER_CONTRACT`` is computed from the mixin sources on first access."""
-    global _OWNER_CONTRACT
+    """``OWNER_CONTRACT`` / ``MANGA_OWNER_CONTRACT`` are computed from the sources on first access."""
+    global _OWNER_CONTRACT, _MANGA_OWNER_CONTRACT
     if name == "OWNER_CONTRACT":
         if _OWNER_CONTRACT is None:
             try:
@@ -720,6 +751,13 @@ def __getattr__(name):
             except OSError:  # sources not shipped (bytecode-only bundle)
                 _OWNER_CONTRACT = ()
         return _OWNER_CONTRACT
+    if name == "MANGA_OWNER_CONTRACT":
+        if _MANGA_OWNER_CONTRACT is None:
+            try:
+                _MANGA_OWNER_CONTRACT = compute_manga_owner_contract()
+            except OSError:  # sources not shipped (bytecode-only bundle)
+                _MANGA_OWNER_CONTRACT = ()
+        return _MANGA_OWNER_CONTRACT
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -730,6 +768,8 @@ __all__ = [
     "ComboShim",
     "DirectTextRunOptions",
     "HeadlessOwner",
+    "MANGA_OWNER_CONTRACT",
+    "MANGA_OWNER_CONTRACT_MODULES",
     "MULTIPASS_ITEMS",
     "OWNER_CONTRACT",
     "PlainTextShim",
@@ -737,5 +777,6 @@ __all__ = [
     "SHIM_TYPES",
     "STARTUP_WIDGET_SOURCES",
     "TextShim",
+    "compute_manga_owner_contract",
     "compute_owner_contract",
 ]

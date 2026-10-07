@@ -1,0 +1,221 @@
+# Self-built mobile wheels for the security pins: cryptography 50.0.2 (Android + iOS) and Pillow
+# 12.3.0 (Android). No index or release has Android/iOS cp313 wheels for these versions, so this
+# workflow builds them with flet-dev/mobile-forge (pinned in src/mobile/ci/wheels/wheelhouse.toml),
+# verifies them and uploads them as the artifact mobile-wheelhouse-<platform>. build-mobile.yml
+# calls it once per platform and hands the wheels to `flet build` through PIP_FIND_LINKS
+# (.github/actions/mobile-wheelhouse).
+#
+# Triggers: workflow_call and workflow_dispatch only. It never publishes: no release, no index
+# upload, no secrets. Finished wheels are cached (actions/cache, exact keys over the manifest,
+# the build scripts and the recipe) and rebuilt on a key change, after 7 idle days, or with
+# fresh=true. Cache entries are written only after both verification steps pass.
+#
+# Outputs: artifact mobile-wheelhouse-<platform> (wheels + SHA256SUMS + provenance.json, 7 days);
+# on failure, mobile-wheels-logs-<platform> (forge logs, 14 days).
+
+name: Mobile wheels (cryptography, Pillow)
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: android or ios
+        type: string
+        required: true
+      fresh:
+        description: Ignore the wheel cache and build again
+        type: boolean
+        required: false
+        default: false
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build
+        type: choice
+        options: [android, ios]
+        default: android
+      fresh:
+        description: Ignore the wheel cache and build again
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  build:
+    name: Build mobile wheels (${{ inputs.platform }})
+    runs-on: ${{ inputs.platform == 'ios' && 'macos-26' || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    env:
+      PLATFORM: ${{ inputs.platform }}
+    steps:
+      - name: Check inputs
+        run: |
+          case "$PLATFORM" in
+            android|ios) ;;
+            *) echo "::error title=Invalid input::platform must be android or ios (got '$PLATFORM')"; exit 1 ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Pinned inputs
+        id: pins
+        run: |
+          {
+            echo "WHEELHOUSE=$RUNNER_TEMP/wheelhouse"
+            echo "WHEELCACHE=$RUNNER_TEMP/wheelcache"
+            echo "FORGE_DIR=$RUNNER_TEMP/forge"
+          } >> "$GITHUB_ENV"
+          uv run --no-project python src/mobile/ci/wheels/wheels.py env --platform "$PLATFORM" --format github | tee -a "$GITHUB_OUTPUT"
+          # The cache steps below are written per package; fail if the manifest moved on without them.
+          case "$PLATFORM" in
+            android) expected="cryptography pillow" ;;
+            *) expected="cryptography" ;;
+          esac
+          packages="$(uv run --no-project python src/mobile/ci/wheels/wheels.py packages --platform "$PLATFORM")"
+          if [ "$packages" != "$expected" ]; then
+            echo "::error title=Mobile wheels::wheelhouse.toml builds '$packages' for $PLATFORM, but this workflow caches '$expected'. Update .github/workflows/mobile-wheels.yml."
+            exit 1
+          fi
+
+      - name: Restore cached cryptography wheels
+        id: cache-cryptography
+        if: ${{ !inputs.fresh }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/wheelcache/cryptography
+          key: mobile-wheels-v1-${{ inputs.platform }}-cryptography-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/cryptography/**') }}
+
+      - name: Restore cached Pillow wheels
+        id: cache-pillow
+        if: ${{ !inputs.fresh && inputs.platform == 'android' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/wheelcache/pillow
+          key: mobile-wheels-v1-${{ inputs.platform }}-pillow-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/pillow/**') }}
+
+      - name: Packages to build
+        id: todo
+        env:
+          HIT_CRYPTOGRAPHY: ${{ steps.cache-cryptography.outputs.cache-hit }}
+          HIT_PILLOW: ${{ steps.cache-pillow.outputs.cache-hit }}
+        run: |
+          todo=""
+          if [ "$HIT_CRYPTOGRAPHY" != true ]; then todo="cryptography"; fi
+          if [ "$PLATFORM" = android ] && [ "$HIT_PILLOW" != true ]; then todo="${todo:+$todo }pillow"; fi
+          echo "packages=$todo" | tee -a "$GITHUB_OUTPUT"
+          if [ -z "$todo" ]; then
+            echo "All wheels for $PLATFORM come from the cache." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Free disk space (Android)
+        if: inputs.platform == 'android' && steps.todo.outputs.packages != ''
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Android toolchain (apt packages, Rust)
+        if: inputs.platform == 'android' && steps.todo.outputs.packages != ''
+        env:
+          RUST_VERSION: ${{ steps.pins.outputs.rust_version }}
+          RUST_TARGETS: ${{ steps.pins.outputs.rust_targets }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config sqlite3
+          # `rustup default`, not RUSTUP_TOOLCHAIN: forge builds the compile environment from scratch
+          # (keeping HOME), so only rustup's default toolchain reaches cargo there.
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$RUST_TARGETS"
+          rustup default "$RUST_VERSION"
+          rustc -V
+
+      - name: Select Xcode
+        if: inputs.platform == 'ios' && steps.todo.outputs.packages != ''
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: iOS toolchain (Rust)
+        if: inputs.platform == 'ios' && steps.todo.outputs.packages != ''
+        env:
+          RUST_VERSION: ${{ steps.pins.outputs.rust_version }}
+          RUST_TARGETS: ${{ steps.pins.outputs.rust_targets }}
+        run: |
+          # As on Android: only rustup's default toolchain reaches forge's build environment. The
+          # iOS deployment target (13.0) is set in the recipe's script_env for the same reason.
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$RUST_TARGETS"
+          rustup default "$RUST_VERSION"
+          rustc -V
+          xcodebuild -version
+
+      - name: Build wheels (mobile-forge)
+        if: steps.todo.outputs.packages != ''
+        env:
+          PACKAGES: ${{ steps.todo.outputs.packages }}
+        run: |
+          read -r -a packages <<< "$PACKAGES"
+          bash src/mobile/ci/wheels/build_wheels.sh "$PLATFORM" "${packages[@]}"
+
+      - name: Assemble the wheelhouse
+        run: uv run --no-project python src/mobile/ci/wheels/wheels.py assemble --platform "$PLATFORM" --cache "$WHEELCACHE" --out "$WHEELHOUSE"
+
+      - name: Verify the wheelhouse (structure, pins, uv.lock)
+        run: uv run --no-project python src/mobile/tools/check_mobile_wheels.py --verify-wheelhouse "$WHEELHOUSE" --platform "$PLATFORM" --report "$RUNNER_TEMP/wheelhouse_check.md"
+
+      - name: Verify the wheelhouse (native binaries)
+        run: uv run --no-project python src/mobile/ci/wheels/wheels.py verify-native --platform "$PLATFORM" "$WHEELHOUSE"
+
+      - name: Save cryptography wheels to the cache
+        if: success() && contains(steps.todo.outputs.packages, 'cryptography')
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/wheelcache/cryptography
+          key: mobile-wheels-v1-${{ inputs.platform }}-cryptography-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/cryptography/**') }}
+
+      - name: Save Pillow wheels to the cache
+        if: success() && contains(steps.todo.outputs.packages, 'pillow')
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/wheelcache/pillow
+          key: mobile-wheels-v1-${{ inputs.platform }}-pillow-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/pillow/**') }}
+
+      - name: Write provenance
+        env:
+          PACKAGES: ${{ steps.todo.outputs.packages }}
+        run: uv run --no-project python src/mobile/ci/wheels/wheels.py provenance --platform "$PLATFORM" --wheelhouse "$WHEELHOUSE" --cache "$WHEELCACHE" --built "$PACKAGES"
+
+      - name: Upload the wheelhouse
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-wheelhouse-${{ inputs.platform }}
+          path: ${{ runner.temp }}/wheelhouse/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload forge logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-wheels-logs-${{ inputs.platform }}
+          path: |
+            ${{ runner.temp }}/forge/logs/
+            ${{ runner.temp }}/forge/errors/
+          if-no-files-found: warn
+          retention-days: 14

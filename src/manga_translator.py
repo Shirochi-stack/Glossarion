@@ -37,8 +37,41 @@ try:
     from google.cloud import vision
     GOOGLE_CLOUD_VISION_AVAILABLE = True
 except ImportError:
-    GOOGLE_CLOUD_VISION_AVAILABLE = False
-    print("Warning: Google Cloud Vision not installed. Install with: pip install google-cloud-vision")
+    try:
+        # REST fallback (mobile, U8): same surface, used only when the SDK is not installed
+        from google_vision_rest import vision
+        GOOGLE_CLOUD_VISION_AVAILABLE = True
+    except ImportError:
+        GOOGLE_CLOUD_VISION_AVAILABLE = False
+        print("Warning: Google Cloud Vision not installed. Install with: pip install google-cloud-vision")
+
+
+def _manga_print_hijack_enabled():
+    """Whether process_image may replace ``builtins.print`` with the manga log router.
+
+    Desktop (default) keeps the hijack. Mobile (U8) never installs it: a job captures its
+    own stdout, and a process-global print left hijacked after a manga run would route
+    other features' prints into that finished job's log.
+    """
+    try:
+        from mobile_runtime import is_mobile
+    except Exception:
+        return True
+    return not is_mobile()
+
+
+def _manga_print_restore_enabled():
+    """Whether ``restore_print`` may reset ``builtins.print`` and ``unified_api_client.print``.
+
+    Desktop: always (unchanged). Mobile installs no manga print (see
+    ``_manga_print_hijack_enabled``), so a restore there only undoes a ``manga_print`` it finds
+    installed; otherwise both stay as they are, in particular unified_api_client's own module
+    ``print`` (its logger route) survives a manga job for the next feature in the process.
+    """
+    if _manga_print_hijack_enabled():
+        return True
+    import builtins
+    return getattr(builtins.print, '__name__', '') == 'manga_print'
 
 # Import HistoryManager for proper context management
 try:
@@ -1749,7 +1782,8 @@ class MangaTranslator:
                 builtins._manga_log_callbacks.pop(id(self), None)
                 
                 # If no more manga translators are active, restore original print
-                if not builtins._manga_log_callbacks:
+                # (mobile: only a manga print that is installed, _manga_print_restore_enabled)
+                if not builtins._manga_log_callbacks and _manga_print_restore_enabled():
                     if hasattr(MangaTranslator, '_original_print_backup'):
                         builtins.print = MangaTranslator._original_print_backup
                         # Also restore in unified_api_client module
@@ -3418,7 +3452,10 @@ class MangaTranslator:
     def _ensure_google_client(self):
         try:
             if getattr(self, 'vision_client', None) is None:
-                from google.cloud import vision
+                try:
+                    from google.cloud import vision
+                except ImportError:
+                    from google_vision_rest import vision  # REST fallback (U8): only without the SDK
                 google_path = self.ocr_config.get('google_credentials_path') if hasattr(self, 'ocr_config') else None
                 if google_path:
                     os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
@@ -6284,7 +6321,10 @@ class MangaTranslator:
         - Consults and updates an in-memory ROI OCR cache.
         """
         try:
-            from google.cloud import vision as _vision
+            try:
+                from google.cloud import vision as _vision
+            except ImportError:
+                from google_vision_rest import vision as _vision  # REST fallback (U8): only without the SDK
         except Exception:
             self._log("❌ Google Vision SDK not available for ROI batching", "error")
             return []
@@ -14771,8 +14811,8 @@ class MangaTranslator:
                 builtins._manga_log_callbacks = {}
             if self.log_callback:
                 builtins._manga_log_callbacks[id(self)] = self.log_callback
-                # Re-apply the custom print if needed
-                if not hasattr(builtins.print, '__name__') or builtins.print.__name__ != 'manga_print':
+                # Re-apply the custom print if needed (never on mobile: _manga_print_hijack_enabled)
+                if _manga_print_hijack_enabled() and (not hasattr(builtins.print, '__name__') or builtins.print.__name__ != 'manga_print'):
                     # Print was restored, need to re-hijack
                     if hasattr(MangaTranslator, '_original_print_backup'):
                         # Get the manga_print function from module initialization

@@ -4133,8 +4133,8 @@ class MultiAPIKeyDialog(QDialog):
         for i in range(self.fallback_tree.topLevelItemCount()):
             item = self.fallback_tree.topLevelItem(i)
             if item:
-                # Status column is index 3 (after Output Limit)
-                item.setText(3, "⏳ Testing...")
+                # Status column is index 5 (after Delay)
+                item.setText(5, "⏳ Testing...")
 
         # Submit all tests to executor in parallel
         for i, key_data in enumerate(fallback_keys):
@@ -4486,8 +4486,8 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                # Status column is index 3 (after Output Limit)
-                item.setText(3, "⏳ Testing...")
+                # Status column is index 5 (after Delay)
+                item.setText(5, "⏳ Testing...")
 
         key_data = fallback_keys[index]
 
@@ -7089,7 +7089,7 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.glossary_tree.topLevelItemCount():
             item = self.glossary_tree.topLevelItem(index)
             if item:
-                item.setText(3, "⏳ Testing...")
+                item.setText(5, "⏳ Testing...")
 
         key_data = glossary_keys[index]
 
@@ -7112,7 +7112,7 @@ class MultiAPIKeyDialog(QDialog):
         for i in range(self.glossary_tree.topLevelItemCount()):
             item = self.glossary_tree.topLevelItem(i)
             if item:
-                item.setText(3, "⏳ Testing...")
+                item.setText(5, "⏳ Testing...")
 
         try:
             from unified_api_client import UnifiedClient

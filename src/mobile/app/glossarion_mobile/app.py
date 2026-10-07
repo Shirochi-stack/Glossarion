@@ -243,6 +243,7 @@ class GlossarionApp:
         await self._install_reader()  # /reader/<bid> (after the Library: it resolves book ids)
         await self._install_glossary()  # Glossary Manager + the Library's glossary hooks (after the Library)
         await self._install_tools()  # Tools hub, QA Scanner, Converter, Headers & metadata (after Library + Reader)
+        await self._install_manga()  # Tools › Manga (after Tools: it reuses its ToolsContext)
         self.dispatcher.spawn(self._after_ready())
         match = await self.dispatch_route(page.route, source="initial")
         await self._maybe_welcome(match)
@@ -371,6 +372,17 @@ class GlossarionApp:
             await ToolsFeature.install(self)  # sets self.tools; wraps shell.screen_factory
         except Exception:
             log.exception("tools feature unavailable; /tools shows the hub")
+
+    async def _install_manga(self) -> None:
+        """Tools › Manga (Files / Settings / Editor tabs, the on-demand ONNX model manager), the
+        IntentRouter "Manga translator" action and the chat's ＋ › Manga translator / "Translate as
+        manga" hand-off (U8). Its job kinds (manga, manga_step) are registered in ``job_kinds``."""
+        try:
+            from glossarion_mobile.ui.tools.manga.feature import MangaFeature
+
+            await MangaFeature.install(self)  # sets self.manga; wraps shell.screen_factory
+        except Exception:
+            log.exception("manga feature unavailable; /tools/manga shows a placeholder")
 
     async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
         """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome

@@ -121,6 +121,15 @@ TIKTOKEN_ENCODINGS = {
 }
 TIKTOKEN_MANIFEST = "MANIFEST.toml"
 
+# Model cache variables -> sub-directories of <data>/models (manga_models.CACHE_ENV_SUBDIRS;
+# bootstrap runs before the backend is importable, so the layout is repeated here and a host
+# test keeps the two equal).
+MODEL_CACHE_SUBDIRS = {
+    "BUBBLE_CACHE_DIR": "detector",
+    "MODEL_CACHE_DIR": "inpainting",
+    "ONNX_CACHE_DIR": "onnx",
+}
+
 # Device log lines are truncated by os_log at ~1 KiB; keep marker payloads short.
 MARKER_MAX_CHARS = 900
 
@@ -181,6 +190,19 @@ class AppPaths:
     def is_device(self) -> bool:
         return self.platform in ("android", "ios")
 
+    @property
+    def models(self) -> Path:
+        """``<data>/models``: on-demand manga ONNX models (manga_models), kept across updates."""
+        return self.data / "models"
+
+    def model_cache_env(self) -> dict[str, str]:
+        """BUBBLE_CACHE_DIR / MODEL_CACHE_DIR / ONNX_CACHE_DIR under ``models``.
+
+        bubble_detector and local_inpainter read them when they are imported, so they are
+        part of the contract. Same layout as ``manga_models.cache_env()`` (host-tested).
+        """
+        return {name: str(self.models / sub) for name, sub in MODEL_CACHE_SUBDIRS.items()}
+
     def writable_dirs(self) -> dict[str, Path]:
         return {
             "data": self.data,
@@ -192,6 +214,7 @@ class AppPaths:
             "output": self.output,
             "library": self.library,
             "tiktoken_cache": self.tiktoken_cache,
+            "models": self.models,
         }
 
     def env_contract(self, ca_bundle: Optional[str] = None) -> dict[str, str]:
@@ -221,6 +244,7 @@ class AppPaths:
             # Bookkeeping (not read by the backend):
             "GLOSSARION_PLATFORM": self.platform,
         }
+        env.update(self.model_cache_env())
         env.update(self.token_env())
         if ca_bundle:
             env["SSL_CERT_FILE"] = ca_bundle

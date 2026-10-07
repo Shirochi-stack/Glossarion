@@ -303,6 +303,17 @@ app_files = [
     ('async_batch_core.py', '.'),
     ('output_tools_core.py', '.'),
     ('sdlxliff_review_core.py', '.'),
+    # Mobile rewrite U8 (manga tiers only; loose files here like the rest of the manga stack): the
+    # manga settings defaults / run env / Files-tab / batch-runner / editor cores, the on-demand ONNX
+    # model registry and the Google Vision / Azure Document Intelligence REST fallbacks
+    ('manga_settings_defaults.py', '.'),
+    ('manga_env.py', '.'),
+    ('manga_files_core.py', '.'),
+    ('manga_runner.py', '.'),
+    ('manga_editor_core.py', '.'),
+    ('manga_models.py', '.'),
+    ('google_vision_rest.py', '.'),
+    ('azure_document_intelligence_rest.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)

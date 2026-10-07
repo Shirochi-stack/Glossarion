@@ -61,7 +61,9 @@ dependencies = [
   "cryptography==50.0.2",  # includes PKCS#7 oracle fix; mobile builds need patched wheels
   "cffi==2.0.0",
 
-  # Cloud OCR
+  # Cloud OCR (manga, U8): Azure Computer Vision through its SDK; Google Cloud Vision and Azure
+  # Document Intelligence through the REST clients google_vision_rest / azure_document_intelligence_rest
+  # (no gRPC stack in the app, see Tier B below)
   "azure-ai-vision-imageanalysis==1.0.0",
   "azure-core>=1.30",
   "isodate",
@@ -82,6 +84,13 @@ dependencies = [
 # Tier B (added in the milestone that enables the route; check_mobile_wheels.py must pass):
 #   "grpcio==1.81.0", "grpcio-status==1.81.0", "google-cloud-translate", "google-cloud-vision",
 #   "google-cloud-texttospeech", "azure-ai-documentintelligence"
+# U8 (manga cloud OCR) leaves them out on purpose: manga_translator and the editor fall back to
+# google_vision_rest when `from google.cloud import vision` fails, and ocr_manager's Azure Document
+# Intelligence provider (it imports azure.ai.formrecognizer, mapped to azure-ai-formrecognizer in
+# backend_manifest.toml) uses azure_document_intelligence_rest on mobile. check_mobile_wheels.py
+# resolves grpcio==1.81.0 + grpcio-status==1.81.0 + google-cloud-vision 3.16.0 and
+# azure-ai-documentintelligence 1.0.2 for every Android/iOS target (2026-10-08), so they can be
+# pinned later without new wheels.
 
 [dependency-groups]
 dev = ["flet[all]==1.0.3", "pytest>=8", "pytest-asyncio>=0.24"]
@@ -146,11 +155,23 @@ startup_message = "Starting translation engine…"
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni_flutter = "1.0.3"
 
+# RapidOCR (manga OCR provider, U8) is a device-only dependency, so the host `uv sync` keeps
+# only opencv-python-headless: rapidocr-onnxruntime requires opencv-python, which pypi.flet.dev
+# builds from the same OpenCV 5.0.0.93 as the headless wheel. Both install the same `cv2` package
+# into the one device site-packages (separate builds, so the later install's files win).
+# 1.2.3 is the newest release that installs on CPython 3.13 (1.2.4+ declare
+# Requires-Python < 3.11/3.12/3.13; verified on CPython 3.13 + numpy 2.4 + onnxruntime 1.27); it
+# bundles its PP-OCRv3 det/rec and v2.0 cls ONNX models (~13 MB) and reads them and config.yaml
+# through __file__, hence extract_packages on Android. check_mobile_wheels.py
+# resolves all three for every Android/iOS target.
 [tool.flet.android]
 min_sdk_version = 26
 target_arch = ["arm64-v8a", "x86_64"]          # onnxruntime has no armeabi-v7a wheel
-extract_packages = ["langdetect", "certifi", "cv2", "tiktoken_ext"]
-dependencies = ["psutil==7.2.2"]               # Android only; every use is guarded
+extract_packages = ["langdetect", "certifi", "cv2", "tiktoken_ext", "rapidocr_onnxruntime"]
+dependencies = [
+  "psutil==7.2.2",                             # Android only; every use is guarded
+  "rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2",
+]
 
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true
@@ -177,6 +198,7 @@ networkSecurityConfig = "@xml/glossarion_network_security_config"
 
 [tool.flet.ios]
 export_method = "release-testing"   # used only when CI passes signing flags
+dependencies = ["rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2"]  # RapidOCR, see [tool.flet.android]
 
 [tool.flet.ios.info]
 # CFBundleDisplayName comes from [tool.flet].product (flet v1.0.3 ios/Runner/Info.plist template);

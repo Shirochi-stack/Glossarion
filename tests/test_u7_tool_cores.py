@@ -239,6 +239,11 @@ def test_qa_settings_loader_reset_and_stop_flags_are_the_frozen_blocks(monkeypat
                                          "output_language": "English"})["check_word_count_ratio"] is False
 
     # the stop escalation against the frozen translator_gui methods (flag effects only)
+    for key in ("GRACEFUL_STOP", "TRANSLATION_CANCELLED"):
+        # record the original state for teardown: a delenv(raising=False) of an absent key records
+        # nothing, and the code under test sets these directly (GRACEFUL_STOP=1 leaked to later files)
+        monkeypatch.setenv(key, "x")
+        monkeypatch.delenv(key)
     tg = frozen_text("src/translator_gui.py")
     calls = []
     fake_client = types.SimpleNamespace(set_stop_flag=lambda v: calls.append(("set_stop_flag", v)),

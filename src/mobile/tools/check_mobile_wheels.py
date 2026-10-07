@@ -46,14 +46,34 @@ Usage::
 
     python tools/check_mobile_wheels.py [--pyproject pyproject.toml] [--report build/wheels.md]
            [--json build/wheels.json] [--direct-only] [--cache-dir build/wheel_cache]
+           [--platform all|android|ios]
+
+Self-built wheels (``ci/wheels/wheelhouse.toml``; built by .github/workflows/mobile-wheels.yml
+and handed to ``flet build`` through ``PIP_FIND_LINKS``). With none of the flags below the
+check behaves exactly as without a wheelhouse, so the security pins fail while no index has
+their mobile wheels:
+
+* ``--wheelhouse DIR`` (repeatable): add the wheels in DIR as a third source. Selection then
+  follows pip (version, then tag priority, then build tag; an exact tie goes to the index),
+  every (package, target) the manifest promises must be picked from DIR, and DIR may hold
+  nothing else.
+* ``--wheelhouse-plan``: the same with the promised wheels as virtual "planned" files (fails
+  fast on index or dependency drift before any wheel exists).
+* ``--verify-wheelhouse DIR``: offline structure check of a built wheelhouse (zip integrity,
+  RECORD hashes, filename vs METADATA / WHEEL vs manifest, nothing unknown).
+* ``--verify-installed SITE_PACKAGES``: offline check that every arch directory of a finished
+  ``flet build`` (build/site-packages) holds the wheelhouse copy of each promised package.
 
 Exit codes: 0 ok, 1 something is not installable, 2 usage/network error.
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import hashlib
 import html
+import io
 import json
 import os
 import re
@@ -61,8 +81,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from email.parser import HeaderParser
 from pathlib import Path
 
 try:
@@ -73,11 +95,12 @@ except ModuleNotFoundError:  # pragma: no cover
 
 MOBILE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_PYPROJECT = MOBILE_DIR / "pyproject.toml"
+DEFAULT_WHEELHOUSE_MANIFEST = MOBILE_DIR / "ci" / "wheels" / "wheelhouse.toml"
 FLET_INDEX = "https://pypi.flet.dev"
 PYPI_SIMPLE = "https://pypi.org/simple"
 PYPI_JSON = "https://pypi.org/pypi"
 TARGET_PYTHON = (3, 13)
-TARGET_PYTHON_FULL = "3.13.7"
+TARGET_PYTHON_FULL = "3.13.15"  # the CPython Flet 1.0.3 bundles (python-build 20260921)
 USER_AGENT = "glossarion-check-mobile-wheels/1 (+https://github.com/Shirochi-stack/Glossarion)"
 
 
@@ -472,25 +495,35 @@ def _py_abi_ok(py: str, abi: str) -> bool:
 class DistFile:
     filename: str
     version: Version
-    source: str              # pypi | flet
+    source: str              # pypi | flet | wheelhouse | planned
     kind: str                # wheel | sdist
     py: str = ""
     abi: str = ""
     plats: tuple = ()
     requires_python: str = ""
     yanked: bool = False
+    build: tuple = ()        # wheel build tag as pip compares it: (number, suffix), () when absent
+    requires_dist: list | None = None   # own metadata (wheelhouse / planned); None: ask PyPI JSON
+    path: str = ""           # local file (wheelhouse)
 
     @property
     def pure(self) -> bool:
         return self.kind == "wheel" and self.plats == ("any",)
 
 
+def parse_build_tag(text: str) -> tuple:
+    """A wheel build tag the way pip orders it: ``(1000, "")``; ``()`` when absent or invalid."""
+    m = re.fullmatch(r"(\d+)(.*)", text or "")
+    return (int(m.group(1)), m.group(2)) if m else ()
+
+
 def parse_filename(filename: str, project: str, source: str, requires_python: str = "", yanked: bool = False):
     fn = filename.split("#")[0]
     if fn.endswith(".whl"):
         parts = fn[:-4].split("-")
+        build = ""
         if len(parts) == 6:
-            name, ver, _build, py, abi, plat = parts
+            name, ver, build, py, abi, plat = parts
         elif len(parts) == 5:
             name, ver, py, abi, plat = parts
         else:
@@ -500,7 +533,8 @@ def parse_filename(filename: str, project: str, source: str, requires_python: st
         v = parse_version(ver)
         if v is None:
             return None
-        return DistFile(fn, v, source, "wheel", py, abi, tuple(plat.split(".")), requires_python, yanked)
+        return DistFile(fn, v, source, "wheel", py, abi, tuple(plat.split(".")), requires_python, yanked,
+                        parse_build_tag(build))
     m = re.match(r"^(?P<name>.+?)-(?P<ver>\d[^-]*?)\.(?:tar\.gz|zip|tar\.bz2|tgz)$", fn)
     if m and canonical(m.group("name")) == canonical(project):
         v = parse_version(m.group("ver"))
@@ -540,6 +574,60 @@ def file_ok(f: DistFile, target: Target, source_package: bool) -> bool:
     return any(target.platform_ok(p) for p in f.plats)
 
 
+def _tag_groups() -> tuple:
+    """(interpreter, abi) groups in pip's preference order (packaging.tags.sys_tags for cp313).
+
+    Platform-specific groups come first: cp313-cp313, cp313-abi3, cp313-none, cp312-abi3 ...
+    cp32-abi3, py313-none, py3-none, py312-none ... py30-none. Then the ``any`` groups:
+    cp313-none-any, py313-none-any, py3-none-any, py312-none-any ... py30-none-any.
+    """
+    maj, mnr = TARGET_PYTHON
+    cp = f"cp{maj}{mnr}"
+    py_range = [f"py{maj}{mnr}", f"py{maj}"] + [f"py{maj}{m}" for m in range(mnr - 1, -1, -1)]
+    specific = [(cp, cp), (cp, "abi3"), (cp, "none")] + [(f"cp{maj}{m}", "abi3") for m in range(mnr - 1, 1, -1)]
+    specific += [(p, "none") for p in py_range]
+    generic = [(cp, "none")] + [(p, "none") for p in py_range]
+    return tuple(specific), tuple(generic)
+
+
+_TAG_GROUPS = _tag_groups()
+
+
+def tag_priority(f: DistFile, target: Target) -> tuple | None:
+    """How much pip prefers ``f``'s best tag for ``target`` (higher is better); None if no tag fits.
+
+    Group order follows packaging.tags; within a group a higher platform level ranks higher
+    (android_24 above android_21). Sdists rank below every wheel.
+    """
+    if f.kind != "wheel":
+        return (-(len(_TAG_GROUPS[0]) + len(_TAG_GROUPS[1]) + 1), ())
+    specific, generic = _TAG_GROUPS
+    best = None
+    for py in f.py.split("."):
+        for abi in f.abi.split("."):
+            for plat in f.plats:
+                if plat == "any":
+                    if (py, abi) not in generic:
+                        continue
+                    key = (-(len(specific) + generic.index((py, abi))), ())
+                else:
+                    if (py, abi) not in specific:
+                        continue
+                    m = re.fullmatch(target.platform_re, plat)
+                    if not m or not target.platform_ok(plat):
+                        continue
+                    key = (-specific.index((py, abi)), tuple(int(x) for x in m.groups() if x is not None))
+                if best is None or key > best:
+                    best = key
+    return best
+
+
+def pip_rank(f: DistFile, target: Target) -> tuple:
+    """pip's preference among the files of one version: tag priority, then build tag; an exact tie
+    goes to the index (pip lists find-links files first and keeps the last best candidate)."""
+    return (tag_priority(f, target) or (-10 ** 6, ()), f.build, f.source in ("pypi", "flet"))
+
+
 # ============================================================================ fetching
 class Fetcher:
     def __init__(self, cache_dir: Path | None = None, timeout: float = 30.0, ttl: float = 6 * 3600, jobs: int = 16):
@@ -550,6 +638,8 @@ class Fetcher:
         self._mem: dict[str, object] = {}
         self._flet_projects: dict[str, str] | None = None
         self.requests = 0
+        # canonical name -> [DistFile] from --wheelhouse / --wheelhouse-plan, offered next to the index files
+        self.extra_files: dict[str, list] = {}
 
     def _get(self, url: str, accept: str | None = None) -> tuple[int, bytes]:
         key = hashlib.sha1(f"{url}|{accept}".encode()).hexdigest()
@@ -595,6 +685,11 @@ class Fetcher:
         return self._flet_projects
 
     def files(self, project: str) -> list:
+        extra = self.extra_files.get(canonical(project))
+        index_files = self._index_files(project)
+        return index_files + extra if extra else index_files
+
+    def _index_files(self, project: str) -> list:
         key = f"files:{canonical(project)}"
         if key in self._mem:
             return self._mem[key]
@@ -652,15 +747,20 @@ class Choice:
 
 
 class Resolver:
-    """Greedy pip-like resolution (newest compatible version; no backtracking) for one target."""
+    """Greedy pip-like resolution (newest compatible version; no backtracking) for one target.
+
+    ``rank="legacy"`` reports a pypi.flet.dev file first within a version (the historic report);
+    ``rank="pip"`` (wheelhouse modes) picks the file pip would install (see ``pip_rank``).
+    """
 
     def __init__(self, target: Target, fetcher: Fetcher, source_packages: set, local_packages: set,
-                 transitive: bool = True):
+                 transitive: bool = True, rank: str = "legacy"):
         self.t = target
         self.f = fetcher
         self.source = source_packages
         self.local = local_packages
         self.transitive = transitive
+        self.rank = rank
         self.specs: dict[str, list] = {}       # name -> [(Requirement, parent, parent_version)]
         self.chosen: dict[str, Choice] = {}
         self.walked: dict[str, tuple] = {}
@@ -710,8 +810,21 @@ class Resolver:
                        f"versions installable here: {', '.join(map(str, usable)) or 'none'}"
                        f"{'' if on_flet else '; not on pypi.flet.dev'}")
             return Choice(name, None, None, why, parents)
-        best = sorted(by_version[pick], key=lambda f: (f.pure, f.source != "flet", f.kind != "wheel"))[0]
+        if self.rank == "pip":
+            best = max(by_version[pick], key=lambda f: pip_rank(f, self.t))
+        else:
+            best = sorted(by_version[pick], key=lambda f: (f.pure, f.source != "flet", f.kind != "wheel"))[0]
         return Choice(name, pick, best, "", parents)
+
+    def _own_metadata(self, name: str) -> bool:
+        c = self.chosen.get(name)
+        return c is not None and c.file is not None and c.file.requires_dist is not None
+
+    def _deps(self, name: str, version: Version):
+        """Requires-Dist of the chosen file: its own metadata (wheelhouse / planned) or PyPI JSON."""
+        if self._own_metadata(name):
+            return list(self.chosen[name].file.requires_dist)
+        return self.f.requires_dist(name, version)
 
     def resolve(self, roots: list) -> None:
         for req in roots:
@@ -739,12 +852,13 @@ class Resolver:
                     changed.append((n, c.version, extras))
             if not self.transitive:
                 continue
-            self.f.prefetch(self.f.requires_dist, [(n, v) for n, v, _ in changed if v is not None])
+            self.f.prefetch(self.f.requires_dist, [(n, v) for n, v, _ in changed
+                                                    if v is not None and not self._own_metadata(n)])
             for n, v, extras in changed:
                 self.walked[n] = (v, extras)
                 if v is None:
                     continue
-                deps = self.f.requires_dist(n, v)
+                deps = self._deps(n, v)
                 if deps is None:
                     self.chosen[n].reason = f"{v} has no PyPI metadata; dependencies not checked"
                     continue
@@ -816,6 +930,576 @@ def load_project(path: Path) -> Project:
     )
 
 
+# ============================================================================ wheelhouse (self-built wheels)
+PLATFORMS = ("all", "android", "ios")
+WHEELHOUSE_SOURCES = ("wheelhouse", "planned")
+SOURCE_LABELS = {"planned": "planned (mobile-wheels)"}
+# Besides the promised wheels a wheelhouse may hold only these (pip reads every archive in a
+# find-links directory, so anything else could be installed by flet build).
+WHEELHOUSE_EXTRA_FILES = ("SHA256SUMS", "provenance.json")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class ManifestError(ValueError):
+    pass
+
+
+def platform_of(target_key: str) -> str:
+    """android | ios for a TARGETS key."""
+    return TARGETS[target_key].os
+
+
+def on_platform(target_key: str, platform: str) -> bool:
+    return platform == "all" or platform_of(target_key) == platform
+
+
+def has_extra_marker(req: Requirement) -> bool:
+    return bool(req.marker) and re.search(r"\bextra\b", req.marker) is not None
+
+
+def _marker_key(marker: str | None) -> str:
+    """Spelling-independent form of a marker (quotes and spacing)."""
+    if not marker:
+        return ""
+    out, pos = [], 0
+    while pos < len(marker) and marker[pos:].strip():
+        m = _MARKER_TOKEN.match(marker, pos)
+        if not m or m.end() == pos:
+            return " ".join(marker.split())
+        kind = m.lastgroup
+        val = m.group(kind)
+        out.append(f'"{val[1:-1]}"' if kind == "str" else re.sub(r"\s+", " ", val))
+        pos = m.end()
+    return " ".join(out)
+
+
+def requirement_key(text: str) -> tuple:
+    """Spelling-independent form of a requirement: ``flet-libjpeg (==3.0.90)`` == ``flet_libjpeg==3.0.90``."""
+    r = parse_requirement(text)
+    return (r.key, tuple(sorted(r.extras)), tuple(sorted(str(s) for s in r.spec.specs)), _marker_key(r.marker),
+            r.url or "")
+
+
+def runtime_requirements(requires_dist) -> set:
+    """The Requires-Dist entries pip installs without extras, as requirement keys."""
+    out = set()
+    for text in requires_dist or []:
+        req = parse_requirement(text)
+        if not has_extra_marker(req):
+            out.add(requirement_key(text))
+    return out
+
+
+@dataclass(frozen=True)
+class PromisedWheel:
+    name: str                # canonical project name
+    version: str
+    recipe: str
+    sdist_sha256: str
+    targets: tuple           # TARGETS keys
+    requires_dist: tuple     # Requires-Dist without extra markers
+
+    def filename(self, target_key: str, build_tag: int) -> str:
+        cp = f"cp{TARGET_PYTHON[0]}{TARGET_PYTHON[1]}"
+        return f"{self.name.replace('-', '_')}-{self.version}-{build_tag}-{cp}-{cp}-{TARGETS[target_key].label}.whl"
+
+    def tag(self, target_key: str) -> str:
+        cp = f"cp{TARGET_PYTHON[0]}{TARGET_PYTHON[1]}"
+        return f"{cp}-{cp}-{TARGETS[target_key].label}"
+
+
+@dataclass
+class WheelhouseManifest:
+    path: Path
+    build_tag: int
+    wheels: list             # [PromisedWheel]
+    data: dict               # the whole TOML document (toolchain, openssl, ...)
+
+    def wheel(self, name: str):
+        return next((w for w in self.wheels if w.name == canonical(name)), None)
+
+    def promised(self, platform: str = "all") -> list:
+        """[(PromisedWheel, target key)] for the targets of ``platform``."""
+        return [(w, t) for w in self.wheels for t in w.targets if on_platform(t, platform)]
+
+
+def load_wheelhouse_manifest(path) -> WheelhouseManifest:
+    """Read and validate ci/wheels/wheelhouse.toml (raises OSError, TOMLDecodeError or ManifestError)."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    if data.get("schema") != 1:
+        raise ManifestError(f"{path}: unsupported schema {data.get('schema')!r} (expected 1)")
+    build_tag = data.get("build_tag")
+    if not isinstance(build_tag, int) or isinstance(build_tag, bool) or build_tag < 1:
+        raise ManifestError(f"{path}: build_tag must be a positive integer")
+    wheels, seen = [], set()
+    for i, entry in enumerate(data.get("wheel") or []):
+        where = f"{path}: [[wheel]] #{i + 1}"
+        if not isinstance(entry, dict):
+            raise ManifestError(f"{where} is not a table")
+        name, version = entry.get("name"), entry.get("version")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise ManifestError(f"{where}: bad name {name!r}")
+        if canonical(name) in seen:
+            raise ManifestError(f"{where}: {name} is listed twice")
+        if not isinstance(version, str) or parse_version(version) is None:
+            raise ManifestError(f"{where}: bad version {version!r}")
+        sdist = entry.get("sdist_sha256")
+        if not isinstance(sdist, str) or not _SHA256_RE.fullmatch(sdist):
+            raise ManifestError(f"{where}: sdist_sha256 must be 64 lowercase hex digits")
+        targets = entry.get("targets")
+        if not isinstance(targets, list) or not targets or len(set(targets)) != len(targets) or \
+                any(t not in TARGETS for t in targets):
+            raise ManifestError(f"{where}: targets must be distinct keys of {sorted(TARGETS)} (got {targets!r})")
+        reqs = entry.get("requires_dist", [])
+        if not isinstance(reqs, list) or not all(isinstance(r, str) for r in reqs):
+            raise ManifestError(f"{where}: requires_dist must be a list of strings")
+        for r in reqs:
+            try:
+                req = parse_requirement(r)
+            except ValueError as e:
+                raise ManifestError(f"{where}: {e}") from e
+            if has_extra_marker(req):
+                raise ManifestError(f"{where}: requires_dist lists only what installs without extras ({r!r})")
+        recipe = entry.get("recipe", "")
+        if not isinstance(recipe, str):
+            raise ManifestError(f"{where}: recipe must be a string")
+        seen.add(canonical(name))
+        wheels.append(PromisedWheel(canonical(name), version, recipe, sdist, tuple(targets), tuple(reqs)))
+    if not wheels:
+        raise ManifestError(f"{path}: no [[wheel]] entries")
+    return WheelhouseManifest(path, build_tag, wheels, data)
+
+
+def load_uv_lock_sdists(path: Path) -> dict:
+    """(canonical name, version) -> (sdist url, sha256 hex) from uv.lock."""
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    out = {}
+    for pkg in data.get("package", []):
+        sdist = pkg.get("sdist") or {}
+        digest = sdist.get("hash", "")
+        if pkg.get("name") and pkg.get("version") and digest.startswith("sha256:"):
+            out[(canonical(pkg["name"]), str(pkg["version"]))] = (sdist.get("url", ""), digest[len("sha256:"):])
+    return out
+
+
+def check_manifest_pins(manifest: WheelhouseManifest, project: Project, uv_lock: Path | None) -> list:
+    """The manifest must build exactly the pinned versions from the locked sdists."""
+    errors = []
+    reqs = project.common + project.android + project.ios
+    lock = None
+    if uv_lock is None or not uv_lock.is_file():
+        errors.append(f"{uv_lock}: not found, so the sdist hashes in {manifest.path.name} cannot be checked")
+    else:
+        try:
+            lock = load_uv_lock_sdists(uv_lock)
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            errors.append(f"{uv_lock}: unreadable ({e})")
+    for w in manifest.wheels:
+        pins = [r for r in reqs if r.key == w.name]
+        if not pins:
+            errors.append(f"{w.name}: {manifest.path.name} builds {w.version} but pyproject does not pin {w.name}")
+        for r in pins:
+            specs = r.spec.specs
+            if len(specs) != 1 or specs[0].op != "==" or specs[0].wild or \
+                    parse_version(specs[0].ver) != parse_version(w.version):
+                errors.append(f"{w.name}: {manifest.path.name} builds {w.version} but pyproject has {r.raw!r}")
+        if lock is not None:
+            locked = lock.get((w.name, w.version), (None, None))[1]
+            if locked is None:
+                errors.append(f"{w.name} {w.version}: no sdist hash in {uv_lock.name}")
+            elif locked != w.sdist_sha256:
+                errors.append(f"{w.name} {w.version}: sdist_sha256 {w.sdist_sha256} differs from {uv_lock.name} "
+                              f"({locked})")
+    return errors
+
+
+@dataclass
+class WheelhouseWheel:
+    path: Path
+    dist: DistFile | None = None      # the parsed filename (source "wheelhouse"), None if not a wheel name
+    project: str = ""                 # canonical name from the filename
+    build_text: str = ""              # build tag as written in the filename
+    meta_name: str = ""
+    meta_version: str = ""
+    requires_dist: list = field(default_factory=list)
+    wheel_build: str | None = None    # WHEEL "Build:"
+    wheel_tags: list = field(default_factory=list)   # WHEEL "Tag:" lines
+    dist_info: str = ""
+    problems: list = field(default_factory=list)
+
+    @property
+    def filename(self) -> str:
+        return self.path.name
+
+    @property
+    def tags(self) -> set:
+        """The tags the filename declares (compressed tag sets expanded)."""
+        if self.dist is None:
+            return set()
+        return {f"{py}-{abi}-{plat}" for py in self.dist.py.split(".") for abi in self.dist.abi.split(".")
+                for plat in self.dist.plats}
+
+
+def read_wheel(path: Path) -> WheelhouseWheel:
+    """Parse a wheel's filename, METADATA and WHEEL (problems are collected, never raised)."""
+    ww = WheelhouseWheel(Path(path))
+    parts = ww.filename[:-4].split("-") if ww.filename.endswith(".whl") else []
+    if len(parts) not in (5, 6):
+        ww.problems.append(f"{ww.filename}: not a wheel filename")
+        return ww
+    ww.project = canonical(parts[0])
+    ww.build_text = parts[2] if len(parts) == 6 else ""
+    ww.dist = parse_filename(ww.filename, parts[0], "wheelhouse")
+    if ww.dist is None:
+        ww.problems.append(f"{ww.filename}: cannot parse the wheel filename")
+        return ww
+    if ww.build_text and not ww.dist.build:
+        ww.problems.append(f"{ww.filename}: build tag {ww.build_text!r} does not start with a digit")
+    ww.dist.path = str(ww.path)
+    try:
+        with zipfile.ZipFile(ww.path) as zf:
+            tops = {n.split("/", 1)[0] for n in zf.namelist() if "/" in n}
+            dist_infos = sorted(t for t in tops if t.endswith(".dist-info"))
+            if len(dist_infos) != 1:
+                ww.problems.append(f"{ww.filename}: expected one .dist-info directory, found {dist_infos}")
+                return ww
+            ww.dist_info = dist_infos[0]
+            meta = HeaderParser().parsestr(zf.read(f"{ww.dist_info}/METADATA").decode("utf-8"))
+            wheel = HeaderParser().parsestr(zf.read(f"{ww.dist_info}/WHEEL").decode("utf-8"))
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError, OSError) as e:
+        ww.problems.append(f"{ww.filename}: unreadable wheel ({type(e).__name__}: {e})")
+        return ww
+    ww.meta_name = (meta.get("Name") or "").strip()
+    ww.meta_version = (meta.get("Version") or "").strip()
+    ww.requires_dist = [r.strip() for r in meta.get_all("Requires-Dist") or []]
+    ww.dist.requires_dist = list(ww.requires_dist)
+    ww.dist.requires_python = (meta.get("Requires-Python") or "").strip()
+    build = wheel.get("Build")
+    ww.wheel_build = build.strip() if build is not None else None
+    ww.wheel_tags = [t.strip() for t in wheel.get_all("Tag") or []]
+    v = ww.dist.version
+    if canonical(ww.meta_name) != ww.project or parse_version(ww.meta_version) != v:
+        ww.problems.append(f"{ww.filename}: METADATA says {ww.meta_name} {ww.meta_version}")
+    di_name, _, di_version = ww.dist_info[:-len(".dist-info")].rpartition("-")
+    if canonical(di_name) != ww.project or parse_version(di_version) != v:
+        ww.problems.append(f"{ww.filename}: dist-info directory {ww.dist_info} does not match the filename")
+    if (ww.wheel_build or "") != ww.build_text:
+        ww.problems.append(f"{ww.filename}: WHEEL Build {ww.wheel_build!r} does not match the filename build tag "
+                           f"{ww.build_text!r}")
+    if set(ww.wheel_tags) != ww.tags:
+        ww.problems.append(f"{ww.filename}: WHEEL Tag {sorted(ww.wheel_tags)} does not match the filename tags "
+                           f"{sorted(ww.tags)}")
+    for text in ww.requires_dist:
+        try:
+            parse_requirement(text)
+        except ValueError:
+            ww.problems.append(f"{ww.filename}: unparsable Requires-Dist {text!r}")
+    return ww
+
+
+def scan_wheelhouse(directory) -> tuple:
+    """(wheels, problems) for a wheelhouse directory; anything but wheels and WHEELHOUSE_EXTRA_FILES is a problem."""
+    directory = Path(directory)
+    wheels, problems = [], []
+    if not directory.is_dir():
+        return wheels, [f"{directory}: not a directory"]
+    for entry in sorted(directory.iterdir()):
+        if entry.is_dir():
+            problems.append(f"{directory}: unexpected directory {entry.name}/")
+        elif entry.name.endswith(".whl"):
+            wheels.append(read_wheel(entry))
+        elif entry.name not in WHEELHOUSE_EXTRA_FILES:
+            problems.append(f"{directory}: unexpected file {entry.name} (pip reads every archive in a "
+                            f"find-links directory)")
+    return wheels, problems
+
+
+def _wheel_target(ww: WheelhouseWheel, promised: PromisedWheel) -> str | None:
+    """The promised target whose tag is exactly the wheel's single tag, if any."""
+    if len(ww.tags) != 1:
+        return None
+    tag = next(iter(ww.tags))
+    return next((t for t in promised.targets if promised.tag(t) == tag), None)
+
+
+def check_wheels_against_manifest(wheels: list, manifest: WheelhouseManifest, platform: str = "all") -> list:
+    """Every promised (package, target) of ``platform`` exactly once, nothing unknown, metadata as promised."""
+    errors, found = [], {}
+    for ww in wheels:
+        errors.extend(ww.problems)
+        if ww.dist is None:
+            continue
+        w = manifest.wheel(ww.project)
+        if w is None:
+            errors.append(f"unknown wheel {ww.filename}: {manifest.path.name} does not promise {ww.project}")
+            continue
+        if parse_version(w.version) != ww.dist.version:
+            errors.append(f"unknown wheel {ww.filename}: {manifest.path.name} promises {w.name} {w.version}")
+            continue
+        target = _wheel_target(ww, w)
+        if target is None:
+            errors.append(f"unknown wheel {ww.filename}: its Tag is not {w.name}'s promised "
+                          f"cp313-cp313-<target> ({', '.join(TARGETS[t].label for t in w.targets)})")
+            continue
+        if ww.build_text != str(manifest.build_tag):
+            errors.append(f"{ww.filename}: build tag {ww.build_text or '(none)'} is not build_tag "
+                          f"{manifest.build_tag}")
+        if ww.wheel_build is not None and ww.wheel_build != str(manifest.build_tag):
+            errors.append(f"{ww.filename}: WHEEL Build {ww.wheel_build} is not build_tag {manifest.build_tag}")
+        try:
+            got = runtime_requirements(ww.requires_dist)
+        except ValueError:
+            got = None
+        want = runtime_requirements(w.requires_dist)
+        if got is not None and got != want:
+            errors.append(f"{ww.filename}: Requires-Dist without extras is "
+                          f"{sorted(r for r in ww.requires_dist if not has_extra_marker(parse_requirement(r)))}, "
+                          f"{manifest.path.name} promises {list(w.requires_dist)}")
+        found.setdefault((w.name, target), []).append(ww.filename)
+    for (name, target), files in sorted(found.items()):
+        if len(files) > 1:
+            errors.append(f"{name} for {target}: {len(files)} wheels ({', '.join(files)})")
+    for w, target in manifest.promised(platform):
+        if (w.name, target) not in found:
+            errors.append(f"missing {w.filename(target, manifest.build_tag)} ({w.name} {w.version} for {target})")
+    return errors
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def check_sha256sums(directory: Path, wheels: list, required: bool = False) -> list:
+    """SHA256SUMS (sha256sum format) must list exactly the wheels, with their hashes."""
+    sums = Path(directory) / "SHA256SUMS"
+    if not sums.is_file():
+        return [f"{sums}: missing"] if required else []
+    errors, listed = [], {}
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        m = re.fullmatch(r"([0-9a-f]{64}) [ *]([^/\\]+)", line.strip())
+        if not m:
+            errors.append(f"{sums.name}: bad line {line!r}")
+            continue
+        listed[m.group(2)] = m.group(1)
+    names = {ww.filename for ww in wheels}
+    for name in sorted(set(listed) - names):
+        errors.append(f"{sums.name} lists {name}, which is not in the wheelhouse")
+    for ww in wheels:
+        if ww.filename not in listed:
+            errors.append(f"{sums.name} does not list {ww.filename}")
+        elif file_sha256(ww.path) != listed[ww.filename]:
+            errors.append(f"{ww.filename}: sha256 differs from {sums.name}")
+    return errors
+
+
+def unsafe_member_name(name: str) -> bool:
+    parts = name.replace("\\", "/").split("/")
+    return name.startswith(("/", "\\")) or ".." in parts or (len(name) > 1 and name[1] == ":")
+
+
+def check_wheel_record(ww: WheelhouseWheel) -> list:
+    """Zip CRCs, safe member names and every member's sha256 / size against RECORD."""
+    errors = []
+    try:
+        with zipfile.ZipFile(ww.path) as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return [f"{ww.filename}: CRC error in {bad}"]
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            unsafe = [n for n in names if unsafe_member_name(n)]
+            if unsafe:
+                errors.append(f"{ww.filename}: unsafe member names {unsafe[:5]}")
+            if not ww.dist_info:
+                return errors
+            record_name = f"{ww.dist_info}/RECORD"
+            if record_name not in names:
+                return errors + [f"{ww.filename}: no {record_name}"]
+            listed = {}
+            for row in csv.reader(io.StringIO(zf.read(record_name).decode("utf-8"))):
+                if not row:
+                    continue
+                if len(row) != 3:
+                    errors.append(f"{ww.filename}: malformed RECORD row {row!r}")
+                    continue
+                listed[row[0]] = (row[1], row[2])
+            unsigned = {record_name, f"{ww.dist_info}/RECORD.jws", f"{ww.dist_info}/RECORD.p7s"}
+            for name in names:
+                if name in unsigned:
+                    continue
+                if name not in listed:
+                    errors.append(f"{ww.filename}: {name} is not in RECORD")
+                    continue
+                digest, size = listed[name]
+                algo, _, value = digest.partition("=")
+                data = zf.read(name)
+                if algo != "sha256":
+                    errors.append(f"{ww.filename}: RECORD hash of {name} is not sha256 ({digest!r})")
+                elif base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode() != value:
+                    errors.append(f"{ww.filename}: {name} does not match its RECORD hash")
+                if size and size != str(len(data)):
+                    errors.append(f"{ww.filename}: {name} is {len(data)} bytes, RECORD says {size}")
+            missing = sorted(set(listed) - set(names) - unsigned)
+            if missing:
+                errors.append(f"{ww.filename}: RECORD lists missing members {missing[:5]}")
+    except (zipfile.BadZipFile, OSError, UnicodeDecodeError, csv.Error) as e:
+        errors.append(f"{ww.filename}: unreadable wheel ({type(e).__name__}: {e})")
+    return errors
+
+
+def verify_wheelhouse(directory, manifest: WheelhouseManifest, project: Project | None, uv_lock: Path | None,
+                      platform: str = "all") -> list:
+    """--verify-wheelhouse: everything a built wheelhouse must satisfy, offline."""
+    wheels, problems = scan_wheelhouse(directory)
+    errors = list(problems) + check_wheels_against_manifest(wheels, manifest, platform)
+    for ww in wheels:
+        if ww.dist is not None:
+            errors.extend(check_wheel_record(ww))
+    errors.extend(check_sha256sums(Path(directory), wheels))
+    if project is not None:
+        errors.extend(check_manifest_pins(manifest, project, uv_lock))
+    return errors
+
+
+def _installed_dist_info(arch_dir: Path, name: str) -> list:
+    out = []
+    for d in arch_dir.glob("*.dist-info"):
+        dname, _, dver = d.name[:-len(".dist-info")].rpartition("-")
+        if d.is_dir() and canonical(dname) == name:
+            out.append((d, dver))
+    return out
+
+
+def verify_installed(site_packages, manifest: WheelhouseManifest, platform: str = "all",
+                     wheels: list | None = None) -> tuple:
+    """--verify-installed: (errors, notes). Each arch directory of a flet build's site-packages
+    (SERIOUS_PYTHON_SITE_PACKAGES, build/site-packages/<arch>) must hold the wheelhouse copy of
+    every promised package: its WHEEL keeps the build tag and the tag (pip copies WHEEL as is)."""
+    site_packages = Path(site_packages)
+    errors, notes, seen_arch = [], [], False
+    by_target = {}
+    for ww in wheels or []:
+        w = manifest.wheel(ww.project) if ww.dist is not None else None
+        t = _wheel_target(ww, w) if w is not None else None
+        if t is not None:
+            by_target[(w.name, t)] = ww
+    for w, target in manifest.promised(platform):
+        arch_dir = site_packages / target
+        if not arch_dir.is_dir():
+            notes.append(f"{target}: no {arch_dir} (not built for this arch)")
+            continue
+        seen_arch = True
+        found = _installed_dist_info(arch_dir, w.name)
+        if not found:
+            errors.append(f"{target}: {w.name} is not installed in {arch_dir}")
+            continue
+        if len(found) > 1:
+            errors.append(f"{target}: {len(found)} {w.name} dist-info directories in {arch_dir}")
+            continue
+        dist_info, version = found[0]
+        expected_build, expected_tags = str(manifest.build_tag), {w.tag(target)}
+        ref = by_target.get((w.name, target))
+        if ref is not None:
+            expected_build, expected_tags = ref.wheel_build or ref.build_text, set(ref.wheel_tags) or ref.tags
+        try:
+            wheel = HeaderParser().parsestr((dist_info / "WHEEL").read_text(encoding="utf-8"))
+        except OSError as e:
+            errors.append(f"{target}: cannot read {dist_info.name}/WHEEL ({e})")
+            continue
+        build = (wheel.get("Build") or "").strip()
+        tags = {t.strip() for t in wheel.get_all("Tag") or []}
+        if parse_version(version) != parse_version(w.version):
+            errors.append(f"{target}: {w.name} {version} is installed, the wheelhouse has {w.version}")
+        elif build != expected_build or tags != expected_tags:
+            errors.append(f"{target}: {w.name} {version} was installed from an index, not the wheelhouse "
+                          f"(WHEEL Build {build or '(none)'}, Tag {', '.join(sorted(tags)) or '(none)'}; expected "
+                          f"Build {expected_build}, Tag {', '.join(sorted(expected_tags))})")
+        else:
+            notes.append(f"{target}: {w.name} {version} build {build} {', '.join(sorted(tags))} (wheelhouse)")
+    if not seen_arch:
+        errors.append(f"{site_packages}: no arch directory of {platform} targets "
+                      f"({', '.join(sorted({t for _, t in manifest.promised(platform)}))})")
+    return errors, notes
+
+
+@dataclass
+class Wheelhouse:
+    """The self-built wheels taking part in a resolution (--wheelhouse or --wheelhouse-plan)."""
+    manifest: WheelhouseManifest
+    mode: str                                          # files | plan
+    wheels: list = field(default_factory=list)         # [WheelhouseWheel] (files)
+    problems: list = field(default_factory=list)       # directory problems (files)
+    uv_lock: Path | None = None
+    dirs: list = field(default_factory=list)           # the --wheelhouse directories (files)
+
+    @classmethod
+    def from_dirs(cls, manifest: WheelhouseManifest, dirs: list, uv_lock: Path | None) -> "Wheelhouse":
+        wh = cls(manifest, "files", uv_lock=uv_lock, dirs=[Path(d) for d in dirs])
+        for d in wh.dirs:
+            wheels, problems = scan_wheelhouse(d)
+            wh.wheels += wheels
+            wh.problems += problems
+        return wh
+
+    def dist_files(self) -> dict:
+        """canonical name -> [DistFile] offered to the resolver next to the index files."""
+        out: dict[str, list] = {}
+        if self.mode == "plan":
+            for w in self.manifest.wheels:
+                for t in w.targets:
+                    df = parse_filename(w.filename(t, self.manifest.build_tag), w.name, "planned")
+                    df.requires_dist = list(w.requires_dist)
+                    out.setdefault(w.name, []).append(df)
+            return out
+        for ww in self.wheels:
+            if ww.dist is not None and not ww.problems and self.manifest.wheel(ww.project) is not None:
+                out.setdefault(ww.project, []).append(ww.dist)
+        return out
+
+
+def _wheelhouse_checks(project: Project, res: "CheckResult", wh: Wheelhouse, archs: list, platform: str) -> None:
+    errors = check_manifest_pins(wh.manifest, project, wh.uv_lock)
+    if wh.mode == "files":
+        errors += wh.problems + check_wheels_against_manifest(wh.wheels, wh.manifest, platform)
+        for d in wh.dirs:
+            errors += check_sha256sums(d, [ww for ww in wh.wheels if ww.path.parent == d])
+    for w, arch in wh.manifest.promised(platform):
+        if arch not in archs:
+            continue
+        target = TARGETS[arch]
+        expected = w.filename(arch, wh.manifest.build_tag)
+        c = res.targets.get(target.key, {}).get(w.name)
+        if c is None:
+            status = f"not in the dependency tree of {target.key}"
+            errors.append(f"[{target.key}] {w.name}: {status}")
+        elif c.version is None:
+            status = "not installable"
+            errors.append(f"[{target.key}] {w.name}: nothing installable although the wheelhouse should provide "
+                          f"{expected}")
+        elif c.version != parse_version(w.version):
+            status = f"pip picks {c.version}"
+            errors.append(f"[{target.key}] {w.name}: pip picks {c.version}, {wh.manifest.path.name} promises "
+                          f"{w.version}")
+        elif c.file.source not in WHEELHOUSE_SOURCES:
+            status = f"index wins: {c.file.filename}"
+            errors.append(f"[{target.key}] {c.file.filename} ({c.file.source}) outranks or ties wheelhouse {expected} "
+                          f"(raise build_tag)")
+        else:
+            status = "ok"
+        res.wheelhouse.append({"target": target.key, "name": w.name, "expected": expected, "status": status,
+                               "picked": c.file.filename if c is not None and c.file is not None else None,
+                               "source": c.file.source if c is not None and c.file is not None else None})
+    res.errors.extend(f"[wheelhouse] {e}" for e in errors)
+
+
 # ============================================================================ main check
 @dataclass
 class CheckResult:
@@ -826,21 +1510,31 @@ class CheckResult:
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     native: dict = field(default_factory=dict)        # direct name -> True/False
+    wheelhouse: list = field(default_factory=list)    # promised (package, target) rows (wheelhouse modes)
 
 
-def run_check(project: Project, fetcher: Fetcher, transitive: bool = True, host: bool = True) -> CheckResult:
+def run_check(project: Project, fetcher: Fetcher, transitive: bool = True, host: bool = True, *,
+              platform: str = "all", wheelhouse: Wheelhouse | None = None) -> CheckResult:
+    """``platform`` limits the device targets (all | android | ios). ``wheelhouse`` adds the
+    self-built wheels, ranks files the way pip does and checks the manifest's promises."""
     res = CheckResult()
     local = set(project.dev_packages)
     res.direct = [r for r in project.common + project.android + project.ios]
-    plan = [(TARGETS[a], project.common + project.android) for a in project.android_archs if a in TARGETS] + \
-           [(TARGETS[a], project.common + project.ios) for a in project.ios_archs if a in TARGETS]
-    for a in project.android_archs + project.ios_archs:
+    android_archs = project.android_archs if platform in ("all", "android") else []
+    ios_archs = project.ios_archs if platform in ("all", "ios") else []
+    plan = [(TARGETS[a], project.common + project.android) for a in android_archs if a in TARGETS] + \
+           [(TARGETS[a], project.common + project.ios) for a in ios_archs if a in TARGETS]
+    for a in android_archs + ios_archs:
         if a not in TARGETS:
             res.errors.append(f"unknown target_arch {a!r}")
+    rank = "legacy"
+    if wheelhouse is not None:
+        fetcher.extra_files = wheelhouse.dist_files()
+        rank = "pip"
     fetcher.flet_projects()
     for target, roots in plan:
         roots = [r for r in roots if evaluate_marker(r.marker, target.markers)]
-        rv = Resolver(target, fetcher, project.source_packages, local, transitive)
+        rv = Resolver(target, fetcher, project.source_packages, local, transitive, rank=rank)
         rv.resolve(roots)
         res.targets[target.key] = rv.chosen
         res.target_errors[target.key] = rv.errors
@@ -898,6 +1592,8 @@ def run_check(project: Project, fetcher: Fetcher, transitive: bool = True, host:
                     res.warnings.append(f"{r.key}: device ({tkey}) resolves {c.version} but the host resolves "
                                         f"{hv[0]}; pin it so host tests run the shipped version")
                     break
+    if wheelhouse is not None:
+        _wheelhouse_checks(project, res, wheelhouse, [a for a in android_archs + ios_archs if a in TARGETS], platform)
     return res
 
 
@@ -929,7 +1625,7 @@ def render_markdown(project: Project, res: CheckResult) -> str:
             else:
                 f = c.file
                 tag = "sdist" if f.kind == "sdist" else "py3-none-any" if f.pure else f"{f.py}-{'.'.join(f.plats)}"
-                cells.append(f"{c.version} {tag} ({f.source})")
+                cells.append(f"{c.version} {tag} ({SOURCE_LABELS.get(f.source, f.source)})")
         h = res.host.get(r.key, {}).get("host-linux")
         host = "-" if h is None and r.key not in res.host else ("**MISSING**" if h is None else f"{h[0]}")
         o.append(f"| `{r.raw}` | {kind} | " + " | ".join(cells) + f" | {host} |")
@@ -951,14 +1647,22 @@ def render_markdown(project: Project, res: CheckResult) -> str:
                 else:
                     f = c.file
                     cells.append(f"{c.version} {'pure' if f.pure else f.kind if f.kind == 'sdist' else 'native'}"
-                                 f"{' (flet)' if f.source == 'flet' else ''}")
+                                 f"{f' ({f.source})' if f.source in ('flet',) + WHEELHOUSE_SOURCES else ''}")
             o.append(f"| `{n}` | " + " | ".join(cells) + f" | {', '.join(sorted(parents))} |")
+        o.append("")
+    if res.wheelhouse:
+        o += ["## Self-built wheels (ci/wheels/wheelhouse.toml)", "",
+              "| target | package | expected | pip picks | status |", "|---|---|---|---|---|"]
+        for row in res.wheelhouse:
+            picked = f"`{row['picked']}` ({SOURCE_LABELS.get(row['source'], row['source'])})" if row["picked"] else "-"
+            o.append(f"| {row['target']} | {row['name']} | `{row['expected']}` | {picked} | "
+                     f"{row['status'] if row['status'] == 'ok' else '**' + row['status'] + '**'} |")
         o.append("")
     return "\n".join(o) + "\n"
 
 
 def result_json(res: CheckResult) -> dict:
-    return {
+    out = {
         "errors": res.errors,
         "warnings": res.warnings,
         "targets": {t: {n: {"version": str(c.version) if c.version else None,
@@ -969,6 +1673,58 @@ def result_json(res: CheckResult) -> dict:
         "host": res.host,
         "native": res.native,
     }
+    if res.wheelhouse:
+        out["wheelhouse"] = res.wheelhouse
+    return out
+
+
+def _write_report(path: str | None, text: str) -> None:
+    """Write a Markdown report and append it to $GITHUB_STEP_SUMMARY."""
+    if not path:
+        return
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(text, encoding="utf-8")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(text)
+
+
+def _verify_main(args) -> int:
+    """--verify-wheelhouse / --verify-installed (offline)."""
+    try:
+        manifest = load_wheelhouse_manifest(args.wheelhouse_manifest)
+    except (OSError, tomllib.TOMLDecodeError, ManifestError) as e:
+        print(f"check_mobile_wheels: cannot read the wheelhouse manifest: {e}", file=sys.stderr)
+        return 2
+    notes = []
+    if args.verify_wheelhouse:
+        title = f"Wheelhouse check: {args.verify_wheelhouse} ({args.platform})"
+        try:
+            project = load_project(Path(args.pyproject))
+        except (OSError, tomllib.TOMLDecodeError, ValueError) as e:
+            print(f"check_mobile_wheels: cannot read {args.pyproject}: {e}", file=sys.stderr)
+            return 2
+        errors = verify_wheelhouse(args.verify_wheelhouse, manifest, project, Path(args.pyproject).parent / "uv.lock",
+                                   args.platform)
+        wheels, _ = scan_wheelhouse(args.verify_wheelhouse)
+        notes = [f"{ww.filename} sha256 {file_sha256(ww.path)}" for ww in wheels]
+    else:
+        title = f"Installed-wheel check: {args.verify_installed} ({args.platform})"
+        reference = []
+        for d in args.wheelhouse or []:
+            wheels, _ = scan_wheelhouse(d)
+            reference += wheels
+        errors, notes = verify_installed(args.verify_installed, manifest, args.platform, reference)
+    for n in notes:
+        print(f"ok      {n}")
+    for e in errors:
+        print(f"ERROR   {e}")
+    report = [f"# {title}", "", f"- Result: **{'FAIL' if errors else 'PASS'}** with {len(errors)} errors", ""]
+    report += [f"- **error** {e}" for e in errors] + [f"- {n}" for n in notes]
+    _write_report(args.report, "\n".join(report) + "\n")
+    print(f"check_mobile_wheels: {title}: {len(errors)} errors")
+    return 1 if errors else 0
 
 
 def main(argv: list | None = None) -> int:
@@ -983,28 +1739,59 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("-q", "--quiet", action="store_true")
+    ap.add_argument("--platform", choices=PLATFORMS, default="all",
+                    help="check only the Android or only the iOS targets (default: all)")
+    wh = ap.add_argument_group("self-built wheels (ci/wheels/wheelhouse.toml, .github/workflows/mobile-wheels.yml)")
+    wh.add_argument("--wheelhouse", action="append", metavar="DIR",
+                    help="add the wheels in DIR (repeatable); pip's ranking then decides and every promised wheel "
+                         "must win")
+    wh.add_argument("--wheelhouse-manifest", default=str(DEFAULT_WHEELHOUSE_MANIFEST), metavar="PATH",
+                    help="the wheel manifest (default: ci/wheels/wheelhouse.toml)")
+    wh.add_argument("--wheelhouse-plan", action="store_true",
+                    help="like --wheelhouse, with the promised wheels as planned files (before they exist)")
+    wh.add_argument("--verify-wheelhouse", metavar="DIR",
+                    help="offline structure check of a built wheelhouse, then exit")
+    wh.add_argument("--verify-installed", metavar="SITE_PACKAGES",
+                    help="offline check that a flet build installed the wheelhouse copies (build/site-packages), "
+                         "then exit; --wheelhouse DIR adds the built wheels as the reference")
     args = ap.parse_args(argv)
+
+    if args.wheelhouse_plan and args.wheelhouse:
+        ap.error("--wheelhouse and --wheelhouse-plan are mutually exclusive")
+    if args.verify_wheelhouse and (args.verify_installed or args.wheelhouse or args.wheelhouse_plan):
+        ap.error("--verify-wheelhouse takes no --verify-installed, --wheelhouse or --wheelhouse-plan")
+    if args.verify_installed and args.wheelhouse_plan:
+        ap.error("--verify-installed takes --wheelhouse DIR, not --wheelhouse-plan")
+    if args.verify_wheelhouse or args.verify_installed:
+        return _verify_main(args)
 
     try:
         project = load_project(Path(args.pyproject))
     except (OSError, tomllib.TOMLDecodeError, ValueError) as e:
         print(f"check_mobile_wheels: cannot read {args.pyproject}: {e}", file=sys.stderr)
         return 2
+    wheelhouse = None
+    if args.wheelhouse or args.wheelhouse_plan:
+        try:
+            manifest = load_wheelhouse_manifest(args.wheelhouse_manifest)
+        except (OSError, tomllib.TOMLDecodeError, ManifestError) as e:
+            print(f"check_mobile_wheels: cannot read the wheelhouse manifest: {e}", file=sys.stderr)
+            return 2
+        uv_lock = Path(args.pyproject).parent / "uv.lock"
+        if args.wheelhouse_plan:
+            wheelhouse = Wheelhouse(manifest, "plan", uv_lock=uv_lock)
+        else:
+            wheelhouse = Wheelhouse.from_dirs(manifest, args.wheelhouse, uv_lock)
     fetcher = Fetcher(Path(args.cache_dir) if args.cache_dir else None, args.timeout, jobs=args.jobs)
     started = time.time()
     try:
-        res = run_check(project, fetcher, transitive=not args.direct_only, host=not args.no_host)
+        res = run_check(project, fetcher, transitive=not args.direct_only, host=not args.no_host,
+                        platform=args.platform, wheelhouse=wheelhouse)
     except RuntimeError as e:
         print(f"check_mobile_wheels: network error: {e}", file=sys.stderr)
         return 2
     report = render_markdown(project, res)
-    if args.report:
-        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.report).write_text(report, encoding="utf-8")
-        summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary:
-            with open(summary, "a", encoding="utf-8") as f:
-                f.write(report)
+    _write_report(args.report, report)
     if args.json_out:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json_out).write_text(json.dumps(result_json(res), indent=1), encoding="utf-8")

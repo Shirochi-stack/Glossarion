@@ -203,6 +203,19 @@ SHARED_MODULES = (
     "async_batch_core",
     "output_tools_core",
     "review_generator",
+    # U8 (manga): the manga settings defaults (manga_settings_dialog), the run env / OCR session,
+    # Files-tab and batch-runner mixins (MangaTranslationTab), the editor pipeline + ImageStateManager
+    # (ImageRenderer, manga_integration), the on-demand ONNX model registry and the Google Vision /
+    # Azure Document Intelligence REST clients (tests/test_manga_env.py, test_manga_editor_core.py,
+    # test_manga_models.py and test_google_vision_rest.py pin the moves)
+    "manga_settings_defaults",
+    "manga_env",
+    "manga_files_core",
+    "manga_runner",
+    "manga_editor_core",
+    "manga_models",
+    "google_vision_rest",
+    "azure_document_intelligence_rest",
 )
 
 _RUN_ENV = ("run_env", "RunEnvMixin")

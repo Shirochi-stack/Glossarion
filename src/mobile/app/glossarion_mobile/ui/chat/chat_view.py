@@ -98,10 +98,11 @@ from glossarion_mobile.ui.chat.send_state import (
     SendState,
     excluded_route_reason,
 )
+from glossarion_mobile.ui.chat.quick_chips import QuickChips
 from glossarion_mobile.ui.chat.transcript import Transcript
 from glossarion_mobile.ui.chat.transcript_model import ACTIONS_LABEL, REPORT_LABEL, build_items, slide_window, tail_window
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.responsive import Layout, layout_for
 from glossarion_mobile.ui.sheets.plus_sheet import PlusSheet
@@ -237,6 +238,9 @@ class ChatView:
         )
         self.job_strip = JobStrip(on_open=lambda: self.navigate("jobs"), on_stop=self._on_strip_stop)
         self.caption = StatusCaption(on_fix=self.run_fix)
+        # UI_SPEC §2.7 quick-action chips (with an attachment): Translate · Extract glossary first ·
+        # Translate as manga · Open in Reader
+        self.quick_chips = QuickChips(on_select=self._on_quick_chip)
         self.composer = Composer(
             mode_signal=state.output_mode,
             row_style=self.layout.output_row,
@@ -252,7 +256,7 @@ class ChatView:
             on_pill_reset=self._on_pill_reset,
         )
         self.column = ft.Column(
-            [self.transcript_stack, self.job_strip, self.caption, self.composer],
+            [self.transcript_stack, self.job_strip, self.quick_chips.control, self.caption, self.composer],
             spacing=0,
             expand=True,
         )
@@ -905,9 +909,38 @@ class ChatView:
                 caption = run_caption
         self.caption.show(caption, inputs.block if state is SendState.BLOCKED else None)
         self.header.set_empty(self.transcript.is_empty and not self.composer.has_content)
+        chips_changed = self._refresh_quick_chips(state)
         if push:
             self._push(self.caption, self.header.wrapper)
+            if chips_changed:
+                self._push(self.quick_chips.control)
         return state
+
+    # ---- quick-action chips (UI_SPEC §2.7) ----------------------------------------------------------
+
+    def _refresh_quick_chips(self, state: Optional[SendState] = None) -> bool:
+        attachment = self.composer.attachment or {}
+        path = str(attachment.get("path") or "") if isinstance(attachment, dict) else ""
+        busy = state in (SendState.RUNNING, SendState.FINISHING, SendState.STOPPING)
+        return self.quick_chips.set_attachment(path or None, hidden=busy)
+
+    def _on_quick_chip(self, chip_id: str) -> None:
+        attachment = self.composer.attachment or {}
+        path = str(attachment.get("path") or "") if isinstance(attachment, dict) else ""
+        if chip_id == "translate":
+            self.on_send_action(SendAction.SEND)
+        elif chip_id in ("extract_glossary", "manga"):
+            self._on_tool(chip_id)  # the glossary / manga features take the attachment from the composer
+        elif chip_id == "open_reader":
+            opener = self.env.open_reader if self.env is not None else None
+            if opener is None or not path:
+                self.notify("The Reader is not available in this session")
+                return
+            result = opener("", path)
+            if hasattr(result, "__await__"):
+                self._spawn(result)
+        else:
+            self.notify("This action is not available here")
 
     @staticmethod
     def _push(*controls: Any) -> None:
@@ -1601,9 +1634,14 @@ class ChatView:
             return None
         session = self.env.chats.session(self.cid) or {}
         field = ft.TextField(label="Chat name:", value=str(session.get("title") or ""), autofocus=True)
+        saved: list = []
 
         def save(e: Any = None) -> None:
-            self.page.pop_dialog()
+            if saved:  # a second tap while the dialog closes
+                return
+            saved.append(True)
+            # This dialog itself: page.pop_dialog() would close a snackbar shown since it opened.
+            close_dialog(self.page, dialog)
             if self.env.chats.rename(self.cid, field.value or ""):
                 self.header.set_title(self.env.chats.session(self.cid).get("title"))
                 self._push(self.header.wrapper)
@@ -1611,7 +1649,7 @@ class ChatView:
         dialog = ft.AlertDialog(
             title=ft.Text("Rename chat"),
             content=field,
-            actions=[ft.TextButton(content="Cancel", on_click=lambda e: self.page.pop_dialog()),
+            actions=[ft.TextButton(content="Cancel", on_click=lambda e: close_dialog(self.page, dialog)),
                      ft.FilledButton(content="OK", on_click=save)],
         )
         self.page.show_dialog(dialog)

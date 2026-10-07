@@ -175,6 +175,13 @@ class ToolsFeature:
             pass
         if getattr(self.app, "jobs", None) is not None:
             routes |= {"tools.files", "tools.files.folder"}
+        if getattr(self.app, "manga", None) is not None:  # U8 MangaFeature
+            try:
+                from glossarion_mobile.ui.tools.manga.feature import IMPLEMENTED_ROUTES as MANGA_ROUTES
+
+                routes |= set(MANGA_ROUTES)
+            except Exception:
+                pass
         return frozenset(routes)
 
     def make_screen(self, match: RouteMatch) -> Any:

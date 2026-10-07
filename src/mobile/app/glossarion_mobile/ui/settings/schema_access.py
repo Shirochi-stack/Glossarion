@@ -318,6 +318,24 @@ class SchemaAccess:
             return False, UNAVAILABLE_REASON
         return True, None
 
+    def value_availability(self, key: str, value: Any) -> tuple[bool, Optional[str]]:
+        """(ok, reason) for one option of a choice setting (``settings_schema.is_value_available``:
+        e.g. a torch-only manga detector or RAM cap mode on mobile); ok when the schema has no
+        per-value rules."""
+        module = self.module
+        func = getattr(module, "is_value_available", None) if module is not None else None
+        if func is None:
+            return True, None
+        try:
+            result = func(key, value, self.platform)
+        except Exception:
+            return True, None
+        if isinstance(result, tuple):
+            ok = bool(result[0])
+            reason = result[1] if len(result) > 1 else None
+            return ok, (str(reason) if reason else (None if ok else UNAVAILABLE_REASON))
+        return bool(result), (None if result else UNAVAILABLE_REASON)
+
     def _evaluate(self, rule: Any, config: Mapping[str, Any], default_reason: str) -> Optional[str]:
         if not rule:
             return None

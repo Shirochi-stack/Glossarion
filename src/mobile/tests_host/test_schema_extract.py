@@ -263,11 +263,16 @@ def default_ai_hunter_config():
     return {'enabled': True, 'thresholds': {'exact': 90}}
 '''
 
+MANGA_DEFAULTS = '''
+def default_manga_settings():
+    return {'ocr': {'provider': 'google'}}
+'''
+
 MANGA_DIALOG = '''
 class MangaSettingsDialog(QDialog):
     def __init__(self, parent, main_gui, config):
         self.config = config
-        self.default_settings = {'ocr': {'provider': 'google'}}
+        self.default_settings = default_manga_settings()
         self.settings = self._merge_settings(config.get('manga_settings', {}))
 
     def _build(self):
@@ -285,6 +290,7 @@ def write_tree(root: Path, layout: str = "A") -> Path:
         "qa_scan_runtime.py": QA_RUNTIME,
         "ai_hunter_enhanced.py": AI_HUNTER,
         "manga_settings_dialog.py": MANGA_DIALOG,
+        "manga_settings_defaults.py": MANGA_DEFAULTS,
     }
     if layout == "A":
         files["translator_gui.py"] = TRANSLATOR_GUI_A

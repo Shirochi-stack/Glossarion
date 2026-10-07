@@ -519,7 +519,15 @@ class _ChoiceTile(SettingTile):
         options = self.options()
         if not 0 <= index < len(options):
             return False
-        return self.apply(options[index][0])
+        value = options[index][0]
+        checker = getattr(self.ctx.schema, "value_availability", None)
+        ok, reason = checker(self.key, value) if callable(checker) else (True, None)
+        if not ok:  # e.g. a torch-only manga option on mobile: listed, never stored
+            self.set_error(reason or "Not available on this device")
+            self.refresh_value()
+            self.ctx.push(self.control)
+            return False
+        return self.apply(value)
 
 
 class SegmentedTile(_ChoiceTile):

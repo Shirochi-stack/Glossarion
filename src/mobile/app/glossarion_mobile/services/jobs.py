@@ -150,6 +150,9 @@ class JobKind(str, enum.Enum):
     RPGMAKER = "rpgmaker"
     GENERATE_MEDIA = "generate_media"
     TRANSLATE_IMAGE = "translate_image"
+    # U8
+    MANGA = "manga"
+    MANGA_STEP = "manga_step"
 
 
 class JobState(str, enum.Enum):

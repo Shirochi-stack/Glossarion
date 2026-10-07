@@ -361,6 +361,24 @@ U7_IMPORTERS = {
     "progress_actions": ("sdlxliff_review_core",),
 }
 
+# U8: the manga cores are imported only by the manga stack (manga_integration, manga_settings_dialog,
+# ImageRenderer, manga_translator, ocr_manager, bubble_detector / local_inpainter lazily), so they
+# follow the manga tiers (memory pyinstaller-spec-tiers): both blocks of the full manga specs,
+# app_files only in the Mac NoCuda tier (loose files like the rest of the manga stack there), never
+# in the Lite/standard specs, where translator_gui's find_spec("manga_integration") must stay False.
+U8_MANGA_MODULES = (
+    "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
+    "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
+)
+MANGA_FULL_SPECS = ("translator_Heavy.spec", "translator_NoCuda.spec", "translator_linux_NoCuda.spec")
+MANGA_FILES_ONLY_SPECS = ("translator_lite_mac_NoCuda.spec", "translator_lite_mac_intel_NoCuda.spec")
+#: Manga module -> the U8 cores it imports at module level.
+U8_IMPORTERS = {
+    "manga_integration": ("manga_env", "manga_files_core", "manga_runner", "manga_editor_core"),
+    "manga_settings_dialog": ("manga_settings_defaults",),
+    "ImageRenderer": ("manga_editor_core",),
+}
+
 
 def _spec_list(source, name):
     lines = source.splitlines()
@@ -435,4 +453,44 @@ def test_u7_modules_are_imported_by_the_desktop_and_stay_gui_free():
            "review_dialog", "QA_Scanner_GUI", "epub_library", "manga_integration", "manga_translator",
            "ImageRenderer", "bubble_detector", "local_inpainter", "ocr_manager"}
     for name in U7_SHARED_MODULES:
+        assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)
+
+
+def test_u8_manga_modules_follow_the_manga_spec_tiers():
+    """Full manga tier: both blocks; Mac NoCuda: app_files only; Lite/standard: neither, and no
+    module those tiers ship imports a U8 core at module level (a lite build that shipped
+    manga_integration would flip translator_gui's find_spec gate and then fail on cv2)."""
+    specs = sorted(SRC_DIR.glob("translator*.spec"))
+    assert len(specs) == 14, [p.name for p in specs]
+    assert {p.name for p in specs} >= set(MANGA_FULL_SPECS + MANGA_FILES_ONLY_SPECS)
+    gate = 'importlib.util.find_spec("manga_integration")'
+    assert gate in (SRC_DIR / "translator_gui.py").read_text(encoding="utf-8-sig")
+    for spec in specs:
+        source = spec.read_text(encoding="utf-8")
+        files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
+        modules = _spec_list(source, "app_modules")
+        if spec.name in MANGA_FULL_SPECS:
+            want = (1, 1)
+        elif spec.name in MANGA_FILES_ONLY_SPECS:
+            want = (1, 0)
+        else:
+            want = (0, 0)
+        # the tier is the one manga_integration itself ships in
+        assert (files.count("manga_integration"), modules.count("manga_integration")) == want, spec.name
+        for name in U8_MANGA_MODULES:
+            assert (SRC_DIR / f"{name}.py").is_file(), name
+            assert (files.count(name), modules.count(name)) == want, (spec.name, name)
+        if want == (0, 0):
+            for shipped in set(files) | set(modules):
+                if (SRC_DIR / f"{shipped}.py").is_file():
+                    assert not _top_level_imports(shipped) & set(U8_MANGA_MODULES), (spec.name, shipped)
+
+
+def test_u8_modules_are_imported_by_the_manga_stack_and_stay_gui_free():
+    for importer, cores in U8_IMPORTERS.items():
+        for core in cores:
+            assert core in _top_level_imports(importer), (importer, core)
+    gui = {"PySide6", "translator_gui", "dpi_setup", "manga_integration", "manga_settings_dialog",
+           "manga_image_preview", "ImageRenderer", "epub_library"}
+    for name in U8_MANGA_MODULES:
         assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)

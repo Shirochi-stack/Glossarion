@@ -148,6 +148,23 @@ def _hf_download_fn():
         return hf_urllib_download
     return None
 
+
+def _model_cache_default(env_name, desktop_default):
+    """U8: the default model cache directory when ``env_name`` is unset.
+
+    Desktop keeps ``desktop_default`` unchanged. On Glossarion Mobile the path comes
+    from manga_models (``<data>/models/<kind>``, the layout the bootstrap also exports
+    in BUBBLE_CACHE_DIR / MODEL_CACHE_DIR / ONNX_CACHE_DIR), so the model manager and
+    this module agree and nothing is written into the process cwd.
+    """
+    if not mobile_runtime.is_mobile():
+        return desktop_default
+    try:
+        import manga_models
+        return manga_models.default_cache_dir(env_name, desktop_default)
+    except Exception:
+        return desktop_default
+
 # Try to import YOLO dependencies with better error handling
 if IS_FROZEN:
     # In frozen environment, try harder to import
@@ -398,7 +415,7 @@ class BubbleDetector:
             self.max_det_rtdetr = 100
         
         # Cache directory for ONNX conversions
-        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'models')
+        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', _model_cache_default('BUBBLE_CACHE_DIR', 'models'))
         os.makedirs(self.cache_dir, exist_ok=True)
         
         # RT-DETR concurrency setting from config

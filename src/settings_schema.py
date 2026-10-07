@@ -44,8 +44,8 @@ from typing import Any, NamedTuple, Optional, Tuple
 __all__ = [
     "MISSING", "EnvBinding", "SettingSpec", "Section", "all_specs", "spec", "has_spec",
     "sections", "section", "section_of", "effective_default", "coerce", "apply_converter",
-    "search", "is_available", "env_names", "keys", "choice_values", "evaluate_rule",
-    "LOCKED_IF", "VISIBLE_IF",
+    "search", "is_available", "is_value_available", "unavailable_values", "env_names", "keys",
+    "choice_values", "evaluate_rule", "LOCKED_IF", "VISIBLE_IF",
 ]
 
 
@@ -108,6 +108,7 @@ class SettingSpec:
     origins: Tuple[str, ...] = ()
     flags: Tuple[str, ...] = ()
     unavailable: Tuple[Tuple[str, str], ...] = ()   # ((platform, reason), ...)
+    unavailable_values: Tuple[Tuple[str, str, str], ...] = ()   # ((value, platform, reason), ...)
 
     @property
     def nested(self) -> bool:
@@ -414,6 +415,39 @@ UNAVAILABLE_RULES = (
      "PDF extraction runs single-process on mobile (no worker processes), so this setting has no effect."),
     (r"^manga_settings\.inpainting\.disable_worker_process$", ("mobile",),
      "Local inpainting always runs in-process on mobile (no worker processes), so this setting has no effect."),
+    # U8 manga: torch-only model tooling. Mobile downloads ready-made ONNX models (manga_models).
+    (r"^manga_settings\.advanced\.(auto_convert_to_onnx|auto_convert_to_onnx_background|quantize_models|"
+     r"onnx_quantize|torch_precision)$", ("mobile",),
+     "ONNX conversion / quantization needs PyTorch and the onnx package (desktop only). "
+     "Mobile downloads ready-made ONNX models."),
+    (r"^qwen2vl_", ("mobile",),
+     "Qwen2-VL OCR needs PyTorch + transformers · not available on mobile."),
+    (r"^manga_settings\.ocr\.(bubble_model_path|bubble_max_detections_yolo)$", ("mobile",),
+     "YOLOv8 / custom detector models need PyTorch + ultralytics · mobile uses RT-DETR ONNX."),
+)
+
+# Per-value availability for choice settings whose options include desktop-only backends
+# (U8 manga combos): (regex on key, values (case-insensitive), platforms, reason). The value
+# stays listed (disabled, with the reason) and a stored value round-trips untouched.
+_MANGA_OCR_KEYS = r"^(manga_ocr_provider|ocr_provider)$"
+_MANGA_LOCAL_INPAINT_KEYS = r"^(manga_local_inpaint_model|manga_settings\.inpainting\.local_method)$"
+UNAVAILABLE_VALUE_RULES = (
+    (_MANGA_OCR_KEYS, ("manga-ocr", "qwen2-vl", "easyocr", "doctr"), ("mobile",),
+     "Needs PyTorch · not available on mobile."),
+    (_MANGA_OCR_KEYS, ("paddleocr",), ("mobile",),
+     "Needs PaddlePaddle · not available on mobile."),
+    (r"^manga_settings\.ocr\.detector_type$", ("rtdetr",), ("mobile",),
+     "RT-DETR (PyTorch) needs PyTorch + transformers · use RT-DETR ONNX on mobile."),
+    (r"^manga_settings\.ocr\.detector_type$", ("yolo", "custom"), ("mobile",),
+     "YOLOv8 / custom detectors need PyTorch + ultralytics · use RT-DETR ONNX on mobile."),
+    (_MANGA_LOCAL_INPAINT_KEYS, ("aot", "lama", "anime", "lama_official", "mat", "qwen_image_edit"), ("mobile",),
+     "Torch JIT / checkpoint model · needs PyTorch. Use the ONNX models (aot_onnx, anime_onnx, lama_onnx)."),
+    (_MANGA_LOCAL_INPAINT_KEYS, ("ollama", "sd_local"), ("mobile",),
+     "Not functional on desktop either (no inpainting backend for this choice)."),
+    (r"^(manga_inpaint_method|manga_settings\.inpainting\.method)$", ("hybrid",), ("mobile",),
+     "Hybrid runs an ensemble of local models · needs PyTorch models (experimental on desktop)."),
+    (r"^manga_settings\.advanced\.ram_cap_mode$", ("hard",), ("mobile",),
+     "The hard RAM cap uses a Windows Job Object (desktop only); mobile uses the soft cap."),
 )
 
 # Fresh-install values measured by the U0 desktop oracle (tests/parity golden
@@ -583,6 +617,19 @@ def _unavailable_for(key: str):
     return tuple(out)
 
 
+def _unavailable_values_for(key: str):
+    out = []
+    seen = set()
+    for pattern, values, platforms, reason in UNAVAILABLE_VALUE_RULES:
+        if re.search(pattern, key):
+            for value in values:
+                for platform in platforms:
+                    if (value, platform) not in seen:
+                        seen.add((value, platform))
+                        out.append((value, platform, reason))
+    return tuple(out)
+
+
 def _env_bindings(raw):
     out = []
     for item in raw or ():
@@ -639,6 +686,7 @@ def _build_spec(key: str, entry: dict) -> SettingSpec:
         origins=tuple(entry.get("origins", ())),
         flags=tuple(entry.get("flags", ())),
         unavailable=unavailable,
+        unavailable_values=_unavailable_values_for(key),
     )
 
 
@@ -844,6 +892,22 @@ def is_available(key: str, platform: str = "mobile"):
         if plat == platform:
             return False, reason
     return True, ""
+
+
+def is_value_available(key: str, value, platform: str = "mobile"):
+    """(True, '') or (False, reason) for one option of a choice setting (e.g. the
+    'manga-ocr' OCR provider on mobile). Works for keys without a generated spec too
+    (``manga_ocr_provider``); unavailable options stay listed, disabled."""
+    wanted = str(value if value is not None else "").strip().lower()
+    for item_value, plat, reason in _unavailable_values_for(key):
+        if plat == platform and item_value == wanted:
+            return False, reason
+    return True, ""
+
+
+def unavailable_values(key: str, platform: str = "mobile"):
+    """{value: reason} for the options of ``key`` that cannot run on ``platform``."""
+    return {value: reason for value, plat, reason in _unavailable_values_for(key) if plat == platform}
 
 
 def search(query: str, *, limit: Optional[int] = None):

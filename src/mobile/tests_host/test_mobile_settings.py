@@ -871,6 +871,15 @@ def test_tiles_edit_validate_reset_and_show_reasons(tmp_path):
         dropdown = t["output_language"]
         assert dropdown.choose(1) and store.get("output_language") == "Korean"
         assert dropdown.dropdown.value == "1"
+        # an option settings_schema marks unavailable here (is_value_available) is listed, never stored
+        schema.module.is_value_available = (
+            lambda key, value, platform="mobile": (False, "Needs PyTorch") if (key, value) == ("output_language", "Japanese")
+            else (True, ""))
+        japanese = next(i for i, (v, _l) in enumerate(dropdown.options()) if v == "Japanese")
+        assert not dropdown.choose(japanese) and dropdown.error == "Needs PyTorch"
+        assert store.get("output_language") == "Korean" and dropdown.dropdown.value == "1"
+        assert dropdown.choose(1) and dropdown.error is None
+        del schema.module.is_value_available
         t["glossary_name"].field.value = "My glossary"
         t["glossary_name"]._on_submit()
         assert store.get("glossary_name") == "My glossary"

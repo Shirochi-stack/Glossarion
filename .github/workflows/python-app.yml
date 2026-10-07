@@ -105,7 +105,11 @@ jobs:
           tests/test_rpgmaker_job.py \
           tests/test_async_batch_core.py \
           tests/test_review_run_core.py \
-          tests/test_u7_tool_cores.py
+          tests/test_u7_tool_cores.py \
+          tests/test_manga_env.py \
+          tests/test_manga_editor_core.py \
+          tests/test_manga_models.py \
+          tests/test_google_vision_rest.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -137,6 +141,10 @@ jobs:
             # SDLXLIFF reviewer core, Review run orchestration
             "image_job", "rpgmaker_job", "async_batch_core", "output_tools_core", "sdlxliff_review_core",
             "review_generator",
+            # U8: manga settings defaults, run env, Files-tab logic, batch runner, editor core, ONNX
+            # model registry, Google Vision / Azure Document Intelligence REST clients
+            "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
+            "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
         )
         failed = []
         for name in SHARED:

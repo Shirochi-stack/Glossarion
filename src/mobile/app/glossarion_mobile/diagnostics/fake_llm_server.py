@@ -29,7 +29,13 @@ What it answers:
   ``Seo-yeon Lee`` instead of the romanized name. Markup, chapter split markers
   and JSON stay intact, so the backend's own parsing works unchanged.
 * **Vision requests** (a user message with an ``image_url`` part, i.e. ``send_image``):
-  the fixed OCR text ``FAKE_OCR_TEXT`` (U7 Vision output mode).
+  the fixed OCR text ``FAKE_OCR_TEXT`` (U7 Vision output mode). **OCR-response mode**
+  (U8): while ``ocr_text`` is set, every vision request answers with it instead, e.g. the
+  Korean bubble text ``FAKE_MANGA_OCR_TEXT`` the manga translator's custom-api OCR
+  "reads" from a page. In that mode an image request whose text carries Hangul is the
+  manga translator's full-page-context translation (the page rides along as visual
+  context), and a translation request made of ``[N] text`` segments gets the JSON object
+  its prompt asks for (``{"[N] text": "<translation>"}``, ``manga_segments``).
 * **Image generation** (``/v1/images/generations``, the client's Images API route for the
   Image output mode): ``FAKE_PNG`` as ``b64_json``; the prompt is recorded in ``preview``.
 
@@ -61,6 +67,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 
 __all__ = [
     "DEFAULT_GLOSSARY",
+    "FAKE_MANGA_OCR_TEXT",
     "FAKE_MARKER",
     "FAKE_MODEL",
     "FAKE_OCR_TEXT",
@@ -74,6 +81,8 @@ __all__ = [
     "fake_translate",
     "glossary_csv",
     "has_image_part",
+    "manga_reply",
+    "manga_segments",
     "png_bytes",
     "romanize_hangul",
 ]
@@ -82,6 +91,8 @@ FAKE_MARKER = "GLFAKE"
 FAKE_MODEL = "gpt-4o-mini"  # an OpenAI chat model name: routed through the custom endpoint as-is
 #: What the model "reads" from any image (Vision output mode).
 FAKE_OCR_TEXT = "GLFAKE-OCR The knight of the Silver Forest raised her sword at dawn."
+#: OCR-response mode (``FakeLLMServer.ocr_text``): the bubble text of a manga page (U8 custom-api OCR).
+FAKE_MANGA_OCR_TEXT = "기사님 안녕하세요"
 
 
 def png_bytes(width: int = 8, height: int = 8, rgb: tuple = (200, 40, 40)) -> bytes:
@@ -185,6 +196,33 @@ def _csv_field(value: str) -> str:
     if any(c in value for c in ',"\n'):
         return '"' + value.replace('"', '""') + '"'
     return value
+
+
+_MANGA_SEGMENT = re.compile(r"^\[(\d+)\]\s?(.*)$")
+
+
+def manga_segments(text: str) -> list:
+    """``[(index, text), ...]`` of a manga page translation request (``[0] first bubble`` lines; a
+    bubble's own line breaks continue its segment); empty when ``text`` does not start with one."""
+    segments: list = []
+    for line in str(text or "").splitlines():
+        match = _MANGA_SEGMENT.match(line.strip())
+        if match:
+            segments.append([int(match.group(1)), match.group(2)])
+        elif segments:
+            segments[-1][1] += "\n" + line
+        elif line.strip():
+            return []
+    return [(index, body) for index, body in segments]
+
+
+def manga_reply(segments: Iterable[tuple], glossary: Iterable[GlossaryEntry] = (), *,
+                marker: str = FAKE_MARKER) -> str:
+    """The JSON object the manga full-page-context prompt asks for: ``"[N] <text on one line>"`` ->
+    the tagged translation (``MangaTranslator.translate_full_page_context`` keys)."""
+    glossary = tuple(glossary)
+    return json.dumps({f"[{index}] {' '.join(str(body).split())}": fake_translate(body, glossary, marker=marker)
+                       for index, body in segments}, ensure_ascii=False)
 
 
 def chapter_numbers(text: str) -> list:
@@ -400,6 +438,8 @@ class FakeLLMServer:
         self.on_response: list = []
         #: chapter number -> Korean text the next answer for that chapter keeps untranslated (once)
         self.leave_raw_once: dict = {}
+        #: OCR-response mode: when set, every vision request answers with this text (manga OCR)
+        self.ocr_text: Optional[str] = None
         self.requests: list = []
         self.access_log: list = []
         self._lock = threading.Lock()
@@ -501,6 +541,7 @@ class FakeLLMServer:
         self.on_response = []
         self.kind_delays = {}
         self.leave_raw_once = {}
+        self.ocr_text = None
         self.release(abort=True)
 
     # ---- queries ---------------------------------------------------------------------------
@@ -584,9 +625,13 @@ class FakeLLMServer:
         if record.kind == "glossary":
             return glossary_csv(last_user or full_text, self.glossary)
         if record.kind == "vision":
-            return FAKE_OCR_TEXT
+            ocr_text = self.ocr_text
+            return FAKE_OCR_TEXT if ocr_text is None else ocr_text
         applied = applied_entries(full_text, self.glossary)
         record.glossary_applied = [e.raw_name for e in applied if e.raw_name in last_user]
+        segments = manga_segments(last_user) if self.ocr_text is not None else []
+        if segments:  # OCR-response mode: the manga page translation (JSON per bubble)
+            return manga_reply(segments, applied, marker=self.marker)
         user_lines = set(last_user.splitlines())
         record.glossary_lines = [line for line in full_text.splitlines() if line not in user_lines
                                  and any(e.raw_name and e.raw_name in line for e in self.glossary)]
@@ -628,8 +673,19 @@ class FakeLLMServer:
             if record.status == "ok":
                 self._run_hooks(self.on_response, record)
 
-    def _serve_chat(self, handler: _Handler, payload: dict, path: str) -> None:
+    def _classify(self, payload: dict) -> str:
         kind = classify_request(payload)
+        if kind == "vision" and self.ocr_text is not None:
+            # OCR-response mode: an image request that already carries Hangul text is the manga
+            # translator's full-page-context translation (the page is only visual context)
+            messages = [m for m in (payload.get("messages") or []) if isinstance(m, dict)]
+            last_user = next((_content_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), "")
+            if _HANGUL_RUN.search(last_user):
+                return "translation"
+        return kind
+
+    def _serve_chat(self, handler: _Handler, payload: dict, path: str) -> None:
+        kind = self._classify(payload)
         with self._lock:
             record = RequestRecord(id=len(self.requests) + 1, path=path, kind=kind, model=str(payload.get("model") or ""),
                                    stream=bool(payload.get("stream")), started=time.time())

@@ -1016,8 +1016,10 @@ def test_result_fields_and_compiled_outputs(tmp_path):
     (tmp_path / "chapter1.html").write_text("x", encoding="utf-8")
     assert [os.path.basename(p) for p in job_kinds.compiled_outputs([str(tmp_path), None])] == [
         "Book.epub", "Book_translated.txt"]
-    with pytest.raises(KeyError):  # a kind of a later milestone (qa_scan is registered since U6)
-        job_kinds.get_kind("manga")
+    assert job_kinds.get_kind("manga").stop_kind == "translation"  # registered since U8 (Tools › Manga)
+    assert job_kinds.get_kind("manga_step").kind == "manga_step"
+    with pytest.raises(KeyError):  # an unknown kind
+        job_kinds.get_kind("no_such_kind")
 
 
 # ==========================================================================

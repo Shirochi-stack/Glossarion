@@ -1,0 +1,64 @@
+# Hand the self-built mobile wheels (.github/workflows/mobile-wheels.yml) to `flet build`.
+#
+# 1. downloads the artifact mobile-wheelhouse-<platform> into $RUNNER_TEMP/wheelhouse;
+# 2. runs the strict wheel check: every pin must resolve for the platform's targets, and every
+#    wheel src/mobile/ci/wheels/wheelhouse.toml promises must come from the wheelhouse (pip's
+#    ranking, so an index file that outranks or ties it fails the step), with nothing else in it;
+# 3. exports PIP_FIND_LINKS=$RUNNER_TEMP/wheelhouse for the rest of the job. serious_python's pip
+#    inherits it through flet-build-action, flet and Dart's Process.start; uv ignores PIP_*.
+#
+# Needs a checkout and uv (astral-sh/setup-uv) earlier in the job. After each flet-build-action
+# step, prove the source with:
+#   uv run --no-project python src/mobile/tools/check_mobile_wheels.py \
+#     --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform <p>
+name: Mobile wheelhouse
+description: Download the self-built mobile wheels, check them against the pins and point pip at them.
+
+inputs:
+  platform:
+    description: android or ios
+    required: true
+
+outputs:
+  path:
+    description: The wheelhouse directory (also exported as PIP_FIND_LINKS)
+    value: ${{ steps.export.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        case "$PLATFORM" in
+          android|ios) ;;
+          *) echo "::error title=Mobile wheelhouse::platform must be android or ios (got '$PLATFORM')"; exit 1 ;;
+        esac
+        case "$RUNNER_TEMP" in
+          *" "*) echo "::error title=Mobile wheelhouse::RUNNER_TEMP contains a space; pip splits PIP_FIND_LINKS on whitespace"; exit 1 ;;
+        esac
+
+    - name: Download the mobile wheelhouse
+      uses: actions/download-artifact@v8
+      with:
+        name: mobile-wheelhouse-${{ inputs.platform }}
+        path: ${{ runner.temp }}/wheelhouse
+
+    - name: Check the wheelhouse against the pins (strict)
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        mkdir -p src/mobile/build
+        uv run --no-project python src/mobile/tools/check_mobile_wheels.py --platform "$PLATFORM" --no-host \
+          --wheelhouse "$RUNNER_TEMP/wheelhouse" --report "src/mobile/build/wheels_report_$PLATFORM.md"
+
+    - name: Point pip at the wheelhouse
+      id: export
+      shell: bash
+      run: |
+        echo "PIP_FIND_LINKS=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_ENV"
+        echo "path=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_OUTPUT"
+        ls -la "$RUNNER_TEMP/wheelhouse"

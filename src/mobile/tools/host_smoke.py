@@ -63,7 +63,11 @@ What it does (plan section 9, build-ci design section 7.4):
    ``headless_owner_env`` (the app's Env preview path: a ``HeadlessOwner`` built from a
    fresh-install config and ``run_env.build_translation_env``; the desktop defaults
    ``authgpt/gpt-6-luna`` / ``AUTO_GLOSSARY_MODE=off`` must come out, and the process
-   env, cwd and config.json must be left as they were).
+   env, cwd and config.json must be left as they were) and ``manga_pipeline`` (U8: RT-DETR
+   through the bundled ``bubble_detector``'s Python onnxruntime path on a tiny synthetic
+   export planted in ``BUBBLE_CACHE_DIR``, then one fixture page through
+   ``manga_runner.HeadlessMangaRunner`` with custom-api OCR and translation answered by the
+   loopback fake LLM server, inpainting skipped; env, cwd and config.json unchanged).
 6. **Verdict.** Fails (exit 1) on an import or check failure, on any tripwire event
    raised directly by bundled code (or one that propagated out of a phase), on any
    network attempt, and on any file created, changed or deleted outside the writable
@@ -143,9 +147,22 @@ _SPAWN_IMPL = frozenset({"subprocess.py", "os.py", "concurrent", "multiprocessin
 _HARNESS_FILE = os.path.normcase(os.path.abspath(__file__))
 
 # Selftest checks the CLI accepts besides the host checks below.
-HOST_CHECKS = ("key_material", "chapter_extractor_pool", "jaro_winkler", "pdf_mupdf_html", "headless_owner_env")
+HOST_CHECKS = ("key_material", "chapter_extractor_pool", "jaro_winkler", "pdf_mupdf_html", "headless_owner_env",
+               "manga_pipeline")
 # What a desktop fresh install runs with (U0 oracle; HeadlessOwner replays the desktop startup).
 FRESH_INSTALL_ENV = {"MODEL": "authgpt/gpt-6-luna", "AUTO_GLOSSARY_MODE": "off"}
+# A tiny RT-DETR-shaped ONNX export (inputs images [1,3,640,640] / orig_target_sizes [1,2]; three
+# constant detections: a bubble, a text bubble and one below the 0.3 threshold), built with
+# onnx.helper as tests/test_mobile_compat_patches_manga.py does (the onnx package is not on the
+# phone, so the bytes are embedded; that test pins them to their builder).
+SYNTHETIC_RTDETR_ONNX_B64 = (
+    "CAg6ggMKNRIGbGFiZWxzIghDb25zdGFudCohCgV2YWx1ZSoVCAEIAxAHOgMAAQJCCGxhYmVsc192oAEECmISBWJveGVz"
+    "IghDb25zdGFudCpPCgV2YWx1ZSpDCAEIAwgEEAEiMAAAIEEAAKBBAADcQgAAXEMAAJZDAAAgQgAAyEMAALRCAABIQgAA"
+    "+kMAABZDAAAMREIHYm94ZXNfdqABBAo+EgZzY29yZXMiCENvbnN0YW50KioKBXZhbHVlKh4IAQgDEAEiDGZmZj/NzEw/"
+    "zczMPUIIc2NvcmVzX3agAQQSC2Zha2VfcnRkZXRyWiIKBmltYWdlcxIYChYIARISCgIIAQoCCAMKAwiABQoDCIAFWiMK"
+    "EW9yaWdfdGFyZ2V0X3NpemVzEg4KDAgHEggKAggBCgIIAmIYCgZsYWJlbHMSDgoMCAcSCAoCCAEKAggDYhsKBWJveGVz"
+    "EhIKEAgBEgwKAggBCgIIAwoCCARiGAoGc2NvcmVzEg4KDAgBEggKAggBCgIIA0IECgAQDQ=="
+)
 
 
 class SetupError(Exception):
@@ -1091,12 +1108,150 @@ def make_host_checks(selftest: Any, keys: KeyState) -> Dict[str, Callable]:
             "secs": result.secs,
         }
 
+    def check_manga_pipeline(ctx) -> dict:
+        """U8 Tools › Manga on the bundle: RT-DETR through Python onnxruntime (a tiny synthetic
+        export with three constant boxes, written where the download lands, so nothing is fetched)
+        and one page through ``manga_runner.HeadlessMangaRunner`` with a HeadlessOwner, custom-api
+        OCR + translation answered by the loopback fake server (OCR-response mode), inpainting
+        skipped; process state and config.json must come out unchanged."""
+        paths = ctx.require_bootstrap()
+        for module in ("numpy", "cv2", "PIL", "onnxruntime"):
+            ctx.need(module)
+        import numpy
+
+        from glossarion_mobile.diagnostics.fake_llm_server import (FAKE_MANGA_OCR_TEXT, FAKE_MARKER, FAKE_MODEL,
+                                                                   FakeLLMServer)
+
+        work = paths.temp / "host-smoke-manga"
+        if work.exists():
+            shutil.rmtree(work)
+        page = work / "pages" / "001.png"
+        page.parent.mkdir(parents=True)
+        page.write_bytes(fixtures.manga_page_png(1))
+        detail: Dict[str, Any] = {}
+
+        # 1. RT-DETR on the device path: the bundled bubble_detector, Python onnxruntime (the C++
+        #    backend is excluded), the bootstrap's BUBBLE_CACHE_DIR (<data>/models/detector).
+        bd = importlib.import_module("bubble_detector")
+        if not bd._rtdetr_python_onnx_allowed():
+            raise AssertionError("bubble_detector does not allow the Python onnxruntime RT-DETR path on mobile")
+        cache = Path(os.environ.get("BUBBLE_CACHE_DIR") or "")
+        if not cache.is_absolute() or not _under(str(cache), str(paths.data)):
+            raise AssertionError(f"BUBBLE_CACHE_DIR {cache} is not under the data dir {paths.data}")
+        detector = bd.BubbleDetector(config_path=str(work / "bubble_config.json"))
+        if _norm(detector.cache_dir) != _norm(cache):
+            raise AssertionError(f"BubbleDetector cache dir {detector.cache_dir} != BUBBLE_CACHE_DIR {cache}")
+        filename = "detector.onnx"
+        cache.mkdir(parents=True, exist_ok=True)
+        planted = [cache / filename, cache / "config.json"]
+        planted[0].write_bytes(base64.b64decode(SYNTHETIC_RTDETR_ONNX_B64))
+        planted[1].write_bytes(b"{}")
+        try:
+            if not detector.load_rtdetr_onnx_model(onnx_filename=filename, force_reload=True):
+                raise AssertionError("load_rtdetr_onnx_model failed on the synthetic export")
+            cls = bd.BubbleDetector
+            if cls._rtdetr_onnx_use_cpp or detector.rtdetr_onnx_session is None:
+                raise AssertionError("RT-DETR did not load through a Python onnxruntime session")
+            image = numpy.full((200, 300, 3), 255, dtype=numpy.uint8)
+            boxes = detector.detect_bubbles(str(page), confidence=0.3, use_rtdetr=True)
+            raw = detector.detect_with_rtdetr_onnx(image=image, confidence=0.3)
+            if not boxes or not isinstance(raw, dict) or not any(raw.values()):
+                raise AssertionError(f"no detections from the synthetic export: {boxes!r} / {raw!r}")
+            detail["rtdetr"] = {"providers": list(cls._rtdetr_onnx_providers or []), "boxes": len(boxes),
+                                "classes": {k: len(v) for k, v in raw.items()}}
+        finally:
+            try:
+                cls = bd.BubbleDetector
+                for name, value in (("_rtdetr_onnx_shared_session", None), ("_rtdetr_onnx_loaded", False),
+                                    ("_rtdetr_onnx_model_key", None), ("_rtdetr_onnx_model_path", None)):
+                    if hasattr(cls, name):
+                        setattr(cls, name, value)
+            except Exception:
+                pass
+            for path in planted:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+        # 2. One page through the mobile batch runner (the MANGA job's code path) on the bundle.
+        job_runner = importlib.import_module("job_runner")
+        stop_control = importlib.import_module("stop_control")
+        headless_owner = importlib.import_module("headless_owner")
+        manga_runner = importlib.import_module("manga_runner")
+        config_file = Path(os.environ.get("CONFIG_FILE") or paths.data / "config.json")
+        config_before = config_file.read_bytes() if config_file.is_file() else None
+        env_before = dict(os.environ)
+        cwd_before = os.getcwd()
+        lines: List[str] = []
+
+        class _Host:
+            def log(self, text="", **_kw):
+                lines.append(str(text))
+
+            def is_stop_requested(self) -> bool:
+                return False
+
+            def is_graceful_stop(self) -> bool:
+                return False
+
+            def emit(self, kind, **data):
+                if kind == "log":
+                    lines.append(str(data.get("text", "")))
+
+            def ask(self, kind, **data):
+                return None
+
+        host = _Host()
+        with FakeLLMServer() as server:
+            server.ocr_text = FAKE_MANGA_OCR_TEXT
+            config = {
+                "model": FAKE_MODEL, "api_key": "sk-host-smoke-manga", "use_custom_openai_endpoint": True,
+                "openai_base_url": server.url, "output_language": "English", "delay": 0,
+                "manga_ocr_provider": "custom-api", "manga_skip_inpainting": True,
+                "manga_settings": {"ocr": {"bubble_detection_enabled": False}},
+            }
+            with job_runner.job_process_state(host.log, lock=job_runner.JOB_LOCK):
+                # The smoke points every proxy at a dead port: the loopback fake server must bypass
+                # them (os.environ is case-insensitive on Windows); the scope restores the env.
+                for key in ("NO_PROXY",) if os.name == "nt" else ("NO_PROXY", "no_proxy"):
+                    os.environ[key] = "127.0.0.1,localhost"
+                stop_control.reset_for_new_run(kind="translation")
+                owner = headless_owner.HeadlessOwner(config, host=host)
+                runner = manga_runner.HeadlessMangaRunner(owner, host=host, files=[str(page)],
+                                                          output_root=str(work / "Output"))
+                summary = dict(runner.run() or {})
+            records = server.records()
+        outputs = [p for p in (summary.get("outputs") or []) if p]
+        kinds = [r.kind for r in records]
+        if not summary.get("ok") or int(summary.get("completed") or 0) != 1 or len(outputs) != 1:
+            tail = " | ".join(line for line in lines[-12:] if line)
+            raise AssertionError(f"the manga run did not translate the page: {summary!r} ({tail[-1500:]})")
+        if kinds.count("vision") != 1 or "translation" not in kinds:
+            raise AssertionError(f"expected one OCR request and a translation request, got {kinds}")
+        if not any(FAKE_MARKER in (r.reply or "") for r in records if r.kind == "translation"):
+            raise AssertionError("the translation request did not carry the OCR text")
+        if not os.path.isfile(outputs[0]) or os.path.getsize(outputs[0]) == 0:
+            raise AssertionError(f"no translated page written: {outputs[0]}")
+        changed = sorted(k for k in set(env_before) | set(os.environ) if env_before.get(k) != os.environ.get(k))
+        if changed:
+            raise AssertionError(f"the manga run left process env changes behind: {changed[:20]}")
+        if os.getcwd() != cwd_before:
+            raise AssertionError("the manga run did not restore the working directory")
+        config_after = config_file.read_bytes() if config_file.is_file() else None
+        if config_after != config_before:
+            raise AssertionError(f"the manga run wrote {config_file} (owners never persist config)")
+        detail["runner"] = {"requests": kinds, "output": os.path.basename(outputs[0]),
+                            "cbz": [os.path.basename(p) for p in summary.get("cbz_paths") or []]}
+        return detail
+
     return {
         "key_material": check_key_material,
         "chapter_extractor_pool": check_chapter_extractor_pool,
         "jaro_winkler": check_jaro_winkler,
         "pdf_mupdf_html": check_pdf_mupdf_html,
         "headless_owner_env": check_headless_owner_env,
+        "manga_pipeline": check_manga_pipeline,
     }
 
 

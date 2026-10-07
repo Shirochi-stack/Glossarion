@@ -14,6 +14,8 @@ from typing import Optional
 
 KOREAN_SAMPLE = "그는 검을 뽑았다. 마왕성의 문이 천천히 열렸다."
 ENGLISH_SAMPLE = "Glossarion self-test: tokens, EPUB, PDF and crypto."
+#: Page size of ``build_manga_cbz`` (a small portrait manga page).
+MANGA_PAGE_SIZE = (480, 720)
 
 
 def selftest_assets_dir(assets_dir: Optional[Path]) -> Optional[Path]:
@@ -81,6 +83,43 @@ def build_tiny_pdf_bytes(pages: int = 2) -> bytes:
         return doc.tobytes()
     finally:
         doc.close()
+
+
+def manga_page_png(index: int, size: tuple = MANGA_PAGE_SIZE) -> bytes:
+    """One manga page as PNG bytes (Pillow): a white page, a panel border, a speech bubble with
+    dark "text" strokes and a page-number mark, so every page differs."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    width, height = size
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((12, 12, width - 13, height - 13), outline=(0, 0, 0), width=4)
+    left, top = width // 6, height // 6
+    right, bottom = width - width // 6, height // 2
+    draw.ellipse((left, top, right, bottom), fill=(255, 255, 255), outline=(0, 0, 0), width=3)
+    for row in range(3):
+        y = top + (bottom - top) * (row + 2) // 6
+        draw.line((left + 40 + 8 * row, y, right - 40 - 8 * row, y), fill=(20, 20, 20), width=6)
+    for mark in range(int(index)):
+        x = 30 + mark * 24
+        draw.rectangle((x, height - 60, x + 14, height - 40), fill=(0, 0, 0))
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def build_manga_cbz(path: Path, pages: int = 3) -> Path:
+    """A CBZ (ZIP of ``001.png`` ... ) of ``pages`` manga pages (the U8 manga E2E input)."""
+    import zipfile
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(1, int(pages) + 1):
+            archive.writestr(f"{index:03d}.png", manga_page_png(index))
+    return path
 
 
 def scratch_dir(base: Optional[Path] = None) -> Path:

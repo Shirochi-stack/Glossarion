@@ -10,7 +10,7 @@ from multi_api_key_manager import APIKeyEntry
 from request_parameters import (
     display_parameter_value, normalize_request_parameters, parse_parameter_value,
 )
-from unified_api_client import UnifiedClient, UnifiedClientError
+from unified_api_client import UnifiedClient
 
 
 @pytest.mark.parametrize('choice,openai,gemini,nanogpt,openrouter', [
@@ -45,50 +45,6 @@ def test_or_prefix_uses_openrouter_transport(monkeypatch, tmp_path):
     )
     assert request['provider'] == 'openrouter'
     assert request['base_url'] == 'https://openrouter.ai/api/v1'
-
-
-def test_nanogpt_tier_preflight_uses_detailed_catalog_and_provider_alias(monkeypatch):
-    calls = []
-
-    def get(url, **kwargs):
-        calls.append((url, kwargs))
-        return SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {'data': [{'id': 'openai/gpt-5.5',
-                                    'supported_service_tiers': ['default', 'flex', 'priority']}]},
-        )
-
-    monkeypatch.setattr(api.requests, 'get', get)
-    tier = UnifiedClient._validate_nanogpt_service_tier(
-        'https://nano-gpt.com/api/v1', 'test-key', 'openai/gpt-5.5', 'fast'
-    )
-    assert tier == 'priority'
-    assert calls == [('https://nano-gpt.com/api/v1/models', {
-        'params': {'detailed': 'true'},
-        'headers': {'Authorization': 'Bearer test-key'},
-        'timeout': 10,
-    })]
-
-
-def test_nanogpt_tier_preflight_rejects_unsupported_tier(monkeypatch):
-    monkeypatch.setattr(api.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
-        raise_for_status=lambda: None,
-        json=lambda: {'data': [{'id': 'openai/gpt-5.5', 'supported_service_tiers': []}]},
-    ))
-    with pytest.raises(UnifiedClientError, match='does not support the flex service tier'):
-        UnifiedClient._validate_nanogpt_service_tier(
-            'https://nano-gpt.com/api/v1', 'test-key', 'openai/gpt-5.5', 'flex'
-        )
-
-
-def test_nanogpt_default_tier_accepts_default_only_model(monkeypatch):
-    monkeypatch.setattr(api.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
-        raise_for_status=lambda: None,
-        json=lambda: {'data': [{'id': 'openai/gpt-5.5', 'supported_service_tiers': []}]},
-    ))
-    assert UnifiedClient._validate_nanogpt_service_tier(
-        'https://nano-gpt.com/api/v1', 'test-key', 'openai/gpt-5.5', 'default'
-    ) == 'default'
 
 
 @pytest.mark.parametrize('provider,model,base_url,choice,expected', [
@@ -133,14 +89,8 @@ def test_service_tier_reaches_request_payload(
         monkeypatch.setattr(api, 'print', lambda *args, **_kwargs: logs.append(' '.join(map(str, args))))
     request_model = model.removeprefix('nan/').removeprefix('or/')
     if provider == 'nanogpt':
-        def catalog_get(*args, **kwargs):
-            if expected is None:
-                raise AssertionError('models without a tier must not query the tier catalog')
-            return SimpleNamespace(
-                raise_for_status=lambda: None,
-                json=lambda: {'data': [{'id': request_model, 'supported_service_tiers': ['flex']}]},
-            )
-        monkeypatch.setattr(api.requests, 'get', catalog_get)
+        monkeypatch.setattr(api.requests, 'get', lambda *_args, **_kwargs:
+                            pytest.fail('Tier selection must not require model discovery'))
     if use_sdk:
         def create(**kwargs):
             calls.append(kwargs)
@@ -389,11 +339,8 @@ def test_nanogpt_logs_sent_effort_and_tier_without_budget_tokens(
     monkeypatch.setenv('GEMINI_SERVICE_TIER', tier)
     monkeypatch.setenv('ENABLE_STREAMING', '0')
     monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '0')
-    if tier == 'flex':
-        monkeypatch.setattr(api.requests, 'get', lambda *_args, **_kwargs: SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {'data': [{'id': model, 'supported_service_tiers': ['flex']}]},
-        ))
+    monkeypatch.setattr(api.requests, 'get', lambda *_args, **_kwargs:
+                        pytest.fail('Tier selection must not require model discovery'))
     if use_sdk:
         def create(**kwargs):
             calls.append(kwargs)
@@ -549,3 +496,89 @@ def test_custom_request_parameters_reach_selected_nanogpt_key(monkeypatch, use_s
 
     client._apply_key_runtime_overrides(key_entry=APIKeyEntry('other', 'nan/openai/gpt-5.5'))
     assert client._active_request_parameters() == {}
+
+
+@pytest.mark.parametrize('use_sdk,streaming', [(True, True), (True, False), (False, False)])
+@pytest.mark.parametrize('model', ['google/gemini-3.1-flash-lite', 'openai/gpt-6-luna'])
+def test_nanogpt_flex_sent_without_catalog_metadata(monkeypatch, tmp_path, use_sdk, streaming, model):
+    """Exercise the actual transports when model discovery has no tier metadata."""
+    import json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    requests_received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def respond(self, body):
+            encoded = json.dumps(body).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self):
+            requests_received.append(('GET', self.path, None))
+            self.respond({'data': [{'id': model}]})
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            requests_received.append(('POST', self.path, payload))
+            if payload.get('stream'):
+                chunk = {
+                    'id': 'tier-check', 'object': 'chat.completion.chunk', 'created': 0,
+                    'model': model,
+                    'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': 'OK'},
+                                 'finish_reason': 'stop'}],
+                }
+                encoded = ('data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n').encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Content-Length', str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+            else:
+                self.respond({
+                    'id': 'tier-check', 'object': 'chat.completion', 'created': 0,
+                    'model': model,
+                    'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'OK'},
+                                 'finish_reason': 'stop'}],
+                })
+
+    for name, value in {
+        'GEMINI_SERVICE_TIER': 'flex', 'FORCE_SERVICE_TIER_UNKNOWN_ROUTES': '0',
+        'USE_CUSTOM_OPENAI_ENDPOINT': '0', 'ENABLE_STREAMING': '1' if streaming else '0',
+        'SEND_INTERVAL_SECONDS': '0', 'MAX_RETRIES': '1',
+        'ENABLE_GPT_THINKING': '1', 'GPT_EFFORT': 'medium', 'NO_PROXY': '127.0.0.1,localhost',
+    }.items():
+        monkeypatch.setenv(name, value)
+    if not use_sdk:
+        monkeypatch.setattr(api, 'openai', None)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = UnifiedClient('local-test-key', f'nan/{model}', str(tmp_path))
+        response = client._send_openai_compatible(
+            [{'role': 'user', 'content': 'Reply OK.'}], 0.5, 100,
+            f'http://127.0.0.1:{server.server_port}/v1', 'tier-check',
+            provider='nanogpt', model_override=model,
+        )
+        assert response.content == 'OK'
+        assert len(requests_received) == 1
+        method, path, payload = requests_received[0]
+        assert (method, path) == ('POST', '/v1/chat/completions')
+        assert payload['model'] == model
+        assert payload['service_tier'] == 'flex'
+        assert payload['reasoning_effort'] == 'medium'
+        assert bool(payload.get('stream')) == streaming
+        assert 'provider' not in payload
+        assert 'thinking' not in payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

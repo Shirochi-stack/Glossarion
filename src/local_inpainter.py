@@ -33,12 +33,29 @@ if IS_FROZEN:
     os.environ['HF_HOME'] = hf_cache_dir
     logger.info(f"Running in frozen environment: {MEIPASS}")
 
+def _model_cache_default(env_name, desktop_default):
+    """U8: the default model cache directory when ``env_name`` is unset.
+
+    Desktop keeps ``desktop_default`` unchanged. On Glossarion Mobile the path comes
+    from manga_models (``<data>/models/<kind>``, the layout the bootstrap also exports
+    in BUBBLE_CACHE_DIR / MODEL_CACHE_DIR / ONNX_CACHE_DIR), so the model manager and
+    this module agree and nothing is written into the process cwd.
+    """
+    if not mobile_runtime.is_mobile():
+        return desktop_default
+    try:
+        import manga_models
+        return manga_models.default_cache_dir(env_name, desktop_default)
+    except Exception:
+        return desktop_default
+
+
 # Environment variables for ONNX
-ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'models')
+ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', _model_cache_default('ONNX_CACHE_DIR', 'models'))
 AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'false').lower() == 'true'
 SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'true'
 FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
-CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting'))
+CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', _model_cache_default('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting')))
 
 # Modified import handling for frozen environment
 TORCH_AVAILABLE = False

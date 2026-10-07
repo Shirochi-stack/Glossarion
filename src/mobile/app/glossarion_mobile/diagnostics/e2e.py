@@ -64,7 +64,14 @@ Scenarios (one self-test check each, in this order):
    response file and the chat; "Generate from prompt" in the Image output mode sends the
    composer text to the Images API (``/v1/images/generations``) and the returned PNG is the
    response's image in the chat folder (``[GENERATED_IMAGE:...]``, ``message_media``).
-8. ``e2e_process_hygiene``: after every job ``os.environ``, ``sys.argv``,
+8. ``e2e_manga_cbz`` (U8): Tools › Manga's Files tab takes a 3-page CBZ (``fixtures.build_manga_cbz``,
+   imported through FileBridge, extracted by the moved desktop Files logic) and Start runs the
+   ``manga`` job (``manga_runner.HeadlessMangaRunner`` with the job's HeadlessOwner as
+   ``main_gui``): custom-api OCR of each full page (the fake server's OCR-response mode answers
+   with Korean bubble text; the bubble detector is off, so no model download), the translation
+   through the same endpoint, inpainting skipped, the text rendered onto every page, the
+   automatic OCR export in ``Output/OCR Text`` and the translated CBZ written at the end.
+9. ``e2e_process_hygiene``: after every job ``os.environ``, ``sys.argv``,
    ``sys.stdout``/``sys.stderr``, the cwd, the ``large_env`` store and the
    ``UnifiedClient`` key pools are what they were before it; Glossarion code asked for
    no process (tripwire on the spawn APIs, as in ``tools/host_smoke.py``; a stdlib
@@ -1710,7 +1717,82 @@ class E2ESession:
                     texts.append(str(message[1] if len(message) > 1 else ""))
         return texts
 
-    # ---- scenario 8: hygiene ----------------------------------------------------------------------------------------
+    # ---- scenario 8: manga CBZ (U8) -----------------------------------------------------------------------------------
+
+    MANGA_CBZ = "E2E Manga.cbz"
+    MANGA_PAGES = 3
+
+    def manga_cbz(self) -> dict:
+        from glossarion_mobile.diagnostics import fixtures
+        from glossarion_mobile.diagnostics.fake_llm_server import FAKE_MANGA_OCR_TEXT, FAKE_MARKER
+        from glossarion_mobile.services import manga as svc
+
+        self.setup()
+        self.configure("off", manga_ocr_provider="custom-api", manga_skip_inpainting=True,
+                       manga_create_cbz_at_end=True, manga_glossary_enabled=False)
+        # Full-page custom-api OCR (no RT-DETR model download offline): the bubble detector is off.
+        settings = svc.merged_manga_settings(self.store.snapshot())
+        settings.setdefault("ocr", {})["bubble_detection_enabled"] = False
+        self.store.set("manga_settings", settings)
+        self.store.flush()
+        server = self.server
+        cbz = fixtures.build_manga_cbz(self.root / "Inbox" / "source" / self.MANGA_CBZ, pages=self.MANGA_PAGES)
+        imported = self.files.import_paths([str(cbz)], names=[self.MANGA_CBZ])
+        _check(imported, "FileBridge did not import the test CBZ")
+        manga_root = self._dir("manga")
+        files = svc.MangaFileList(self.store.snapshot(), save=self.store.set_many,
+                                  temp_root=str(manga_root / "cbz"), config_source=self.store.snapshot,
+                                  folders_root=str(manga_root / "folders"))
+        _check(files.available, "this build has no shared manga Files core (manga_files_core)")
+        added = files.add_paths([imported[0].path])
+        _check(added == self.MANGA_PAGES, f"the Files tab added {added} pages from the CBZ, not {self.MANGA_PAGES}")
+        _check(files.cbz_jobs, "the CBZ was not registered as a CBZ job (no archive at the end)")
+        spec = svc.batch_spec(files, output_root=str(self.root / "Output"))
+        mark = server.mark()
+        server.ocr_text = FAKE_MANGA_OCR_TEXT  # OCR-response mode: every page "reads" the Korean bubble text
+        try:
+            outcome = self.run_job(self.service, spec, "manga (3-page CBZ)")
+        finally:
+            server.ocr_text = None
+        _check(outcome.state == "DONE", f"manga job ended {outcome.state}: {outcome.error}")
+        records = server.records(since=mark)
+        vision = [r for r in records if r.kind == "vision"]
+        translations = [r for r in records if r.kind == "translation"]
+        _check(len(vision) == self.MANGA_PAGES,
+               f"{len(vision)} OCR (vision) request(s) for {self.MANGA_PAGES} pages ({[r.kind for r in records]})")
+        _check(translations, f"no translation request reached the model ({[r.kind for r in records]})")
+        _check(not [r for r in records if r.kind == "glossary"], "the manga run sent a glossary request")
+        snap = self.service.snapshot(outcome.job_id)
+        result = dict(getattr(snap, "result", None) or {})
+        pages = [p for p in (result.get("manga_outputs") or []) if p]
+        _check(len(pages) == self.MANGA_PAGES and all(os.path.isfile(p) for p in pages),
+               f"translated pages: {pages}")
+        from safe_image import open_image
+
+        sources = sorted(files.files)
+        for source, page in zip(sources, sorted(pages)):
+            with open_image(page) as rendered, open_image(source) as original:
+                _check(rendered.size == original.size, f"{os.path.basename(page)} has size {rendered.size}")
+                _check(rendered.convert("RGB").tobytes() != original.convert("RGB").tobytes(),
+                       f"{os.path.basename(page)} is the untranslated page (no text rendered)")
+        archives = [p for p in (result.get("manga_cbz") or []) if p]
+        _check(len(archives) == 1 and os.path.isfile(archives[0]), f"CBZ at the end: {archives}")
+        with zipfile.ZipFile(archives[0]) as archive:
+            members = sorted(n for n in archive.namelist() if not n.endswith("/"))
+        _check(len(members) == self.MANGA_PAGES, f"the output CBZ holds {members}")
+        _check(set(outcome.outputs) >= set(pages) | set(archives), f"job outputs {outcome.outputs}")
+        exports = sorted(Path(self.root / "Output" / "OCR Text").glob("*.json"))
+        _check(exports, "no automatic OCR export in Output/OCR Text")
+        document = json.loads(exports[-1].read_text(encoding="utf-8"))
+        _check(document.get("format") == "glossarion-manga-ocr", f"OCR export format {document.get('format')!r}")
+        # the fake model tags Hangul it "translates": a tagged reply means the OCR text was in the request
+        replies = [r for r in translations if FAKE_MARKER in (r.reply or "")]
+        _check(replies, "no translation request carried the Korean OCR text (no reply has the fake marker)")
+        return {"pages": len(pages), "cbz": os.path.basename(archives[0]), "cbz_members": members,
+                "ocr_requests": len(vision), "translation_requests": len(translations),
+                "ocr_export": exports[-1].name, "secs": round(outcome.secs, 1)}
+
+    # ---- scenario 9: hygiene ----------------------------------------------------------------------------------------
 
     def process_hygiene(self) -> dict:
         self.setup()
@@ -1765,6 +1847,7 @@ SCENARIOS = (
     ("e2e_force_stop_kill_resume", "force_stop_kill_resume"),
     ("e2e_retranslate_resolve_qa", "retranslate_resolve_qa"),
     ("e2e_vision_and_generate", "vision_and_generate"),
+    ("e2e_manga_cbz", "manga_cbz"),
     ("e2e_process_hygiene", "process_hygiene"),
 )
 

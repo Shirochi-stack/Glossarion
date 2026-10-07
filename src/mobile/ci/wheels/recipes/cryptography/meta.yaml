@@ -1,0 +1,35 @@
+# Glossarion overlay of recipes/cryptography/meta.yaml from flet-dev/mobile-forge
+# (https://github.com/flet-dev/mobile-forge at 0fadbfab0d63d11164030dfddc955ed980e32e2c,
+# BSD-3-Clause, see ../LICENSE.mobile-forge). build_wheels.sh runs forge on this directory
+# in place (forge <host> <path>), so the forge checkout itself is never patched.
+#
+# Changes from upstream:
+#   - version 50.0.2 (the security pin) instead of 43.0.1 for Python 3.13;
+#   - build number 1000 (wheelhouse.toml build_tag);
+#   - host openssl pinned to 3.5.9: BeeWare's static OpenSSL 3.5.9, which wheels.py
+#     stage-openssl packs into forge's dist/ in place of the support tree's end-of-life 3.0.x;
+#   - OPENSSL_STATIC=1 on Android only. It must stay unset on iOS: with it, the build script
+#     of cryptography-cffi links clang_rt.osx (a macOS runtime) on every Apple target;
+#   - IPHONEOS_DEPLOYMENT_TARGET=13.0 on iOS (wheelhouse.toml toolchain.ios_deployment_target,
+#     the ios_13_0 wheel tag). forge builds the compile environment from scratch, so script_env
+#     is the only way it reaches rustc; without it rustc links for iOS 10.0. rustc raises the
+#     arm64 simulator slice to its floor of 14.0 either way (wheels.py verify-native allows that).
+package:
+  name: cryptography
+  version: "50.0.2"
+
+requirements:
+  host:
+    # forge installs this as openssl==3.5.9 from dist/ (src/forge/build.py install_requirements).
+    - openssl 3.5.9
+
+build:
+  number: 1000
+  script_env:
+    OPENSSL_DIR: '{platlib}/opt'
+    _PYTHON_SYSCONFIGDATA_NAME: '{sysconfigdata_name}'
+# {% if sdk == 'android' %}
+    OPENSSL_STATIC: '1'
+# {% else %}
+    IPHONEOS_DEPLOYMENT_TARGET: '13.0'
+# {% endif %}

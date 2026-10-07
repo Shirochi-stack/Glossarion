@@ -73,6 +73,13 @@ modules = [
   # batch), the output tools core (Load Font, Validate EPUB, Delete Header Files / TOC.txt, lifted
   # from other_settings) and the SDLXLIFF reviewer core (Retranslation_GUI; Tools › SDLXLIFF).
   "image_job", "rpgmaker_job", "async_batch_core", "output_tools_core", "sdlxliff_review_core",
+  # U8 shared core (Tools › Manga): the manga settings defaults and run env (MangaTranslator's
+  # duck-typed main_gui is the job's HeadlessOwner), the Files-tab logic, the batch runner the
+  # MANGA job adapter calls (HeadlessMangaRunner), the editor pipeline (MangaEditorSession), the
+  # on-demand ONNX model registry / downloader and the Google Vision / Azure Document
+  # Intelligence REST clients the cloud OCR providers use when their SDKs are not installed.
+  "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
+  "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).
@@ -196,12 +203,12 @@ google-cloud-aiplatform = "gRPC SDK; Vertex via REST + google-auth"
 google-generativeai = "deprecated SDK (google-genai is pinned)"
 google-ai-generativelanguage = "gRPC SDK (Tier B)"
 google-api-core = "Tier B: pinned with grpcio 1.81 when a google-cloud-* route is enabled"
-google-cloud-vision = "Tier B (manga cloud OCR milestone)"
+google-cloud-vision = "gRPC SDK (Tier B); manga_translator / the editor use google_vision_rest when it is missing (U8)"
 google-cloud-translate = "Tier B (paid Google Translate route)"
 google-cloud-texttospeech = "Tier B (TTS milestone)"
 grpcio = "Tier B (grpcio==1.81.0 + grpcio-status==1.81.0 resolver trap)"
-azure-ai-formrecognizer = "Tier B (manga cloud OCR milestone)"
-rapidocr-onnxruntime = "Tier B (manga milestone; pyclipper + shapely are on pypi.flet.dev, verify with check_mobile_wheels)"
+azure-ai-formrecognizer = "Azure Document Intelligence SDK; ocr_manager uses azure_document_intelligence_rest on mobile (U8)"
+azure-ai-documentintelligence = "Azure Document Intelligence SDK; ocr_manager uses azure_document_intelligence_rest on mobile (U8)"
 argostranslate = "ctranslate2 has no mobile wheel (offline MT disabled)"
 datasketch = "scipy; guarded MinHash fallback"
 poe-api-wrapper = "desktop-only Poe client"

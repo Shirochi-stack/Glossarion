@@ -21,7 +21,10 @@ runs for the same action:
 * ``validate_epub`` / ``rename_outputs``: Converter actions (``TransateKRtoEN`` validation,
   ``output_naming._rename_output_files_for_retain``);
 * ``translate_headers``: ``translate_headers_standalone.run_translation`` per EPUB + rebuild;
-* ``metadata``: the owner's metadata-only run (desktop ``start_metadata_translation``).
+* ``metadata``: the owner's metadata-only run (desktop ``start_metadata_translation``);
+* ``manga`` / ``manga_step``: Tools › Manga's batch run (``manga_runner.HeadlessMangaRunner``, the
+  desktop ``MangaTranslationTab`` Start without Qt, the owner as ``main_gui``) and the editor steps
+  (``manga_editor_core.MangaEditorSession``), U8.
 
 No backend logic lives here. ``get_kind(kind)`` returns a ``KindInfo`` (verb and
 icon for the strip and notifications, the ``stop_control.reset_for_new_run``
@@ -62,6 +65,9 @@ KIND_MODULES = {
     "rpgmaker": "rpgmaker",
     "generate_media": "generate_media",
     "translate_image": "image",
+    # U8 (Tools › Manga: the batch Start / Generate glossary and the editor steps)
+    "manga": "manga",
+    "manga_step": "manga",
 }
 
 

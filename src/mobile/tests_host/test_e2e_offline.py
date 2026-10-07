@@ -496,9 +496,14 @@ def test_offline_e2e_suite(tmp_path):
     media = checks["e2e_vision_and_generate"]["detail"]
     assert media["vision"]["requests"] == 1 and media["vision"]["responses"]
     assert media["generate"]["requests"] == 1 and media["generate"]["image"].startswith("Direct Text ")
+    # U8: Tools › Manga Start on a 3-page CBZ (custom-api OCR + translation, inpainting skipped, CBZ at the end).
+    manga = checks["e2e_manga_cbz"]["detail"]
+    pages = e2e.E2ESession.MANGA_PAGES
+    assert manga["pages"] == manga["ocr_requests"] == pages and manga["translation_requests"] >= 1
+    assert manga["cbz"].endswith("_translated.cbz") and len(manga["cbz_members"]) == pages
     hygiene = checks["e2e_process_hygiene"]["detail"]
     assert hygiene["spawn_attempts"] == 0 and hygiene["writes_outside"] == 0 and hygiene["network_attempts"] == 0
-    assert all(not job["process_diff"] for job in hygiene["jobs"]) and len(hygiene["jobs"]) == 18
+    assert all(not job["process_diff"] for job in hygiene["jobs"]) and len(hygiene["jobs"]) == 19
 
     # The sandbox is gone after a pass; the user's own chats, settings, jobs and outputs were never touched.
     sandboxes = storage["temp"] / "glossarion-e2e"

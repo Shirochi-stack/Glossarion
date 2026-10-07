@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 from queue import Queue
 from types import SimpleNamespace
@@ -622,8 +623,9 @@ def test_manga_ocr_export_dialog_path_defaults_to_ocr_folder(tmp_path):
 def test_auto_ocr_folder_uses_the_epub_default_output_root(tmp_path, monkeypatch):
     app_output_root = tmp_path / 'app-output'
     monkeypatch.delenv('OUTPUT_DIRECTORY', raising=False)
+    # U8: the method moved to manga_env (inherited by MangaTranslationTab); patch where it looks up
     monkeypatch.setattr(
-        manga_integration,
+        sys.modules[MangaTranslationTab._manga_ocr_output_dir.__module__],
         '_get_app_dir',
         lambda: str(app_output_root),
     )
