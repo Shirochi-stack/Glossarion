@@ -20,7 +20,9 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.sheet import sheet_frame
 from glossarion_mobile.ui.tools import targets as tg
 
 __all__ = ["SEGMENTS", "SourcePicker"]
@@ -67,7 +69,9 @@ class SourcePicker:
             segments=[ft.Segment(value=value, label=ft.Text(label)) for value, label in SEGMENTS],
             selected=[self.segment], allow_multiple_selection=False, show_selected_icon=False,
             on_change=self._on_segment, key="picker-segments")
-        self.list_view = ft.ListView(spacing=2, height=360, build_controls_on_demand=True, key="picker-list")
+        # The list takes the sheet's free height (Cancel / Done stay below it): a fixed 360 dp list
+        # pushed the multi-select Done past the sheet at large text.
+        self.list_view = ft.ListView(spacing=2, expand=True, build_controls_on_demand=True, key="picker-list")
         self.status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                               key="picker-status")
         self.browse_button = ft.FilledTonalButton(content=browse_label, icon=ft.Icons.FILE_OPEN_OUTLINED,
@@ -83,8 +87,8 @@ class SourcePicker:
             self.list_view,
             ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.close(), key="picker-cancel"),
                     self.done_button], alignment=ft.MainAxisAlignment.END),
-        ], tight=True, spacing=tokens.SPACING["sm"])
-        self.sheet = ft.BottomSheet(content=ft.Container(content=content, padding=tokens.SPACING["sheet_padding"]),
+        ], spacing=tokens.SPACING["sm"])
+        self.sheet = ft.BottomSheet(content=sheet_frame(content, padding=tokens.SPACING["sheet_padding"]),
                                     show_drag_handle=True, scrollable=True, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH)
         self._page: Any = None
 
@@ -97,8 +101,7 @@ class SourcePicker:
         return self
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.sheet)
 
     async def load(self) -> None:
         self.status.value = "Loading…"

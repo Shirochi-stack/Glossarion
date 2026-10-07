@@ -30,7 +30,9 @@ import flet as ft
 
 from glossarion_mobile.ui.chat.media_model import GENERATIVE_MODES
 from glossarion_mobile.ui.chat.output_modes import mode_label, normalize_mode, output_mode
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = [
@@ -281,11 +283,11 @@ class ModeOptionsSheet:
         self.tiles = self.content.tiles
         self.this_chat_switch = self.content.this_chat_switch
         self.generate_button = self.content.generate_button
+        # Scrolls at the sheet level (Vision's eight tiles are taller than a phone); the ＋ sheet
+        # inlines the same column inside its own scroll, so the column itself does not scroll.
         self.dialog = ft.BottomSheet(
-            content=ft.Container(
-                padding=ft.Padding.only(left=16, right=16, bottom=24),
-                content=self.content.column,
-            ),
+            content=sheet_frame(scroll_column([self.content.column]),
+                                padding=ft.Padding.only(left=16, right=16, bottom=24)),
             show_drag_handle=True,
             scrollable=True,
             on_dismiss=on_dismiss,
@@ -304,8 +306,4 @@ class ModeOptionsSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            try:
-                self._page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(self._page, self.dialog)

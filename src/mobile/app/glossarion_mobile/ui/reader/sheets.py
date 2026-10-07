@@ -17,6 +17,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import HIT_TARGET
 
@@ -32,11 +33,7 @@ class _Sheet:
 
     def close(self) -> None:
         page = getattr(self, "_page", None)
-        if page is not None and getattr(self.sheet, "open", False):
-            try:
-                page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(page, self.sheet)
 
 
 class BookmarksSheet(_Sheet):

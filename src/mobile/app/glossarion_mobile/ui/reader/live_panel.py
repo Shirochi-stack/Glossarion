@@ -18,6 +18,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.reader.live import LiveFeed, status_stopping, status_waiting, thinking_label
 
 __all__ = ["LivePanel"]
@@ -114,11 +115,7 @@ class LivePanel:
 
     def close(self) -> None:
         page = self._page
-        if page is not None and getattr(self.sheet, "open", False):
-            try:
-                page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(page, self.sheet)
         self.is_open = False
 
     def _on_dismiss(self, e: Any = None) -> None:

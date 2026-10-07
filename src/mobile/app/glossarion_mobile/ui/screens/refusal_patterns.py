@@ -119,7 +119,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     import flet as ft
 
     from glossarion_mobile.ui import tokens
-    from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+    from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
     from glossarion_mobile.ui.screens.base import Screen
     from glossarion_mobile.ui.theme import HIT_TARGET
 except ImportError:  # pragma: no cover - Flet missing
@@ -200,9 +200,13 @@ class RefusalPatternsScreen(Screen):  # type: ignore[misc,valid-type]
             self.search,
             self.count_text,
         ], spacing=8, tight=True)
+        # The header is the list's first row, so it scrolls with the patterns: as a fixed block it
+        # took the whole page with the keyboard up (typing a pattern or a filter left 0 dp for the
+        # list) and overflowed at large text.
+        self.header = ft.Container(content=header, padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                                   key="refusal-header")
         self.render()
-        return ft.Column([ft.Container(content=header, padding=ft.Padding.symmetric(horizontal=12, vertical=8)),
-                          self.list_view], expand=True, spacing=0)
+        return ft.Column([self.list_view], expand=True, spacing=0)
 
     def visible_patterns(self) -> list:
         needle = self.query.strip().lower()
@@ -215,7 +219,8 @@ class RefusalPatternsScreen(Screen):  # type: ignore[misc,valid-type]
         self.count_text.value = f"{total} patterns" + (f" · {len(patterns)} shown" if self.query.strip() else "") + (
             f" · {len(self.selected)} selected" if self.selected else "")
         self.delete_button.disabled = not self.selected
-        self.list_view.controls = [self._row(p) for p in patterns]
+        header = getattr(self, "header", None)
+        self.list_view.controls = ([header] if header is not None else []) + [self._row(p) for p in patterns]
 
     def _row(self, pattern: str) -> "ft.Control":
         return ft.ListTile(
@@ -278,8 +283,7 @@ class RefusalPatternsScreen(Screen):  # type: ignore[misc,valid-type]
         return dialog
 
     def _close(self, dialog: Any) -> None:
-        if self.page is not None and getattr(dialog, "open", False):
-            self.page.pop_dialog()
+        close_dialog(self.page, dialog)
 
     def confirm_delete(self) -> Any:
         if not self.selected:

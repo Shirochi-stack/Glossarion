@@ -1924,7 +1924,9 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 - **Colours.**
   - Theme roles come from `ft.Colors.*`.
   - Semantic and status colours are app constants in `ui/theme/colors.py`, keyed by brightness, because Flet themes have no custom roles.
-- **Dialogs and sheets** (`BottomSheet`, `AlertDialog`, `SnackBar`, `Banner`) open with `page.show_dialog(…)` and close with `page.pop_dialog()`.
+- **Dialogs and sheets** (`BottomSheet`, `AlertDialog`, `SnackBar`, `Banner`) open with `page.show_dialog(…)` and close with `components.dialogs.close_dialog(page, dialog)`.
+  - Never close a known dialog with `page.pop_dialog()`. It closes the most recently opened dialog, which after a handler has shown a snackbar is the snackbar, not the sheet.
+  - `BottomSheet(scrollable=True)` only lifts the 9/16 height cap; it never scrolls. A sheet whose content can outgrow a phone builds its body with `components.sheet` (a scrolling column, an optional pinned action row, the bottom system inset).
 - **Extensions.**
   - `flet_webview.WebView` raises outside Android, iOS and macOS. Every WebView surface therefore has a native fallback for Windows/Linux dev.
   - `flet_video.Video` uses its default controls (there is no `show_controls`) and `aspect_ratio`.

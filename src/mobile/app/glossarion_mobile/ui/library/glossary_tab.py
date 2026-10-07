@@ -33,7 +33,7 @@ import flet as ft
 from glossarion_mobile.services.library import CoreMissing, first_value
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.colors import GP_STATUS_PALETTE_KEY
@@ -581,6 +581,5 @@ class _MarkdownSheet:
         page.show_dialog(self.sheet)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.sheet)
 

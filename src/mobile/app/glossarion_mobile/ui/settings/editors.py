@@ -6,13 +6,19 @@ to default), ``SecretEditor`` (masked field with reveal, Clear), ``PathEditor``
 add / remove / move up / move down) and ``JsonEditor`` (validated JSON).
 
 Each is a ``BottomSheet(fullscreen=True)`` opened with ``page.show_dialog``.
-``on_save(value)`` returns ``None`` on success or an error string, which is
-shown under the field while the editor stays open.
+``on_save(value)`` (sync or async) returns ``None`` on success or an error string,
+which is shown under the field while the editor stays open. While a save runs
+Save and Close are disabled and further taps are ignored; on success the editor
+closes itself (by identity, never the topmost dialog) and then calls
+``on_saved(value)``, the place for a confirmation snackbar.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import logging
 import os
 import shutil
 from typing import Any, Callable, Optional, Sequence
@@ -20,7 +26,11 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.theme import HIT_TARGET, mono_family
+
+log = logging.getLogger("glossarion.ui")
 
 __all__ = ["FullScreenEditor", "JsonEditor", "ListEditor", "PathEditor", "PromptEditor", "SecretEditor", "count_label"]
 
@@ -42,12 +52,15 @@ class FullScreenEditor:
         subtitle: Optional[str] = None,
         on_save: Optional[SaveHandler] = None,
         save_label: str = "Save",
+        on_saved: Optional[Callable[[Any], Any]] = None,
     ) -> None:
         self.ctx = ctx
         self.title = title
         self.on_save = on_save
+        self.on_saved = on_saved  # runs once the editor has closed (feedback)
         self.saved_value: Any = None
         self.closed = False
+        self.saving = False
         self.error_text = ft.Text("", color=ft.Colors.ERROR, theme_style=ft.TextThemeStyle.BODY_SMALL, visible=False)
         self.save_button = ft.FilledButton(content=save_label, on_click=self._on_save)
         self.close_button = ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", on_click=self.close, size_constraints=HIT_TARGET)
@@ -98,32 +111,67 @@ class FullScreenEditor:
     # ---- lifecycle -------------------------------------------------------------------------
 
     def show(self) -> "FullScreenEditor":
+        if self.closed:  # shown again after a save / close
+            self.closed = False
+            self._set_busy(False)
         self.ctx.show_dialog(self.sheet)
         return self
 
     def close(self, e: Any = None) -> None:
         self.closed = True
-        if getattr(self.sheet, "open", False):
-            self.ctx.pop_dialog()
+        # This sheet itself: page.pop_dialog() would close a snackbar shown since it opened.
+        close_dialog(getattr(self.ctx, "page", None), self.sheet)
 
     def set_error(self, message: Optional[str]) -> None:
         self.error_text.value = message or ""
         self.error_text.visible = bool(message)
         self.ctx.push(self.error_text)
 
-    def save(self) -> bool:
+    def _set_busy(self, busy: bool) -> None:
+        self.saving = busy
+        self.save_button.disabled = busy
+        self.close_button.disabled = busy
+        self.ctx.push(self.save_button, self.close_button)
+
+    def save(self) -> Any:
+        """Validate, store (``on_save``) and close; True when saved, False otherwise (an async
+        ``on_save`` gives an awaitable of that). Ignored while a save runs and once closed, so a
+        repeated tap never stores the value twice."""
+        if self.closed or self.saving:
+            return False
         try:
             value = self.collect()
         except ValueError as exc:
             self.set_error(str(exc))
             return False
-        error = self.on_save(value) if self.on_save is not None else None
+        self._set_busy(True)
+        try:
+            result = self.on_save(value) if self.on_save is not None else None
+        except Exception as exc:
+            log.exception("saving %s failed", self.title)
+            return self._finish(value, str(exc) or type(exc).__name__)
+        if inspect.isawaitable(result):
+            return asyncio.ensure_future(self._finish_async(value, result))
+        return self._finish(value, result)
+
+    async def _finish_async(self, value: Any, pending: Any) -> bool:
+        try:
+            error = await pending
+        except Exception as exc:
+            log.exception("saving %s failed", self.title)
+            error = str(exc) or type(exc).__name__
+        return self._finish(value, error)
+
+    def _finish(self, value: Any, error: Any) -> bool:
         if error:
-            self.set_error(error)
+            self._set_busy(False)
+            self.set_error(str(error))
             return False
         self.saved_value = value
         self.set_error(None)
+        self.saving = False  # the buttons stay disabled while the sheet closes
         self.close()
+        call_handler(self.on_saved, value)
         return True
 
     def _on_save(self, e: Any = None) -> None:

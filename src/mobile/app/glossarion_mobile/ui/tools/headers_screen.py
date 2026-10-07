@@ -22,7 +22,7 @@ from typing import Any, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.tools import headers_model as hm
@@ -83,8 +83,7 @@ class PromptsSheet:
         return self
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.sheet)
 
 
 class MetadataFieldsSheet:
@@ -129,8 +128,7 @@ class MetadataFieldsSheet:
         return self
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.sheet)
 
     def _remember(self) -> None:
         if self.current and self.checkboxes:

@@ -30,7 +30,7 @@ import flet as ft
 from glossarion_mobile.services import model_catalog as mc
 from glossarion_mobile.services.model_catalog import CatalogSnapshot, ModelCatalogService
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen, build_screen_view
@@ -376,12 +376,12 @@ class ModelManagerScreen(Screen):
             text = (field.value or "").strip()
             if not text:
                 return
-            if self.page is not None and getattr(dialog, "open", False):
-                self.page.pop_dialog()
+            if not close_dialog(self.page, dialog) and self.page is not None:
+                return  # already closed: a second tap / Enter never adds twice
             self.add(text)
 
         dialog = ft.AlertDialog(title=ft.Text("Add model"), content=field, actions=[
-            ft.TextButton(content="Cancel", on_click=lambda e: self.page.pop_dialog() if self.page else None),
+            ft.TextButton(content="Cancel", on_click=lambda e: close_dialog(self.page, dialog)),
             ft.FilledButton(content="➕ Add", on_click=lambda e: submit()),
         ])
         self.add_field, self.add_submit = field, submit
@@ -501,6 +501,7 @@ class PrefixEditor:
     def __init__(self, *, route: Optional[dict] = None, on_save: Callable[[dict], Optional[str]]) -> None:
         route = dict(route or {})
         self.on_save = on_save
+        self.saved = False
         self._page: Any = None
         self.prefix = ft.TextField(value=str(route.get("prefix", "")), label="Prefix", hint_text="myprefix/", dense=True)
         self.routing = ft.TextField(value=str(route.get("routing", route.get("base_url", ""))), label="Base URL",
@@ -526,6 +527,8 @@ class PrefixEditor:
                 "endpoint_type": (self.endpoint_type.value or "/chat/completions").strip()}
 
     def save(self) -> Optional[str]:
+        if self.saved:  # a second tap while the sheet closes
+            return None
         row = self.row()
         if not row["prefix"] and not row["routing"]:
             error: Optional[str] = "Row 1 needs both a prefix and Base URL."
@@ -536,6 +539,7 @@ class PrefixEditor:
             self.error.visible = True
             _push(self.error)
             return error
+        self.saved = True
         self.close()
         return None
 
@@ -544,8 +548,7 @@ class PrefixEditor:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)
 
 
 # ---- feature install ------------------------------------------------------------------------------------

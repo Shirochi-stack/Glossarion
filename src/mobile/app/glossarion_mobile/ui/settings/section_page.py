@@ -281,7 +281,7 @@ class SectionPage(Screen):
 
     def _open_hit(self, hit: SearchHit) -> None:
         if self.search_sheet is not None and getattr(self.search_sheet, "open", False):
-            self.ctx.pop_dialog()
+            self.ctx.pop_dialog(self.search_sheet)
         if hit.section_id == self.section_id:
             self.ctx.spawn(self.focus_key(hit.key))
         else:

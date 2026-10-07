@@ -24,6 +24,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.reader import model as rm
 from glossarion_mobile.ui.theme import HIT_TARGET
 
@@ -259,11 +260,7 @@ class AaSheet:
         page.show_dialog(self.sheet)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            try:
-                self._page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(self._page, self.sheet)
 
     @staticmethod
     def _push(*controls: Any) -> None:

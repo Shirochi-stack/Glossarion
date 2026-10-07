@@ -13,6 +13,10 @@ prompt role · Skip plan for attachments) · Conversation (Disable conversation
 auto-scroll · Rendered conversation cards 4-200 · Text size). Footer: "Reset chat
 overrides". Effective values reach the run as JobSpec overrides; nothing here writes
 config.json in This-chat scope.
+
+The sheet body scrolls (``components.sheet``): on a phone the sections are taller than the
+screen (owner report: "chat settings doesn't scroll down"). A change rebuilds the rows; each
+section keeps the expanded / collapsed state the user left it in.
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     normalize_rendered_card_limit,
 )
 from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
+from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
 
 __all__ = [
     "CHAT_SETTING_KEYS",
@@ -120,30 +126,25 @@ class ChatSettingsSheet:
         self.scope = scope if scope in ("chat", "global") else "chat"
         self._page: Any = None
         self.body = ft.Column([], tight=True, spacing=4)
+        #: section id -> ExpansionTile of the last rebuild; its ``expanded`` follows the user's taps.
+        self.sections: dict = {}
+        self.expanded = {"model": True, "glossary": True, "run": False, "conversation": False}
         self.scope_button = ft.SegmentedButton(
             segments=[ft.Segment(value="chat", label="This chat"), ft.Segment(value="global", label="All chats")],
             selected=[self.scope],
             on_change=self._on_scope,
         )
-        self.dialog = ft.BottomSheet(
-            content=ft.Container(
-                padding=ft.Padding.only(left=16, right=16, bottom=24),
-                content=ft.Column(
-                    [
-                        ft.Text("Direct Text settings", theme_style=ft.TextThemeStyle.TITLE_LARGE),
-                        ft.Text(INTRO, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
-                        self.scope_button,
-                        self.body,
-                    ],
-                    tight=True,
-                    spacing=10,
-                ),
-            ),
-            show_drag_handle=True,
-            scrollable=True,
-            draggable=True,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+        self.column = scroll_column(
+            [
+                ft.Text("Direct Text settings", theme_style=ft.TextThemeStyle.TITLE_LARGE),
+                ft.Text(INTRO, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                self.scope_button,
+                self.body,
+            ],
+            spacing=10,
         )
+        self.dialog = bottom_sheet(sheet_frame(self.column, padding=ft.Padding.only(left=16, right=16, bottom=24)),
+                                   draggable=True)
         self.rebuild()
 
     # ---- values ----------------------------------------------------------------------------
@@ -268,6 +269,8 @@ class ChatSettingsSheet:
         return ft.Row([dropdown, *self._badge(field_name)], spacing=4, key=f"setting-{field_name}")
 
     def rebuild(self) -> None:
+        for section_id, tile in self.sections.items():  # the user's expand / collapse taps
+            self.expanded[section_id] = bool(getattr(tile, "expanded", False))
         glossary_mode = str(self.value_of("glossary_override_mode"))
         glossary_group = ft.RadioGroup(
             value=glossary_mode,
@@ -310,7 +313,6 @@ class ChatSettingsSheet:
             divisions=(MAX_RENDERED_CARD_LIMIT - MIN_RENDERED_CARD_LIMIT) // 2,
             value=limit,
             on_change_end=lambda e: self.set_value("rendered_card_limit", int(round(e.control.value or limit))),
-            expand=True,
         )
         role_button = ft.SegmentedButton(
             segments=[ft.Segment(value=value, label=label) for label, value in ATTACHMENT_PROMPT_ROLES],
@@ -318,10 +320,10 @@ class ChatSettingsSheet:
             on_change=lambda e: self.set_value("attachment_prompt_role", (list(e.control.selected) or ["user"])[0]),
         )
         text_scale = float(self.chats.meta(self.cid).get("text_scale") or 1.0)
-        sections = [
-            ft.ExpansionTile(
+        self.sections = {
+            "model": ft.ExpansionTile(
                 title="Model & prompt",
-                expanded=True,
+                expanded=self.expanded["model"],
                 controls=[
                     model_row,
                     self._dropdown("profile", "Prompt profile", [(p, p) for p in self.profiles]),
@@ -329,13 +331,14 @@ class ChatSettingsSheet:
                     self._dropdown("output_mode", "Default output mode", [(m.id, f"{m.emoji} {m.label}") for m in OUTPUT_MODES]),
                 ],
             ),
-            ft.ExpansionTile(
+            "glossary": ft.ExpansionTile(
                 title="Glossary",
-                expanded=True,
+                expanded=self.expanded["glossary"],
                 controls=[ft.Row([ft.Container(expand=True), *self._badge("glossary_override_mode")]), glossary_group],
             ),
-            ft.ExpansionTile(
+            "run": ft.ExpansionTile(
                 title="Run behaviour",
+                expanded=self.expanded["run"],
                 controls=[
                     self._switch("force_multipass_off", "Force Multipass off"),
                     self._switch("disable_thinking", "Disable all thinking"),
@@ -354,8 +357,9 @@ class ChatSettingsSheet:
                     self._switch("skip_plan", "Skip plan for attachments"),
                 ],
             ),
-            ft.ExpansionTile(
+            "conversation": ft.ExpansionTile(
                 title="Conversation",
+                expanded=self.expanded["conversation"],
                 controls=[
                     self._switch("disable_auto_scroll", "Disable conversation auto-scroll"),
                     ft.Column(
@@ -380,9 +384,9 @@ class ChatSettingsSheet:
                     ),
                 ],
             ),
-        ]
+        }
         footer = [ft.TextButton(content="Reset chat overrides", on_click=lambda e: self.reset())] if self.scope == "chat" else []
-        self.body.controls = [*sections, *footer]
+        self.body.controls = [*self.sections.values(), *footer]
 
     def _set_text_scale(self, value: Any) -> None:
         try:
@@ -400,5 +404,4 @@ class ChatSettingsSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)

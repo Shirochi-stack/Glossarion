@@ -152,6 +152,7 @@ class ImportPlan:
     unknown: tuple = ()
     legacy: bool = False  # a flat key list (appended to the Translation pool on desktop)
     error: Optional[str] = None
+    duplicates: int = 0  # legacy keys the pool already held (skipped by ``apply_import``)
 
     @property
     def total(self) -> int:
@@ -298,6 +299,18 @@ class KeyBackend:
         merged = dict(entry)
         merged.update(normalized)
         return merged, None
+
+    def find_duplicate(self, keys: Sequence[Mapping[str, Any]], entry: Mapping[str, Any]) -> Optional[int]:
+        """``key_pool_service.find_duplicate_key``: index of an identical key in ``keys`` or None."""
+        fn = self.fn("find_duplicate_key")
+        if fn is None:
+            return None
+        try:
+            index = fn([dict(k) for k in keys], dict(entry))
+        except Exception:
+            log.debug("duplicate check failed", exc_info=True)
+            return None
+        return index if isinstance(index, int) else None
 
     # ---- import / export --------------------------------------------------------------------------
 
@@ -470,14 +483,43 @@ class KeysController:
         return self.backend.new_entry("", "")
 
     def add_key(self, pool: str, entry: Mapping[str, Any]) -> tuple:
+        """``(index, None)`` or ``(None, error)``; an exact duplicate of a key in the pool is refused."""
         clean, error = self.backend.validate(entry, self.spec(pool).id)
         if clean is None:
             return None, error
         with self._lock:
             keys = self.keys(pool)
+            duplicate = self.backend.find_duplicate(keys, clean)
+            if duplicate is not None:
+                return None, (f"This key is already in {self.spec(pool).title} "
+                              f"(#{duplicate + 1}: {self.key_label(keys[duplicate])}).")
             keys.append(clean)
             self.set_keys(pool, keys)
             return len(keys) - 1, None
+
+    @staticmethod
+    def key_label(entry: Mapping[str, Any]) -> str:
+        """``sk-…a1B2 · gpt-6``: a key as feedback names it (never the whole secret)."""
+        from glossarion_mobile.ui.settings.model import mask_secret
+
+        api_key = str(entry.get("api_key") or "").strip()
+        model = str(entry.get("model") or "").strip()
+        return f"{mask_secret(api_key) if api_key else 'No key'} · {model}"
+
+    def saved_message(self, pool: str, entry: Mapping[str, Any], *, added: bool) -> str:
+        """The confirmation after the key editor closed (desktop: "Added key for model: …" plus the
+        ``added_key_extra_info`` suffix); it names the key and the pool."""
+        if not added:
+            return f"Saved key {self.key_label(entry)}"
+        extra = ""
+        fn = self.backend.fn("added_key_extra_info")
+        if fn is not None:
+            endpoint = entry.get("azure_endpoint") if entry.get("use_individual_endpoint") else None
+            try:
+                extra = str(fn(entry.get("google_credentials"), endpoint) or "")
+            except Exception:
+                extra = ""
+        return f"Added key {self.key_label(entry)} to {self.spec(pool).title}{extra}"
 
     def update_key(self, pool: str, index: int, entry: Mapping[str, Any]) -> Optional[str]:
         clean, error = self.backend.validate(entry, self.spec(pool).id)
@@ -728,7 +770,20 @@ class KeysController:
                 if key and self.store.has(key):
                     view[key] = self.store.get(key)
         before = copy.deepcopy(view)
-        count = fn(view, {"legacy": plan.legacy, "items": [(p, list(k), e) for p, k, e in plan.items]})
+        items = [(p, list(k), e) for p, k, e in plan.items]
+        if plan.legacy:  # appended: never add a key the pool (or the file) already holds
+            plan.duplicates = 0
+            deduped = []
+            for pool_id, keys, enabled in items:
+                held = self.keys(pool_id)
+                kept: list = []
+                for key in keys:
+                    if self.backend.find_duplicate(held + kept, key) is None:
+                        kept.append(key)
+                plan.duplicates += len(keys) - len(kept)
+                deduped.append((pool_id, kept, enabled))
+            items = deduped
+        count = fn(view, {"legacy": plan.legacy, "items": items})
         changed = {k: v for k, v in view.items() if k not in before or before[k] != v}
         if changed:
             self.store.set_many(changed)
@@ -738,9 +793,10 @@ class KeysController:
         """The desktop result line (``pool_import_result_message`` / ``legacy_import_result_message``)."""
         if plan.legacy:
             fn = self.backend.fn("legacy_import_result_message")
-            if fn is not None:
-                return fn(applied, plan.skipped)
-            return f"Imported {applied} API key(s)"
+            message = fn(applied, plan.skipped) if fn is not None else f"Imported {applied} API key(s)"
+            if plan.duplicates:
+                message += f"\n{plan.duplicates} duplicate key(s) skipped (already in the pool)"
+            return message
         fn = self.backend.fn("pool_import_result_message")
         if fn is not None:
             return fn(applied, len(plan.items), plan.skipped, list(plan.unknown))
@@ -755,9 +811,10 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui import tokens
     from glossarion_mobile.ui.components._handlers import call_handler
     from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
-    from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+    from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
     from glossarion_mobile.ui.components.reason_chip import ReasonChip
     from glossarion_mobile.ui.components.section_card import SectionCard
+    from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
     from glossarion_mobile.ui.screens.base import Screen
     from glossarion_mobile.ui.settings.model import mask_secret
     from glossarion_mobile.ui.theme import HIT_TARGET, status_color
@@ -1219,24 +1276,29 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         except Exception:
             azure_versions = []
 
+        pool = self.pool
+
         def save(value: dict) -> Optional[str]:
             if new:
-                _index, error = self.controller.add_key(self.pool, value)
-                if error is None:
-                    self.say(f"Added key for model: {value.get('model')}")
+                _index, error = self.controller.add_key(pool, value)
             else:
-                error = self.controller.update_key(self.pool, index, value)
+                error = self.controller.update_key(pool, index, value)
             if error is None:
                 self.render()
                 _push(self.list_view)
             return error
+
+        def saved(value: dict) -> None:
+            # After the editor has closed: a snackbar shown inside save() would be the dialog the
+            # close pops, leaving the sheet open with no feedback (owner report).
+            self.say(self.controller.saved_message(pool, value, added=new))
 
         async def test(value: dict) -> dict:
             return await self.io(lambda: self.controller.test_entry(value, self.pool))
 
         self.editor = KeyEditor(
             self.ctx, entry=entry, pool_id=spec.id, pool_title=spec.title, contexts=spec.contexts,
-            context_labels=context_labels(), on_save=save, on_test=test, sheet_env=self.sheet_env,
+            context_labels=context_labels(), on_save=save, on_saved=saved, on_test=test, sheet_env=self.sheet_env,
             azure_versions=azure_versions, read_clipboard=self.read_clipboard, copy_text=self.copy_text, new=new,
             test_reason=None if self.controller.backend.available else SERVICE_MISSING,
         ).show()
@@ -1322,6 +1384,9 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         def clear() -> None:
             pool = self.pool
             removed = self.controller.clear(pool)
+            if not removed:
+                self.say(f"{spec.title} is already empty")
+                return
             self.selected.clear()
             self.render()
             _push(self.list_view)
@@ -1451,23 +1516,21 @@ class ContextSheet:
         self.labels = dict(labels)
         self.on_apply = on_apply
         self.changes: dict = {}
+        self.applied = False
         self._page: Any = None
         self.chips: dict = {}
         for context in self.states:
             self.chips[context] = ft.Chip(label=ft.Text(self._label(context)), selected=bool(self.states[context]),
                                           on_click=lambda e, c=context: self.cycle(c), key=f"bulk-ctx-{context}")
-        self.dialog = ft.BottomSheet(
-            content=ft.Container(padding=ft.Padding.only(left=16, right=16, bottom=16), content=ft.Column([
-                ft.Text("Request contexts", theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
-                ft.Text("Tap to switch a context on or off for every selected key. “–” means the keys differ; "
-                        "contexts you do not touch stay as they are.", theme_style=ft.TextThemeStyle.BODY_SMALL),
-                ft.Row(list(self.chips.values()), wrap=True, spacing=6, run_spacing=6),
-                ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.close()),
-                        ft.FilledButton(content="Apply", on_click=lambda e: self.apply())],
-                       alignment=ft.MainAxisAlignment.END),
-            ], tight=True, spacing=10)),
-            show_drag_handle=True, scrollable=True, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
-        )
+        self.apply_button = ft.FilledButton(content="Apply", on_click=lambda e: self.apply())
+        # 25 chips are taller than a phone: they scroll, Cancel / Apply stay pinned below them.
+        self.dialog = bottom_sheet(sheet_frame(scroll_column([
+            ft.Text("Request contexts", theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
+            ft.Text("Tap to switch a context on or off for every selected key. “–” means the keys differ; "
+                    "contexts you do not touch stay as they are.", theme_style=ft.TextThemeStyle.BODY_SMALL),
+            ft.Row(list(self.chips.values()), wrap=True, spacing=6, run_spacing=6),
+        ], footer=[ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.close()), self.apply_button],
+                          alignment=ft.MainAxisAlignment.END)])))
 
     def _label(self, context: str) -> str:
         state = self.states.get(context)
@@ -1491,6 +1554,9 @@ class ContextSheet:
         return new
 
     def apply(self) -> Any:
+        if self.applied:  # a second tap while the sheet closes
+            return None
+        self.applied = True
         self.close()
         return self.on_apply(dict(self.changes))
 
@@ -1499,5 +1565,4 @@ class ContextSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)

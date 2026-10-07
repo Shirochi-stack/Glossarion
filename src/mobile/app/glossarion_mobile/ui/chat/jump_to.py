@@ -15,6 +15,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.chat_ops import JumpEntry
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["JumpToSheet", "step_target"]
@@ -148,8 +149,4 @@ class JumpToSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            try:
-                self._page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(self._page, self.dialog)

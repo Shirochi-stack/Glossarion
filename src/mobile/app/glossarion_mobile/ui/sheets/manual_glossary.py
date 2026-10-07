@@ -21,6 +21,8 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     manual_glossary_source,
 )
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 
 __all__ = ["ManualGlossarySheet", "read_glossary_file"]
 
@@ -87,16 +89,20 @@ class ManualGlossarySheet:
                     self.load_text(initial.path, text)
             else:
                 self.editor.value = initial.content
+        # The text scrolls and the buttons stay pinned below it: with the keyboard up the sheet is
+        # shorter than the editor, and only a scroll view brings the focused editor into view.
         self.dialog = ft.BottomSheet(
-            content=ft.Container(
+            content=sheet_frame(
                 padding=ft.Padding.only(left=16, right=16, bottom=24),
-                content=ft.Column(
+                content=scroll_column(
                     [
                         ft.Text(TITLE, theme_style=ft.TextThemeStyle.TITLE_LARGE),
                         ft.Text(INSTRUCTIONS, theme_style=ft.TextThemeStyle.BODY_MEDIUM),
                         self.editor,
                         self.source_label,
                         self.error_label,
+                    ],
+                    footer=[
                         ft.Row(
                             [
                                 ft.TextButton(content="Browse…", on_click=self._browse),
@@ -107,7 +113,6 @@ class ManualGlossarySheet:
                             spacing=8,
                         ),
                     ],
-                    tight=True,
                     spacing=10,
                 ),
             ),
@@ -153,6 +158,8 @@ class ManualGlossarySheet:
         )
 
     def use(self) -> Optional[ManualGlossarySource]:
+        if self.result is not None:  # a second tap while the sheet closes never sends twice
+            return None
         source = self.source()
         if source is None:
             self._error(REQUIRED)
@@ -191,5 +198,4 @@ class ManualGlossarySheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)

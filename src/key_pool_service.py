@@ -15,7 +15,8 @@ signals and call these:
 * **Entries.** ``new_key_entry()`` (the dict the Fallback / Glossary / dedicated "Add key"
   buttons append), ``new_main_key_entry()`` (the ``APIKeyEntry`` of the Translation pool's
   "Add Key"), ``missing_model_error()`` and ``added_key_extra_info()``; ``validate_entry()`` for
-  editors that build a whole entry (mobile KeyEditor).
+  editors that build a whole entry (mobile KeyEditor); ``find_duplicate_key()`` finds an entry a
+  pool already holds (mobile "Add key" and legacy-list imports refuse exact duplicates).
 * **Import / export** (format ``glossarion-key-pools`` version 1): ``sanitize_imported_keys``,
   ``classify_key_import``, ``plan_pool_aware_import``, ``legacy_key_entries``,
   ``pool_import_summary`` and the result messages (``_import_keys`` / ``_import_pool_aware`` /
@@ -63,7 +64,7 @@ __all__ = [
     # entries
     "NEW_KEY_ENTRY_FIELDS", "DEFAULT_GOOGLE_REGION", "DEFAULT_AZURE_API_VERSION",
     "missing_model_error", "new_key_entry", "new_main_key_entry", "added_key_extra_info",
-    "validate_entry",
+    "validate_entry", "find_duplicate_key",
     # import / export
     "KEY_POOLS_FORMAT", "KEY_POOLS_VERSION", "INVALID_IMPORT_MESSAGE", "NO_VALID_KEYS_MESSAGE",
     "NO_POOLS_MESSAGE", "sanitize_imported_keys", "classify_key_import", "plan_pool_aware_import",
@@ -561,6 +562,33 @@ def validate_entry(entry, pool='main'):
         if name in data:
             data[name] = normalized[name]
     return data, None
+
+
+def _duplicate_identity(entry):
+    """What makes two entries the same key for a pool: the API key, the model and where / how the
+    request is sent (individual endpoint + API version, Google credentials). ``None`` for an
+    encrypted (``ENC:``) key, which cannot be compared."""
+    get = entry.get if isinstance(entry, dict) else (lambda name, default=None: getattr(entry, name, default))
+    api_key = str(get('api_key') or '').strip()
+    if api_key.startswith('ENC:'):
+        return None
+    use_endpoint = bool(get('use_individual_endpoint', False))
+    endpoint = str(get('azure_endpoint') or '').strip() if use_endpoint else ''
+    version = str(get('azure_api_version') or '').strip() if use_endpoint else ''
+    return (api_key, str(get('model') or '').strip(), use_endpoint, endpoint, version,
+            str(get('google_credentials') or '').strip())
+
+
+def find_duplicate_key(keys, entry):
+    """Index of the first key in *keys* that duplicates *entry* (same API key, model, individual
+    endpoint and Google credentials), or ``None``. Encrypted keys never match."""
+    wanted = _duplicate_identity(entry)
+    if wanted is None:
+        return None
+    for index, existing in enumerate(keys or []):
+        if _duplicate_identity(existing) == wanted:
+            return index
+    return None
 
 
 # =============================================================================================

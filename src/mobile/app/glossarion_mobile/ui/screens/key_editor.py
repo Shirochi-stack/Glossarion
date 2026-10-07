@@ -266,6 +266,7 @@ class KeyEditor(FullScreenEditor):
         contexts: Sequence[str] = (),
         context_labels: Optional[Mapping[str, str]] = None,
         on_save: Optional[Callable[[dict], Optional[str]]] = None,
+        on_saved: Optional[Callable[[dict], Any]] = None,  # after the editor closed: the confirmation
         on_test: Optional[Callable[[dict], Any]] = None,  # async entry -> result
         sheet_env: Any = None,
         azure_versions: Sequence[str] = (),
@@ -292,7 +293,8 @@ class KeyEditor(FullScreenEditor):
         self.context_enabled = {c: c not in disabled for c in self.contexts}
         self.extra_disabled = sorted(disabled - set(self.contexts))  # kept untouched
         title = "Add key" if new else "Edit key"
-        super().__init__(ctx, title=title, subtitle=pool_title, on_save=on_save, save_label="Add" if new else "Save")
+        super().__init__(ctx, title=title, subtitle=pool_title, on_save=on_save, save_label="Add" if new else "Save",
+                         on_saved=on_saved)
 
     # ---- form ---------------------------------------------------------------------------------------
 

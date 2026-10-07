@@ -7,6 +7,10 @@ of ``ListTile`` rows plus a Cancel row. On tablets the same rows sit in a
 centred ``AlertDialog`` (<= 560 dp). Tapping a row closes the sheet first,
 then runs the action. Destructive rows use the error colour; unavailable rows
 stay visible, disabled, with a ReasonChip (nothing hidden, §0 item 6).
+
+The rows scroll when they may not fit (a 14-row chapter menu on a phone, any
+menu at large text); a scrolling body makes a Flet 1.0.3 sheet full height, so
+a menu that surely fits at 200 % text keeps a compact body (``show``).
 """
 
 from __future__ import annotations
@@ -18,7 +22,9 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.sheet import fits_compact, page_width, sheet_frame, text_height
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["ActionItem", "ActionSheet"]
@@ -70,9 +76,10 @@ class ActionSheet:
             header.append(ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600))
         if subtitle:
             header.append(ft.Text(subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
-        body = ft.Column(
+        self.body = body = ft.Column(
             tight=True,
             spacing=0,
+            scroll=ft.ScrollMode.AUTO,  # show() keeps a short menu compact
             controls=(
                 [ft.Container(padding=ft.Padding.only(left=16, right=16, bottom=8), content=ft.Column(header, tight=True, spacing=2))]
                 if header
@@ -88,7 +95,7 @@ class ActionSheet:
             )
         else:
             self.dialog = ft.BottomSheet(
-                content=ft.Container(padding=ft.Padding.only(bottom=8), content=body),
+                content=sheet_frame(body, padding=ft.Padding.only(bottom=8)),
                 show_drag_handle=True,
                 scrollable=True,
                 bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
@@ -109,14 +116,29 @@ class ActionSheet:
             key=item.key or item.label,
         )
 
+    def estimated_height(self, width: float) -> float:
+        """Upper estimate (dp, at 200 % text) of the header, rows and Cancel at ``width``."""
+        hit = float(tokens.SIZES["hit_target"])
+        inner = max(120.0, width - 88)  # ListTile padding and the leading icon
+        total = 8.0
+        for label, reason in [(i.label, i.disabled_reason) for i in self.items] + [("Cancel", None)]:
+            total += max(hit, text_height(label, inner - (140 if reason else 0), 16) + 16)
+        if self.title:
+            total += text_height(self.title, width - 32, 16)
+        if self.subtitle:
+            total += text_height(self.subtitle, width - 32, 12)
+        if self.title or self.subtitle:
+            total += 8
+        return total
+
     def show(self, page: Any) -> None:
         self._page = page
+        width = min(page_width(page), float(tokens.SIZES["dialog_max"])) if self.tablet else page_width(page)
+        self.body.scroll = None if fits_compact(page, self.estimated_height(width)) else ft.ScrollMode.AUTO
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        page = self._page
-        if page is not None and getattr(self.dialog, "open", False):
-            page.pop_dialog()
+        close_dialog(self._page, self.dialog)
 
     def _on_cancel(self, e: Any = None) -> None:
         self.close()

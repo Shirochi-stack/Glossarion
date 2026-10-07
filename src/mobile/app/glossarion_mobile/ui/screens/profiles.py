@@ -44,7 +44,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.screens.prompt_editor import PLACEHOLDERS, PromptEditorPane
@@ -873,15 +873,24 @@ class ProfileDetailScreen(_ProfilesBase):
         field_ = ft.TextField(label="New profile name", autofocus=True, dense=True)
         page = getattr(self.ctx, "page", None)
 
+        saved: list = []
+
         def done(e: Any = None) -> None:
+            if saved:  # a second tap while the dialog closes
+                return
             name = self.save_as(field_.value or "")
-            if name and page is not None:
-                page.pop_dialog()
+            if name:
+                saved.append(name)
+                # By identity: save_as() has shown a snackbar, which pop_dialog() would close instead.
+                close_dialog(page, dialog)
+            else:  # the error shows where the user is looking (the page's error line is under the dialog)
+                field_.error = self.error_text.value or "The profile could not be saved."
+                self.push(field_)
 
         dialog = ft.AlertDialog(
             title=ft.Text("Save as"),
             content=field_,
-            actions=[ft.TextButton(content="Cancel", on_click=lambda e: page.pop_dialog() if page else None),
+            actions=[ft.TextButton(content="Cancel", on_click=lambda e: close_dialog(page, dialog)),
                      ft.FilledButton(content="Save", on_click=done)],
         )
         self.save_as_dialog = (dialog, field_)

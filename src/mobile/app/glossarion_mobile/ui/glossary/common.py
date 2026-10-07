@@ -16,7 +16,8 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
+from glossarion_mobile.ui.components.sheet import scroll_sheet
 from glossarion_mobile.ui.library.common import LibraryContext
 
 __all__ = ["GlossaryContext", "ask", "ago", "kind_icon", "kind_label"]
@@ -127,11 +128,8 @@ async def prompt_text(ctx: Any, *, title: str, label: str, value: str = "", ok: 
     try:
         result = await answer
     finally:
-        if not dismissed and getattr(dialog, "open", False):  # never pop a dialog underneath
-            try:
-                ctx.page.pop_dialog()
-            except Exception:
-                pass
+        if not dismissed:  # by identity: never close a dialog or snackbar opened since
+            close_dialog(ctx.page, dialog)
     text = str(result or "").strip()
     return text or None
 
@@ -154,25 +152,14 @@ def chip(text: str, *, color: Any = None, bgcolor: Any = None, key: Optional[str
 
 def sheet(title: str, controls: list, *, actions: Optional[list] = None, key: Optional[str] = None,
           scroll: bool = True) -> ft.BottomSheet:
-    """A scrollable bottom sheet: title, content and a bottom action row (primary actions in reach)."""
-    body: list = [ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600)]
-    body.extend(controls)
-    if actions:
-        body.append(ft.Row(actions, alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8))
-    return ft.BottomSheet(
-        content=ft.Container(
-            content=ft.Column(body, tight=True, spacing=10, scroll=ft.ScrollMode.AUTO if scroll else None),
-            padding=ft.Padding.only(left=16, right=16, bottom=20),
-        ),
-        show_drag_handle=True,
-        scrollable=True,
-        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
-        key=key,
-    )
+    """A scrollable bottom sheet: title, content and a bottom action row (primary actions in reach);
+    the app-wide ``components.sheet.scroll_sheet``."""
+    return scroll_sheet(title, controls, actions=actions, key=key, scroll=scroll,
+                        padding=ft.Padding.only(left=16, right=16, bottom=20))
 
 
 class SheetHost:
-    """Opens / closes one ``ft.BottomSheet`` through the page (``page.show_dialog`` / ``pop_dialog``)."""
+    """Opens / closes one ``ft.BottomSheet`` through the page (``page.show_dialog`` / ``close_dialog``)."""
 
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
@@ -187,11 +174,7 @@ class SheetHost:
 
     def close(self) -> None:
         page = getattr(self.ctx, "page", None)
-        if page is not None and self.dialog is not None and getattr(self.dialog, "open", False):
-            try:
-                page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(page, self.dialog)
 
 
 def run_later(ctx: Any, fn: Callable[[], Any]) -> Any:

@@ -21,6 +21,7 @@ import flet as ft
 
 from glossarion_mobile.services.library import CoreMissing
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.dialogs import close_dialog
 
 __all__ = [
     "ChoiceDialog",
@@ -59,11 +60,7 @@ class ChoiceDialog:
 
     def _done(self, value: Optional[str]) -> None:
         self.result = value
-        if self._page is not None and getattr(self.dialog, "open", False):
-            try:
-                self._page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(self._page, self.dialog)
         if self._future is not None and not self._future.done():
             self._future.set_result(value)
 

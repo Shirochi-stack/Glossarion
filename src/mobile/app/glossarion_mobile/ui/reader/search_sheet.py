@@ -18,6 +18,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import close_dialog
 
 __all__ = ["ReaderSearchSheet", "SEARCH_DEBOUNCE", "SEARCH_HINT"]
 
@@ -167,11 +168,7 @@ class ReaderSearchSheet:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
-        if self._page is not None and getattr(self.sheet, "open", False):
-            try:
-                self._page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(self._page, self.sheet)
 
     @staticmethod
     def _push(*controls: Any) -> None:

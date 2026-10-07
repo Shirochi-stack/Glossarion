@@ -58,7 +58,7 @@ from glossarion_mobile.services.notifications import ACTION_RESUME, ACTION_SHARE
 from glossarion_mobile.services.wakelock import SharedWakelock
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.status import StatusChip
 from glossarion_mobile.ui.router import RouteMatch
@@ -826,11 +826,7 @@ class JobsFeature:
         newest = interrupted[0]
 
         def close() -> None:
-            if self.banner is not None and getattr(self.banner, "open", False):
-                try:
-                    self.page.pop_dialog()
-                except Exception:
-                    pass
+            close_dialog(self.page, self.banner)
 
         def resume(e: Any = None) -> None:
             close()

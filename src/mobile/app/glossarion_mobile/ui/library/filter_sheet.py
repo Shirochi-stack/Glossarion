@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library.models import (
     DENSITY_LABELS,
@@ -239,8 +240,7 @@ class FilterSheet:
         page.show_dialog(self.sheet)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.sheet)
 
     def snapshot(self) -> Mapping[str, Any]:
         return {"fmt": self.state.fmt, "sort": self.state.sort, "reverse": self.state.reverse,

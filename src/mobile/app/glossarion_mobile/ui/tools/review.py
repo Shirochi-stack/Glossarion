@@ -28,6 +28,7 @@ from typing import Any, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.sheet import fits_compact, scroll_column, sheet_frame
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.tools import targets as tg
@@ -394,8 +395,10 @@ class ReviewScreen(Screen):
             field("review_list_gap", "List gap"),
             ft.TextButton(content="↺ Reset", key="review-display-reset", on_click=lambda e: self.reset_display(fields)),
         ]
-        sheet = ft.BottomSheet(content=ft.Container(content=ft.Column(controls, tight=True, spacing=8),
-                                                    padding=ft.Padding.only(left=16, right=16, bottom=24)),
+        # Scrolls: with the keyboard up the lower fields and Reset are past the sheet, and a focused
+        # field is scrolled into view only inside a scroll view.
+        sheet = ft.BottomSheet(content=sheet_frame(scroll_column(controls, spacing=8),
+                                                   padding=ft.Padding.only(left=16, right=16, bottom=24)),
                                show_drag_handle=True, scrollable=True, key="review-display-sheet")
         self.display_sheet = sheet
         self.display_fields = fields
@@ -428,12 +431,17 @@ class ReviewScreen(Screen):
         """Volume mode "↕ File Order…": drag to reorder (the run reviews the files in this order)."""
         rows = [ft.ListTile(title=ft.Text(t.source_name or t.title), leading=ft.Icon(ft.Icons.DRAG_HANDLE),
                             key=f"order-{i}") for i, t in enumerate(self.targets)]
-        listing = ft.ReorderableListView(controls=rows, on_reorder=self._on_reorder, key="review-order-list")
+        # Unless the rows surely fit (estimate at 200 % text), the list takes the rest of the sheet's
+        # height and scrolls itself: shrink-wrapped in a tight Column it never scrolled, so volumes
+        # past the screen could not be seen or reordered.
+        fits = fits_compact(self.ctx.page, 200 + 80 * len(rows))
+        listing = ft.ReorderableListView(controls=rows, on_reorder=self._on_reorder, expand=not fits,
+                                         key="review-order-list")
         self.order_listing = listing
-        sheet = ft.BottomSheet(content=ft.Container(content=ft.Column([
+        sheet = ft.BottomSheet(content=sheet_frame(ft.Column([
             ft.Text("File order", theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
             hint_text("The combined review is saved in every volume under review/combined_review/."),
-            listing], tight=True, spacing=8), padding=ft.Padding.only(left=16, right=16, bottom=24)),
+            listing], tight=fits, spacing=8), padding=ft.Padding.only(left=16, right=16, bottom=24)),
             show_drag_handle=True, scrollable=True, key="review-order-sheet")
         self.order_sheet = sheet
         if self.ctx.page is not None:

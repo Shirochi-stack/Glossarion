@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library.common import LibraryContext
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
@@ -425,11 +426,7 @@ class ChoiceDialog:
 
     def choose(self, value: Optional[str]) -> None:
         self.choice = value
-        if self._page is not None and getattr(self.dialog, "open", False):
-            try:
-                self._page.pop_dialog()
-            except Exception:
-                pass
+        close_dialog(self._page, self.dialog)
         self._resolve(value)
 
     async def wait(self) -> Optional[str]:

@@ -17,7 +17,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools.common import hint_text, section_header
 
@@ -101,8 +101,7 @@ class CustomModeSheet:
         return self
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.sheet, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.sheet)
 
     def _on_slider(self, key: str, e: Any = None) -> None:
         slider = self.sliders[key]
@@ -130,8 +129,8 @@ class CustomModeSheet:
         saved = qm.custom_saved(self.collect())
         self.ctx.set_cfg(CONFIG_PATH, saved)
         self.saved_value = saved
+        self.close()  # first: the snackbar must outlive the sheet (MetadataFieldsSheet.save does the same)
         self.ctx.say("✅ Custom detection settings saved")
-        self.close()
         call_handler(self.on_saved, saved)
         return saved
 

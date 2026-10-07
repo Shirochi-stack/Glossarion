@@ -3,8 +3,9 @@
 ``ConfirmDialog``: title, body (the verbatim desktop text when one exists), an
 optional item list and 2 buttons; the destructive one uses the error colour.
 While an async ``on_confirm`` runs, both buttons are disabled and a
-ProgressRing shows (state ``running``). Dialogs open with ``page.show_dialog``
-and close with ``page.pop_dialog`` (Flet 1.0.3).
+ProgressRing shows (state ``running``); once it succeeds the dialog closes and
+ignores further taps (state ``closed``). Dialogs open with ``page.show_dialog``
+and close with ``close_dialog`` (Flet 1.0.3).
 """
 
 from __future__ import annotations
@@ -16,7 +17,42 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
 
-__all__ = ["ConfirmDialog", "show_snackbar"]
+__all__ = ["ConfirmDialog", "close_dialog", "show_snackbar"]
+
+
+def close_dialog(page: Any, dialog: Any) -> bool:
+    """Close ``dialog`` itself; returns True when it was open.
+
+    ``page.pop_dialog()`` closes the most recently opened dialog that is still open. After a
+    handler has shown a SnackBar (also a dialog control in Flet 1.0.3) that is the SnackBar, not
+    the sheet or confirm dialog that should close: Add key left its sheet open with no feedback
+    and the same key was added again on every tap. Turning ``open`` off closes exactly this
+    dialog's route (Flet 1.0.3 ``bottom_sheet.dart`` closes the route it pushed, as does
+    ``alert_dialog.dart``); the client then sends ``dismiss`` and the page drops it.
+    """
+    if dialog is None or not getattr(dialog, "open", False):
+        return False
+    if hasattr(dialog, "_frozen"):
+        # Flet freezes a dialog in a keyed diff (one shown again under the same key before the
+        # first one's dismiss arrived); its own use_dialog hook strips the marker the same way so
+        # ``open`` can be turned off. page.pop_dialog() raised here and the dialog stayed open.
+        try:
+            del dialog._frozen
+        except AttributeError:
+            pass
+    try:
+        dialog.open = False
+    except RuntimeError:
+        return False
+    try:
+        dialog.update()
+    except Exception:  # not mounted on a page (tests) or the session is gone
+        if page is not None:
+            try:
+                page.update()
+            except Exception:
+                pass
+    return True
 
 
 class ConfirmDialog:
@@ -63,11 +99,13 @@ class ConfirmDialog:
 
     def show(self, page: Any) -> None:
         self._page = page
+        if self.state == "closed":  # shown again
+            self.state = "idle"
+            self._set_running(False)
         page.show_dialog(self.dialog)
 
     def _close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)
 
     def _set_running(self, running: bool) -> None:
         self.state = "running" if running else "idle"
@@ -80,20 +118,25 @@ class ConfirmDialog:
             pass
 
     def _on_cancel(self, e: Any = None) -> None:
-        if self.state == "running":
+        if self.state in ("running", "closed"):
             return
+        self.state = "closed"
         self.result = False
         self._close()
         call_handler(self.on_cancel)
 
     async def _on_confirm(self, e: Any = None) -> None:
-        if self.state == "running":
+        if self.state in ("running", "closed"):  # a second tap never runs the action again
             return
         self._set_running(True)
         try:
             await await_handler(self.on_confirm)
-        finally:
+        except BaseException:
             self._set_running(False)
+            raise
+        # Close this dialog by identity: a snackbar the action showed (often with Undo) stays.
+        self.state = "closed"
+        self.progress.visible = False
         self.result = True
         self._close()
 

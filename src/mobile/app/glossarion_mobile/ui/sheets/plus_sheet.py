@@ -28,7 +28,9 @@ from glossarion_mobile.state.store import Signal
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.mode_options_sheet import MODE_HINTS
 from glossarion_mobile.ui.chat.output_mode_row import OutputModeRow
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.sheet import sheet_frame
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["ATTACH_TILES", "PlusSheet", "THIS_CHAT", "TOOLS"]
@@ -114,8 +116,10 @@ class PlusSheet:
             )
             for item_id, label, icon in THIS_CHAT
         }
+        # The body scrolls: with the mode options inline it is taller than a phone, and "This chat ›
+        # Chat settings…" is the last row (components.sheet).
         self.dialog = ft.BottomSheet(
-            content=ft.Container(
+            content=sheet_frame(
                 padding=ft.Padding.only(bottom=16),
                 content=ft.Column(
                     [
@@ -135,6 +139,7 @@ class PlusSheet:
                     ],
                     spacing=4,
                     tight=True,
+                    scroll=ft.ScrollMode.AUTO,
                 ),
             ),
             show_drag_handle=True,
@@ -203,5 +208,4 @@ class PlusSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)

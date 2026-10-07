@@ -86,13 +86,20 @@ class SettingsContext:
         if page is not None:
             page.show_dialog(dialog)
 
-    def pop_dialog(self) -> None:
+    def pop_dialog(self, dialog: Any = None) -> None:
+        """Close ``dialog`` itself (``close_dialog``); without one, the topmost open dialog."""
         page = self.page
-        if page is not None:
-            try:
-                page.pop_dialog()
-            except Exception:
-                pass
+        if page is None:
+            return
+        if dialog is not None:
+            from glossarion_mobile.ui.components.dialogs import close_dialog
+
+            close_dialog(page, dialog)
+            return
+        try:
+            page.pop_dialog()
+        except Exception:
+            pass
 
     def go(self, route_name: str, params: Optional[dict] = None, *, fragment: Optional[str] = None) -> Optional[str]:
         """Navigate to a whitelisted route (with an optional ``#fragment``); returns the route."""

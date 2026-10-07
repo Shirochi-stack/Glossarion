@@ -218,6 +218,8 @@ class OllamaOptionsForm:
                                        on_select=lambda e: self.load(self.model_field.value or ""))
         self.fields: dict = {}
         self.error = ft.Text("", color=ft.Colors.ERROR, visible=False, selectable=True)
+        # Success feedback (the server rows show "Saved: …" the same way); nothing changed visibly before.
+        self.status = ft.Text("", color=semantic("success"), visible=False)
         groups: list = []
         for group, rows in OPTION_GROUPS:
             controls = []
@@ -238,7 +240,7 @@ class OllamaOptionsForm:
         self.save_button = ft.FilledTonalButton(content="Save options", icon=ft.Icons.SAVE_OUTLINED,
                                                 on_click=lambda e: self.save())
         self.control = ft.Column([self.model_field, *groups, self.extra_options, self.extra_request, self.think,
-                                  self.keep_alive, self.response_format, self.error, self.save_button],
+                                  self.keep_alive, self.response_format, self.error, self.status, self.save_button],
                                  spacing=8, tight=True)
         self.load(self.model_field.value or "")
 
@@ -259,6 +261,7 @@ class OllamaOptionsForm:
         fmt = current.get("format")
         self.response_format.value = json.dumps(fmt) if isinstance(fmt, dict) else str(fmt or "")
         self.error.visible = False
+        self.status.visible = False
         _push(self.control)
 
     def save(self) -> Optional[str]:
@@ -278,13 +281,16 @@ class OllamaOptionsForm:
         settings["models"][model] = result
         self.store.set("ollama_settings", settings)
         self.error.visible = False
-        _push(self.error)
+        self.status.value = f"Saved options for {model}"
+        self.status.visible = True
+        _push(self.error, self.status)
         return None
 
     def _fail(self, message: str) -> str:
         self.error.value = message
         self.error.visible = True
-        _push(self.error)
+        self.status.visible = False
+        _push(self.error, self.status)
         return message
 
 

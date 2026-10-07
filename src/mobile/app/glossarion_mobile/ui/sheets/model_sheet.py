@@ -57,8 +57,10 @@ from glossarion_mobile.services.oauth import sign_in_satisfied, slot_key
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 
 __all__ = [
@@ -290,10 +292,12 @@ class ModelSheet:
             spacing=4,
             wrap=True,
         )
+        # The sheet scrolls as a whole (the list keeps its own height and scrolls inside it): the
+        # route rows, "Thinking & effort" and the footer sit below the list, past a phone's height.
         self.dialog = ft.BottomSheet(
-            content=ft.Container(
+            content=sheet_frame(
                 padding=ft.Padding.only(left=12, right=12, bottom=16),
-                content=ft.Column(
+                content=scroll_column(
                     [
                         ft.Row([self.title_text, self.menu], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         self.tabs,
@@ -306,7 +310,6 @@ class ModelSheet:
                         self.thinking,
                         self.footer,
                     ],
-                    tight=True,
                     spacing=8,
                 ),
             ),
@@ -845,9 +848,12 @@ class ModelSheet:
             self._remember(RECENTS_PREF, value)
         elif field_name == "language":
             self._remember(LANG_RECENTS_PREF, value)
-        if self.on_select is not None:
-            self.on_select(field_name, value, bool(self.chat_switch.value) and not self.one_shot)
+        chat_scope = bool(self.chat_switch.value) and not self.one_shot
+        # Close first: on_select may open the next sheet or a snackbar (a one-shot send opens the
+        # Manual glossary sheet), which a later close must not take down instead of this one.
         self.close()
+        if self.on_select is not None:
+            self.on_select(field_name, value, chat_scope)
 
     def _sign_in(self, model: str) -> None:
         route, account = mc.login_route(model)
@@ -1038,8 +1044,7 @@ class ModelSheet:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)
 
 
 #: U3 name (``ui.sheets.model_sheet_min.ModelSheetMin``); the full sheet now.
@@ -1139,8 +1144,7 @@ class PoeSetupSheet:
                     ft.TextButton(content="Close", on_click=lambda e: self.close())], wrap=True),
         ]
         self.dialog = ft.BottomSheet(
-            content=ft.Container(padding=ft.Padding.only(left=16, right=16, bottom=24),
-                                 content=ft.Column(controls, tight=True, spacing=8)),
+            content=sheet_frame(scroll_column(controls, spacing=8), padding=ft.Padding.only(left=16, right=16, bottom=24)),
             show_drag_handle=True, scrollable=True, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         )
 
@@ -1164,5 +1168,4 @@ class PoeSetupSheet:
         page.show_dialog(self.dialog)
 
     def close(self) -> None:
-        if self._page is not None and getattr(self.dialog, "open", False):
-            self._page.pop_dialog()
+        close_dialog(self._page, self.dialog)
