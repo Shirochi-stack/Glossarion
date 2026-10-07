@@ -1,9 +1,17 @@
 # Glossarion Mobile (Android + iOS): Flet 1.0.3 build, device smoke tests and release.
 #
-#   prepare --+-- android -- android-smoke --+
-#             +-- ios -----------------------+-- release (manual opt-in only, see below)
-#             +-- ios-signed (Apple secrets) +
-#             +-- ios-simulator-smoke (optional, non-blocking)
+#   prepare ---------+-- android -- android-smoke --+
+#   wheels-android --+                              |
+#   wheels-ios ------+-- ios -----------------------+-- release (manual opt-in only, see below)
+#                    +-- ios-signed (Apple secrets) +
+#                    +-- ios-simulator-smoke (optional, non-blocking)
+#
+# wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
+# mobile wheels (cryptography 50.0.2, Pillow 12.3.0; src/mobile/ci/wheels/wheelhouse.toml), which
+# no index has. Android needs prepare + wheels-android, the iOS jobs prepare + wheels-ios. Each
+# build job hands them to flet build through .github/actions/mobile-wheelhouse (strict check +
+# PIP_FIND_LINKS) and checks after every flet build that pip installed them
+# (check_mobile_wheels.py --verify-installed). The smoke jobs assert the versions on the device.
 #
 # Optional secrets:
 #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS (default "upload"),
@@ -23,7 +31,8 @@
 #
 # Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
 # Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
-# mobile-backend-report, mobile-smoke-logs-android, mobile-smoke-logs-ios.
+# mobile-backend-report, mobile-smoke-logs-android, mobile-smoke-logs-ios,
+# mobile-wheelhouse-android, mobile-wheelhouse-ios (+ mobile-wheels-logs-* on failure).
 
 name: Build Mobile (Android + iOS)
 
@@ -149,6 +158,7 @@ jobs:
           ios_simulator_smoke=false
           if [ "${IN_IOS_SIMULATOR_SMOKE:-false}" = true ] && [ "$run_ios" = true ]; then ios_simulator_smoke=true; fi
           {
+            echo "targets=$targets"
             echo "run_android=$run_android"
             echo "run_ios=$run_ios"
             echo "emulator_smoke=$emulator_smoke"
@@ -257,9 +267,16 @@ jobs:
             echo "has_ios_signing=$has_ios"
           } | tee -a "$GITHUB_OUTPUT"
 
-      - name: Check mobile wheels (pypi.flet.dev / PyPI)
+      - name: Check mobile wheels (pypi.flet.dev / PyPI + the planned self-built wheels)
         working-directory: src/mobile
-        run: uv run --no-project python tools/check_mobile_wheels.py --report build/wheels_report.md
+        env:
+          TARGETS: ${{ steps.opts.outputs.targets }}
+        run: |
+          # The security pins have no index wheels for Android/iOS; mobile-wheels.yml builds them.
+          # This plan check fails fast on index or dependency drift before any wheel exists; the
+          # build jobs run the strict check on the built wheels (.github/actions/mobile-wheelhouse).
+          uv run --no-project python tools/check_mobile_wheels.py --wheelhouse-plan --platform "$TARGETS" \
+            --report build/wheels_report.md
 
       - name: Collect backend closure
         working-directory: src/mobile
@@ -350,11 +367,31 @@ jobs:
           retention-days: 1
 
   # ==========================================================================
+  # wheels-android / wheels-ios: the security pins' mobile wheels (mobile-wheels.yml; cached,
+  # always rebuilt for a publish_release run). An iOS wheel failure never blocks Android.
+  # ==========================================================================
+  wheels-android:
+    name: Mobile wheels (Android)
+    if: inputs.targets != 'ios'
+    uses: ./.github/workflows/mobile-wheels.yml
+    with:
+      platform: android
+      fresh: ${{ inputs.publish_release == true }}
+
+  wheels-ios:
+    name: Mobile wheels (iOS)
+    if: inputs.targets != 'android'
+    uses: ./.github/workflows/mobile-wheels.yml
+    with:
+      platform: ios
+      fresh: ${{ inputs.publish_release == true }}
+
+  # ==========================================================================
   # android: APKs split per ABI (+ AAB when the upload keystore exists)
   # ==========================================================================
   android:
     name: Android build
-    needs: prepare
+    needs: [prepare, wheels-android]
     if: needs.prepare.outputs.run_android == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
@@ -387,6 +424,11 @@ jobs:
       - name: Verify the bundle is the host-tested one
         working-directory: src/mobile
         run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Self-built wheels (cryptography, Pillow) for flet build
+        uses: ./.github/actions/mobile-wheelhouse
+        with:
+          platform: android
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6
@@ -441,6 +483,11 @@ jobs:
           extra-args: --split-per-abi
           archive-output: 'false'
 
+      - name: Check the APK build installed the self-built wheels
+        run: >-
+          uv run --no-project python src/mobile/tools/check_mobile_wheels.py
+          --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform android
+
       - name: Collect APKs
         env:
           APK_OUT: ${{ steps.apk.outputs.output-path }}
@@ -472,6 +519,12 @@ jobs:
           build-number: ${{ env.BUILD_NUMBER }}
           build-version: ${{ env.BUILD_VERSION }}
           archive-output: 'false'
+
+      - name: Check the AAB build installed the self-built wheels
+        if: env.HAS_KEYSTORE == 'true'
+        run: >-
+          uv run --no-project python src/mobile/tools/check_mobile_wheels.py
+          --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform android
 
       - name: Collect AAB
         if: env.HAS_KEYSTORE == 'true'
@@ -589,6 +642,15 @@ jobs:
           # The runner executes each script line separately with sh -c, so keep it to one line.
           script: E2E_TIMEOUT=1200 bash src/mobile/ci/android_smoke.sh "$SMOKE_APK" "$GITHUB_WORKSPACE/mobile-smoke-logs"
 
+      - name: Self-built wheels on the emulator (cryptography + OpenSSL, Pillow)
+        run: |
+          # The smoke suite prints its fernet and pillow checks on one logcat line
+          # (GLOSSARION_WHEELS {json}). `flet build apk` makes release-mode APKs, debug-signed or
+          # not, so run-as cannot pull the JSON report: the line is the only way out. The expected
+          # versions come from src/mobile/ci/wheels/wheelhouse.toml and src/mobile/pyproject.toml.
+          python3 src/mobile/ci/wheels/wheels.py assert-selftest --platform android \
+            mobile-smoke-logs/logcat_flet_python.txt mobile-smoke-logs/logcat_full_stream.txt
+
       - name: Upload smoke logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -603,7 +665,7 @@ jobs:
   # ==========================================================================
   ios:
     name: iOS build (unsigned IPA)
-    needs: prepare
+    needs: [prepare, wheels-ios]
     if: needs.prepare.outputs.run_ios == 'true'
     runs-on: macos-26
     timeout-minutes: 90
@@ -631,6 +693,11 @@ jobs:
         working-directory: src/mobile
         run: uv run --no-project python tools/collect_backend.py --verify
 
+      - name: Self-built wheels (cryptography, Pillow) for flet build
+        uses: ./.github/actions/mobile-wheelhouse
+        with:
+          platform: ios
+
       - name: Install Rosetta
         run: softwareupdate --install-rosetta --agree-to-license || true
 
@@ -651,6 +718,11 @@ jobs:
           build-number: ${{ env.BUILD_NUMBER }}
           build-version: ${{ env.BUILD_VERSION }}
           archive-output: 'false'
+
+      - name: Check the unsigned iOS build installed the self-built wheels
+        run: >-
+          uv run --no-project python src/mobile/tools/check_mobile_wheels.py
+          --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform ios
 
       - name: Package unsigned IPA
         env:
@@ -678,7 +750,7 @@ jobs:
   # ==========================================================================
   ios-signed:
     name: iOS build (signed IPA)
-    needs: prepare
+    needs: [prepare, wheels-ios]
     if: needs.prepare.outputs.run_ios == 'true' && needs.prepare.outputs.has_ios_signing == 'true'
     runs-on: macos-26
     timeout-minutes: 90
@@ -705,6 +777,11 @@ jobs:
       - name: Verify the bundle is the host-tested one
         working-directory: src/mobile
         run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Self-built wheels (cryptography, Pillow) for flet build
+        uses: ./.github/actions/mobile-wheelhouse
+        with:
+          platform: ios
 
       - name: Install Rosetta
         run: softwareupdate --install-rosetta --agree-to-license || true
@@ -798,6 +875,11 @@ jobs:
             --ios-export-method ${{ steps.signing.outputs.export_method }}
           archive-output: 'false'
 
+      - name: Check the signed iOS build installed the self-built wheels
+        run: >-
+          uv run --no-project python src/mobile/tools/check_mobile_wheels.py
+          --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform ios
+
       - name: Collect signed IPA
         env:
           IOS_OUT: ${{ steps.build.outputs.output-path }}
@@ -841,7 +923,7 @@ jobs:
   # ==========================================================================
   ios-simulator-smoke:
     name: iOS simulator smoke (optional)
-    needs: prepare
+    needs: [prepare, wheels-ios]
     if: needs.prepare.outputs.ios_simulator_smoke == 'true'
     continue-on-error: true
     runs-on: macos-26
@@ -873,6 +955,11 @@ jobs:
         working-directory: src/mobile
         run: uv run --no-project python tools/collect_backend.py --verify
 
+      - name: Self-built wheels (cryptography, Pillow) for flet build
+        uses: ./.github/actions/mobile-wheelhouse
+        with:
+          platform: ios
+
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -889,6 +976,11 @@ jobs:
           build-number: ${{ env.BUILD_NUMBER }}
           build-version: ${{ env.BUILD_VERSION }}
           archive-output: 'false'
+
+      - name: Check the simulator build installed the self-built wheels
+        run: >-
+          uv run --no-project python src/mobile/tools/check_mobile_wheels.py
+          --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform ios
 
       - name: Package simulator app
         env:
@@ -993,11 +1085,19 @@ jobs:
             container="$(xcrun simctl get_app_container "$SIM_UDID" "$APP_PACKAGE" data 2>/dev/null || true)"
             if [ -n "$container" ]; then
               cp "$container/Library/Caches/console.log" "$logs/console.log" 2>/dev/null || true
+              cp "$container/Library/Application Support/data/logs/selftest-smoke.json" "$logs/" 2>/dev/null || true
               cp -R "$container/Library/Application Support/data/logs" "$logs/app_logs" 2>/dev/null || true
             fi
             xcrun simctl io "$SIM_UDID" screenshot "$logs/screen.png" 2>/dev/null || true
           fi
           grep -a -h -o -E 'GLOSSARION_[A-Z_]+( (PASS|FAIL))?' "$logs"/*.txt "$logs"/console.log 2>/dev/null | sort | uniq -c > "$logs/markers.txt" || true
+
+      - name: Self-built wheels on the simulator (cryptography + OpenSSL, Pillow)
+        run: |
+          # The smoke report from the app container (selftest-smoke.json; e2e overwrites
+          # selftest-last.json), else the GLOSSARION_WHEELS line the smoke suite printed.
+          uv run --no-project python src/mobile/ci/wheels/wheels.py assert-selftest --platform ios \
+            mobile-smoke-logs/selftest-smoke.json mobile-smoke-logs/console_pty.txt mobile-smoke-logs/oslog_stream.txt
 
       - name: Upload simulator smoke logs
         if: always()

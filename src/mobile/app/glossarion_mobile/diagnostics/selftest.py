@@ -14,10 +14,16 @@ host by ``python -m glossarion_mobile.diagnostics.e2e``.
 
 ``run_selftest()`` is blocking (call it from a worker thread, never from the
 Flet loop), returns a JSON-serialisable dict, writes ``<logs>/selftest-last.json``
-and prints exactly one marker line::
+(and ``<logs>/selftest-<suite>.json``) and prints exactly one marker line::
 
     GLOSSARION_SELFTEST PASS {"suite":"smoke","passed":11,...}
     GLOSSARION_SELFTEST FAIL {"suite":"smoke","failed":1,"failed_checks":[...]}
+
+A suite that runs the ``fernet`` or ``pillow`` check (smoke) first prints their
+results on one more line, ``GLOSSARION_WHEELS {"suite":"smoke",...,"checks":[...]}``:
+CI asserts the self-built cryptography (and its OpenSSL) and Pillow wheels from it with
+``ci/wheels/wheels.py assert-selftest`` (on Android from logcat, since release-mode APKs
+do not allow ``run-as``; on the iOS simulator from ``selftest-smoke.json``).
 
 In strict mode (default on Android/iOS) a missing package is a failure; on the
 host (non-strict) checks whose packages are missing are reported as skipped.
@@ -263,6 +269,21 @@ def check_epub_lxml(ctx: Context) -> dict[str, Any]:
     return {"epub": asset.name, "source": source, "documents": len(documents), "paragraphs": paragraphs}
 
 
+def _openssl_version_text() -> Optional[str]:
+    """The OpenSSL cryptography is linked with (the self-built mobile wheels: static 3.5.9)."""
+    try:
+        from cryptography.hazmat.backends.openssl.backend import backend
+
+        return str(backend.openssl_version_text())
+    except Exception:  # an API move must not fail the Fernet round trip
+        try:
+            from cryptography.hazmat.bindings._rust import openssl as rust_openssl
+
+            return str(rust_openssl.openssl_version_text())
+        except Exception:
+            return None
+
+
 def check_fernet(ctx: Context) -> dict[str, Any]:
     fernet_mod = ctx.need("cryptography.fernet")
     key = fernet_mod.Fernet.generate_key()
@@ -272,7 +293,54 @@ def check_fernet(ctx: Context) -> dict[str, Any]:
     if cipher.decrypt(token) != secret:
         raise AssertionError("Fernet round-trip mismatch")
     cryptography = importlib.import_module("cryptography")
-    return {"version": getattr(cryptography, "__version__", None), "token_len": len(token)}
+    return {
+        "version": getattr(cryptography, "__version__", None),
+        "token_len": len(token),
+        "openssl": _openssl_version_text(),
+    }
+
+
+_PILLOW_FEATURES = (("jpg", "codec"), ("zlib", "codec"), ("webp", "module"), ("freetype2", "module"))
+
+
+def check_pillow(ctx: Context) -> dict[str, Any]:
+    """Pillow's codecs and FreeType (Android: the self-built 12.3.0 wheel on flet-lib*;
+    iOS: PyPI's wheel): JPEG / PNG / WebP round trips through safe_image.open_image and
+    text drawn with the scalable default font."""
+    import io
+
+    pil = ctx.need("PIL")
+    image_mod = ctx.need("PIL.Image")
+    features = ctx.need("PIL.features")
+    font_mod = ctx.need("PIL.ImageFont")
+    draw_mod = ctx.need("PIL.ImageDraw")
+    safe_image = ctx.need("safe_image")
+    found = {
+        name: bool(features.check_codec(name) if kind == "codec" else features.check_module(name))
+        for name, kind in _PILLOW_FEATURES
+    }
+    missing = [name for name, ok in found.items() if not ok]
+    if missing:
+        raise AssertionError(f"Pillow {pil.__version__} lacks {missing}")
+    roundtrip: dict[str, Any] = {}
+    sample = image_mod.new("RGB", (16, 12), (225, 143, 152))
+    for fmt in ("JPEG", "PNG", "WEBP"):
+        buffer = io.BytesIO()
+        sample.save(buffer, format=fmt)
+        buffer.seek(0)
+        with safe_image.open_image(buffer) as image:
+            image.load()
+            if image.format != fmt or image.size != sample.size:
+                raise AssertionError(f"{fmt} round trip gave {image.format} {image.size}")
+            roundtrip[fmt] = list(image.size)
+    font = font_mod.load_default(size=24)
+    if not isinstance(font, font_mod.FreeTypeFont):
+        raise AssertionError(f"ImageFont.load_default(size=24) returned {type(font).__name__}, not FreeTypeFont")
+    canvas = image_mod.new("L", (64, 32), 0)
+    draw_mod.Draw(canvas).text((2, 2), "Gl", font=font, fill=255)
+    if canvas.getbbox() is None:
+        raise AssertionError("FreeType drew nothing")
+    return {"version": pil.__version__, "features": found, "roundtrip": roundtrip, "font": type(font).__name__}
 
 
 _KEY_FILE_NAMES = (".glossarion_key", "glossarion_key.txt")  # api_key_encryption's desktop key files
@@ -543,6 +611,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("tiktoken_offline", check_tiktoken_offline),
         ("epub_lxml", check_epub_lxml),
         ("fernet", check_fernet),
+        ("pillow", check_pillow),
         ("encryption_keys", check_encryption_keys),
         ("openai_pydantic_jiter", check_openai_pydantic),
         ("pymupdf", check_pymupdf),
@@ -589,6 +658,44 @@ def summary_line(result: dict[str, Any]) -> str:
         summary["truncated"] = True
         line = json.dumps(summary, separators=(",", ":"), ensure_ascii=True)
     return f"{rb.MARKER_SELFTEST} {status} {line}"
+
+
+MARKER_WHEELS = "GLOSSARION_WHEELS"
+# What ci/wheels/wheels.py assert-selftest reads from each check's detail.
+_WHEELS_DETAIL = {"fernet": ("version", "openssl"), "pillow": ("version", "features", "roundtrip", "font")}
+
+
+def wheels_marker_payload(result: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The ``fernet`` and ``pillow`` checks of ``result`` for the GLOSSARION_WHEELS line.
+
+    CI checks the self-built mobile wheels on the device from it. On Android the logcat line is
+    the only way out: ``flet build apk`` makes release-mode APKs, whose files ``run-as`` cannot
+    read. Bounded well under ``rb.MARKER_MAX_CHARS``. None when neither check ran.
+    """
+    checks: list[dict[str, Any]] = []
+    for check in result.get("checks", []):
+        keys = _WHEELS_DETAIL.get(check.get("name"))
+        if keys is None:
+            continue
+        entry: dict[str, Any] = {"name": check["name"], "status": check.get("status")}
+        if check.get("status") == "pass":
+            detail = check.get("detail") or {}
+            entry["detail"] = {
+                key: _short(detail[key], 80) if isinstance(detail.get(key), str) else detail.get(key)
+                for key in keys
+                if key in detail
+            }
+        else:
+            entry["error"] = _short(check.get("error") or check.get("reason") or "", 160)
+        checks.append(entry)
+    if not checks:
+        return None
+    return {
+        "suite": result.get("suite"),
+        "platform": result.get("platform"),
+        "strict": result.get("strict"),
+        "checks": checks,
+    }
 
 
 def run_selftest(
@@ -660,12 +767,18 @@ def run_selftest(
             result["error"] = error
         if write_report and state is not None:
             try:
+                text = json.dumps(result, indent=1, ensure_ascii=False, default=str)
                 report = state.paths.logs / "selftest-last.json"
-                report.write_text(json.dumps(result, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
+                report.write_text(text, encoding="utf-8")
+                if suite in SUITES:  # per suite too: the smoke jobs run smoke, then e2e
+                    (state.paths.logs / f"selftest-{suite}.json").write_text(text, encoding="utf-8")
                 result["report"] = str(report)
             except OSError:
                 pass
         if emit:
+            wheels = wheels_marker_payload(result)
+            if wheels is not None:  # before the PASS/FAIL line the smoke scripts wait for
+                rb.emit_marker(MARKER_WHEELS, wheels)
             line = summary_line(result)
             rb.emit_marker(line.split(" ", 1)[0], line.split(" ", 1)[1])
         return result

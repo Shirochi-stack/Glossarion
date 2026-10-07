@@ -474,6 +474,14 @@ def test_selftest_smoke_on_host(storage, capsys):
     if glossary_qa["status"] == "pass":  # skipped on a host without the backend packages
         assert glossary_qa["detail"]["glossary"]["format"] == "token_csv"
         assert glossary_qa["detail"]["qa_scan"]["files"] == 3
+    fernet = by_name["fernet"]
+    if fernet["status"] == "pass":
+        assert fernet["detail"]["openssl"].startswith("OpenSSL ")
+    pillow = by_name["pillow"]
+    if pillow["status"] == "pass":  # skipped on a host without Pillow or the backend's safe_image
+        assert pillow["detail"]["features"] == {"jpg": True, "zlib": True, "webp": True, "freetype2": True}
+        assert set(pillow["detail"]["roundtrip"]) == {"JPEG", "PNG", "WEBP"}
+        assert pillow["detail"]["font"] == "FreeTypeFont"
     assert result["ok"] is True
 
     err = capsys.readouterr().err
@@ -483,6 +491,32 @@ def test_selftest_smoke_on_host(storage, capsys):
     assert summary["passed"] == result["passed"] and summary["failed"] == 0
     report = json.loads((paths.logs / "selftest-last.json").read_text(encoding="utf-8"))
     assert report["suite"] == "smoke"
+    smoke = json.loads((paths.logs / "selftest-smoke.json").read_text(encoding="utf-8"))
+    assert smoke["suite"] == "smoke" and smoke["checks"] == report["checks"]
+
+    # The GLOSSARION_WHEELS line CI reads from logcat parses with ci/wheels/wheels.py and comes
+    # before the PASS line the smoke scripts stop at.
+    lines = err.splitlines()
+    wheels = [ln for ln in lines if ln.startswith("GLOSSARION_WHEELS ")]
+    assert len(wheels) == 1 and len(wheels[0]) <= rb.MARKER_MAX_CHARS
+    assert lines.index(wheels[0]) < lines.index(marker[0])
+    logcat = paths.logs / "logcat_flet_python.txt"
+    logcat.write_text(f"10-08 12:00:00.000  4321  4388 I flet.python: {wheels[0]}\n", encoding="utf-8")
+    evidence, source = _ci_wheels().load_selftest_evidence([logcat])
+    assert evidence is not None, source
+    assert evidence["suite"] == "smoke" and evidence["strict"] is False
+    statuses = {c["name"]: c["status"] for c in evidence["checks"]}
+    assert statuses == {name: by_name[name]["status"] for name in ("fernet", "pillow")}
+    if by_name["fernet"]["status"] == "pass":
+        assert evidence["checks"][0]["detail"]["openssl"] == by_name["fernet"]["detail"]["openssl"]
+
+
+def _ci_wheels():
+    """ci/wheels/wheels.py (the CI helper that asserts the self-test on the device)."""
+    spec = importlib.util.spec_from_file_location("mobile_ci_wheels", MOBILE_DIR / "ci" / "wheels" / "wheels.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_selftest_unknown_suite_fails(storage, capsys):
@@ -513,6 +547,31 @@ def test_selftest_marker_is_short():
     assert line.startswith("GLOSSARION_SELFTEST FAIL {")
     assert len(line) <= rb.MARKER_MAX_CHARS + 40
     json.loads(line.split(" ", 2)[2])
+
+
+def test_selftest_wheels_marker_is_short_and_only_for_fernet_and_pillow():
+    from glossarion_mobile.diagnostics import selftest
+
+    result = {
+        "suite": "smoke",
+        "platform": "android",
+        "strict": True,
+        "checks": [
+            {"name": "fernet", "status": "fail", "error": "E" * 5000, "traceback": "T" * 5000},
+            {
+                "name": "pillow",
+                "status": "pass",
+                "detail": {"version": "V" * 500, "features": {"jpg": True}, "font": "F" * 500, "extra": "X" * 5000},
+            },
+            {"name": "cv2", "status": "pass", "detail": {"version": "4"}},
+        ],
+    }
+    payload = selftest.wheels_marker_payload(result)
+    assert len(json.dumps(payload, separators=(",", ":"), ensure_ascii=True)) <= rb.MARKER_MAX_CHARS
+    assert [c["name"] for c in payload["checks"]] == ["fernet", "pillow"]
+    assert set(payload["checks"][1]["detail"]) == {"version", "features", "font"}
+    assert payload["checks"][0]["status"] == "fail" and len(payload["checks"][0]["error"]) <= 160
+    assert selftest.wheels_marker_payload({"suite": "e2e", "checks": [{"name": "chat", "status": "pass"}]}) is None
 
 
 # --------------------------------------------------------------------------
