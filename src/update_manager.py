@@ -504,6 +504,27 @@ class QtDownloadJob(QObject):
 class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
     
+    MIN_UPDATE_SIZE = 60_000_000  # 60 MB (decimal bytes)
+
+    @classmethod
+    def _eligible_update_asset(cls, asset):
+        try:
+            return ("glossarion" in os.path.basename(asset.get("name", "")).casefold()
+                    and int(asset.get("size", 0)) >= cls.MIN_UPDATE_SIZE)
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _validate_update_file(cls, file_path):
+        if "glossarion" not in os.path.basename(file_path).casefold():
+            raise ValueError("Update filename must contain Glossarion.")
+        if not os.path.isfile(file_path):
+            raise ValueError("Update file was not saved.")
+        size = os.path.getsize(file_path)
+        if size < cls.MIN_UPDATE_SIZE:
+            raise ValueError("Update file must be at least 60 MB (60,000,000 bytes).")
+        return size
+
     GITHUB_API_URL = "https://api.github.com/repos/Shirochi-stack/Glossarion/releases"
     GITHUB_LATEST_URL = "https://api.github.com/repos/Shirochi-stack/Glossarion/releases/latest"
     
@@ -1314,7 +1335,8 @@ class UpdateManager(QObject):
         if release_to_check:
             # Get downloadable files from the first/latest release (.exe for Windows, .dmg for macOS)
             all_installable = [a for a in release_to_check.get('assets', []) 
-                               if a['name'].lower().endswith(('.exe', '.dmg', '.appimage', '.deb', '.tar.gz'))]
+                               if a['name'].lower().endswith(('.exe', '.dmg', '.appimage', '.deb', '.tar.gz'))
+                               and self._eligible_update_asset(a)]
 
             # Partition into same-platform and cross-platform assets
             current_platform = self._detect_platform()
@@ -1899,6 +1921,10 @@ class UpdateManager(QObject):
             self._show_download_error(dialog, "No file selected for download.")
             return
 
+        if not self._eligible_update_asset(asset):
+            self._show_download_error(dialog, "Update must contain Glossarion in its filename and be at least 60 MB.")
+            return
+
         # Get the current executable path and target directory
         if getattr(sys, 'frozen', False):
             current_exe = sys.executable
@@ -2192,25 +2218,8 @@ class UpdateManager(QObject):
         
         # Validate downloaded file before offering install
         try:
-            if not os.path.exists(file_path):
-                self._show_download_error(dialog, "Download failed: file was not saved.")
-                return
-            
-            file_size = os.path.getsize(file_path)
-            # A valid Glossarion exe should be at least 1 MB
-            if file_size < 1_000_000:
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-                self._show_download_error(
-                    dialog,
-                    f"Download appears corrupted (only {file_size / 1024:.0f} KB).\n\n"
-                    "This usually means the connection was interrupted.\n"
-                    "Please try downloading again."
-                )
-                return
-            
+            file_size = self._validate_update_file(file_path)
+
             # Check expected size if we tracked it
             expected_size = getattr(self, '_expected_download_size', 0)
             if expected_size > 0 and file_size < expected_size * 0.95:
@@ -2226,7 +2235,8 @@ class UpdateManager(QObject):
                 )
                 return
         except Exception as e:
-            print(f"[DEBUG] File validation error: {e}")
+            self._show_download_error(dialog, f"Update rejected: {e}")
+            return
         
         dialog.close()
         
@@ -2238,6 +2248,7 @@ class UpdateManager(QObject):
     def install_update(self, update_file):
         """Launch the update installer and exit current app"""
         try:
+            self._validate_update_file(update_file)
             # Save current state/config if needed
             self.main_gui.save_config(show_message=False)
             

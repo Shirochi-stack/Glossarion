@@ -147,7 +147,7 @@ def test_update_manager_uses_two_columns_and_keeps_asset_selection(app, tmp_path
     names = ['Glossarion.exe', 'L_Glossarion_Lite.exe', 'L_Glossarion_TurboLite.exe',
              'N_Glossarion_NoCuda.exe', 'L_Glossarion_MAC.dmg', 'L_Glossarion_MAC_Intel.dmg']
     release = {'tag_name': 'v9.10.8', 'body': '## Patch notes\n\n- A fix',
-               'assets': [{'name': name, 'size': 1000000, 'browser_download_url': 'https://example.com/file'} for name in names]}
+               'assets': [{'name': name, 'size': 60000000, 'browser_download_url': 'https://example.com/file'} for name in names]}
     manager.latest_release = release
     manager.all_releases = [release]
     manager.show_update_dialog()
