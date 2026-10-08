@@ -1371,8 +1371,14 @@ def _main(argv=None):
     if args.capture_golden:
         return capture_golden()
     if args.headless:
-        return _headless_child(args.fixtures, args.sandbox, args.out)
-    return _probe_child(args.tg_dir or None, args.fixtures, args.sandbox, args.out)
+        rc = _headless_child(args.fixtures, args.sandbox, args.out)
+    else:
+        rc = _probe_child(args.tg_dir or None, args.fixtures, args.sandbox, args.out)
+    print(f"[probe] results written: {args.out}", file=sys.stderr, flush=True)
+    # The observations are on disk; skip interpreter and Qt teardown, which this test does not
+    # measure and which segfaulted on Linux CI after every scenario had finished (7ad722e4).
+    sys.stdout.flush()
+    os._exit(rc or 0)
 
 
 # ---------------------------------------------------------------------------
