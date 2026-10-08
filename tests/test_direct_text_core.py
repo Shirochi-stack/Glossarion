@@ -606,6 +606,7 @@ def _probe_child(tg_dir, fixtures, sandbox, out_path):
         return dialog.output_box.toHtml()
 
     def run(label, fn):
+        print(f"[probe] {label}", file=sys.stderr, flush=True)  # last line before a native crash
         try:
             obs[label] = norm(fn())
         except Exception as exc:  # recorded, compared like any observation
@@ -1001,6 +1002,7 @@ def _headless_child(fixtures, sandbox, out_path):
     env_keys = _env_keys()
 
     def run(label, fn):
+        print(f"[probe] {label}", file=sys.stderr, flush=True)  # last line before a native crash
         try:
             obs[label] = norm(fn())
         except Exception as exc:
@@ -1362,6 +1364,10 @@ def _main(argv=None):
     parser.add_argument("--out")
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args(argv)
+    if args.probe or args.headless:
+        import faulthandler
+
+        faulthandler.enable()  # a native crash in a probe child prints its Python stack to stderr
     if args.capture_golden:
         return capture_golden()
     if args.headless:
