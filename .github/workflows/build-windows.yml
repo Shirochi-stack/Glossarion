@@ -1,7 +1,13 @@
 name: Build Windows
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:
+    inputs:
+      test_signing:
+        description: 'Submit Windows builds to SignPath using the test certificate'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   # ============================================================================
@@ -9,6 +15,9 @@ jobs:
   # ============================================================================
   build-windows-lite:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
     
     steps:
       - name: Checkout code
@@ -95,10 +104,32 @@ jobs:
           pyinstaller translator_lite.spec
       
       - name: Upload Windows Lite artifact
+        id: unsigned-windows
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-Lite-Windows
           path: src/dist/*.exe
+          if-no-files-found: error
+
+      - name: Test sign Windows Lite with SignPath
+        if: ${{ inputs.test_signing }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: '6a2f04e5-f9ae-44a0-9f80-f1191d07e51d'
+          project-slug: 'Glossarion'
+          signing-policy-slug: 'test-signing'
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: 'signed-windows'
+
+      - name: Upload test-signed Windows Lite artifact
+        if: ${{ inputs.test_signing }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-Windows-TEST-SIGNED
+          path: signed-windows/*.exe
           if-no-files-found: error
 
   # ============================================================================
@@ -106,6 +137,9 @@ jobs:
   # ============================================================================
   build-windows-nocuda:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
     
     steps:
       - name: Checkout code
@@ -192,10 +226,32 @@ jobs:
           pyinstaller translator_NoCuda.spec
       
       - name: Upload Windows NoCuda artifact
+        id: unsigned-windows
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-NoCuda-Windows
           path: src/dist/*.exe
+          if-no-files-found: error
+
+      - name: Test sign Windows NoCuda with SignPath
+        if: ${{ inputs.test_signing }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: '6a2f04e5-f9ae-44a0-9f80-f1191d07e51d'
+          project-slug: 'Glossarion'
+          signing-policy-slug: 'test-signing'
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: 'signed-windows'
+
+      - name: Upload test-signed Windows NoCuda artifact
+        if: ${{ inputs.test_signing }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-Windows-TEST-SIGNED
+          path: signed-windows/*.exe
           if-no-files-found: error
 
   # ============================================================================
@@ -203,6 +259,9 @@ jobs:
   # ============================================================================
   build-windows-turbolite:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
     
     steps:
       - name: Checkout code
@@ -289,10 +348,32 @@ jobs:
           pyinstaller translator_TurboLite.spec
       
       - name: Upload Windows TurboLite artifact
+        id: unsigned-windows
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-TurboLite-Windows
           path: src/dist/*.exe
+          if-no-files-found: error
+
+      - name: Test sign Windows TurboLite with SignPath
+        if: ${{ inputs.test_signing }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: '6a2f04e5-f9ae-44a0-9f80-f1191d07e51d'
+          project-slug: 'Glossarion'
+          signing-policy-slug: 'test-signing'
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: 'signed-windows'
+
+      - name: Upload test-signed Windows TurboLite artifact
+        if: ${{ inputs.test_signing }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-TurboLite-Windows-TEST-SIGNED
+          path: signed-windows/*.exe
           if-no-files-found: error
 
   # ============================================================================
@@ -300,6 +381,9 @@ jobs:
   # ============================================================================
   build-windows-main:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
     
     steps:
       - name: Checkout code
@@ -386,10 +470,32 @@ jobs:
           pyinstaller translator.spec
       
       - name: Upload Windows Main artifact
+        id: unsigned-windows
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-Main-Windows
           path: src/dist/*.exe
+          if-no-files-found: error
+
+      - name: Test sign Windows Main with SignPath
+        if: ${{ inputs.test_signing }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: '6a2f04e5-f9ae-44a0-9f80-f1191d07e51d'
+          project-slug: 'Glossarion'
+          signing-policy-slug: 'test-signing'
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: 'signed-windows'
+
+      - name: Upload test-signed Windows Main artifact
+        if: ${{ inputs.test_signing }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Main-Windows-TEST-SIGNED
+          path: signed-windows/*.exe
           if-no-files-found: error
 
   # ============================================================================
@@ -397,6 +503,9 @@ jobs:
   # ============================================================================
   build-windows-heavy:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
 
     steps:
       - name: Checkout code
@@ -483,10 +592,32 @@ jobs:
           pyinstaller translator_Heavy.spec
 
       - name: Upload Windows Heavy artifact
+        id: unsigned-windows
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-Heavy-Windows
           path: src/dist/*.exe
+          if-no-files-found: error
+
+      - name: Test sign Windows Heavy with SignPath
+        if: ${{ inputs.test_signing }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: '6a2f04e5-f9ae-44a0-9f80-f1191d07e51d'
+          project-slug: 'Glossarion'
+          signing-policy-slug: 'test-signing'
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: 'signed-windows'
+
+      - name: Upload test-signed Windows Heavy artifact
+        if: ${{ inputs.test_signing }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Heavy-Windows-TEST-SIGNED
+          path: signed-windows/*.exe
           if-no-files-found: error
 
   # ============================================================================
