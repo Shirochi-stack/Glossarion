@@ -7,9 +7,12 @@ glossary in a full-screen raw editor (atomic save that keeps the UTF-8 BOM, like
 
 ``JobCard`` is the assistant-position card of an attachment turn:
 Plan -> Queued -> Running -> Result. Running shows the ProgressWatcher progress
-("Chapter 12/48 · 3 in flight · ETA …"), the current request and the live request
-cards (``Requests (N)``); Result groups the persisted request cards, the desktop
-"Extraction report", the output chips of the turn's own workspace (compiled EPUB / PDF,
+("Chapter 12/48 · 3 in flight · ETA …"), the current request and the turn's request
+cards (``Requests (N)``, open while it runs: the cards the run already committed - the
+glossary gate's - then its live ones); every list shows its newest rows (the chat's
+rendered-card limit) and "↑ Show … earlier requests" pages back. Result groups the
+persisted request cards, the desktop "Extraction report", the output chips of the turn's
+own workspace (compiled EPUB / PDF,
 ``*_translated.txt``, subtitles, SDLXLIFF, glossary; ``set_outputs``) and the "Attachment
 actions" (Read · Share/Export · Compile ▾ EPUB / PDF · QA scan · Open output · Retry failed ·
 Open in Library: a finished book's workspace moves into the Library by itself, so the card links
@@ -41,6 +44,7 @@ from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 __all__ = [
     "ATTACHMENT_ACTIONS",
     "ATTACHMENT_ACTION_REASONS",
+    "EARLIER_REQUESTS_TEMPLATE",
     "GLOSSARY_QUESTION_KINDS",
     "LIBRARY_WAIT_REASON",
     "GlossaryApprovalCard",
@@ -425,6 +429,19 @@ class RequestSheet:
 # ---------------------------------------------------------------------------
 
 
+#: the JobCard's page of older request rows (the chat's rendered-card limit; UI_SPEC §2.12.3)
+EARLIER_REQUESTS_TEMPLATE = "↑ Show {n} earlier requests ({hidden} hidden)"
+
+
+def _row_signature(segment: dict) -> tuple:
+    """What a request row shows (an unchanged segment keeps its row control across live repaints)."""
+    content = str(segment.get("content", "") or "")
+    return (str(segment.get("label") or ""), str(segment.get("phase") or ""), bool(segment.get("complete")),
+            len(content), content[:400], len(str(segment.get("thinking", "") or "")),
+            int(segment.get("thinking_tokens") or 0), int(segment.get("text_tokens") or 0),
+            segment.get("index"), str(segment.get("status_label") or ""))
+
+
 def _request_row(segment: dict, on_open: Optional[Callable[[dict], Any]]) -> ft.Control:
     phase = str(segment.get("phase") or "processing")
     phase_label = {"thinking": "Thinking", "text": "Generating"}.get(phase, "Processing")
@@ -473,9 +490,19 @@ class JobCard(ft.Container):
         dark: bool = False,
         icon: Optional[str] = None,
         meta: Optional[str] = None,
+        row_page: int = 20,
+        requests_expanded: bool = False,
     ) -> None:
         super().__init__(key=key)
         self.attachment = dict(attachment or {})
+        # Requests: the newest ``row_page`` rows of the turn first, a page more per "Show earlier"
+        self.row_page = max(1, int(row_page or 20))
+        self.shown_rows = self.row_page
+        self.request_segments: list = []  # every request of the turn (``set_requests``)
+        # The running card: the turn's committed request cards (the glossary gate's, an earlier run's)
+        # listed before the run's live ones (``ChatView._update_live_job_card``)
+        self.saved_requests: list = []
+        self._row_cache: dict = {}
         self.phase = phase
         self.on_action = on_action
         self.on_open_request = on_open_request
@@ -502,8 +529,13 @@ class JobCard(ft.Container):
                                    visible=False, key="job-qa-failed",
                                    on_click=lambda e: self.on_action("progress") if self.on_action else None)
         self.requests_column = ft.Column([], spacing=2, tight=True)
-        self.requests_tile = ft.ExpansionTile(title="Requests (0)", controls=[self.requests_column], visible=False,
-                                              maintain_state=True, dense=True)
+        self.earlier_requests_button = ft.TextButton(content="", visible=False,
+                                                     on_click=lambda e: self.show_earlier_requests())
+        # the running card opens its list (like Jobs › job while the job is active), a Result's stays shut
+        self.requests_tile = ft.ExpansionTile(title="Requests (0)",
+                                              controls=[self.earlier_requests_button, self.requests_column],
+                                              visible=False, maintain_state=True, dense=True,
+                                              expanded=bool(requests_expanded), on_change=self._on_requests_toggle)
         self.report_md = ft.Markdown("", selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)
         self.report_tile = ft.ExpansionTile(title="Extraction report", controls=[ft.Container(content=self.report_md, padding=8)],
                                             visible=False, dense=True)
@@ -639,10 +671,55 @@ class JobCard(ft.Container):
         self.current_text.visible = bool(current)
 
     def set_requests(self, segments: Sequence[dict]) -> None:
-        rows = [_request_row(s, self.on_open_request) for s in segments]
+        """Every request of the turn; the newest ``shown_rows`` are rows ("Requests (N)" counts them all,
+        "↑ Show … earlier requests" pages back). A row whose segment did not change stays the same
+        control, so a live repaint re-sends only the requests that moved."""
+        self.request_segments = list(segments)
+        total = len(self.request_segments)
+        shown = self.request_segments[-self.shown_rows:] if total > self.shown_rows else self.request_segments
+        cache: dict = {}
+        rows: list = []
+        for segment in shown:
+            signature = _row_signature(segment)
+            row = self._row_cache.get(signature) if signature not in cache else None
+            if row is None:
+                row = _request_row(segment, self.on_open_request)
+            cache.setdefault(signature, row)
+            rows.append(row)
+        self._row_cache = cache
         self.requests_column.controls = rows
-        self.requests_tile.title = f"Requests ({len(rows)})"
-        self.requests_tile.visible = bool(rows)
+        hidden = total - len(shown)
+        self.earlier_requests_button.content = EARLIER_REQUESTS_TEMPLATE.format(n=min(hidden, self.row_page),
+                                                                                hidden=hidden)
+        self.earlier_requests_button.visible = hidden > 0
+        self.requests_tile.title = f"Requests ({total})"
+        self.requests_tile.visible = bool(total)
+
+    def show_earlier_requests(self) -> None:
+        """"↑ Show … earlier requests": one page more of the older rows."""
+        self.shown_rows += self.row_page
+        self.set_requests(self.request_segments)
+        self.push()
+
+    def reveal_request(self, index: int) -> bool:
+        """Jump-to / search: open the Requests list with the row of message ``index`` shown (paging back
+        to it); False when the card has no such row."""
+        for position, segment in enumerate(self.request_segments):
+            if segment.get("index") == index:
+                needed = len(self.request_segments) - position
+                if needed > self.shown_rows:
+                    self.shown_rows = -(-needed // self.row_page) * self.row_page
+                    self.set_requests(self.request_segments)
+                self.requests_tile.expanded = True
+                return True
+        return False
+
+    def _on_requests_toggle(self, e: Any) -> None:
+        value = getattr(e, "data", None)
+        if isinstance(value, str):
+            value = value.strip().lower() == "true"
+        if isinstance(value, bool):
+            self.requests_tile.expanded = value  # the next reveal / repaint starts from what the user sees
 
     def set_ocr(self, entries: Sequence[tuple]) -> None:
         """Vision: the run's cached OCR text per image (UI_SPEC §2.6 "a collapsible OCR section")."""

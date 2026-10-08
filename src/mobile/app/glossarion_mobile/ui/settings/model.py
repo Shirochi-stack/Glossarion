@@ -28,6 +28,7 @@ __all__ = [
     "CURATED_REMNANT_GROUPS",
     "CURATED_SECTIONS",
     "CURATED_SOURCE_PREFIXES",
+    "FOLDED_KEYS",
     "GROUP_ORDER",
     "GROUP_TITLES",
     "HEADING_OVERRIDES",
@@ -59,6 +60,7 @@ __all__ = [
     "spec_type",
     "summarize",
     "tile_kind",
+    "virtual_writes",
     "window_bounds",
 ]
 
@@ -153,8 +155,10 @@ CURATED_SECTIONS: tuple = (
                              "rolling_summary_system_prompt", "rolling_summary_user_prompt")),
     )),
     ("other.response", "Response handling & retries", "Translation", (
-        ("Streaming", ("enable_streaming", "stream_thinking_logs", "allow_batch_stream_logs",
-                       "allow_authgpt_batch_stream_logs")),
+        # streaming: one switch for the desktop streaming group and Enable thoughts (VIRTUAL_SPECS, owner
+        # 2026-10-08); the folded keys after it get no tile of their own (FOLDED_KEYS)
+        ("Streaming", ("streaming", "enable_streaming", "stream_thinking_logs", "allow_batch_stream_logs",
+                       "allow_authgpt_batch_stream_logs", "enable_thoughts")),
         ("Retries", ("max_retries", "max_retry_tokens", "retry_timeout", "timeout_retry_attempts", "chunk_timeout",
                      "indefinite_rate_limit_retry", "ignore_retry_after")),
         ("Truncation", ("retry_truncated", "truncation_retry_attempts", "char_ratio_truncation_enabled",
@@ -204,7 +208,7 @@ CURATED_SECTIONS: tuple = (
                         "pdf_page_numbers", "pdf_page_number_alignment")),
     )),
     ("thinking", "Thinking & reasoning", "Models & keys", (
-        ("Thoughts", ("enable_thoughts",)),
+        # Enable thoughts follows the Streaming switch (Response handling & retries, owner 2026-10-08)
         ("Gemini", ("enable_gemini_thinking", "thinking_budget", "thinking_level")),
         ("OpenAI / OpenRouter", ("enable_gpt_thinking", "gpt_effort", "gpt_reasoning_tokens",
                                  "openrouter_use_reasoning_tokens", "pass_thinking_all_openai")),
@@ -250,8 +254,47 @@ def _context_mode_spec() -> VirtualSpec:
                  "batching to No batching (settings_rules.apply_context_mode)."))
 
 
+def _streaming_spec() -> VirtualSpec:
+    from glossarion_mobile.state.setting_writes import MOBILE_STREAMING_DEFAULT, STREAMING_KEY
+
+    return VirtualSpec(
+        key=STREAMING_KEY, label="Streaming", type="bool", default=MOBILE_STREAMING_DEFAULT,
+        section="other.response", virtual="streaming",
+        tooltip=("Live replies and 🧠 thinking in chats, the Reader's live translation and book jobs.\n"
+                 "It sets the four desktop streaming toggles together (also the logs during batch translation) "
+                 "and keeps Enable thoughts on while it is on; turning it off turns thoughts off, like the "
+                 "desktop. Off: nothing streams on this device, chats and the Reader included."))
+
+
 #: Settings controls without a config key of their own (key -> VirtualSpec).
-VIRTUAL_SPECS: dict = {"context_mode": _context_mode_spec()}
+VIRTUAL_SPECS: dict = {"context_mode": _context_mode_spec(), "streaming": _streaming_spec()}
+
+
+def _folded_keys() -> dict:
+    from glossarion_mobile.state.setting_writes import STREAMING_KEY, STREAMING_WRITES
+
+    return {key: STREAMING_KEY for key in STREAMING_WRITES}
+
+
+#: Config keys a virtual control represents on mobile and that get no tile of their own (key -> virtual
+#: key): the Streaming switch stands for the four desktop streaming toggles and Enable thoughts. They stay
+#: in their section's keys (counts, ``section_for_key``); ``SchemaAccess.specs_for`` leaves them out.
+FOLDED_KEYS: dict = _folded_keys()
+
+
+def virtual_writes(key: str) -> tuple:
+    """The config keys a settings control stands for: the flags a virtual control writes (Context mode:
+    contextual / use_rolling_summary / rolling_summary_mode; Streaming: its toggles and Enable thoughts),
+    else ``(key,)``."""
+    if key == "context_mode":
+        from glossarion_mobile.state.setting_writes import CONTEXT_MODE_WRITES
+
+        return tuple(CONTEXT_MODE_WRITES[:3])
+    if key in VIRTUAL_SPECS and getattr(VIRTUAL_SPECS[key], "virtual", "") == "streaming":
+        from glossarion_mobile.state.setting_writes import STREAMING_WRITES
+
+        return tuple(STREAMING_WRITES)
+    return (key,)
 
 
 #: Desktop sections the curated map takes keys from (a schema without them is left as it is).

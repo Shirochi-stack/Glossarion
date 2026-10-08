@@ -85,13 +85,13 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 21 | Arena Login + account dropdown (autharena/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded**: autharena |
 | 22 | 🔐 Antigravity Login + 📊 status + ♻️ reset + 🛸 dashboard | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded**: antigravity |
 | 23 | Model-route-driven control visibility | ModelSheet route row; Plan card chips; Send `blocked` reasons (`route_controls`) |  |
-| 24 | Profile dropdown (system prompt profiles) | ModelSheet › Profile tab; Settings › Profiles |  |
-| 25 | + New Profile | Profiles FAB "New profile"; ModelSheet › Profile › New |  |
+| 24 | Profile dropdown (system prompt profiles) | ModelSheet › Profile tab; Chat settings › Model & prompt; Settings › Profiles | Adapted: the chat pickers list every profile, the task-specific built-ins under "Specialised" |
+| 25 | + New Profile | Profiles FAB "New profile"; ModelSheet › Profile › New; Chat settings › Model & prompt › New profile… (a copy of the current profile) |  |
 | 26 | Save Profile | Profile editor › Save / Save as |  |
 | 27 | Delete Profile / Reset Profile | Profile editor ⋯ Delete / Reset to default |  |
 | 28 | Manage Profiles dialog | Settings › Profiles & prompts |  |
 | 29 | Profiles import/export | Profiles ⋯ Import / Export; Data › Backup | FilePicker / Share |
-| 30 | System Prompt editor | Profile editor (PromptEditor, full screen) |  |
+| 30 | System Prompt editor | Profile editor (PromptEditor, full screen); Chat settings › Model & prompt › Edit prompt |  |
 | 31 | System/User prompt toggle (↕️/🔀) | Profile editor role toggle; ModelSheet › Profile toggle |  |
 | 32 | Output Mode combo (📝Text/👁️Vision/🖼️Image/🎬Video/🔊Audio/✨Refine) | Composer output-mode row (six toggles; tap the active one → Mode options; chat key `direct_text_output_mode`); Settings › Translation defaults › Output mode (global `output_mode` for book jobs; linked from Image & vision); Plan card mode chip |  |
 | 33 | Output Token Limit button | Settings › Translation defaults; Plan card › Run options |  |
@@ -119,7 +119,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 55 | Post QA Scan + ⚙️ Scanner Settings | Settings › Processing › Post-translation scan; Plan card switch; link to Settings › QA |  |
 | 56 | Remove AI Artifacts (Off/Low/Medium/High) | Settings › Translation defaults |  |
 | 57 | API Key + Show/Hide | ModelSheet route row KeyField; Keys main pool; Welcome step 2 | Stored encrypted |
-| 58 | Multi Key Manager button | Settings › Models & keys › Multi-Key Manager; KeyPoolTiles |  |
+| 58 | Multi Key Manager button | Drawer / sidebar footer 🔑 API keys; Settings › Models & keys › Multi-Key Manager; KeyPoolTiles |  |
 | 59 | ⚙️ Other Setting button | Settings home (searchable schema sections) |  |
 | 60 | 📚 Library button | Drawer › Library |  |
 | 61 | API watchdog progress bar | JobStrip subtitle "3 in flight"; Job card running line |  |
@@ -174,7 +174,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 28 | Crash/shutdown recovery of in-progress rows | LaunchBanner "N interrupted jobs · Resume / Review" → Jobs › Interrupted (Resume / Discard) |  |
 | 29 | Live log console | Job detail LogConsole; Job card › Log; Data › Logs |  |
 | 30 | API watchdog / in-flight progress bar | JobStrip; Job card |  |
-| 31 | Streaming & thinking log toggles | Settings › Response handling › Streaming | Chat forces streaming on (desktop parity) |
+| 31 | Streaming & thinking log toggles | Settings › Response handling › Streaming (one switch) | Adapted: one switch for the four toggles + Enable thoughts, on by default; off also stops chat / Reader streaming (the desktop forces it) |
 | 32 | Chapter range & spine order | Plan card › Choose chapters |  |
 | 33 | Input / output token limits | Settings › Translation defaults; Plan card |  |
 | 34 | Context mode (Off / Contextual History / Rolling Summary Replace/Append) | Settings › Context & memory; Plan card |  |
@@ -329,7 +329,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge); Settings › Response handling › Gemini Free chunking | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
 | 52 | Opera Aria (search/opera) | ModelSheet search/opera rows + Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 53 | Tor proxy for provider traffic | Settings › Response handling & retries › "Tor proxy" (disabled row + ReasonChip) | **Excluded**; value preserved |
-| 54 | Streaming responses | Settings › Response handling › Streaming |  |
+| 54 | Streaming responses | Settings › Response handling › Streaming (one switch) |  |
 | 55 | GPT-5 / OpenRouter / NIM / OpenCode thinking controls | Settings › Thinking; ModelSheet › Thinking |  |
 | 56 | Reasoning-effort auto-repair | Log line in Job card | Automatic |
 | 57 | Skip thinking for lightweight tasks | Settings › Thinking |  |
@@ -415,7 +415,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 39 | 🦙 Load Ollama button (ollamapull/ route) | ModelSheet ollamapull/ rows + Settings › Endpoints "Load Ollama" row (disabled row + ReasonChip) | **Excluded**: ollamapull |
 | 40 | Ollama settings dialog | Settings › Endpoints › Local LLM host (URL / port only) | Install / pull excluded |
 | 41 | ollamapull/ chat requests | ModelSheet ollamapull/ rows (disabled row + ReasonChip) | **Excluded** |
-| 42 | Forced-stream batch log toggle | Settings › Response handling › Streaming | Entries for excluded routes are shown disabled with a ReasonChip |
+| 42 | Forced-stream batch log toggle | Settings › Response handling › Streaming (one switch) | Its excluded routes show a ReasonChip on the switch |
 | 43 | Login-button labels and status snapshot | Accounts slot rows; LoginChip "ChatGPT #2 ✓" |  |
 | 44 | Login control visibility per model and key pools | ModelSheet route row (`route_controls`) |  |
 | 45 | Provider model polling for subscription routes | Models › Poll providers; ModelSheet refresh |  |
@@ -556,16 +556,16 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 42 | Config Backup: Create Backup / Restore Backup | Data › Backup & restore |  |
 | 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android "Mirror outputs to Downloads/Glossarion") |
 | 44 | Auto DPI Scale / GUI Scale Factor / GUI Font Scale | Settings › Appearance › "Auto DPI / GUI scale" (disabled row + ReasonChip); Appearance › Text scale replaces it | **Excluded**: DPI scaling (the OS handles it); value preserved |
-| 45 | Enable streaming responses (OpenAI-compatible) | Settings › Response handling › Streaming |  |
-| 46 | Stream thinking/reasoning logs | Streaming |  |
-| 47 | Allow streaming logs during batch mode | Streaming |  |
-| 48 | Allow forced-stream batch log (AuthGPT/AuthGrok/AuthGem/AuthCD/AuthZA/Arena/Antigravity/OcAgy) | Streaming | Excluded routes are shown disabled with a ReasonChip |
+| 45 | Enable streaming responses (OpenAI-compatible) | Settings › Response handling › Streaming (one switch) |  |
+| 46 | Stream thinking/reasoning logs | Settings › Response handling › Streaming (one switch) |  |
+| 47 | Allow streaming logs during batch mode | Settings › Response handling › Streaming (one switch) |  |
+| 48 | Allow forced-stream batch log (AuthGPT/AuthGrok/AuthGem/AuthCD/AuthZA/Arena/Antigravity/OcAgy) | Settings › Response handling › Streaming (one switch) | Its excluded routes show a ReasonChip on the switch |
 | 49 | GPT / OpenRouter / NIM / OpenCode Thinking: Enable + Effort | Settings › Thinking & reasoning; ModelSheet › Thinking |  |
 | 50 | Use OR token budget instead of Effort + OR Thinking Tokens | Thinking |  |
 | 51 | ⚠️ Force reasoning parameters on unknown routes | Thinking |  |
 | 52 | Service Tier (off/standard/flex/fast/priority) + Force on unknown routes | Settings › Provider options & safety |  |
 | 53 | Gemini Thinking: Enable + Budget + Level (Gemini 3) | Thinking |  |
-| 54 | Enable thoughts (include model reasoning metadata) | Thinking |  |
+| 54 | Enable thoughts (include model reasoning metadata) | Settings › Response handling › Streaming (one switch) | Follows Streaming (the desktop stream-thinking lock) |
 | 55 | DeepSeek Thinking: Enable (DeepSeek & Chutes) + Effort (V4) + Use Responses API format | Thinking |  |
 | 56 | Anthropic Extended Thinking: Enable + Budget + Force Adaptive + Effort | Thinking |  |
 | 57 | NIM / AuthND Token Helpers (auto limits, token concurrency, subprocess limit, token timeout) | Settings › Response handling › NIM/AuthND helpers | Adapted: the subprocess-limit field is shown disabled with a ReasonChip (no subprocesses) |
@@ -988,7 +988,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 
 | # | Feature | Mobile surface | Notes |
 |---|---|---|---|
-| 0 | Open Multi API Key Manager (full) | Settings › Models & keys › Multi-Key Manager |  |
+| 0 | Open Multi API Key Manager (full) | Drawer / sidebar footer 🔑 API keys; Settings › Models & keys › Multi-Key Manager |  |
 | 1 | One-pool preview windows | KeyPoolTiles → `/settings/keys/<pool>` | Adapted |
 | 2 | Global rotation settings | Keys › Rotation card |  |
 | 3 | Enable Translation Keys (main pool toggle) | Keys › Translation pool switch |  |

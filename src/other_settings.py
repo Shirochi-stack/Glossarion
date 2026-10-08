@@ -2822,7 +2822,7 @@ def _create_response_handling_section(self, parent):
     QTimer.singleShot(0, lambda: _on_streaming_toggle(self.enable_streaming_checkbox.isChecked()))
 
     section_v.addWidget(self.enable_streaming_checkbox)
-    streaming_warn = QLabel("⚠️ Enabling this may result in silent truncation")
+    streaming_warn = QLabel(settings_rules.STREAMING_TRUNCATION_WARNING)
     streaming_warn.setStyleSheet("color: #f59e0b; font-size: 9pt;")
     streaming_warn.setContentsMargins(20, 0, 0, 4)
     section_v.addWidget(streaming_warn)
@@ -2867,8 +2867,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.allow_authgpt_batch_stream_logs_checkbox)
 
     authgpt_note = QLabel(
-        "🔐 AuthGPT, AuthGrok, AuthGem, AuthCD, Arena, Antigravity, and OcAgy always stream "
-        "— this controls batch log visibility"
+        settings_rules.FORCED_STREAM_NOTE
     )
     authgpt_note.setStyleSheet("color: #6b7280; font-size: 9pt; font-style: italic;")
     authgpt_note.setWordWrap(True)

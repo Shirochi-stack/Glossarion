@@ -172,12 +172,12 @@ one line too). Dispatch with `off` to skip a required suite for one run.
 Settings → Logs & diagnostics › Run self-test → PASS) and `tests/test_ui_chat_epub.py`
 (Settings › Import from desktop with a config.json that points at the test's fake OpenAI server
 through `adb reverse`; a new chat; ＋ › Files picks the 12-chapter self-test EPUB in the system
-picker; Send; the job card reaches Done; Migrate; Library › the book › Chapters shows 12/12).
+picker; Send; the job card reaches Done; the book moves into the Library by itself; Library › the book › Chapters shows 12/12).
 The steps live in `tests/flows.py` on top of `tests/ui_driver.py` (Flet's tester calls: keys,
 tooltips, labels); the system file picker (DocumentsUI) is driven through adb + uiautomator
 (`tests/android_device.py`). `tests_host/test_ui_flows.py` runs the same flows on the host
 against the real app on a fake Flet session (`tests/host_tester.py`), so every key and label
-the device tests use is checked on each host run. Locally:
+the device tests use is checked on each host run (at the CI emulator's 320 dp, with a check that no Row text overflows instead of ellipsizing). Before the first test, `tests/conftest.py` patches the `flet test` driver (`tests/driver_patch.py`: device pointer events reach the app, so the adb swipes that scroll lazily built lists work, and a tap that would miss its target fails and is retried) and uninstalls a leftover app, so every device test starts as a fresh install. Locally:
 
 ```bash
 python tools/build.py ui-tests --device-id emulator-5554          # after `adb devices`

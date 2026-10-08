@@ -23,6 +23,16 @@ section keeps the expanded / collapsed state the user left it in.
 On tablets the same body opens in the shell's SidePanel next to the chat (UI_SPEC §1.1, §2.14;
 ``components.surface.present_sheet``); ``close`` closes whichever it is.
 
+Prompts (device fixes, owner #15/#16): the "Prompt profile" picker lists every profile of the Settings ›
+Profiles & prompts listing (the shared ``ProfileService``; all desktop built-ins on a fresh config),
+translation profiles first and the task-specific built-ins under "Specialised". Under it the profile's
+prompt card (``profiles.profile_prompt_card``): **Edit prompt** (``PromptEditorSheet``; it edits the
+shared profile, the desktop model), **New profile…** (a copy of the current profile; This chat / This
+series get it as their override, All chats makes it the active profile) and **Manage…** (Settings ›
+Profiles & prompts: rename, delete / reset, import / export). Edits from This chat never switch the
+global active profile (``keep_active``). A chat whose profile no longer exists shows "<name> (missing)".
+No API key settings live here (owner #17): keys have their own Keys button next to Settings.
+
 U9 Series (§2.14 item 5, §2.15): the chat's series defaults sit between All chats and the chat
 (``ChatStoreAdapter.overrides`` layers them; "custom" and ↺ use the chat's ``own_overrides``), so a
 row the series sets reads "Inherited from: Series <name>"; the SeriesFeature fills ``SERIES_HOOKS``
@@ -33,6 +43,7 @@ All chats, without the chat-only rows (skip plan, text size).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
@@ -54,16 +65,30 @@ from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.screens.profiles import (
+    SPECIALISED_GROUP,
+    ProfileService,
+    ask_profile_name,
+    chat_profile_order,
+    grouped_profile_names,
+    profile_prompt_card,
+)
+from glossarion_mobile.ui.theme import HIT_TARGET, mono_family
 
 __all__ = [
     "CHAT_SETTING_KEYS",
     "ChatSettingsSheet",
     "DESCRIPTIONS",
+    "GROUP_OPTION_PREFIX",
     "INTRO",
     "SERIES_HOOKS",
     "global_updates_for",
 ]
+
+log = logging.getLogger("glossarion.chat")
+
+#: Key prefix of the profile picker's group heading ("Specialised"): a disabled option, never a value.
+GROUP_OPTION_PREFIX = "__group__:"
 
 #: U9 Series, installed by ``ui.chat.series_feature.SeriesFeature`` (unset = no Series UI):
 #: ``inherited_label(chats, cid, field)`` -> "Series <name>" when the chat's series sets ``field``;
@@ -144,12 +169,28 @@ class ChatSettingsSheet:
         subject: str = "chat",  # "series": the sheet edits one series' defaults (U9)
         title: Optional[str] = None,
         prefs: Any = None,  # Prefs-like (get / set): the mobile-only All-chats values (AUTO_ACCEPT_GLOSSARY_PREF)
+        # Prompts (owner #15): the shared profile operations (default: a ProfileService over ``config`` when it
+        # is the settings store), the SettingsContext the prompt editor opens with (default: the app's
+        # settings context) and Manage… (default: close + Settings › Profiles & prompts)
+        profile_service: Any = None,
+        ctx: Any = None,
+        on_manage_profiles: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.cid = str(cid)
         self.config = config
         self.chats = chats
         self.prefs = prefs
+        self.ctx = ctx
+        self.on_manage_profiles = on_manage_profiles
+        if profile_service is None and callable(getattr(config, "snapshot", None)):
+            profile_service = ProfileService(config)
+        self.profile_service = profile_service
+        self.listing: Any = None  # profiles.ProfileList of the shared listing (None without a service)
+        self._given_profiles = list(profiles)
         self.profiles = list(profiles)
+        self.prompt_editor: Any = None
+        self.new_profile_dialog: Any = None
+        self.refresh_profiles()
         self.languages = list(languages)
         self.on_changed = on_changed
         self.on_choose_model = on_choose_model
@@ -213,6 +254,9 @@ class ChatSettingsSheet:
                                      "target_language": "output_language"}[field_name], "") or ""
             if not value and field_name == "target_language":
                 value = self.config.get("glossary_target_language", "") or ""
+            if field_name == "profile" and self.listing is not None and self.listing.active and \
+                    value not in self.listing.texts:
+                value = self.listing.active  # what the desktop start-up runs for a missing / unset one
             # what the owner would use on a fresh config (desktop fallbacks), shown, never written
             return value or {"model": "authgpt/gpt-6-luna", "profile": (self.profiles or ["Universal"])[0],
                              "target_language": "English"}[field_name]
@@ -317,20 +361,212 @@ class ChatSettingsSheet:
             key=f"setting-{field_name}",
         )
 
-    def _dropdown(self, field_name: str, label: str, options: Sequence[tuple], allow_inherit: bool = False) -> ft.Control:
+    def _dropdown(self, field_name: str, label: str, options: Sequence[tuple], allow_inherit: bool = False,
+                  missing: str = "{value}") -> ft.Control:
+        """``options``: ``(key, text)``; a key starting with ``GROUP_OPTION_PREFIX`` is a disabled heading.
+        A current value that is not an option is listed first (``missing`` formats its text)."""
         value = str(self.value_of(field_name) or "")
-        items = [ft.DropdownOption(key=key, text=text) for key, text in options]
+        items = []
+        for key, text in options:
+            if str(key).startswith(GROUP_OPTION_PREFIX):
+                items.append(ft.DropdownOption(
+                    key=key, text=text, disabled=True,
+                    content=ft.Text(text, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, color=ft.Colors.PRIMARY)))
+            else:
+                items.append(ft.DropdownOption(key=key, text=text))
         if value and value not in {key for key, _text in options}:
-            items.insert(0, ft.DropdownOption(key=value, text=value))
+            items.insert(0, ft.DropdownOption(key=value, text=missing.format(value=value)))
         dropdown = ft.Dropdown(
             label=label,
             value=value or None,
             options=items,
-            on_select=lambda e, f=field_name: self.set_value(f, e.control.value),
+            on_select=lambda e, f=field_name: self._on_select(f, e.control.value),
             expand=True,
             dense=True,
         )
         return ft.Row([dropdown, *self._badge(field_name)], spacing=4, key=f"setting-{field_name}")
+
+    def _on_select(self, field_name: str, value: Any) -> None:
+        if str(value or "").startswith(GROUP_OPTION_PREFIX):  # a group heading: put the shown value back
+            self.rebuild()
+            self._changed()
+            return
+        self.set_value(field_name, value)
+
+    # ---- prompt profiles (owner #15/#16) -----------------------------------------------------------
+
+    def refresh_profiles(self) -> None:
+        """Re-read the shared profile listing (at open and after a profile operation, not on every row
+        change): the picker's names in the chat order, the texts the prompt card shows."""
+        listing = None
+        if self.profile_service is not None:
+            try:
+                listing = self.profile_service.listing()
+            except Exception:
+                log.warning("prompt profile listing failed", exc_info=True)
+        self.listing = listing
+        names = list(listing.names) if listing is not None and listing.names else list(self._given_profiles)
+        self.profiles = chat_profile_order(names)
+
+    def profile_options(self) -> list:
+        """The picker's ``(key, text)`` options: translation profiles, then the "Specialised" heading and
+        the task-specific built-ins."""
+        options: list = []
+        for title, names in grouped_profile_names(self.profiles):
+            if title == SPECIALISED_GROUP:
+                options.append((GROUP_OPTION_PREFIX + title, title))
+            options.extend((name, name) for name in names)
+        return options
+
+    @property
+    def profile_actions_reason(self) -> Optional[str]:
+        """Why Edit prompt / New profile… are off (None: available)."""
+        service = self.profile_service
+        if service is None:
+            return "Needs the settings store"
+        if not getattr(service, "available", False):
+            return "Needs the prompt profiles core"
+        return None
+
+    def _prompt_card(self) -> ft.Control:
+        from glossarion_mobile.ui.screens.profiles import ProfileList
+
+        name = str(self.value_of("profile") or "")
+        listing = self.listing
+        if listing is None:  # no settings store: what config.json holds, read-only
+            stored = self.config.get("prompt_profiles", None)
+            texts = dict(stored) if isinstance(stored, dict) else {}
+            listing = ProfileList(names=list(self.profiles), texts=texts)
+        return profile_prompt_card(
+            listing, name, missing=self.listing is not None and name not in self.listing.texts,
+            role_user=bool(self.config.get("system_prompt_to_user", False)),
+            skip=bool(self.value_of("skip_prompt_profile")),
+            on_edit=self.edit_prompt, on_new=self.new_profile, on_manage=self.manage_profiles,
+            disabled_reason=self.profile_actions_reason,
+            mono=mono_family(self._page), key="setting-profile-prompt",
+        )
+
+    def _settings_ctx(self) -> Any:
+        """The SettingsContext the prompt editor opens with: the one given, else the app's settings
+        context, else one around this sheet's page and store."""
+        if self.ctx is not None:
+            return self.ctx
+        try:
+            from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+            ctx = sheet_env().ctx
+        except Exception:
+            ctx = None
+        if ctx is not None:
+            return ctx
+        from glossarion_mobile.ui.settings.context import SettingsContext
+
+        return SettingsContext(page=self._page, store=self.config, schema=None)
+
+    def _say(self, message: str) -> None:
+        say = getattr(self._settings_ctx(), "say", None)
+        if callable(say):
+            say(message)
+
+    def edit_prompt(self, name: Optional[str] = None) -> Any:
+        """Edit prompt: the shared profile's text in ``PromptEditorSheet`` (placeholder chips, token count;
+        Reset to default for a built-in). Saving changes the profile itself."""
+        from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
+
+        name = str(name or self.value_of("profile") or "")
+        reason = self.profile_actions_reason
+        listing = self.listing
+        if reason or listing is None or name not in listing.texts:
+            self._say(reason or f"The prompt profile '{name}' no longer exists")
+            return None
+        editor = PromptEditorSheet(
+            self._settings_ctx(), title=name, subtitle="Prompt profile · shared with every chat and the desktop",
+            value=str(listing.texts.get(name, "") or ""), default=listing.defaults.get(name),
+            model=lambda: str(self.value_of("model") or ""),
+            on_save=lambda text, n=name: self.save_prompt(n, text),
+        )
+        editor.on_saved = lambda _value: self._profiles_changed()  # once the editor has closed
+        self.prompt_editor = editor
+        editor.show()
+        return editor
+
+    def save_prompt(self, name: str, text: Any) -> Optional[str]:
+        """Store an edited prompt (None, or the error the editor shows). Unchanged text writes nothing; a
+        built-in put back to its default is the shared reset (exactly the default text); anything else is
+        Save Profile under the same name. The global active profile stays as it is."""
+        listing = self.listing
+        service = self.profile_service
+        if listing is None or service is None:
+            return self.profile_actions_reason or "Prompt profiles are not available"
+        text = str(text or "")
+        if text.strip() == str(listing.texts.get(name, "") or "").strip():
+            return None
+        default = listing.defaults.get(name)
+        try:
+            if listing.is_builtin(name) and default is not None and text.strip() == str(default).strip():
+                service.delete_or_reset(name, keep_active=True)
+            else:
+                service.save(name, name, text, keep_active=True)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        return None
+
+    def new_profile(self) -> Any:
+        """New profile…: a name dialog; the profile starts as a copy of the current one and becomes this
+        chat's (This chat), this series' (This series) or the active (All chats) profile, then opens in the
+        editor."""
+        reason = self.profile_actions_reason
+        if reason:
+            self._say(reason)
+            return None
+        source = str(self.value_of("profile") or "")
+        texts = self.listing.texts if self.listing is not None else {}
+        text = str(texts.get(source, "") or "")
+        try:
+            initial = self.profile_service.copy_name(source, self.listing) if source in texts else ""
+        except Exception:
+            initial = ""
+        dialog, field_ = ask_profile_name(
+            self._page if self._page is not None else getattr(self._settings_ctx(), "page", None),
+            title="New profile",
+            note=f"Starts as a copy of '{source}'." if source in texts else "Starts empty.",
+            initial=initial,
+            confirm_label="Create",
+            on_submit=lambda name: self.create_profile(name, text),
+            on_done=lambda name: self.edit_prompt(name),
+        )
+        self.new_profile_dialog = (dialog, field_)
+        return dialog
+
+    def create_profile(self, name: str, text: str) -> Optional[str]:
+        """Create ``name`` with ``text`` without switching the global profile, then make it this scope's
+        profile (None, or the error the name dialog shows)."""
+        if self.profile_service is None:
+            return self.profile_actions_reason
+        try:
+            created = self.profile_service.save_as(name, text, keep_active=True)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        self.refresh_profiles()
+        # This chat: the sidecar override; This series: the series default; All chats: write_setting ->
+        # ProfileService.select (active profile + the desktop extraction-method switch)
+        self.set_value("profile", created)
+        return None
+
+    def manage_profiles(self) -> None:
+        """Manage…: Settings › Profiles & prompts (rename, delete / reset, import / export)."""
+        if self.on_manage_profiles is not None:
+            self.on_manage_profiles()
+            return
+        self.close()
+        go = getattr(self._settings_ctx(), "go", None)
+        if callable(go):
+            go("settings.profiles")
+
+    def _profiles_changed(self) -> None:
+        self.refresh_profiles()
+        self.rebuild()
+        self._changed()
 
     def rebuild(self) -> None:
         for section_id, tile in self.sections.items():  # the user's expand / collapse taps
@@ -390,7 +626,9 @@ class ChatSettingsSheet:
                 expanded=self.expanded["model"],
                 controls=[
                     model_row,
-                    self._dropdown("profile", "Prompt profile", [(p, p) for p in self.profiles]),
+                    self._dropdown("profile", "Prompt profile", self.profile_options(),
+                                   missing="{value} (missing)" if self.listing is not None else "{value}"),
+                    self._prompt_card(),
                     self._dropdown("target_language", "Target language", [(lang, lang) for lang in self.languages]),
                     self._dropdown("output_mode", "Default output mode", [(m.id, f"{m.emoji} {m.label}") for m in OUTPUT_MODES]),
                 ],

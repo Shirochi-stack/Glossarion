@@ -83,6 +83,10 @@ STATIC_LINKS: dict = {
     # PDF › Quality: the image compression switch and quality are shared with the EPUB output
     "pdf": (("Image compression & quality → EPUB output", "PHOTO_SIZE_SELECT_LARGE", "settings.section",
              {"section": "epub_output"}, "enable_image_compression"),),
+    # Profile & System Prompt: profiles are edited on their own page (the JSON tile would bypass the desktop
+    # save_profiles semantics)
+    "main.prompt": (("Profiles & prompts…", "DESCRIPTION_OUTLINED", "settings.profiles"),
+                    ("Assistant prefill…", "SHORT_TEXT", "settings.prefill")),
 }
 
 #: KeyPoolTiles (UI_SPEC §4.12 "KeyPoolTiles inside settings sections open /settings/keys/<pool>
@@ -136,6 +140,9 @@ class SectionPage(Screen):
         self.ctx = ctx
         self.section_id = section_id or (match.params.get("section", "") if match is not None else "")
         self.focus_target = match.fragment if match is not None else None
+        display_key = getattr(ctx.schema, "display_key", None)
+        if self.focus_target and callable(display_key):  # a key folded into a virtual control (Streaming)
+            self.focus_target = display_key(self.focus_target)
         self.window_size = max(4, int(window_size))
         self.section = ctx.schema.section(self.section_id) if ctx.schema.available else None
         if self.section is not None and self.section.id != self.section_id and section_id is None:
@@ -333,6 +340,8 @@ class SectionPage(Screen):
 
     async def focus_key(self, key: str, *, highlight: bool = True, settle: float = 0.05) -> bool:
         """Re-centre the window on ``key``, ``scroll_to`` its tile and highlight it."""
+        display_key = getattr(self.ctx.schema, "display_key", None)
+        key = display_key(key) if callable(display_key) else key
         if self.list_view is None or key not in self.keys:
             return False
         index = self.keys.index(key)
@@ -408,10 +417,14 @@ class SectionPage(Screen):
     def reset_section(self) -> list[str]:
         removed = []
         for key in self.keys:
+            spec = self.specs[self.keys.index(key)]
+            if getattr(spec, "virtual", ""):  # Context mode / Streaming: the tile resets the keys it stands for
+                if self.tile(key).reset():
+                    removed.append(key)
+                continue
             if not self.ctx.store.has(self.ctx.schema.path_of(key)):
                 continue
             ok, _reason = self.ctx.schema.availability(key)
-            spec = self.specs[self.keys.index(key)]
             if getattr(spec, "readonly", ""):  # a mirror another control writes (Follows Output mode, ...)
                 continue
             if ok and self.ctx.schema.lock_reason(spec, self.config_view) is None:
@@ -421,7 +434,9 @@ class SectionPage(Screen):
         return removed
 
     def _on_reset_section(self, e: Any = None) -> ConfirmDialog:
-        stored = [k for k in self.keys if self.ctx.store.has(self.ctx.schema.path_of(k))]
+        is_stored = getattr(self.ctx.schema, "is_stored", None)
+        stored = [k for k in self.keys if (is_stored(self.ctx.store, k) if callable(is_stored)
+                                           else self.ctx.store.has(self.ctx.schema.path_of(k)))]
         dialog = ConfirmDialog(
             title=f"Reset “{self.title}”?",
             body=(f"{len(stored)} stored value{'s' if len(stored) != 1 else ''} in this section go back to their "

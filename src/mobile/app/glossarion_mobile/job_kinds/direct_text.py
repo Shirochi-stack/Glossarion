@@ -11,7 +11,11 @@ does the same on the job's ``HeadlessOwner``, with the same shared code:
    is_attachment)``: ``OUTPUT_DIRECTORY``/``OUTPUT_DIR`` = the run's output root,
    ``DIRECT_TEXT_*``, ``ORDER_BATCH_REQUESTS_BY_SPINE``, then the owner's
    ``_apply_forced_streaming_environment`` / ``_apply_direct_text_runtime_environment``
-   (the dialog's block, in its order);
+   (the dialog's block, in its order). The desktop dialog always forces streaming; on
+   mobile the Streaming switch decides (owner 2026-10-08): while it is off
+   (``setting_writes.streaming_enabled`` of the job's config) the run is not forced
+   (``skip_forced_streaming``: ``_force_stream_all`` off, the owner's forced export a no-op),
+   so it streams exactly as the four toggles say - not at all;
 3. ``owner._prepare_translation_run([input])`` + ``owner._translation_worker``;
 4. ``ctx.set_result(...)``: the glossary the run used (the run's ``MANUAL_GLOSSARY``,
    else the owner's ``manual_glossary_path``), the run's ``MANUAL_GLOSSARY`` itself
@@ -39,7 +43,8 @@ from typing import Any, Mapping
 from glossarion_mobile.job_kinds import owner_method
 from glossarion_mobile.job_kinds.translate import check_inputs, run_translation
 
-__all__ = ["FINISH_ENV_KEYS", "KINDS", "apply_run_environment", "build_options", "run", "run_result"]
+__all__ = ["FINISH_ENV_KEYS", "KINDS", "apply_run_environment", "build_options", "run", "run_result",
+           "skip_forced_streaming", "streaming_allowed"]
 
 
 def build_options(params: Mapping[str, Any], input_path: str) -> Any:
@@ -54,8 +59,28 @@ def build_options(params: Mapping[str, Any], input_path: str) -> Any:
     return DirectTextRunOptions(**values)
 
 
+def streaming_allowed(owner: Any) -> bool:
+    """The mobile Streaming switch over the job's config (``owner.config``; absent toggles count as ON)."""
+    from glossarion_mobile.state.setting_writes import streaming_enabled
+
+    return streaming_enabled(getattr(owner, "config", None))
+
+
+def _no_forced_streaming() -> None:
+    """``_apply_forced_streaming_environment`` while the Streaming switch is off: nothing forced."""
+
+
+def skip_forced_streaming(owner: Any) -> None:
+    """Streaming off (owner 2026-10-08): this job's owner never forces the streaming env. ``_force_stream_all``
+    off (the pipeline's re-exports then follow the config) and the owner's forced export a no-op for the
+    shared ``apply_direct_text_run_environment``, which calls it unconditionally (the owner is this job's)."""
+    owner._force_stream_all = False
+    owner._apply_forced_streaming_environment = _no_forced_streaming
+
+
 def apply_run_environment(owner: Any, params: Mapping[str, Any]) -> None:
-    """The dialog's run environment (``direct_text_store.apply_direct_text_run_environment``)."""
+    """The dialog's run environment (``direct_text_store.apply_direct_text_run_environment``); with the
+    Streaming switch off nothing is forced (``skip_forced_streaming``)."""
     from glossarion_mobile.services.jobs import JobError
 
     output_root = params.get("output_root")
@@ -65,6 +90,8 @@ def apply_run_environment(owner: Any, params: Mapping[str, Any]) -> None:
         from direct_text_store import apply_direct_text_run_environment  # shared (U3)
     except ImportError as exc:
         raise JobError(f"The shared module 'direct_text_store' is not in this build ({exc}).") from exc
+    if not streaming_allowed(owner):
+        skip_forced_streaming(owner)
     apply_direct_text_run_environment(owner, os.fspath(output_root), bool(params.get("is_attachment")))
 
 

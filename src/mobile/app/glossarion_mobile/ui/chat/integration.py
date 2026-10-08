@@ -26,7 +26,12 @@ SecureStorage keys, and the settings feature provides ``app.config_store``):
    desktop Migrate run for the user, UI_SPEC §2.17): when its run finishes (``ChatRuns``
    ``subscribe_finished``), whenever the job queue goes idle and once after install (books from
    earlier versions and runs whose app was killed before the move). The env gets the Library
-   hooks the chat UI uses (``library_service`` / ``library_book`` / ``library_translate``).
+   hooks the chat UI uses (``library_service`` / ``library_book`` / ``library_translate``);
+8. device fixes (owner #15/#16): the chat's profile list is the Settings › Profiles & prompts listing
+   (``profile_names``; every desktop built-in), ``env.profile_service`` is the shared ProfileService,
+   and chats / series whose prompt profile was renamed follow it while ones whose profile was deleted
+   (here, on the desktop, or by an import) inherit again (``reconcile_profile_overrides`` on every
+   ``prompt_profiles`` change and once after install), never a silent first profile.
 
 ``maybe_show_welcome()`` opens ``/welcome`` on a first run (no
 ``glossary_mode_dialog_shown`` in config.json and no completed mobile welcome); the
@@ -112,21 +117,21 @@ def _target_languages() -> tuple:
         return ("English",)
 
 
-def profile_names(config_get: Callable[[str, Any], Any]) -> list:
-    """Prompt profile names: config ``prompt_profiles`` or the built-in defaults (owner_state)."""
-    profiles = config_get("prompt_profiles", None)
-    if isinstance(profiles, dict) and profiles:
-        return list(profiles)
+def profile_names(store: Any) -> list:
+    """The chat's prompt profile names (Chat settings, the ModelSheet Profile tab, ``/profile``, Series
+    defaults): the Settings › Profiles & prompts listing, i.e. the desktop start-up profiles
+    (``prompt_profiles.profile_state_from_config``: every built-in plus the stored ones, missing built-ins
+    added like ``_init_variables``), translation profiles first and the task-specific built-ins after them
+    (``profiles.chat_profile_order``, the "Specialised" group). Reads only; writes nothing."""
+    from glossarion_mobile.ui.screens.profiles import ProfileService, chat_profile_order
+
     try:
-        import types
-
-        from owner_state import ConfigStateMixin
-
-        holder = types.SimpleNamespace()
-        ConfigStateMixin._init_default_prompt_profiles(holder)
-        return list(getattr(holder, "default_prompts", {}) or {})
-    except Exception:
-        return ["Universal"]
+        names = list(ProfileService(store).listing().names)
+    except Exception:  # e.g. a hand-edited prompt_profiles that is not an object: the desktop start-up rejects it
+        log.debug("prompt profile listing failed", exc_info=True)
+        stored = store.get("prompt_profiles", None) if store is not None else None
+        names = list(stored) if isinstance(stored, dict) else []
+    return chat_profile_order(names) or ["Universal"]
 
 
 def _reader_workspace(folder: str, source: str = "") -> str:
@@ -286,7 +291,11 @@ class ChatFeature:
             is_android=self.is_android,
             is_ios=self.is_ios,
         )
-        env.profiles = lambda: profile_names(env.config_get)
+        env.profiles = lambda: profile_names(env.store)
+        from glossarion_mobile.ui.screens.profiles import ProfileService
+
+        # the shared profile operations (Chat settings › Edit prompt / New profile…; stateless)
+        env.profile_service = ProfileService(env.store)
         return env
 
     def attach(self) -> None:
@@ -316,6 +325,7 @@ class ChatFeature:
                     lambda: chat_view.open_chat_settings(scope="global"))
         self.runs.attach()
         self._hook_auto_migrate()
+        self._hook_profile_overrides()
         shell = getattr(app, "shell", None)
         if shell is not None and self._fallback_factory is None:
             self._fallback_factory = shell.screen_factory
@@ -356,6 +366,70 @@ class ChatFeature:
         state = getattr(self.app, "state", None)
         if cid and state is not None and self.chats.session(cid) is not None and state.current_chat.value != str(cid):
             state.current_chat.set(str(cid))
+
+    # ---- prompt profiles of chats and series (owner #15/#16) ---------------------------------------
+
+    def _hook_profile_overrides(self) -> None:
+        """Re-check the chats' and series' prompt profiles whenever ``prompt_profiles`` changes (a rename or
+        delete in Settings › Profiles & prompts or Chat settings, Import profiles, Import from desktop, a
+        restored backup). A rename made on this device reaches the observer already noted
+        (``ProfileService.save`` -> ``profiles.note_renamed``), so the chats follow it."""
+        store = getattr(self.env, "store", None) if self.env is not None else None
+        observe = getattr(store, "observe_keys", None)
+        if not callable(observe) or getattr(self, "_profiles_hooked", False):
+            return
+        self._profiles_hooked = True
+        self._unsubs.append(observe(("prompt_profiles",),
+                                    lambda key, value: self._post(self._reconcile_profiles_quietly)))
+
+    def _reconcile_profiles_quietly(self) -> None:
+        try:
+            self.reconcile_profile_overrides()
+        except Exception:
+            log.exception("re-checking the chats' prompt profiles failed")
+
+    def reconcile_profile_overrides(self) -> dict:
+        """Chats (own overrides) and series (defaults) whose prompt profile no longer exists: a profile
+        renamed on this device is followed (``profiles.follow_profile``), a gone one is cleared so the chat
+        inherits its series / All chats profile again (a run would otherwise use the first profile without
+        a word). Returns ``{"chats": {cid: new or None}, "series": {sid: new or None}}`` (what changed)."""
+        from glossarion_mobile.ui.screens.profiles import ProfileService, follow_profile
+
+        changed: dict = {"chats": {}, "series": {}}
+        store = getattr(self.env, "store", None) if self.env is not None else getattr(self.app, "config_store", None)
+        if store is None:
+            return changed
+        try:
+            listing = ProfileService(store).core_listing()  # None: no desktop core here, names unknown
+        except Exception:
+            log.debug("prompt profile listing failed", exc_info=True)
+            listing = None
+        if listing is None or not listing.names:
+            return changed
+        names = list(listing.names)
+        if getattr(self.chats, "available", False):
+            for summary in self.chats.all():
+                name = self.chats.own_overrides(summary.cid).get("profile")
+                if isinstance(name, str) and name and name not in names:
+                    new = follow_profile(name, names)
+                    self.chats.set_override(summary.cid, "profile", new)
+                    changed["chats"][summary.cid] = new
+        series_store = getattr(getattr(self.app, "series", None), "store", None)
+        if series_store is not None and callable(getattr(series_store, "all", None)):
+            for item in series_store.all():
+                name = (getattr(item, "defaults", None) or {}).get("profile")
+                if isinstance(name, str) and name and name not in names:
+                    new = follow_profile(name, names)
+                    series_store.set_default(item.id, "profile", new)
+                    changed["series"][item.id] = new
+        gone = [k for k, v in [*changed["chats"].items(), *changed["series"].items()] if v is None]
+        if changed["chats"] or changed["series"]:
+            log.info("prompt profiles of chats/series updated: %s", changed)
+        if gone and self.env is not None:
+            count = len(gone)
+            self._post(self.env.say, f"A prompt profile used by {count} chat{'s' if count != 1 else ''} or series "
+                                     "no longer exists; they now use their inherited profile.")
+        return changed
 
     def _hook_lifecycle(self) -> None:
         page = self.page
@@ -866,6 +940,8 @@ class ChatFeature:
         deadline = time.monotonic() + max(0.0, float(wait))
         while self.library_service() is None and time.monotonic() < deadline:
             await asyncio.sleep(0.25)
+        # profiles deleted while the app was closed (the Series feature is installed after the Library)
+        self._reconcile_profiles_quietly()
         return await self.sweep("startup")
 
     async def sweep(self, reason: str = "") -> list:

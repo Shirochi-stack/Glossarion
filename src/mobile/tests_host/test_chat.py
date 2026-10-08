@@ -1173,7 +1173,8 @@ def test_transcript_window_and_grouping():
     job = items[3]
     assert (job.index, job.requests, job.report, job.actions) == (2, [3], 4, 5)
     partial = build_items(messages, 4, 7)  # window starting inside the job group still groups its cards
-    assert [i.kind for i in partial] == ["job", "user"] and partial[0].report == 4 and partial[0].index == -1
+    assert [i.kind for i in partial] == ["job", "user"] and partial[0].report == 4
+    assert (partial[0].index, partial[0].detached, partial[0].key) == (2, True, "job-2")  # devfix4: the JobCard keeps its turn
     many = [("user", str(i)) for i in range(100)]
     assert tail_window(many, 20) == (80, 100)
     assert slide_window((80, 100), 100, 20, -1) == (74, 94)

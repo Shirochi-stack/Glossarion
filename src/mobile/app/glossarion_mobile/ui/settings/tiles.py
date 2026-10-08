@@ -30,9 +30,17 @@ from glossarion_mobile.state.config_store import MISSING, MobileConfigStore
 from glossarion_mobile.state.setting_writes import (
     CONTEXT_MODE_KEY,
     CONTEXT_MODE_WRITES,
+    MOBILE_STREAMING_DEFAULT,
     PROFILE_KEY,
     RULE_KEYS,
+    STREAMING_KEY,
+    STREAMING_KEYS,
+    STREAMING_WRITES,
     context_mode_of,
+    effective_streaming_values,
+    reset_streaming,
+    streaming_states,
+    streaming_summary,
     write_setting,
 )
 from glossarion_mobile.ui import tokens
@@ -78,6 +86,7 @@ __all__ = [
     "SegmentedTile",
     "SettingTile",
     "SliderTile",
+    "StreamingTile",
     "SwitchTile",
     "TILE_CLASSES",
     "TextTile",
@@ -724,6 +733,140 @@ class ContextModeTile(DropdownTile):
         return True
 
 
+def _settings_rules() -> Any:
+    try:
+        import settings_rules  # shared, GUI-free (U4)
+
+        return settings_rules
+    except Exception:
+        log.debug("settings_rules unavailable", exc_info=True)
+        return None
+
+
+#: Enable thoughts, the key the stream-thinking lock drives (``setting_writes.STREAMING_WRITES``).
+_THOUGHTS_KEY = STREAMING_WRITES[-1]
+#: The toggle whose routes mobile only partly has (the schema's partial-route chip moves onto the switch).
+_FORCED_STREAM_KEY = "allow_authgpt_batch_stream_logs"
+
+
+class StreamingTile(SwitchTile):
+    """Glossarion Mobile's one Streaming switch (owner 2026-10-08) for the desktop "Real-time Translation
+    (Streaming)" group - Enable streaming responses, Stream thinking/reasoning logs, Allow streaming logs
+    during batch mode, Allow forced-stream batch log - and Enable thoughts, which the stream-thinking lock
+    drives. Not a config key: it reads the four toggles (absent = ON on mobile) and writes them through
+    ``setting_writes`` (``settings_rules.apply_streaming``: only the keys that change, the desktop thoughts
+    lock). Toggles that differ (an imported desktop config) show "Custom · N of 4 on" with the switch
+    following Enable streaming responses; one tap sets all four. Under it: the desktop's silent-truncation
+    warning and forced-stream note (``settings_rules`` texts, the ones other_settings shows)."""
+
+    kind = "switch"
+
+    def readonly(self) -> Optional[str]:
+        return None
+
+    def states(self) -> dict:
+        return streaming_states(self.store)
+
+    def value(self) -> Any:
+        states = self.states()
+        if all(states.values()) or not any(states.values()):
+            return all(states.values())
+        return bool(states.get("enable_streaming"))  # custom: whether requests stream
+
+    def default(self) -> Any:
+        return MOBILE_STREAMING_DEFAULT
+
+    @property
+    def stored(self) -> bool:
+        return any(self.store.has(key) for key in STREAMING_KEYS)
+
+    def summary(self) -> str:
+        return streaming_summary(self.store)
+
+    def _label(self, key: str) -> str:
+        spec = self.ctx.schema.spec(key)
+        return label_for(spec) if spec is not None else key
+
+    def _texts(self) -> tuple:
+        """(the silent-truncation warning, the forced-stream note) the desktop dialog shows."""
+        rules = _settings_rules()
+        return (str(getattr(rules, "STREAMING_TRUNCATION_WARNING", "") or ""),
+                str(getattr(rules, "FORCED_STREAM_NOTE", "") or ""))
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        warning, note = self._texts()
+        self.warning_text = ft.Text(warning, theme_style=ft.TextThemeStyle.BODY_SMALL, color=semantic("warning", False),
+                                    visible=bool(warning))
+        self.note_text = ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True,
+                                 color=ft.Colors.ON_SURFACE_VARIANT, visible=bool(note))
+        return ft.Column([self.warning_text, self.note_text], spacing=2, tight=True)
+
+    def refresh(self, push: bool = True) -> None:
+        super().refresh(push=False)
+        self.modified_dot.visible = any(self.store.is_modified(key) for key in STREAMING_WRITES)
+        if push:
+            self.ctx.push(self.control)
+
+    def _badge_controls(self) -> list[ft.Control]:
+        out = super()._badge_controls()
+        states = self.states()
+        if 0 < sum(1 for on in states.values() if on) < len(states):
+            rows = " · ".join(f"{self._label(key)}: {'On' if on else 'Off'}" for key, on in states.items())
+            out.append(ReasonChip(
+                reason=self.summary(),
+                detail=(f"The desktop streaming toggles differ: {rows}. Requests stream while "
+                        f"{self._label('enable_streaming')} is on. Tap the switch to set all four.")))
+        partial = getattr(self.ctx.schema, "partial_reason", None)
+        reason = partial(_FORCED_STREAM_KEY) if callable(partial) else None
+        if reason and self.available:
+            out.append(ReasonChip(reason=reason, detail=f"{self._label(_FORCED_STREAM_KEY)}: {reason}."))
+        return out
+
+    def apply(self, raw: Any) -> bool:
+        if not self.editable:
+            return False
+        if self.error:
+            self.set_error(None)
+        write_setting(self.store, STREAMING_KEY, bool(raw))
+        self.refresh()
+        return True
+
+    def reset(self) -> bool:
+        """Long-press / Reset: the toggles back to the default (their keys removed: ON), with Undo."""
+        if not self.editable or not self.stored:
+            return False
+        old = reset_streaming(self.store)
+        self.refresh()
+        if old:
+            self.ctx.say(f"{self.label} reset to default", "Undo",
+                         lambda: (self.store.set_many(dict(old)), self.refresh()))
+        return bool(old)
+
+    def help_body(self) -> str:
+        lines: list[str] = []
+        tooltip = plain_text(spec_attr(self.spec, "tooltip", ""))
+        if tooltip:
+            lines.append(tooltip)
+        values = effective_streaming_values(self.store)
+        rows = []
+        for key in STREAMING_WRITES:
+            spec = self.ctx.schema.spec(key)
+            names = env_names(spec) if spec is not None else []
+            state = "On" if bool(values[key]) else "Off"
+            stored = "" if self.store.has(key) else " (default)"
+            rows.append(f"• {self._label(key)}{' · ' + ', '.join(names) if names else ''}: {state}{stored}")
+        lines.append("Desktop settings it sets:\n" + "\n".join(rows))
+        lines.append(f"{self._label(_THOUGHTS_KEY)} stays on while {self._label('stream_thinking_logs')} is on "
+                     "(the desktop lock); turning Streaming off turns it off too.")
+        lines.extend(text for text in self._texts() if text)
+        spec = self.ctx.schema.spec(_FORCED_STREAM_KEY)
+        for note in (spec_attr(spec, "discrepancies", ()) or ()) if spec is not None else ():
+            lines.append(f"Desktop note: {note}")
+        lines.append("Default on Glossarion Mobile: On (the desktop default is off). "
+                     + ("" if self.stored else "Not stored in config.json yet: the default applies."))
+        return "\n\n".join(line.strip() for line in lines if line.strip())
+
+
 def _foreign_value_reason(tile: "SettingTile") -> Optional[str]:
     """A text / prompt tile over a stored value that is not text (a dict the profile bar wrote, a
     number a spin box stored): writing the field back would replace it with a string."""
@@ -995,6 +1138,8 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> Setti
         cls = JsonTile
     elif key == CONTEXT_MODE_KEY and getattr(spec, "virtual", "") == "context_mode":
         cls = ContextModeTile
+    elif key == STREAMING_KEY and getattr(spec, "virtual", "") == "streaming":
+        cls = StreamingTile
     else:
         cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
     return cls(spec, ctx, config=config)

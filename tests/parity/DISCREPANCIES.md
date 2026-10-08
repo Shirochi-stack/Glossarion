@@ -3948,3 +3948,160 @@ Yes, or No" (translator_gui._present_glossary_approval_request). Mobile:
 - Every log surface (LogConsole, the log-file viewer, Check environment lines, the Reader live Thinking pane)
   uses `theme.log_text` at 8 sp (`tokens.LOG_STYLE`, line 11). The desktop live pane is 8.5 pt. Code, editors
   and error text stay mono 13. Tests: tests_host/test_log_text.py.
+
+## Device fixes part 2 (2026-10-08) (owner device report items 10-17 on the U8 APK + the Android UI tests; one owner-approved desktop text move, the rest mobile only)
+
+The owner's report: 10 Reader text is cut off at the bottom of the page; 11 Original / Translated / Bilingual
+all show the translation; 12 a chat attachment job shows Done right after the glossary step and its request
+cards never appear in the chat; 13 "↑ Scroll for earlier messages" does nothing and only one request card is
+ever shown; 14 one Streaming toggle on mobile; 15 edit and add prompts from Chat settings; 16 mobile lists only
+the "Universal" prompt profile; 17 a Keys button next to Settings, in a drawer / sidebar footer that never
+scrolls away. The first run of the optional Android UI tests also exposed a chat header that overflows instead
+of ellipsizing on phones narrower than about 470 dp.
+Desktop source changes (`git diff 55c46555 -- src/*.py`): other_settings.py reads its two streaming notes from
+settings_rules (owner-approved move, no visible change); settings_rules.py gains those two constants and the
+GUI-free streaming helpers (`STREAMING_ENV` / `STREAMING_KEYS`, `streaming_states`, `streaming_mode`,
+`apply_streaming`; no desktop caller); reader_doc.py changes only the mobile-only `_MOBILE_PAGED_CSS`
+(`_mobilize_reader_html`, `wrap(mobile=True)`), and tests/test_reader_doc.py still proves the desktop page
+byte-identical.
+
+### Streaming: one switch on mobile (owner decision 2026-10-08; one owner-approved desktop text move)
+
+- Desktop: Other Settings › Response Handling › Real-time Translation (Streaming) keeps its four checkboxes, the
+  batch-log enable dependency and the Enable thoughts lock. Its two notes ('⚠️ Enabling this may result in
+  silent truncation', '🔐 AuthGPT, … always stream — this controls batch log visibility') now come from
+  `settings_rules.STREAMING_TRUNCATION_WARNING` / `FORCED_STREAM_NOTE` (owner-approved move). Same text and
+  styles: tests/test_other_settings_streaming_texts.py renders the section offscreen. Desktop defaults are
+  unchanged (absent = off).
+- Mobile: one **Streaming** switch (Settings › Response handling & retries; `VIRTUAL_SPECS['streaming']`,
+  `StreamingTile`) sets the four keys together through `settings_rules.apply_streaming`, which makes the
+  checkboxes' own writes; stream thinking keeps the desktop thoughts lock: ON locks Enable thoughts on, OFF
+  unchecks it. Only keys whose value changes are written, because the stream-thinking rule would turn thoughts
+  off on a no-op write. The Enable thoughts tile is gone: it is folded into the switch (`model.FOLDED_KEYS`)
+  and still listed in its ⓘ. The folded keys stay in their section's keys (counts, `section_for_key`, search,
+  deep links and "Reset this section" reach the switch).
+- Mobile-only divergences:
+  1. Absent keys mean ON (`setting_writes.MOBILE_STREAMING_DEFAULT`). Settings shows this through
+     `MOBILE_DISPLAY_DEFAULTS`, and every job's config snapshot gets it (`JobService._config_snapshot` →
+     `with_mobile_streaming_defaults`; Check environment previews the same snapshot). A saved or imported
+     value wins, and nothing is written for the default.
+  2. Streaming OFF stops streaming everywhere on mobile. The desktop Direct Text dialog and the Reader's live
+     Translate always force every streaming switch on (`_apply_forced_streaming_environment`,
+     `_force_stream_all`). On mobile, `job_kinds.direct_text.apply_run_environment` skips this while the switch
+     is off (`skip_forced_streaming` shadows the job owner's `_apply_forced_streaming_environment` for that one
+     job; the shared `direct_text_store.apply_direct_text_run_environment` is unchanged), and
+     `job_kinds.single_chapter` drops `force_stream_all` and logs '🛰️ Streaming is off …'; the Reader's live
+     panel then says "Streaming is off: the chapter appears when it is done" instead of "waiting for stream…".
+     While the switch is on, behaviour is the desktop's.
+  3. Toggles that differ show 'Custom · N of 4 on'. The switch then follows Enable streaming responses, and one
+     tap sets all four.
+  4. Every job config re-applies the thoughts lock: stream thinking on gives enable_thoughts True in the
+     snapshot, never stored. Mobile has no Enable thoughts tile to show a stale value; desktop applies the same
+     lock when Other Settings opens.
+- Tests: tests_host/test_streaming_toggle.py, tests/test_other_settings_streaming_texts.py; tests_host/
+  test_u9_gap_closure.py and test_mobile_settings.py follow the fold (Enable thoughts is listed under Response
+  handling; a folded key has no tile of its own).
+
+### Chat transcript window over rendered cards (mobile only; desktop unchanged)
+
+- The desktop Direct Text dialog windows its saved messages; mobile windows the chat's rendered cards
+  (`transcript_model.build_items` of the whole chat), because a book turn's request messages are rows of one
+  JobCard (owner issues 12 + 13: at the glossary gate the message window cut the turn's user_file off and the
+  running card was drawn as 'Done' / 'Attachment'; slides never added a card). A text chat's cards are its
+  messages, so it windows exactly like the dialog. A JobCard's size in the 120,000-character budget is its
+  report plus the 400-character previews of the request rows it shows.
+- The window arithmetic is the dialog's, mirrored in `transcript_model` (`tail_start` = `_reset_history_window`,
+  `shift_window` = `_shift_history_window`, `window_after_append` = `_update_history_window_after_append`) and
+  compared with the dialog source by tests_host/test_chat_transcript_window.py::test_window_arithmetic_is_the_dialogs.
+  Like the dialog, the window re-tails only after an append to a window that ended at the old tail; mobile also
+  returns to the newest cards on actions that create a card (send, Plan, QA scan, batch, ↓).
+- A job item always carries its turn's real index (`detached=True` when its user_file is outside the window);
+  the old `TranscriptItem('job', -1)` sentinel is gone, and a run whose turn is unknown never takes over a card.
+- Mobile-only: the running JobCard lists the turn's committed request cards (the glossary gate's) before its
+  live ones and pages its rows (newest `direct_text_rendered_card_limit` first, "↑ Show N earlier requests");
+  its Requests list starts open while the job runs (the desktop shows every request card in the transcript).
+  Scrolling within 600 px of the top, or a pull past it, loads one page of earlier cards (UI_SPEC §2.8).
+- Tests: tests_host/test_chat_transcript_window.py; tests_host/test_chat.py::test_transcript_window_and_grouping
+  (the partial window's JobCard keeps index 2, `detached`, key `job-2`).
+
+### Reader page layout and mode switches (mobile only; the mobile-only reader_doc CSS)
+
+- The Reader's page layer (WebView, native page, empty state) sits in a `SafeArea` (`reader-page-safe`) inside
+  its full-screen Stack; the chrome bars stay edge to edge with their own SafeAreas. The page size, the
+  selection chips (`_stack_rect`) and the theme strips behind the system bars follow the insets. The desktop
+  reader is a Qt window and has no counterpart.
+- `reader_doc._MOBILE_PAGED_CSS` (mobile only): the top / bottom safe-area insets are added once, on `body`
+  (`html` padding 0; before they were on both, so the top inset counted twice), and `#columns` gets the height
+  left between them with `!important` over the desktop `_setupColumns` inline `innerHeight - 36`. With no inset
+  this is the desktop geometry: 256 documents (4 viewports × 4 fonts × 4 line spacings × 2 families × 2
+  chapters) give identical page counts and column boxes. Measured with real pages in headless Chrome at 412×915
+  and 360×800 (fonts 12-24 pt, line spacing 1.0-2.4, paged and scroll, 3-button and gesture navigation): no
+  line past the bottom of a page and none under a bar.
+- The native fallback's edge tap scrolls 90 % of what the list shows (its scroll viewport, else the page area),
+  not 90 % of the screen.
+- Mode switches: one at a time (desktop `_raw_toggle_in_flight`); a switch that cannot load the other EPUB keeps
+  the version on screen and says "Could not switch: …" (desktop `_restore_raw_toggle_value`). Mobile additions:
+  a book saved in Original whose raw EPUB no longer loads opens on its translation with a notice; a saved
+  Bilingual is checked against the chapter that opens; Bilingual on a chapter without both versions shows the
+  translation and comes back on the next chapter that has both (`ReaderSession.effective_flavor`; before, an
+  untranslated chapter showed every raw paragraph twice), and a reload in Bilingual (Show special files) keeps
+  the raw EPUB (`ReaderSession.load`). Issue 11 itself was the devfix 1 WebView transport bug (`load_request`).
+- Tests: tests_host/test_reader_layout.py (Chrome measurement test needs headless Chrome + node >= 22, else
+  skips), tests_host/test_reader_modes.py; tests/test_reader_doc.py.
+
+### Desktop bug found (recorded, not fixed): a long paragraph before an illustration is clipped
+
+- Shared reader core, same on desktop and mobile, unchanged by this batch: `reader_doc._process_html` (about
+  line 1813) pulls any preceding `<p>` (and a heading before it) into the `.full-page-img` wrapper of an
+  illustration with no length check. The wrapper is `overflow: hidden` and `break-inside: avoid`, so a long
+  paragraph right before an image paragraph is clipped (example: a 2302 px wrapper in a 692 px column; at 24 pt
+  14 lines were never shown). Proposed fix, desktop-shared, needs the owner's approval: apply the <= 240-character
+  rule line 1806 already applies to the image's parent (`len(prev.get_text(' ', strip=True)) <= 240`).
+
+### Chat settings prompt profiles (mobile only; the shared prompt_profiles core unchanged)
+
+- The chat's profile pickers (Chat settings, ModelSheet › Profile) list `ProfileService.listing()`, the same
+  listing as Settings › Profiles & prompts (`prompt_profiles.profile_state_from_config`): a fresh config shows
+  all 18 built-ins. Before, `integration.profile_names` built the defaults on a bare SimpleNamespace, the
+  AttributeError was swallowed and only 'Universal' was left. Chat order: translation profiles first
+  (Universal, the *_BeautifulSoup and *_html2text built-ins, custom profiles), then the task-specific built-ins
+  under a "Specialised" heading (`ui/screens/profiles.SPECIALISED_PROFILES`: Refinement, Manga_JP / KR / CN,
+  Glossary_Editor, RPGMaker_GTool, RPGMaker_GTool_Image, NanoBanana_Image, Original, SDLXLIFF Editing v2,
+  Subtitle Translation; RPGMaker_GTool too, because its prompt is the numbered [N] game-tool format). The
+  desktop combo and Settings › Profiles & prompts keep the stored order.
+- Chat settings › Model & prompt adds the profile's prompt card, **Edit prompt** (`PromptEditorSheet`; editing
+  changes the shared profile, the desktop model) and **New profile…** (a copy of the current profile). The
+  desktop Direct Text dialog only has Skip prompt profile. Edits from This chat / This series go through
+  `ProfileService(..., keep_active=True)` and never change `active_profile` or `text_extraction_method`; All
+  chats selects the new profile as the active one with the desktop extraction-method switch. Rename and delete
+  stay under Manage… (Settings › Profiles & prompts). All writes go through the shared core, so only the desktop
+  `save_profiles` keys are written and config.json gets no new key.
+- Chats and series follow a profile renamed on the device; a profile that is gone (deleted here, on the desktop,
+  by an import or a restore) is cleared from the chat sidecar / mobile_series.json, so the chat inherits again,
+  with one snackbar (`ChatFeature.reconcile_profile_overrides`, on every `prompt_profiles` change and once at
+  startup). There is no silent fallback to Universal.
+- Settings › Profile & System Prompt (the generated `main.prompt` section, whose `prompt_profiles` tile is raw
+  JSON) links to Profiles & prompts and Assistant prefill.
+- Tests: tests_host/test_chat_prompts.py.
+
+### Drawer / sidebar footer: API keys button, pinned footer (mobile only)
+
+- The footer is status chip · Settings · **API keys** (🔑, `/settings/keys`, the Multi-Key Manager) · Help. Key
+  settings are not in Chat settings. Back from Keys returns through Settings, the drawer's static-parent rule
+  (Help › Logs & diagnostics, About and the status chip's Accounts do the same).
+- Phone: Flet 1.0.3 builds the drawer as Flutter's NavigationDrawer, whose own list pads its end by the
+  navigation bar. The content box is now the page height minus the top and bottom insets
+  (`AppShell._drawer_height`, re-fitted on `page.on_media_change`), so that outer list can no longer scroll the
+  footer away or put it under the navigation bar. The tablet sidebar was already pinned (now tested).
+- Tests: tests_host/test_sidebar_footer.py.
+
+### Chat header and the Android UI tests (mobile only; test-only otherwise)
+
+- `ui/chat/header.py`: the subtitle Text is a loose Flexible (`expand=True, expand_loose=True`) in the tight
+  subtitle Row, so it ellipsizes inside the app bar title slot and the "custom" chip stays whole (at 320 dp the
+  Row overflowed by 148 px; a RenderFlex overflow fails the Flutter test and clipped the text for users).
+- Android UI tests (`flet test`, the optional android-ui-tests job): `tests/conftest.py` patches the generated
+  driver on device runs only (`tests/driver_patch.py`: `shouldPropagateDevicePointerEvents` so adb swipes reach
+  the app, `hitTestWarningShouldBeFatal` so a missed tap fails and is retried) and uninstalls a leftover app;
+  `UiDriver.pump` sends int milliseconds; `dismiss_welcome(first_run=True)` waits for the Welcome of a fresh
+  install. tests_host/test_ui_flows.py runs both flows at 320 dp with a check for unflexed ellipsizing Row texts.

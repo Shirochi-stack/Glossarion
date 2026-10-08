@@ -92,12 +92,18 @@ class ChatHeader:
         self.target_sep = ft.TextSpan(" · ")
         self.target_span = ft.TextSpan("", on_click=lambda e: self._open("language"))
         self.caret_span = ft.TextSpan(" ▾", on_click=lambda e: self._open("model"))
+        # A loose Flexible in the subtitle row (expand + expand_loose): the row gives a non-flex
+        # child unbounded width, so without it the ellipsis never applied and the row overflowed
+        # the app bar's title slot on phones narrower than ~470 dp (88 dp wide at 320 dp), hiding
+        # the "custom" chip. Loose, so a short subtitle keeps the chip right after it.
         self.subtitle = ft.Text(
             spans=[self.model_span, self.profile_sep, self.profile_span, self.target_sep, self.target_span, self.caret_span],
             theme_style=ft.TextThemeStyle.LABEL_SMALL,
             color=muted,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
+            expand=True,
+            expand_loose=True,
         )
         self.custom_badge = ft.Container(
             content=ft.Text("custom", theme_style=ft.TextThemeStyle.LABEL_SMALL),

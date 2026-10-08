@@ -236,7 +236,8 @@ def test_curated_sections_regroup_without_losing_a_key():
     assert {"output_language", "output_mode", "delay", "thread_submission_delay", "multipass_mode"} <= set(td.keys)
     assert dict(td.headings)["delay"] == "Pacing" and dict(td.headings)["output_mode"] == "Language & output mode"
     assert {"use_rolling_summary", "rolling_summary_system_prompt", "contextual"} <= set(sections["context_memory"].keys)
-    assert {"enable_thoughts", "enable_gpt_thinking", "thinking_budget"} <= set(sections["thinking"].keys)
+    assert {"enable_gpt_thinking", "thinking_budget"} <= set(sections["thinking"].keys)
+    assert "enable_thoughts" in sections["other.response"].keys  # devfix4: folded into the Streaming switch
     assert {"disable_gemini_safety", "gemini_service_tier"} <= set(sections["provider_options"].keys)
     assert {"pdf_extraction_workers", "enable_pdf_output"} <= set(sections["pdf"].keys)
     assert dict(sections["other.response"].headings)["max_retries"] == "Retries"

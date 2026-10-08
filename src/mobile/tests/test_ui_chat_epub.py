@@ -11,7 +11,8 @@ import flows
 
 
 async def test_chat_epub_to_library(ui, device_files, fake_server):
-    await flows.dismiss_welcome(ui, timeout=90)
+    # every device test is a fresh install: wait for the Welcome (pushed after the home) and skip it
+    await flows.dismiss_welcome(ui, timeout=180, first_run=True)
     await flows.wait_home(ui)
     await flows.import_desktop_config(ui)
     await flows.chat_translate_and_migrate(ui)

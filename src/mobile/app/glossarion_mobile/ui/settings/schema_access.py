@@ -33,6 +33,7 @@ from glossarion_mobile.ui.settings.model import (
     CURATED_REMNANT_GROUPS,
     CURATED_SECTIONS,
     CURATED_SOURCE_PREFIXES,
+    FOLDED_KEYS,
     SECTION_ORDER,
     SECTION_TITLES,
     VIRTUAL_SPECS,
@@ -43,15 +44,20 @@ from glossarion_mobile.ui.settings.model import (
     ordered_groups,
     plain_text,
     spec_attr,
+    virtual_writes,
 )
 from glossarion_mobile.job_kinds.qa import MOBILE_QUICK_SAMPLE_SIZE, QUICK_SAMPLE_KEY
+from glossarion_mobile.state.setting_writes import MOBILE_STREAMING_DEFAULT, STREAMING_KEYS
 
 __all__ = ["MOBILE_DISPLAY_DEFAULTS", "SchemaAccess", "SearchHit", "SectionInfo", "UNAVAILABLE_REASON",
            "curate_sections"]
 
 #: Display defaults that differ on Glossarion Mobile (owner 2026-10-08); the QA job applies the same
-#: value when config.json has none, so Settings › QA shows what the scans use ("Reset" means 0).
-MOBILE_DISPLAY_DEFAULTS = {".".join(QUICK_SAMPLE_KEY): MOBILE_QUICK_SAMPLE_SIZE}
+#: value when config.json has none, so Settings › QA shows what the scans use ("Reset" means 0). The
+#: streaming toggles are ON when absent: every job's config snapshot gets the same default
+#: (``setting_writes.with_mobile_streaming_defaults``), the Streaming switch shows it.
+MOBILE_DISPLAY_DEFAULTS = {".".join(QUICK_SAMPLE_KEY): MOBILE_QUICK_SAMPLE_SIZE,
+                           **{key: MOBILE_STREAMING_DEFAULT for key in STREAMING_KEYS}}
 
 log = logging.getLogger("glossarion.settings")
 
@@ -310,12 +316,63 @@ class SchemaAccess:
         return config_path(spec) if spec is not None else (key,)
 
     def specs_for(self, section: SectionInfo) -> list[Any]:
+        """The specs a section page shows a tile for: a key folded into a virtual control of the same section
+        (the Streaming switch's toggles, ``model.FOLDED_KEYS``) has none of its own."""
         out = []
         for key in section.keys:
+            if FOLDED_KEYS.get(key) in section.keys:
+                continue
             spec = self.spec(key)
             if spec is not None:
                 out.append(spec)
         return out
+
+    # ---- virtual controls (U9 Context mode, the mobile Streaming switch) -----------------------
+
+    @staticmethod
+    def display_key(key: str) -> str:
+        """The key of the tile that shows ``key``: its virtual control when it is folded into one."""
+        return FOLDED_KEYS.get(str(key), str(key))
+
+    @staticmethod
+    def represented_keys(key: str) -> tuple:
+        """The config keys the tile ``key`` stands for (``model.virtual_writes``; ``(key,)`` for a plain one)."""
+        return virtual_writes(str(key))
+
+    def is_modified(self, store: Any, key: str) -> bool:
+        """A tile's "modified" dot / the "Modified" search filter: any key it stands for is stored and differs
+        from its display default."""
+        try:
+            return any(store.is_modified(self.path_of(name)) for name in self.represented_keys(key))
+        except Exception:
+            return False
+
+    def is_stored(self, store: Any, key: str) -> bool:
+        """Any key the tile ``key`` stands for is in config.json (a section reset has something to remove)."""
+        try:
+            return any(store.has(self.path_of(name)) for name in self.represented_keys(key))
+        except Exception:
+            return False
+
+    @staticmethod
+    def virtual_summary(store: Any, key: str) -> Optional[str]:
+        """The value line of a virtual control for lists that show no tile (search results): Streaming
+        "On" / "Off" / "Custom · N of 4 on", the Context mode label; None for a plain key."""
+        spec = VIRTUAL_SPECS.get(str(key))
+        kind = getattr(spec, "virtual", "") if spec is not None else ""
+        try:
+            if kind == "streaming":
+                from glossarion_mobile.state.setting_writes import streaming_summary
+
+                return streaming_summary(store)
+            if kind == "context_mode":
+                from glossarion_mobile.state.setting_writes import context_mode_of
+
+                mode = context_mode_of(store.snapshot())
+                return next((label for value, label in spec.choices if value == mode), mode)
+        except Exception:
+            log.debug("virtual summary of %s failed", key, exc_info=True)
+        return None
 
     @staticmethod
     def _marker(spec: Any) -> tuple[Optional[str], Optional[str]]:
@@ -534,6 +591,9 @@ class SchemaAccess:
         hits: list[SearchHit] = []
         seen: set[str] = set()
         for spec in specs:
+            folded = FOLDED_KEYS.get(str(spec_attr(spec, "key", "") or ""))
+            if folded in VIRTUAL_SPECS:  # one hit for the control that shows it (the Streaming switch)
+                spec = VIRTUAL_SPECS[folded]
             hit = self._hit(spec)
             if hit is None or hit.key in seen:
                 continue

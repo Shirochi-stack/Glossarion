@@ -4,7 +4,7 @@ Glossarion translates novels, documents, subtitles, images and manga with the AI
 
 ## 1. Getting started
 
-1. **Sign in or add a key.** The default model is ChatGPT (`authgpt/…`): the Welcome guide offers **Sign in with ChatGPT**. Any other provider works with its API key (**Settings › API keys**) or its own sign-in (**Settings › Accounts**: Gemini, Claude, Grok, …).
+1. **Sign in or add a key.** The default model is ChatGPT (`authgpt/…`): the Welcome guide offers **Sign in with ChatGPT**. Any other provider works with its API key (**Settings › API keys**, or the 🔑 key button at the bottom of the drawer) or its own sign-in (**Settings › Accounts**: Gemini, Claude, Grok, …).
 2. **Pick a model.** Tap the model name in the chat header. Search the list, star favourites, or type any model id and choose **Use “…”** (the desktop model box accepts any id the same way).
 3. **Pick the target language and profile** in the same sheet (Profile and Language tabs).
 
@@ -14,7 +14,7 @@ Run **About › Guides › Run the Welcome guide again** at any time.
 
 The home screen is a chat, like the desktop Direct Text window.
 
-- **Type or paste text** and tap **Send**: the reply streams in.
+- **Type or paste text** and tap **Send**: the reply streams in (Settings › Response handling & retries › Streaming; when it is off, replies, book jobs and the Reader's live translation arrive when they are done).
 - **Attach a file** with **＋ › Files / From Library / Photos / Clipboard**. EPUB, TXT, PDF, DOCX, HTML, subtitles (SRT, ASS, VTT, LRC), SDLXLIFF, ZIP and images are accepted. An attachment becomes a **job card**: Plan → Queued → Running → Result.
 - **Library books in the chat:** tap **＋ › From Library**, the **From Library** chip in an empty chat, or type `/library <title>` to attach a Library book without leaving the chat (search, newest first, with covers). **Send** continues the book in its own workspace (Save to: Library). Long-press a book to pick several; **Use N** makes one batch.
 - When a book attachment finishes translating, it moves into the **Library** by itself ("Added to the Library" · Open book). There is no Migrate step. **Attachments** lists only workspaces still waiting: a job is running, the run can be resumed, or a different Library book has the same name (⋯ › Merge into Library…).

@@ -4,11 +4,21 @@ Top to bottom: header row (Halgakos avatar, "Glossarion", New chat, New scratch
 chat) · unified search field (results replace the body, grouped Chats · Books ·
 Glossaries · Files) · destination chips Library · Jobs (badge) · Glossaries ·
 Tools · Pinned (hidden when empty) · Recents (Today / Yesterday / Previous 7
-days / <Month YYYY>) · footer: status chip, Settings, Help. Settings lives in
-the footer, not among the destination chips (§1.3 item 3).
+days / <Month YYYY>) · footer: status chip, Settings, API keys, Help. Settings
+lives in the footer, not among the destination chips (§1.3 item 3); so does
+the Keys button (owner request 17, device report 2026-10-08): it opens the
+Multi-Key Manager (``settings.keys``, ``ui/screens/keys.py``) the way Settings
+opens the Settings home, and key settings are not part of Chat settings.
+
+The footer is pinned: ``content`` is a non-scrolling ``Column`` whose only
+scrolling child is ``body`` (the chat list / search results, ``expand``), with
+the header, search field and destination chips above it and the footer below
+it. Only the chat list scrolls; the footer never moves with it.
 
 The same content object is wrapped in ``NavigationDrawer(controls=…)`` on
-phones and in a persistent ``Container`` on tablets (AppShell decides).
+phones and in a persistent ``Container`` on tablets (AppShell decides; on
+phones it sizes the box to the drawer's own list viewport, so that list never
+scrolls the whole content, footer included, see ``AppShell._drawer_height``).
 Chat row long-press opens an ActionSheet (``Chip`` has no long-press in Flet
 1.0.3; ``ListTile.on_long_press`` is used). Rows come from the placeholder
 ``InMemoryChatIndex`` until ``direct_text_store`` backs it (U3).
@@ -47,8 +57,8 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
-__all__ = ["DESTINATIONS", "ChatDrawer", "SEARCH_DEBOUNCE", "SEARCH_GROUPS", "SEARCH_LIMIT", "SearchHit",
-           "drawer_status"]
+__all__ = ["DESTINATIONS", "ChatDrawer", "KEYS_ROUTE", "SEARCH_DEBOUNCE", "SEARCH_GROUPS", "SEARCH_LIMIT",
+           "SearchHit", "drawer_status"]
 
 log = logging.getLogger("glossarion.drawer")
 
@@ -59,6 +69,8 @@ DESTINATIONS = (
     ("glossary", "Glossaries", "SPELLCHECK", "glossary"),
     ("tools", "Tools", "HANDYMAN", "tools"),
 )
+#: The footer's Keys button: the Multi-Key Manager (API keys of every pool).
+KEYS_ROUTE = "settings.keys"
 # (id, label, milestone when results appear; None = searchable now). Books, Glossaries and Files
 # search through the providers their features register (``ChatDrawer.register_search``).
 SEARCH_GROUPS = (
@@ -107,6 +119,7 @@ class ChatDrawer:
         on_status: Optional[Callable[..., Any]] = None,
         on_settings: Optional[Callable[..., Any]] = None,
         on_help: Optional[Callable[..., Any]] = None,
+        on_keys: Optional[Callable[..., Any]] = None,  # default: on_navigate(KEYS_ROUTE), like a destination
         clock: Callable[[], float] = time.time,
         dark: bool = False,
     ) -> None:
@@ -177,19 +190,28 @@ class ChatDrawer:
         self.status_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         self.status_chip = ft.Chip(label=self.status_text, leading=self.status_icon, on_click=on_status, key="drawer-status")
         self.settings_button = ft.IconButton(
-            icon=ft.Icons.SETTINGS, tooltip="Settings", on_click=on_settings, size_constraints=HIT_TARGET
+            icon=ft.Icons.SETTINGS, tooltip="Settings", on_click=on_settings, size_constraints=HIT_TARGET,
+            key="drawer-settings",
         )
-        self.help_button = ft.IconButton(icon=ft.Icons.HELP_OUTLINE, tooltip="Help", on_click=on_help, size_constraints=HIT_TARGET)
+        self.keys_button = ft.IconButton(
+            icon=ft.Icons.KEY, tooltip="API keys", on_click=on_keys or (lambda e: self._navigate(KEYS_ROUTE)),
+            size_constraints=HIT_TARGET, key="drawer-keys",
+        )
+        self.help_button = ft.IconButton(icon=ft.Icons.HELP_OUTLINE, tooltip="Help", on_click=on_help,
+                                         size_constraints=HIT_TARGET, key="drawer-help")
         self.footer = ft.Container(
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
             padding=ft.Padding.only(left=8, right=4),
             content=ft.Row(
-                [ft.Container(content=self.status_chip, expand=True), self.settings_button, self.help_button,
-                 ft.Container(width=0, height=tokens.SIZES["drawer_footer"])],  # 56 dp minimum
+                [ft.Container(content=self.status_chip, expand=True), self.settings_button, self.keys_button,
+                 self.help_button, ft.Container(width=0, height=tokens.SIZES["drawer_footer"])],  # 56 dp minimum
                 spacing=0,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
+            key="drawer-footer",
         )
+        # Not scrollable itself: ``body`` (expand) is the one scrolling part, so the footer stays pinned
+        # at the bottom and the header, search and chips at the top (owner request 17).
         self.content = ft.Column(
             [
                 self.header,

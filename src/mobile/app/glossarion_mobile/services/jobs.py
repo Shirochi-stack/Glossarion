@@ -1850,7 +1850,10 @@ class JobService:
         overrides = job.spec.params.get("config_overrides")
         if isinstance(overrides, Mapping):
             config.update(copy.deepcopy(dict(overrides)))
-        return config
+        # the mobile Streaming default (absent toggles ON) and the thoughts lock; config.json is untouched
+        from glossarion_mobile.state.setting_writes import with_mobile_streaming_defaults
+
+        return with_mobile_streaming_defaults(config)
 
     @contextlib.contextmanager
     def _watching(self, job: _Job, host: _JobHost) -> Iterator[None]:

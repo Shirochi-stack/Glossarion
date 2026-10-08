@@ -1156,7 +1156,7 @@ def test_real_schema_renders_every_section(tmp_path):
             page.views[0].controls[:] = [screen.get_body()]
             page.update()
             for key in section.keys:
-                if schema.spec(key) is not None:
+                if schema.spec(key) is not None and schema.display_key(key) == key:  # devfix4: folded keys
                     tile = screen.tiles[key]
                     assert tile.kind in TILE_CLASSES
                     available, reason = schema.availability(key)

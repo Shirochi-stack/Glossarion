@@ -114,6 +114,7 @@ jobs:
           tests/test_update_core.py \
           tests/test_browser_driver.py \
           tests/test_schema_p5b.py \
+          tests/test_other_settings_streaming_texts.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \

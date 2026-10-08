@@ -12,6 +12,11 @@ button label), ``contains`` (substring of a text), ``tooltip``. ``wait`` polls w
 (never ``pump_and_settle``: progress rings never settle). Native screens (the Android file
 picker) are outside Flutter; a ``picker`` object handles them (``android_device.DocumentsPicker``
 on a device, the host's stub picker in host runs).
+
+On a device, Flutter only builds the list rows in the viewport and a tap needs its target to be
+hit-testable (``driver_patch`` makes a missed tap an error): ``wait(scroll=True)`` swipes the
+list up between polls, and ``tap`` / ``enter`` scroll a step (or pump) and retry while the target
+is found but would not receive the pointer yet.
 """
 
 from __future__ import annotations
@@ -23,9 +28,21 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-__all__ = ["DEFAULT_TIMEOUT", "UiDriver", "UiTimeout"]
+__all__ = ["DEFAULT_TIMEOUT", "RETRYABLE_ACTION_ERRORS", "UiDriver", "UiTimeout", "retryable_action_error"]
 
 DEFAULT_TIMEOUT = float(os.environ.get("GLOSSARION_UI_TIMEOUT", "60"))
+
+#: Errors a device tap / text entry can hit while its target is still settling; ``UiDriver`` scrolls
+#: a step (or pumps) and retries them until the action's deadline:
+#: * Flutter's hit-test check (``WidgetController.hitTestWarningShouldBeFatal``, set by
+#:   ``driver_patch``): the target is built but would not receive the pointer (a list row below the
+#:   fold whose card is already on screen, a route mid-transition);
+#: * the finder, which Flutter evaluates again at tap time, matched nothing (a rebuild in between).
+RETRYABLE_ACTION_ERRORS = (
+    "would not receive pointer events",
+    "would not hit test",
+    "could not find any matching widgets",
+)
 
 
 class UiTimeout(AssertionError):
@@ -34,6 +51,16 @@ class UiTimeout(AssertionError):
 
 def _describe(**spec: Any) -> str:
     return ", ".join(f"{k}={v!r}" for k, v in spec.items() if v is not None)
+
+
+def retryable_action_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(marker in text for marker in RETRYABLE_ACTION_ERRORS)
+
+
+def _first_line(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return (text.splitlines() or [type(exc).__name__])[0][:200]
 
 
 class UiDriver:
@@ -54,12 +81,11 @@ class UiDriver:
     # ---- primitives -------------------------------------------------------------------------
 
     async def pump(self, ms: Optional[int] = None) -> None:
-        from datetime import timedelta
-
-        try:
-            await self.t.pump(timedelta(milliseconds=ms if ms is not None else self.poll_ms))
-        except TypeError:  # a tester without duration support
-            await self.t.pump()
+        """Pump frames for ``ms`` milliseconds (default ``poll_ms``). Flet's ``DurationValue``: an
+        int is milliseconds. (A ``timedelta`` is not JSON-serialisable over the RemoteTester
+        socket: it raised after the reply future was registered, so every poll leaked a future and
+        pumped with no delay.)"""
+        await self.t.pump(int(self.poll_ms if ms is None else ms))
 
     async def find(self, *, key: Any = None, text: Optional[str] = None, contains: Optional[str] = None,
                    tooltip: Optional[str] = None) -> Any:
@@ -89,8 +115,8 @@ class UiDriver:
         """The finder once it matches (``gone``: once it no longer matches). ``scroll``: the target
         may sit below the fold of a list; swipe up between polls (a device only: on the host every
         row is in the tree)."""
-        deadline = time.monotonic() + (DEFAULT_TIMEOUT if timeout is None else timeout)
-        polls = 0
+        budget = DEFAULT_TIMEOUT if timeout is None else timeout
+        deadline = time.monotonic() + budget
         while True:
             finder = await self.find(**spec)
             matched = int(getattr(finder, "count", 0)) > 0
@@ -99,10 +125,9 @@ class UiDriver:
             if time.monotonic() >= deadline:
                 if not quiet:
                     await self.screenshot("timeout")
-                raise UiTimeout(f"{'still found' if gone else 'not found'} after {timeout or DEFAULT_TIMEOUT:.0f}s: "
+                raise UiTimeout(f"{'still found' if gone else 'not found'} after {budget:.0f}s: "
                                 f"{_describe(**spec)}")
-            polls += 1
-            if scroll and not gone and self._scroll is not None and polls % 2 == 0:
+            if scroll and not gone and self._scroll is not None:
                 self.step(f"scroll for {_describe(**spec)}")
                 await self._scroll()
             await self.pump()
@@ -119,19 +144,44 @@ class UiDriver:
                 raise UiTimeout("none found: " + " | ".join(_describe(**s) for s in specs))
             await self.pump()
 
+    async def _act(self, verb: str, action: Callable[[Any], Awaitable[Any]], *, timeout: Optional[float],
+                   index: int, scroll: bool, spec: dict) -> None:
+        """Find (scrolling if asked), then act. A retryable miss (``RETRYABLE_ACTION_ERRORS``)
+        scrolls one step (or just pumps) and tries again until the deadline."""
+        budget = DEFAULT_TIMEOUT if timeout is None else timeout
+        deadline = time.monotonic() + budget
+        while True:
+            finder = await self.wait(timeout=max(0.0, deadline - time.monotonic()), scroll=scroll, **spec)
+            target = finder.at(index) if index else finder.first
+            self.step(f"{verb} {_describe(**spec)}")
+            try:
+                await action(target)
+            except Exception as exc:
+                if not retryable_action_error(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    await self.screenshot("timeout")
+                    raise UiTimeout(f"{verb} kept missing for {budget:.0f}s: {_describe(**spec)}: "
+                                    f"{_first_line(exc)}") from exc
+                scrolling = scroll and self._scroll is not None
+                self.step(f"{verb} missed ({_first_line(exc)}); {'scroll' if scrolling else 'pump'} and retry")
+                if scrolling:
+                    await self._scroll()
+                await self.pump()
+                continue
+            await self.pump(150)
+            return
+
     async def tap(self, *, timeout: Optional[float] = None, index: int = 0, scroll: bool = False,
                   **spec: Any) -> None:
-        finder = await self.wait(timeout=timeout, scroll=scroll, **spec)
-        target = finder.at(index) if index else finder.first
-        self.step(f"tap {_describe(**spec)}")
-        await self.t.tap(target)
-        await self.pump(150)
+        await self._act("tap", self.t.tap, timeout=timeout, index=index, scroll=scroll, spec=spec)
 
-    async def enter(self, value: str, *, timeout: Optional[float] = None, **spec: Any) -> None:
-        finder = await self.wait(timeout=timeout, **spec)
-        self.step(f"enter {value!r} into {_describe(**spec)}")
-        await self.t.enter_text(finder.first, value)
-        await self.pump(150)
+    async def enter(self, value: str, *, timeout: Optional[float] = None, scroll: bool = False,
+                    **spec: Any) -> None:
+        async def enter_text(target: Any) -> None:
+            await self.t.enter_text(target, value)
+
+        await self._act(f"enter {value!r} into", enter_text, timeout=timeout, index=0, scroll=scroll, spec=spec)
 
     async def back(self) -> None:
         self.step("back")

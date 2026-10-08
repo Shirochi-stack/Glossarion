@@ -24,6 +24,14 @@ exactly the keys the desktop writes (``prompt_profiles``, ``active_profile``,
 a profile edited on the phone round-trips into a desktop config unchanged.
 
 Routes carry an opaque profile id (``profile_id(name)``: 12 hex of SHA-1), never the name.
+
+Shared with the chat (device fixes, owner #15/#16): ``ProfileService.listing`` is the one profile
+list (the chat pickers order it with ``chat_profile_order``: translation profiles first, the
+task-specific built-ins under "Specialised"); ``keep_active=True`` edits a profile without
+switching the global/desktop active profile (Chat settings › This chat); ``ask_profile_name``,
+``profile_badges``, ``prompt_preview`` and ``profile_prompt_card`` are the pieces Chat settings
+reuses; ``follow_profile`` tells where a chat's or series' stored profile went after a rename
+(noted by ``ProfileService.save``) or a delete (None: inherit).
 """
 
 from __future__ import annotations
@@ -52,14 +60,26 @@ from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = [
     "PROFILE_CONFIG_KEYS",
+    "SPECIALISED_GROUP",
+    "SPECIALISED_PROFILES",
+    "TRANSLATION_GROUP",
     "ProfileDetailScreen",
     "ProfileList",
     "ProfileService",
     "ProfilesCore",
     "ProfilesScreen",
     "ProfilesUnavailable",
+    "ask_profile_name",
+    "chat_profile_order",
     "extraction_note",
+    "follow_profile",
+    "grouped_profile_names",
+    "note_renamed",
+    "profile_badges",
+    "profile_group",
     "profile_id",
+    "profile_prompt_card",
+    "prompt_preview",
 ]
 
 log = logging.getLogger("glossarion.profiles")
@@ -74,6 +94,77 @@ PROFILE_CONFIG_KEYS = (
     "text_extraction_method",
 )
 ROLE_KEY = "system_prompt_to_user"
+
+#: Built-in profiles made for one task (refinement, manga, glossary cleanup, game tools, image
+#: generation, SDLXLIFF, subtitles, pass-through). The chat's profile pickers list them after the
+#: translation profiles under "Specialised" (owner decision 2026-10-08); Settings › Profiles &
+#: prompts keeps the desktop order of everything, like the desktop Profile combo.
+SPECIALISED_PROFILES = frozenset((
+    "Refinement",
+    "Manga_JP",
+    "Manga_KR",
+    "Manga_CN",
+    "Glossary_Editor",
+    "RPGMaker_GTool",
+    "RPGMaker_GTool_Image",
+    "NanoBanana_Image",
+    "Original",
+    "SDLXLIFF Editing v2",
+    "Subtitle Translation",
+))
+TRANSLATION_GROUP = "Translation"
+SPECIALISED_GROUP = "Specialised"
+
+
+def profile_group(name: str) -> str:
+    """``SPECIALISED_GROUP`` for a task-specific built-in, else ``TRANSLATION_GROUP`` (custom profiles too)."""
+    return SPECIALISED_GROUP if str(name) in SPECIALISED_PROFILES else TRANSLATION_GROUP
+
+
+def grouped_profile_names(names: Any) -> list:
+    """``[(group title, [names])]``: translation profiles first, then "Specialised"; each group keeps the
+    listing's (desktop) order and an empty group is left out."""
+    groups: dict = {TRANSLATION_GROUP: [], SPECIALISED_GROUP: []}
+    for name in names or ():
+        groups[profile_group(name)].append(name)
+    return [(title, items) for title, items in groups.items() if items]
+
+
+def chat_profile_order(names: Any) -> list:
+    """The names in the chat pickers' order (``grouped_profile_names`` flattened)."""
+    return [name for _title, items in grouped_profile_names(names) for name in items]
+
+
+#: Profiles renamed on this device (old name -> new name). ``ProfileService.save`` notes a rename before
+#: the write reaches config.json, so a ``prompt_profiles`` observer (the chat feature) can move the chats
+#: and series that use the old name to the new one (``follow_profile``).
+_RENAMED: dict = {}
+
+
+def note_renamed(old: Any, new: Any) -> None:
+    if old and new and str(old) != str(new):
+        _RENAMED[str(old)] = str(new)
+
+
+def follow_profile(name: Any, names: Any) -> Optional[str]:
+    """What a chat's or series' stored profile choice means now: ``name`` while it exists, the profile it
+    was renamed to on this device (following renames of renames), else None: the profile is gone and the
+    chat inherits the series / All chats profile (never a silent first profile)."""
+    known = set(names or ())
+    current = str(name or "")
+    seen: set = set()
+    while current and current not in known:
+        if current in seen:
+            return None
+        seen.add(current)
+        current = _RENAMED.get(current, "")
+    return current or None
+
+
+def prompt_preview(text: Any, lines: int = 3) -> str:
+    """The first ``lines`` non-empty lines of a prompt (stripped), or "(empty)"."""
+    picked = [line.strip() for line in str(text or "").splitlines() if line.strip()][:max(1, int(lines))]
+    return "\n".join(picked) if picked else "(empty)"
 
 
 class ProfilesUnavailable(RuntimeError):
@@ -109,7 +200,10 @@ class ProfileList:
         return name in self.protected
 
     def is_modified(self, name: str) -> bool:
-        return name in self.defaults and self.texts.get(name, "") != self.defaults.get(name, "")
+        # outer whitespace does not count: the shared save_profile strips what it saves (desktop too), so
+        # a built-in saved back unchanged (or "Reset to default" + Save in an editor) is not "modified"
+        return name in self.defaults and \
+            str(self.texts.get(name, "") or "").strip() != str(self.defaults.get(name, "") or "").strip()
 
     def name_for(self, pid: str) -> Optional[str]:
         for name in self.names:
@@ -378,24 +472,50 @@ class ProfileService:
     def _config(self) -> dict:
         return self.store.snapshot() if self.store is not None else {}
 
+    def core_listing(self) -> Optional[ProfileList]:
+        """The listing desktop start-up builds (the shared core), or None when the core cannot run here."""
+        try:
+            return self.core.listing(self.core.state(self._config()))
+        except ProfilesUnavailable:
+            return None
+
     def listing(self) -> ProfileList:
         """Blocking-light (pure dict work): the profiles as the desktop shows them."""
+        listing = self.core_listing()
+        if listing is not None:
+            return listing
         config = self._config()
-        try:
-            return self.core.listing(self.core.state(config))
-        except ProfilesUnavailable:
-            profiles = config.get("prompt_profiles") if isinstance(config.get("prompt_profiles"), dict) else {}
-            return ProfileList(names=list(profiles), texts=dict(profiles), active=str(config.get("active_profile") or ""))
+        profiles = config.get("prompt_profiles") if isinstance(config.get("prompt_profiles"), dict) else {}
+        return ProfileList(names=list(profiles), texts=dict(profiles), active=str(config.get("active_profile") or ""))
 
-    def _run(self, op: Callable[[Any, dict], Any], *, string_is_error: bool = False) -> tuple[Any, list]:
+    def _run(self, op: Callable[[Any, dict], Any], *, string_is_error: bool = False, keep_active: bool = False,
+             before_write: Optional[Callable[[Any], Any]] = None) -> tuple[Any, list]:
+        """Run one core operation on a config copy and write the changed desktop keys.
+
+        ``keep_active``: the operation edits a profile without choosing it (Chat settings › This chat):
+        ``active_profile`` and ``text_extraction_method`` keep their stored values (an absent key stays
+        absent) - unless the profile in use (the desktop start-up rule's choice) was renamed or deleted,
+        where the core's choice stands like on the desktop. ``before_write(result)`` runs once the
+        operation succeeded, before config.json observers hear of it."""
         config = self._config()
         before = copy.deepcopy(config)
         state = self.core.state(config)
+        in_use = self.core._active_of(state)
         result = op(state, config)
         error = _error_of(result, string_is_error=string_is_error)
         if error:
             raise ValueError(error)
         self.core.persist(state, config)
+        if keep_active:
+            profiles = config.get("prompt_profiles")
+            if isinstance(profiles, Mapping) and in_use in profiles:
+                for key in ("active_profile", "text_extraction_method"):
+                    if key in before:
+                        config[key] = before[key]
+                    else:
+                        config.pop(key, None)
+        if before_write is not None:
+            before_write(result)
         updates = {key: config[key] for key in PROFILE_CONFIG_KEYS
                    if key in config and (key not in before or before[key] != config[key])}
         changed = self.store.set_many(updates) if updates else []
@@ -405,44 +525,61 @@ class ProfileService:
         _result, changed = self._run(lambda state, config: self.core.select(state, name, config))
         return changed
 
-    def save(self, source: str, name: str, content: str) -> str:
-        """Desktop Save Profile: rename a custom profile, copy a built-in under a new name."""
+    def save(self, source: str, name: str, content: str, *, keep_active: bool = False) -> str:
+        """Desktop Save Profile: rename a custom profile, copy a built-in under a new name. A rename is
+        noted (``note_renamed``) so chats and series using the old name follow it."""
         name = str(name or "").strip()
         if not name:
             raise ValueError("Profile cannot be empty.")
-        self._run(lambda state, config: self.core.save(state, source, name, content, config), string_is_error=True)
+        renamed: list = []
+
+        def op(state: Any, config: dict) -> Any:
+            had_source = source in self.core._profiles_of(state)
+            result = self.core.save(state, source, name, content, config)
+            after = self.core._profiles_of(state)
+            if had_source and source != name and source not in after and name in after:
+                renamed.append(source)
+            return result
+
+        self._run(op, string_is_error=True, keep_active=keep_active,
+                  before_write=lambda _result: [note_renamed(old, name) for old in renamed])
         return name
 
-    def save_as(self, name: str, content: str) -> str:
+    def save_as(self, name: str, content: str, *, keep_active: bool = False) -> str:
         """A new profile with ``content`` (``save_profile`` with the new name as its own source)."""
         name = str(name or "").strip()
         if not name:
             raise ValueError("Profile cannot be empty.")
         if name in self.listing().texts:
             raise ValueError("A profile with this name already exists. Choose another name.")
-        self._run(lambda state, config: self.core.save(state, name, name, content, config), string_is_error=True)
+        self._run(lambda state, config: self.core.save(state, name, name, content, config), string_is_error=True,
+                  keep_active=keep_active)
         return name
 
-    def duplicate(self, name: str) -> str:
-        listing = self.listing()
-        base = f"{name} (copy)"
-        candidate, n = base, 2
-        while candidate in listing.texts:
+    def copy_name(self, name: str, listing: Optional[ProfileList] = None) -> str:
+        """The first free "<name> (copy)" / "<name> (copy N)" (Duplicate's naming)."""
+        texts = (listing or self.listing()).texts
+        candidate, n = f"{name} (copy)", 2
+        while candidate in texts:
             candidate = f"{name} (copy {n})"
             n += 1
-        return self.save_as(candidate, listing.texts.get(name, ""))
+        return candidate
 
-    def new(self) -> str:
-        result, _changed = self._run(lambda state, config: self.core.new(state, config))
+    def duplicate(self, name: str, *, keep_active: bool = False) -> str:
+        listing = self.listing()
+        return self.save_as(self.copy_name(name, listing), listing.texts.get(name, ""), keep_active=keep_active)
+
+    def new(self, *, keep_active: bool = False) -> str:
+        result, _changed = self._run(lambda state, config: self.core.new(state, config), keep_active=keep_active)
         if isinstance(result, str) and result:
             return result
         return self.listing().active
 
-    def delete_or_reset(self, name: str) -> str:
+    def delete_or_reset(self, name: str, *, keep_active: bool = False) -> str:
         """``"reset"`` for a built-in (latest default prompt), ``"deleted"`` for a custom profile."""
         builtin = name in self.listing().protected
         result, _changed = self._run(lambda state, config: self.core.delete_or_reset(state, name, config),
-                                     string_is_error=True)
+                                     string_is_error=True, keep_active=keep_active)
         if isinstance(result, str) and result in ("reset", "deleted"):
             return result
         return "reset" if builtin else "deleted"
@@ -466,6 +603,151 @@ class ProfileService:
     def set_role_user(self, value: bool) -> None:
         if self.store is not None:
             self.store.set(ROLE_KEY, bool(value))
+
+
+# ==========================================================================================
+# Shared pieces (the Profiles screens and Chat settings)
+# ==========================================================================================
+
+
+def profile_badges(listing: ProfileList, name: str, *, show_active: bool = True) -> list:
+    """The "Active" pill and the dot of a built-in that differs from its default."""
+    badges: list = []
+    if show_active and name == listing.active:
+        badges.append(ft.Container(content=ft.Text("Active", theme_style=ft.TextThemeStyle.LABEL_SMALL,
+                                                   color=ft.Colors.ON_PRIMARY),
+                                   bgcolor=ft.Colors.PRIMARY, border_radius=8,
+                                   padding=ft.Padding.symmetric(horizontal=6, vertical=2)))
+    if listing.is_modified(name):
+        badges.append(ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.PRIMARY,
+                                   tooltip="Differs from the built-in default"))
+    return badges
+
+
+def ask_profile_name(
+    page: Any,
+    *,
+    title: str,
+    on_submit: Callable[[str], Optional[str]],
+    on_done: Optional[Callable[[str], Any]] = None,
+    label: str = "New profile name",
+    initial: str = "",
+    note: Optional[str] = None,
+    confirm_label: str = "Save",
+    push: Optional[Callable[..., Any]] = None,
+) -> tuple:
+    """The profile-name dialog (Profile page "Save as", Chat settings "New profile…"). ``on_submit(name)``
+    stores it and returns an error message (shown on the field, the dialog stays) or None (the dialog
+    closes, then ``on_done(name)`` runs). Returns ``(dialog, field)``."""
+    field_ = ft.TextField(label=label, value=initial or "", autofocus=True, dense=True)
+    done_names: list = []
+
+    def done(e: Any = None) -> None:
+        if done_names:  # a second tap while the dialog closes
+            return
+        name = str(field_.value or "")
+        error = on_submit(name)
+        if error:  # the error shows where the user is looking (under the dialog nothing is visible)
+            field_.error = str(error)
+            if push is not None:
+                push(field_)
+            else:
+                try:
+                    field_.update()
+                except Exception:
+                    pass
+            return
+        done_names.append(name.strip())
+        # By identity: on_submit may have shown a snackbar, which pop_dialog() would close instead.
+        close_dialog(page, dialog)
+        if on_done is not None:
+            on_done(name.strip())
+
+    content: Any = field_
+    if note:
+        content = ft.Column([ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                             field_], tight=True, spacing=8)
+    dialog = ft.AlertDialog(
+        title=ft.Text(title),
+        content=content,
+        actions=[ft.TextButton(content="Cancel", on_click=lambda e: close_dialog(page, dialog)),
+                 ft.FilledButton(content=confirm_label, on_click=done)],
+    )
+    if page is not None:
+        page.show_dialog(dialog)
+    return dialog, field_
+
+
+def profile_prompt_card(
+    listing: ProfileList,
+    name: str,
+    *,
+    role_user: bool = False,
+    skip: bool = False,
+    on_edit: Optional[Callable[[], Any]] = None,
+    on_new: Optional[Callable[[], Any]] = None,
+    on_manage: Optional[Callable[[], Any]] = None,
+    disabled_reason: Optional[str] = None,
+    missing: Optional[bool] = None,
+    mono: str = "monospace",
+    key: str = "profile-prompt-card",
+) -> ft.Control:
+    """One profile's prompt as a card (Chat settings › Model & prompt): the desktop role label
+    ("System prompt" / "User prompt", ``system_prompt_to_user``), Built-in / modified marks, the first lines,
+    the size, the extraction and skip notes, and Edit prompt · New profile… · Manage…. A profile that no
+    longer exists (``missing``; default: not in the listing) can only be replaced (Edit is off)."""
+    from glossarion_mobile.ui.settings.editors import count_label
+
+    missing = (name not in listing.texts) if missing is None else bool(missing)
+    text = str(listing.texts.get(name, "") or "")
+    builtin = listing.is_builtin(name) or name in listing.defaults
+    heading = ft.Row(
+        [ft.Text("User prompt" if role_user else "System prompt", theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
+                 expand=True),
+         *([ft.Text("Built-in", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)]
+           if builtin and not missing else []),
+         *([] if missing else profile_badges(listing, name, show_active=False))],
+        spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    rows: list = [heading]
+    if missing:
+        rows.append(ft.Text(f"The prompt profile '{name}' no longer exists. Choose another one, or reset this "
+                            "row to inherit.", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ERROR,
+                            key=f"{key}-missing"))
+    else:
+        rows.append(ft.Text(prompt_preview(text), font_family=mono, size=12, max_lines=3,
+                            overflow=ft.TextOverflow.ELLIPSIS, color=ft.Colors.ON_SURFACE_VARIANT,
+                            key=f"{key}-preview"))
+        rows.append(ft.Text(count_label(text), theme_style=ft.TextThemeStyle.LABEL_SMALL,
+                            color=ft.Colors.ON_SURFACE_VARIANT))
+        note = extraction_note(name)
+        if note:
+            rows.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
+    if skip:
+        rows.append(ft.Text("Skip prompt profile is on: runs ignore this prompt.",
+                            theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                            key=f"{key}-skip"))
+    rows.append(ft.Text("Profiles are shared: editing changes this profile everywhere it is used, including "
+                        "the desktop.", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
+    off = bool(disabled_reason)
+    rows.append(ft.Row(
+        [ft.TextButton(content="Edit prompt", icon=ft.Icons.EDIT_NOTE, on_click=lambda e: on_edit() if on_edit else None,
+                       disabled=off or missing or on_edit is None, key=f"{key}-edit"),
+         ft.TextButton(content="New profile…", icon=ft.Icons.ADD, on_click=lambda e: on_new() if on_new else None,
+                       disabled=off or on_new is None, key=f"{key}-new"),
+         ft.TextButton(content="Manage…", icon=ft.Icons.TUNE, on_click=lambda e: on_manage() if on_manage else None,
+                       disabled=on_manage is None, key=f"{key}-manage")],
+        wrap=True, spacing=0,
+    ))
+    if off:
+        rows.append(ReasonChip(reason=str(disabled_reason)))
+    return ft.Container(
+        content=ft.Column(rows, spacing=4, tight=True),
+        padding=ft.Padding.only(left=12, right=8, top=8, bottom=4),
+        border_radius=tokens.RADII["card"],
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        key=key,
+    )
 
 
 # ==========================================================================================
@@ -568,17 +850,8 @@ class ProfilesScreen(_ProfilesBase):
     def _row(self, name: str) -> ft.ListTile:
         listing = self.listing
         builtin = listing.is_builtin(name)
-        text = listing.texts.get(name, "") or ""
-        first = next((line.strip() for line in text.splitlines() if line.strip()), "(empty)")
-        badges: list[ft.Control] = []
-        if name == listing.active:
-            badges.append(ft.Container(content=ft.Text("Active", theme_style=ft.TextThemeStyle.LABEL_SMALL,
-                                                       color=ft.Colors.ON_PRIMARY),
-                                       bgcolor=ft.Colors.PRIMARY, border_radius=8,
-                                       padding=ft.Padding.symmetric(horizontal=6, vertical=2)))
-        if listing.is_modified(name):
-            badges.append(ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.PRIMARY,
-                                       tooltip="Differs from the built-in default"))
+        first = prompt_preview(listing.texts.get(name, ""), 1)
+        badges = profile_badges(listing, name)
         row = ft.ListTile(
             leading=ft.Icon(ft.Icons.VERIFIED_OUTLINED if builtin else ft.Icons.DESCRIPTION_OUTLINED,
                             tooltip="Built-in profile" if builtin else "Custom profile"),
@@ -870,32 +1143,15 @@ class ProfileDetailScreen(_ProfilesBase):
         return saved
 
     def ask_save_as(self) -> ft.AlertDialog:
-        field_ = ft.TextField(label="New profile name", autofocus=True, dense=True)
-        page = getattr(self.ctx, "page", None)
+        def submit(name: str) -> Optional[str]:
+            if self.save_as(name):
+                return None
+            # the page's error line is under the dialog: the field shows it
+            return self.error_text.value or "The profile could not be saved."
 
-        saved: list = []
-
-        def done(e: Any = None) -> None:
-            if saved:  # a second tap while the dialog closes
-                return
-            name = self.save_as(field_.value or "")
-            if name:
-                saved.append(name)
-                # By identity: save_as() has shown a snackbar, which pop_dialog() would close instead.
-                close_dialog(page, dialog)
-            else:  # the error shows where the user is looking (the page's error line is under the dialog)
-                field_.error = self.error_text.value or "The profile could not be saved."
-                self.push(field_)
-
-        dialog = ft.AlertDialog(
-            title=ft.Text("Save as"),
-            content=field_,
-            actions=[ft.TextButton(content="Cancel", on_click=lambda e: close_dialog(page, dialog)),
-                     ft.FilledButton(content="Save", on_click=done)],
-        )
+        dialog, field_ = ask_profile_name(getattr(self.ctx, "page", None), title="Save as", on_submit=submit,
+                                          push=self.push)
         self.save_as_dialog = (dialog, field_)
-        if page is not None:
-            page.show_dialog(dialog)
         return dialog
 
     def save_as(self, name: str) -> Optional[str]:

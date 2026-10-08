@@ -330,10 +330,10 @@ class DocumentBuilder:
         spread = rm.spread_for(layout)
         if layout == rm.LAYOUT_ALL:
             chapters = [(html_lib.escape(str(session.chapter_title(i) or ""), quote=False),
-                         sanitize_book_html(session.chapter_html(i, flavor))) for i in range(session.count)]
+                         sanitize_book_html(session.chapter_html(i))) for i in range(session.count)]
             body = tag_chapter_headings(doc.all_chapters_body(chapters), doc._get_theme())
         else:
-            body = doc.process_html(sanitize_book_html(session.chapter_html(index, flavor)))
+            body = doc.process_html(sanitize_book_html(session.chapter_html(index)))
             if chapter_body_empty(body):  # §7.4: never a blank themed page; the chrome (◀ ▶, Chapters) stays
                 body += (f'<p class="gl-empty-chapter" style="text-align:center;opacity:.7;margin-top:30vh">'
                          f'{html_lib.escape(EMPTY_CHAPTER_TEXT)}</p>')

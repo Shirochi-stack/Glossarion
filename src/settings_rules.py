@@ -36,7 +36,9 @@ desktop handlers and the mobile app read the same rules:
   (other_settings._set_output_mode and the Image Translation sub-settings),
   ``glossary_mode_from_display`` / ``glossary_mode_toggle_steps``
   (GlossaryManager_GUI update_auto_glossary_state). The desktop handlers
-  call these and keep their widget work.
+  call these and keep their widget work. Section 9b holds the streaming group's two dialog
+  notes (``STREAMING_TRUNCATION_WARNING`` / ``FORCED_STREAM_NOTE``, other_settings shows them) and
+  ``apply_streaming`` / ``streaming_mode``, the group as one switch (Glossarion Mobile).
 * ``evaluate(rule_id, config)``: the evaluator of ``settings_schema`` ``visible_if`` /
   ``locked_if`` rule ids (``lock:<key>`` -> lock reason or ''; visibility ids -> bool), and
   ``apply_change(config, key, value)`` for the controls whose change has side effects.
@@ -92,6 +94,9 @@ __all__ = [
     "LockInfo", "register_lock_rule", "lock_rules", "evaluate_locks",
     # thinking (other_settings)
     "THOUGHTS_LOCK_KEYS", "THOUGHTS_LOCK_REASON", "thoughts_lock_state", "apply_thoughts_lock", "thoughts_lock",
+    # streaming (other_settings texts; the Glossarion Mobile Streaming switch)
+    "STREAMING_TRUNCATION_WARNING", "FORCED_STREAM_NOTE", "STREAMING_ENV", "STREAMING_KEYS", "streaming_states",
+    "streaming_mode", "apply_streaming",
     # output mode (other_settings)
     "OUTPUT_MODES", "OUTPUT_MODE_INDEX", "OutputModeFlags", "normalize_output_mode", "output_mode_flags",
     "apply_output_mode", "current_output_mode", "output_mode_sub_settings",
@@ -1476,6 +1481,64 @@ def thoughts_lock(config):
         return {'enable_thoughts': LockInfo(locked=True, reason=THOUGHTS_LOCK_REASON, allowed=(enabled,),
                                             value=enabled)}
     return {'enable_thoughts': LockInfo(locked=False)}
+
+
+# =============================================================================================
+# 9b. Streaming (other_settings "Real-time Translation (Streaming)"; the mobile Streaming switch)
+# =============================================================================================
+
+#: The amber note under "Enable streaming responses" (other_settings._create_response_handling_section).
+STREAMING_TRUNCATION_WARNING = "⚠️ Enabling this may result in silent truncation"
+#: The note under the forced-stream batch log toggle (same dialog).
+FORCED_STREAM_NOTE = ("🔐 AuthGPT, AuthGrok, AuthGem, AuthCD, Arena, Antigravity, and OcAgy always stream "
+                      "— this controls batch log visibility")
+#: The group's four toggles: config key -> the env name a run exports (run_env, translation_pipeline).
+STREAMING_ENV = {
+    'enable_streaming': 'ENABLE_STREAMING',
+    'stream_thinking_logs': 'STREAM_THINKING_LOGS',
+    'allow_batch_stream_logs': 'ALLOW_BATCH_STREAM_LOGS',
+    'allow_authgpt_batch_stream_logs': 'ALLOW_AUTHGPT_BATCH_STREAM_LOGS',
+}
+STREAMING_KEYS = tuple(STREAMING_ENV)
+
+
+def streaming_states(config, unset=False):
+    """``{key: bool}`` of the four streaming toggles as a run reads them (``bool(config.get(key,
+    unset))``, run_env / translation_pipeline); *unset* is what an absent key means (desktop: False)."""
+    return {key: bool(config.get(key, unset)) for key in STREAMING_KEYS}
+
+
+def streaming_mode(config, unset=False):
+    """'on' (all four toggles on), 'off' (all off) or 'custom' (they differ)."""
+    states = streaming_states(config, unset)
+    if all(states.values()):
+        return 'on'
+    if not any(states.values()):
+        return 'off'
+    return 'custom'
+
+
+def apply_streaming(config, on, unset=False):
+    """Every streaming toggle to *on* (in place), each the way its desktop checkbox writes it; returns
+    the env exports.
+
+    Only the toggles whose value changes are applied: the checkboxes fire on a real change only, and
+    stream thinking logs runs the thoughts lock (``_change_stream_thinking``: OFF also unchecks Enable
+    thoughts) even when its own value does not change. Turning on always applies stream thinking, so
+    the lock is re-applied the way the dialog does when it opens with stream thinking on (that never
+    unchecks thoughts). *unset*: what an absent key means (desktop False).
+    """
+    on = bool(on)
+    states = streaming_states(config, unset)
+    env = {}
+    for key in STREAMING_KEYS:
+        if key == 'stream_thinking_logs':
+            if on or states[key]:
+                env.update(_change_stream_thinking(config, on))
+        elif states[key] != on:
+            config[key] = on
+            env[STREAMING_ENV[key]] = '1' if on else '0'
+    return env
 
 
 # =============================================================================================

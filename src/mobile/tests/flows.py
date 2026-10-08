@@ -16,7 +16,7 @@ from typing import Any
 __all__ = [
     "ATTACH_TOOLTIP", "CONFIG_NAME", "EPUB_NAME", "chat_translate_and_migrate", "dismiss_welcome", "go_home",
     "import_desktop_config", "library_book_chapters", "open_drawer", "open_settings", "run_selftest",
-    "smoke_navigation", "ui_config", "wait_home", "write_ui_config",
+    "SCROLL_TIMEOUT", "smoke_navigation", "ui_config", "wait_home", "write_ui_config",
 ]
 
 ATTACH_TOOLTIP = "Attach, output mode and tools"
@@ -49,9 +49,20 @@ def write_ui_config(path: Path, base_url: str, model: str) -> Path:
 
 # ---- navigation ---------------------------------------------------------------------------------
 
-async def dismiss_welcome(d: Any, timeout: float = 10.0) -> bool:
-    """First run on a fresh install: the Welcome flow covers the chat; "Skip" closes it. Returns
-    once either the Welcome flow or the chat home is on screen."""
+async def dismiss_welcome(d: Any, timeout: float = 10.0, *, first_run: bool = False) -> bool:
+    """The Welcome flow covers the chat on a fresh install; "Skip" closes it. Returns whether it
+    was skipped.
+
+    ``first_run=True`` (the device tests: ``flutter test`` installs the app fresh for every test
+    and conftest uninstalls a leftover copy first): tap "Skip" once it is up, then wait until it is
+    gone; never settle for the chat home. The app mounts the home first and pushes the Welcome
+    only after its feature installs, so a home seen early is about to be covered: in Build Mobile
+    run 37800059580 the drawer then opened under the Welcome and 'dest-library' was never found.
+    Without it (host runs, a returning user) return once either one is on screen."""
+    if first_run:
+        await d.tap(text="Skip", timeout=timeout)
+        await d.wait(text="Skip", gone=True, timeout=30)
+        return True
     index = await d.wait_any({"text": "Skip"}, {"tooltip": ATTACH_TOOLTIP}, timeout=timeout)
     if index == 0:
         await d.tap(text="Skip")
@@ -85,6 +96,11 @@ async def open_settings(d: Any) -> None:
     await d.wait(key="hub-settings.appearance", timeout=30)
 
 
+#: a device scrolls the Settings home's lower groups into view one swipe per poll (the Data group
+#: is about a dozen swipes down a 320x640 emulator; a cold emulator takes 1-2 s per swipe)
+SCROLL_TIMEOUT = 90.0
+
+
 # ---- flows --------------------------------------------------------------------------------------
 
 async def smoke_navigation(d: Any) -> None:
@@ -95,16 +111,16 @@ async def smoke_navigation(d: Any) -> None:
     await d.tap(key="dest-library")
     await d.wait(key="lib-search", timeout=60)
     await open_settings(d)
-    await d.wait(key="hub-settings.import", timeout=30, scroll=True)
-    await d.wait(key="hub-settings.logs", timeout=30, scroll=True)
-    await d.wait(key="hub-settings.updates", timeout=30, scroll=True)
+    await d.wait(key="hub-settings.import", timeout=SCROLL_TIMEOUT, scroll=True)
+    await d.wait(key="hub-settings.logs", timeout=SCROLL_TIMEOUT, scroll=True)
+    await d.wait(key="hub-settings.updates", timeout=SCROLL_TIMEOUT, scroll=True)
 
 
 async def run_selftest(d: Any, timeout: float = 600.0) -> str:
     """Settings › Logs & diagnostics › Run self-test → the result card says PASS."""
     await open_settings(d)
-    await d.tap(key="hub-settings.logs", timeout=30, scroll=True)
-    await d.tap(text="Run self-test", timeout=30, scroll=True)
+    await d.tap(key="hub-settings.logs", timeout=SCROLL_TIMEOUT, scroll=True)
+    await d.tap(text="Run self-test", timeout=SCROLL_TIMEOUT, scroll=True)
     index = await d.wait_any({"contains": "PASS · "}, {"contains": "FAIL · "}, timeout=timeout)
     assert index == 0, "the self-test reported FAIL"
     return "PASS"
@@ -112,10 +128,10 @@ async def run_selftest(d: Any, timeout: float = 600.0) -> str:
 
 async def import_desktop_config(d: Any, name: str = CONFIG_NAME) -> None:
     await open_settings(d)
-    await d.tap(key="hub-settings.import", timeout=30, scroll=True)
+    await d.tap(key="hub-settings.import", timeout=SCROLL_TIMEOUT, scroll=True)
     await d.pick_file(name, lambda: d.tap(key="import-pick-config"))
     await d.wait(text=name, timeout=30)  # the chosen file's name
-    await d.tap(key="import-run", timeout=30, scroll=True)
+    await d.tap(key="import-run", timeout=60, scroll=True)
     await d.wait(contains="Imported ", timeout=60)
 
 

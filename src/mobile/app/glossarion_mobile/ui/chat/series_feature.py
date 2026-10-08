@@ -491,6 +491,7 @@ class SeriesFeature:
             cid=sid, config=config, chats=SeriesDefaultsChats(self.store, sid), profiles=profiles,
             languages=languages, subject="series", title=f"{item.name} · defaults",
             on_choose_model=lambda scope: self._choose_model(sid, scope, config),
+            ctx=env, profile_service=getattr(env, "profile_service", None),
         )
         self.sheet = sheet
         return self.show(sheet)

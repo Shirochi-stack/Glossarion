@@ -9,6 +9,7 @@ import flows
 
 
 async def test_launch_navigation_and_selftest(ui):
-    await flows.dismiss_welcome(ui, timeout=90)
+    # every device test is a fresh install: wait for the Welcome (pushed after the home) and skip it
+    await flows.dismiss_welcome(ui, timeout=180, first_run=True)
     await flows.smoke_navigation(ui)
     assert await flows.run_selftest(ui) == "PASS"

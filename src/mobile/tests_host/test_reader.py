@@ -1215,6 +1215,27 @@ def test_reader_live_translation_flow(novel):
 
 
 @needs_flet
+def test_reader_live_panel_does_not_wait_for_a_stream_when_streaming_is_off(novel):
+    """devfix4 #14: with the mobile Streaming switch off the live job does not stream (job_kinds.single_chapter
+    drops force_stream_all), so the panel says the chapter appears when it is done; absent keys mean on."""
+    off = {"enable_streaming": False, "stream_thinking_logs": False, "allow_batch_stream_logs": False,
+           "allow_authgpt_batch_stream_logs": False}
+
+    async def scenario(config, expected):
+        screen = _screen(novel, config=config)
+        await screen.open()
+        await screen.go_chapter(1)
+        await screen.translate_chapter()
+        assert screen.deps.jobs.submitted[-1].params == {"chapter_file": "chapter0002.xhtml", "force_stream_all": True}
+        assert screen.live.panel.status.value == expected
+        screen.dispose()
+
+    asyncio.run(scenario(off, "\U0001f6f0️ Translating “chapter0002.xhtml” — Streaming is off: the chapter appears "
+                              "when it is done"))
+    asyncio.run(scenario(None, "\U0001f6f0️ Translating “chapter0002.xhtml” — waiting for stream…"))
+
+
+@needs_flet
 def test_completed_chapter_asks_before_retranslating(novel):
     async def scenario():
         screen = _screen(novel)

@@ -126,14 +126,18 @@ from glossarion_mobile.ui.chat.send_state import (
     excluded_route_reason,
 )
 from glossarion_mobile.ui.chat.quick_chips import QuickChips
-from glossarion_mobile.ui.chat.transcript import Transcript
+from glossarion_mobile.ui.chat.transcript import CardSlot, Transcript
 from glossarion_mobile.ui.chat.transcript_model import (
     ACTIONS_LABEL,
     QA_LABEL,
     REPORT_LABEL,
     build_items,
-    slide_window,
-    tail_window,
+    item_position,
+    item_sizes,
+    shift_window,
+    tail_start,
+    window_after_append,
+    window_around,
 )
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
@@ -344,7 +348,14 @@ class ChatView:
         self.glossary_sheet: Any = None
         self.login_sheet: Any = None
         self.cid = str(state.current_chat.value)
+        # The rendered window over the transcript's cards (``_window_items``: the whole chat's items
+        # without hidden versions), (start, end); None = the newest cards. ``_window_total`` is the card
+        # count it was computed for: the desktop rule re-tails only after cards were added to a window
+        # that ended at the old tail (``window_after_append``).
         self.window: Optional[tuple] = None
+        self._window_total = 0
+        self.items: list = []  # the items of the latest render (the window indexes them)
+        self._row_page = 20  # a JobCard's page of request rows (the rendered-card limit at the last render)
         self.live_cards: dict = {}
         self.live_job_card: Optional[JobCard] = None
         self.approval_card: Optional[GlossaryApprovalCard] = None
@@ -397,8 +408,9 @@ class ChatView:
         self.transcript = Transcript(
             on_suggestion=self._on_suggestion,
             on_scroll=self.header.on_transcript_scroll,
-            on_load_earlier=lambda: self.slide(-1),
-            on_load_later=lambda: self.slide(1),
+            # a loader row's tap shows the loaded cards; a scroll at the edge (auto) keeps the viewport
+            on_load_earlier=lambda auto=False: self.slide(-1, keep_view=auto),
+            on_load_later=lambda auto=False: self.slide(1, keep_view=auto),
             on_follow_change=self._on_follow_change,
         )
         self.new_fab = ft.FloatingActionButton(
@@ -619,7 +631,7 @@ class ChatView:
         self.approval_card = None
         self._approval_key = None
         self._cards = {}
-        self.render_transcript(follow=True)
+        self.show_newest()  # the chat opens on its newest cards (window None), following them
         self.refresh_send()
         self._ensure_stream_task()
 
@@ -639,28 +651,52 @@ class ChatView:
     def _messages(self) -> list:
         return self.env.chats.messages(self.cid) if self.bound else []
 
+    def _window_items(self, messages: list, versions: Any) -> list:
+        """The transcript's cards: the whole chat's items (a book turn is one file card + one JobCard
+        whatever its size) without the hidden versions. The window indexes this list."""
+        hidden = versions.hidden
+        return [item for item in build_items(messages) if item.index not in hidden]
+
+    def _window_for(self, items: list, messages: list, expanded: Any, settings: DirectTextSettings) -> tuple:
+        """This render's window over ``items`` (the desktop ``_history_visible_start/_end`` rules): the
+        newest cards when there is none (``_reset_history_window``); after cards were added or removed
+        it follows them only if it ended at the old tail (``_update_history_window_after_append``);
+        otherwise it stays where the user slid or jumped it (clamped)."""
+        total = len(items)
+        previous, self._window_total = self._window_total, total
+        if self.window is not None and total != previous:
+            self.window = window_after_append(self.window, previous, total)  # None: follow the new cards
+        if self.window is not None:
+            start = max(0, min(int(self.window[0]), total))
+            end = max(start, min(int(self.window[1]), total))
+            if end > start or not total:
+                return (start, end)
+        limit = settings.rendered_card_limit
+        return (tail_start(item_sizes(items, messages, expanded, limit), limit), total)
+
     def render_transcript(self, *, follow: bool = False) -> None:
+        """Render the window. ``follow``: scroll to the newest card if the window shows it and the user
+        follows the tail; it never moves the window (``show_newest`` / ``slide`` / ``jump_to`` do)."""
         if not self.bound:
             return
         self._render_gen += 1  # card extras still loading go to this render's cards
         messages = self._messages()
         settings = self.settings()
         expanded = self.env.chats.expanded(self.cid)
-        total = len(messages)
-        if self.window is None or self.window[1] >= total - 1 or follow:
-            self.window = tail_window(messages, settings.rendered_card_limit, expanded)
-        start, end = self.window
         run = self.env.runs.live_run(self.cid) if self.env.runs is not None else None
         versions = self._version_view(messages)
         self.hidden_indices = set(versions.hidden)
+        items = self._window_items(messages, versions)
+        self.items = items
+        self.window = start, end = self._window_for(items, messages, expanded, settings)
+        self._row_page = settings.rendered_card_limit  # a JobCard's page of request rows
         controls: list = []
         if self._is_scratch(self.cid):
             controls.append(self._scratch_banner())
         self._next_cards = {}
-        for item in build_items(messages, start, end):
-            if item.index in versions.hidden or (item.kind == "job" and item.index < 0 and item.requests
-                                                 and set(item.requests) <= versions.hidden):
-                continue
+        # the run's card is mounted again below when it is in the window (no repaint of a card off screen)
+        self.live_job_card = None
+        for item in items[start:end]:
             controls.append(self._item_control(item, messages, expanded, run))
             switcher = versions.switchers.get(item.index) if item.kind in ("user", "user_file") else None
             if switcher is not None:
@@ -669,20 +705,45 @@ class ChatView:
                                                 key=f"versions-{item.index}"))
         self._cards, self._next_cards = self._next_cards, {}
         self.transcript.set_messages([c for c in controls if c is not None], hidden_before=start,
-                                     hidden_after=max(0, total - end))
+                                     hidden_after=max(0, len(items) - end))
         self.transcript.set_tail(self._tail_controls(run))
         self.header.set_empty(self.transcript.is_empty and not self.composer.has_content)
         self._push(self.transcript)
-        if follow and self.transcript.follow_tail and not settings.disable_auto_scroll:
+        if follow and end >= len(items) and self.transcript.follow_tail and not settings.disable_auto_scroll:
             self._spawn(self.transcript.scroll_to_end())
 
-    def slide(self, direction: int) -> None:
+    def show_newest(self) -> None:
+        """Back to the newest cards, following them (an action whose card the user should see: a send, a
+        Plan, a QA scan, a batch…)."""
+        self.window = None
+        self.transcript.follow_tail = True
+        self.render_transcript(follow=True)
+
+    def slide(self, direction: int, *, keep_view: bool = False) -> bool:
+        """One page of older (-1) / newer (+1) cards (desktop ``_shift_history_window``); False when the
+        window cannot move. ``keep_view`` (a scroll at the edge): the card that was at that edge stays in
+        view (``Transcript.keep_in_view`` ends the edge load); a loader row's tap shows the loaded cards."""
         if not self.bound:
-            return
-        messages = self._messages()
-        bounds = self.window or tail_window(messages, self.settings().rendered_card_limit, self.env.chats.expanded(self.cid))
-        self.window = slide_window(bounds, len(messages), self.settings().rendered_card_limit, direction)
+            return False
+        if self.window is None:
+            self.render_transcript()
+        new = shift_window(self.window, len(self.items), self.settings().rendered_card_limit, direction)
+        if new is None:
+            return False
+        anchor = None
+        if keep_view:
+            slots = [c for c in self.transcript.messages if isinstance(c, CardSlot)]
+            if slots:
+                anchor = (slots[0] if direction < 0 else slots[-1]).slot_key
+        self.window = new
+        if direction < 0:
+            # reading older cards: a live run's repaints no longer pull the view to the end (↓ shows instead)
+            self.transcript.follow_tail = False
+        self.transcript.hold_edge_loads()
         self.render_transcript()
+        if keep_view and self._spawn(self.transcript.keep_in_view(anchor)) is None:
+            self.transcript.release_edge_load()
+        return True
 
     def _item_control(self, item: Any, messages: list, expanded: set, run: Any) -> Optional[ft.Control]:
         message = messages[item.index] if 0 <= item.index < len(messages) else None
@@ -771,15 +832,37 @@ class ChatView:
                            card)
         return slot
 
+    @staticmethod
+    def _saved_request_segments(item: Any, messages: list) -> list:
+        """The JobCard rows of a turn's committed request cards (its Result; while it runs, the cards the
+        run already froze into the chat - the glossary gate's - before its live ones)."""
+        segments = []
+        for index in item.requests:
+            if not 0 <= index < len(messages):
+                continue
+            msg = messages[index]
+            segments.append({
+                "label": str(msg[5] if len(msg) > 5 else ""),
+                "content": str(msg[1] or ""),
+                "thinking": str(msg[2] or "") if len(msg) > 2 else "",
+                "phase": "processing",
+                "complete": True,
+                "index": index,
+            })
+        return segments
+
     def _job_control(self, item: Any, messages: list, run: Any) -> Any:
-        file_message = messages[item.index] if item.index >= 0 else None
+        # ``item.index`` is always the turn's user_file (build_items): the card keeps its title, size
+        # line, live run, Result state and Resume wherever the window starts (owner issues 12 + 13)
+        file_message = messages[item.index] if 0 <= item.index < len(messages) else None
         record = None
         if file_message is not None:
             name = str(file_message[1])
             record = {"name": name, "path": str(file_message[2] if len(file_message) > 2 else ""),
                       "extension": os.path.splitext(name)[1].lower(), "size": file_message[3] if len(file_message) > 3 else 0}
         slot_key = f"job-{item.index}"
-        live = run is not None and run.user_index == item.index
+        live = run is not None and item.index >= 0 and run.user_index == item.index
+        row_page = getattr(self, "_row_page", None) or 20
         plan = self._pending_plan()
         if plan is not None and plan.get("user_index") == item.index and not live:
             context = self.state.chat_context.value
@@ -796,10 +879,13 @@ class ChatView:
             return self._library_job_control(item, messages, record)
         if live:
             # The running card stays the same object for the whole run: progress, phase and its
-            # live request rows are updated in place (here and on every job snapshot).
+            # request rows are updated in place (here and on every job snapshot). Its rows are the
+            # turn's committed cards (the glossary gate freezes its phase into the chat) + the live ones.
             slot = self._card(slot_key, ("live", self.cid, item.index, record),
                               lambda: JobCard(attachment=record, phase=CardPhase("running"), on_action=self._on_job_action,
-                                              on_open_request=self._open_request))
+                                              on_open_request=self._open_request, row_page=row_page,
+                                              requests_expanded=True))
+            slot.card.saved_requests = self._saved_request_segments(item, messages)
             self.live_job_card = slot.card
             self._update_live_job_card(run)
             return slot
@@ -825,17 +911,7 @@ class ChatView:
                 ended = ended_card(ended_kind(remembered), remembered)
         if ended is not None:
             phase, status = CardPhase(ended[0]), ended[1]
-        segments = []
-        for index in item.requests:
-            msg = messages[index]
-            segments.append({
-                "label": str(msg[5] if len(msg) > 5 else ""),
-                "content": str(msg[1] or ""),
-                "thinking": str(msg[2] or "") if len(msg) > 2 else "",
-                "phase": "processing",
-                "complete": True,
-                "index": index,
-            })
+        segments = self._saved_request_segments(item, messages)
         report = self.env.chats.message_text(self.cid, item.report, "content") if item.report is not None else None
 
         failed = 0
@@ -847,7 +923,8 @@ class ChatView:
         def build() -> JobCard:
             card = JobCard(attachment=record, phase=phase, on_action=lambda a, it=item: self._on_job_action(a, it),
                            on_open_request=self._open_request,
-                           on_open_output=lambda path, kind, it=item: self._open_output_file(path, kind, it))
+                           on_open_output=lambda path, kind, it=item: self._open_output_file(path, kind, it),
+                           row_page=row_page)
             card.set_phase(phase, status=status)
             card.set_failed(failed)
             card.set_requests(segments)
@@ -855,7 +932,8 @@ class ChatView:
                 card.set_report(report)
             return card
 
-        slot = self._card(slot_key, ("job", self.cid, item, record, phase, status, segments, report, failed), build)
+        slot = self._card(slot_key, ("job", self.cid, item, record, phase, status, segments, report, failed, row_page),
+                          build)
         card = slot.card
         # UI_SPEC §2.12.4 Result: the turn's output files as chips (its own workspace, on the io pool)
         key = ("outputs", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
@@ -1098,7 +1176,11 @@ class ChatView:
         segments = run.stream.segments()
         current = str(segments[-1].get("label") or "") if segments else ""
         card.set_progress(counts.get("fraction"), progress_line(snapshot, eta=self._eta), current)
-        card.set_requests(segments)
+        # the turn's committed cards (the glossary gate's) stay listed above the run's live ones (desktop);
+        # while the finish commits the live cards they are both: the live one is listed once
+        live_labels = {str(s.get("label") or "") for s in segments} - {""}
+        saved = [s for s in card.saved_requests if str(s.get("label") or "") not in live_labels]
+        card.set_requests(saved + segments)
         active_issue = getattr(snapshot, "active_issue", None)
         try:
             from glossarion_mobile.services.jobs import issue_label
@@ -1127,19 +1209,23 @@ class ChatView:
                 if self.live_job_card is not None:
                     self._update_live_job_card(run)
                 self._push(self.transcript)
-                if self.transcript.follow_tail and not self.settings().disable_auto_scroll:
+                # follow only while the window shows the newest cards and the user is at the bottom: after
+                # "↑ earlier" or a jump the view stays where the user is reading, ↓ brings it back
+                at_tail = self.transcript.follow_tail and not self.transcript.hidden_after
+                if at_tail and not self.settings().disable_auto_scroll:
                     await self.transcript.scroll_to_end(0)
-                elif not self.transcript.follow_tail:
+                elif not at_tail:
                     self.new_fab.visible = True
                     self._push(self.new_fab)
 
     def _on_follow_change(self, follow: bool) -> None:
-        if follow and self.new_fab.visible:
+        if follow and self.new_fab.visible and not self.transcript.hidden_after:
             self.new_fab.visible = False
             self._push(self.new_fab)
 
     async def _jump_to_end(self, e: Any = None) -> None:
         self.window = None
+        self.transcript.follow_tail = True
         self.render_transcript()
         self.new_fab.visible = False
         self._push(self.new_fab)
@@ -1377,8 +1463,7 @@ class ChatView:
         """Clear the composer and restore the mode non-automatically (desktop after recording the turn)."""
         self.composer.clear()
         self._set_mode(OutputModeState(normalize_mode(output_mode)))
-        self.window = None
-        self.render_transcript(follow=True)
+        self.show_newest()
         self.refresh_send()
 
     async def _submit(self, cid: str, text: str, record: Optional[dict], settings: DirectTextSettings,
@@ -1776,7 +1861,7 @@ class ChatView:
         if bid:
             storage["bid"] = bid
         append_tool_message(self.env.chats, cid, body, "", LIBRARY_LABEL, storage)
-        self.render_transcript(follow=True)
+        self.render_transcript(follow=True)  # the turn's own card (its Plan card's slot) shows where it went
         self.notify(f"Translating · {name}", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
         return job_id
 
@@ -1918,7 +2003,7 @@ class ChatView:
         # message[4] is the scanned workspace: a later move into the Library rewrites it with the cards
         append_tool_message(self.env.chats, cid, body, folder, QA_LABEL,
                             {"qa_job": str(job_id), "folder": folder, "source": source, "summary": summary})
-        self.render_transcript(follow=True)
+        self.show_newest()
         self.notify(f"QA scan · {name}", action_label="Jobs",
                     on_action=lambda j=str(job_id): self.navigate("jobs.detail", {"jid": j}))
         return str(job_id)
@@ -2026,7 +2111,7 @@ class ChatView:
             self.composer.set_attachment(record)
             chats.set_attachment(self.cid, record)
         self.composer.set_text(str(plan.get("text") or ""))
-        self.render_transcript(follow=True)
+        self.show_newest()
         self.refresh_send()
 
     def _on_job_action(self, action: str, item: Any = None) -> None:
@@ -2464,7 +2549,7 @@ class ChatView:
         batch = {"files": [str(p) for p in files], "folder": str(folder or ""),
                  "include_subfolders": bool(include_subfolders), "created": time.time()}
         self.env.chats.set_meta(self.cid, "pending_batch", batch)
-        self.render_transcript(follow=True)
+        self.show_newest()
         return batch
 
     def _update_batch(self, cid: str, created: Any, **changes: Any) -> None:
@@ -2564,7 +2649,7 @@ class ChatView:
         append_tool_message(self.env.chats, cid, f"📚 **Batch started:** {len(files)} file(s) translate as books in "
                                                  "the output folder (Library shelf). Follow it in Jobs.", "",
                             LIBRARY_LABEL, {"library_job": str(job_id)})
-        self.render_transcript(follow=True)
+        self.show_newest()
         self.notify(f"Translating · {title}", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
         return job_id
 
@@ -3420,6 +3505,9 @@ class ChatView:
             on_choose_model=lambda scope: self.open_model_sheet("model", chat_scope=scope == "chat"),
             scope=scope,
             prefs=getattr(self.env, "prefs", None),  # the mobile-only All-chats values (Always accept)
+            ctx=self.env,  # Edit prompt / New profile… open on the chat's SettingsContext
+            profile_service=getattr(self.env, "profile_service", None),
+            on_manage_profiles=lambda: (self.settings_sheet.close(), self.navigate("settings.profiles")),
         )
         self.settings_sheet.show(self.page)
         return self.settings_sheet
@@ -4058,32 +4146,39 @@ class ChatView:
     # ---- U7: jump to, search, export ---------------------------------------------------------------------
 
     def _scroll_key_for(self, index: int) -> Any:
-        """The ScrollKey of the card that shows message ``index`` (a job card for an attachment's responses)."""
+        """The ScrollKey of the card that shows message ``index`` (its turn's JobCard for an attachment's
+        request, report, actions and Library cards)."""
         messages = self._messages()
-        for item in build_items(messages, 0, len(messages)):
-            if item.kind == "job" and (item.index == index or index in item.requests
-                                       or index in (item.report, item.actions)):
-                if item.index >= 0 and index != item.index:
-                    return ft.ScrollKey(f"job-{item.index}")
+        for item in build_items(messages):
+            if item.kind == "job" and item.shows(index):
+                return ft.ScrollKey(f"job-{item.index}")
         return ft.ScrollKey(self._mid(index) or f"m-{index}")
 
     async def jump_to(self, index: int) -> None:
-        """The jump procedure (UI_SPEC §2.8): re-centre the window, then ``scroll_to(scroll_key=)``."""
+        """The jump procedure (UI_SPEC §2.8): bring the card that shows message ``index`` into the window
+        (``window_around`` over the transcript's cards: it stays there, never snapped back to the tail),
+        open a request's row in its JobCard, then ``scroll_to(scroll_key=)``."""
         if not self.bound:
             return
-        from glossarion_mobile.ui.chat.transcript_model import window_around
-
         messages = self._messages()
         if not (0 <= index < len(messages)):
             return
-        limit = self.settings().rendered_card_limit
-        start, end = self.window or tail_window(messages, limit, self.env.chats.expanded(self.cid))
-        if not (start <= index < end):
-            self.window = window_around(len(messages), limit, index)
+        if self.window is None or len(self._window_items(messages, self._version_view(messages))) != len(self.items):
+            self.render_transcript()  # the window and its cards for the chat as it is now
+        position = item_position(self.items, index)
+        if position is None:
+            return  # a hidden version
+        start, end = self.window
+        if not (start <= position < end):
+            self.window = window_around(len(self.items), self.settings().rendered_card_limit, position)
             self.render_transcript()
         self.focus_index = index
-        await asyncio.sleep(0)
         key = self._scroll_key_for(index)
+        card = getattr(self.transcript.slot_for(key), "card", None)
+        if isinstance(card, JobCard) and card.reveal_request(index):
+            card.push()  # the request's row is listed and its Requests list open
+        self.transcript.hold_edge_loads(1.0)  # the jump's own scroll never loads more cards
+        await asyncio.sleep(0)
         try:
             await self.transcript.scroll_to(scroll_key=key, duration=250)
         except Exception:

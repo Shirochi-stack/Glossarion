@@ -1,8 +1,11 @@
 """ReaderScreen (UI_SPEC §3.11, §5.8 ``ReaderView``): the full-screen Reader for ``/reader/<bid>``.
 
 Layers (a ``Stack``): the page (``flet_webview.WebView`` loading the document
-from ``ReaderServer``, or the native ``FallbackPage``), the chrome bars, the
-floating selection chips and a loading / error overlay. The chapters drawer
+from ``ReaderServer``, or the native ``FallbackPage``) in a ``SafeArea`` (the app
+runs edge to edge on Android 15+: the page never lies under the status or
+navigation bar, so its viewport is the area the reader sees), the chrome bars
+(edge to edge, each with its own ``SafeArea``), the floating selection chips and
+a loading / error overlay. The chapters drawer
 is the View's ``end_drawer`` on phones; on a tablet (>= 900 dp, UI_SPEC §3.11) ☰ toggles the same
 drawer content as a persistent 320 dp side panel to the right of the page instead.
 
@@ -230,6 +233,9 @@ class ReaderScreen(Screen):
         self.console_ok = False
         self.http_off_doc = ""  # the page whose fetch fallback was switched off
         self.view: Optional[ft.View] = None
+        self.edge_to_edge = False  # the Reader built its own View (``build_view``): no SafeArea around the body
+        self._painted_bg: Any = None  # the theme background last given to the body / View (``_paint_background``)
+        self._mode_busy = False  # a flavour switch is loading (one at a time, ``set_mode``)
         self.panel_open = False  # tablet: the chapters side panel is shown
         self.custom_families: list = []  # Aa › Text: fonts imported with Converter › Load Font…
         self.font_faces: dict = {}  # imported family -> URL served by ReaderServer (@font-face)
@@ -325,6 +331,43 @@ class ReaderScreen(Screen):
         page = self.page
         return float(getattr(page, "width", 0) or 412), float(getattr(page, "height", 0) or 860)
 
+    def _page_insets(self) -> tuple:
+        """(left, top, right, bottom): what the page's SafeArea keeps it away from (the system bars and
+        cutouts, ``page.media.padding``). Zero while the shell's own SafeArea holds the whole body
+        (no ``build_view``: ``_adopt_view``), where the page area is the full Stack."""
+        if not self.edge_to_edge:
+            return 0.0, 0.0, 0.0, 0.0
+        padding = getattr(getattr(self.page, "media", None), "padding", None)
+        insets = []
+        for side in ("left", "top", "right", "bottom"):
+            try:
+                insets.append(max(0.0, float(getattr(padding, side, 0) or 0)))
+            except (TypeError, ValueError):
+                insets.append(0.0)
+        return tuple(insets)
+
+    def _page_size(self) -> tuple:
+        """The page area's size: the screen less the insets and, on a tablet, the open chapters panel."""
+        width, height = self._size()
+        left, top, right, bottom = self._page_insets()
+        if self.panel_open:
+            width -= TOC_PANEL_WIDTH
+        return max(1.0, width - left - right), max(1.0, height - top - bottom)
+
+    def _stack_rect(self, rect: Optional[tuple]) -> Optional[tuple]:
+        """A page selection rect (fractions of the page viewport) as fractions of the full-screen Stack
+        the selection chips float in: the page area starts ``left`` / ``top`` into the Stack."""
+        if rect is None:
+            return None
+        width, height = self._size()
+        left, top, _right, _bottom = self._page_insets()
+        inner_width, inner_height = self._page_size()
+        if self.panel_open:
+            width -= TOC_PANEL_WIDTH  # the Stack ends where the side panel starts
+        x, y, w, h = (float(v) for v in rect)
+        return ((left + x * inner_width) / width, (top + y * inner_height) / height,
+                w * inner_width / width, h * inner_height / height)
+
     def _effective_layout(self) -> str:
         width, height = self._size()
         return rm.effective_layout(self.settings.layout, width, height)
@@ -357,8 +400,12 @@ class ReaderScreen(Screen):
             on_tap_zone=self._on_fallback_tap, on_pinch=self._on_pinch_step, on_pinch_end=self._on_pinch_end,
             on_paragraph=self._on_paragraph, on_scroll=self._on_fallback_scroll,
         )
-        self.fallback.set_size(width, height)
+        self.fallback.set_size(*self._page_size())
         self.page_slot = ft.Container(expand=True, content=None, bgcolor=self.theme.get("bg"))
+        # The page layer never lies under the status / navigation bar or a cutout (the app runs edge to
+        # edge on Android 15+): the WebView's viewport, and so its paged columns, is the area the reader
+        # sees. ``page_slot`` stays the swap target (WebView, native page, empty state).
+        self.page_area = ft.SafeArea(content=self.page_slot, expand=True, key="reader-page-safe")
         self.loading_text = ft.Text("Loading…", theme_style=ft.TextThemeStyle.BODY_MEDIUM)
         self.loading = ft.Container(
             expand=True,
@@ -371,7 +418,7 @@ class ReaderScreen(Screen):
         self.top_slot = ft.Container(content=self.chrome.top, left=0, right=0, top=0)
         self.bottom_slot = ft.Container(content=self.chrome.bottom, left=0, right=0, bottom=0)
         self.stack = ft.Stack(
-            controls=[self.page_slot, self.top_slot, self.bottom_slot, self.selection.container, self.loading],
+            controls=[self.page_area, self.top_slot, self.bottom_slot, self.selection.container, self.loading],
             expand=True,
             key="reader-stack",
         )
@@ -410,8 +457,7 @@ class ReaderScreen(Screen):
             self.side_panel.visible = False
             if box not in (self.toc.drawer.controls or []):
                 self.toc.drawer.controls = [box]
-        width, height = self._size()
-        self.fallback.set_size(width - (TOC_PANEL_WIDTH if self.panel_open else 0), height)
+        self.fallback.set_size(*self._page_size())
         for control in (self.body_row, self.toc.drawer):
             try:
                 control.update()
@@ -419,10 +465,13 @@ class ReaderScreen(Screen):
                 pass
 
     def build_view(self, route: str) -> ft.View:
-        """The full-screen View (no app bar; ``base.build_screen_view`` uses this when present)."""
+        """The full-screen View (no app bar; ``base.build_screen_view`` uses this when present). It is
+        edge to edge: the chrome bars reach under the system bars, the page sits in its SafeArea."""
         view = ft.View(route=route, padding=0, spacing=0, controls=[self.get_body()], bgcolor=self.theme.get("bg"),
                        end_drawer=self.toc.drawer, can_pop=False, on_confirm_pop=self._on_confirm_pop)
         self.view = view
+        self.edge_to_edge = True
+        self._painted_bg = self.theme.get("bg")
         return view
 
     def _adopt_view(self) -> None:
@@ -563,6 +612,20 @@ class ReaderScreen(Screen):
             except Exception:
                 pass
 
+    def _paint_background(self) -> None:
+        """The theme background on the page slot and, beside the page's SafeArea (the strips under
+        the system bars), on the body and the View."""
+        bg = self.theme.get("bg")
+        self.page_slot.bgcolor = bg
+        controls: list = [self.page_slot]
+        if bg != self._painted_bg:
+            self._painted_bg = bg
+            for control in (self.body, self.view):
+                if control is not None:
+                    control.bgcolor = bg
+                    controls.append(control)
+        self._update(*controls)
+
     def _set_loading(self, text: Optional[str]) -> None:
         self.loading.visible = text is not None
         if text is not None:
@@ -620,7 +683,18 @@ class ReaderScreen(Screen):
             flavor = self._initial_flavor(saved)
             if plan.mode == "dual" and flavor == rm.ORIGINAL:
                 session.flavor = rm.ORIGINAL
-            await self._io(session.load)
+            try:
+                await self._io(session.load)
+            except CoreMissing:
+                raise
+            except Exception:
+                if session.flavor != rm.ORIGINAL or plan.mode != "dual":
+                    raise
+                # the raw EPUB of a saved Original view does not load: the book opens on its translation
+                log.warning("the original EPUB did not load; opening the translation", exc_info=True)
+                session.flavor = flavor = rm.TRANSLATED
+                await self._io(session.load)
+                self.notify("The original could not be opened; showing the translation")
         except CoreMissing as exc:
             self._show_error(f"The reader engine is not available in this build ({exc.name}).")
             return
@@ -636,12 +710,13 @@ class ReaderScreen(Screen):
             self._show_error("No readable content found for this book.")
             return
         if flavor != session.flavor:
-            if flavor == rm.BILINGUAL and not session.available_modes(0).get(rm.BILINGUAL):
+            # Bilingual needs both versions of the chapter that opens (chapter 0 is often a cover)
+            if flavor == rm.BILINGUAL and not session.available_modes(self._start_chapter(session)).get(rm.BILINGUAL):
                 flavor = rm.TRANSLATED
             if flavor == rm.ORIGINAL and not session.has_alternate:
                 flavor = rm.TRANSLATED
             if flavor != session.flavor:
-                await self._io(session.set_flavor, flavor)
+                await self._switch_flavor(session, flavor, session.flavor)  # a failure keeps the loaded one
                 if self.disposed:  # left while the flavour loaded (dispose closed the session)
                     return
         self.renderer = self._choose_renderer()
@@ -866,7 +941,7 @@ class ReaderScreen(Screen):
             if self.page_slot.content is not self.fallback.control:
                 self.page_slot.content = self.fallback.control
             self.fallback_chapter = index
-            self.fallback.set_size(*self._size())
+            self.fallback.set_size(*self._page_size())
             self.fallback.render(blocks, theme=self.theme, settings=self.settings, images=images,
                                  keep_offset=not fresh)
             self.fallback_generation = generation
@@ -1010,9 +1085,19 @@ class ReaderScreen(Screen):
         self._spawn(self.set_mode(mode))
 
     async def set_mode(self, mode: str) -> None:
-        """Original / Translated / Bilingual; the position survives with the page hint."""
+        """Original / Translated / Bilingual; the position survives with the page hint.
+
+        One switch at a time (desktop ``_raw_toggle_in_flight``): a tap while a switch loads (a large
+        raw EPUB takes seconds on a phone) snaps the segment back to the flavour being loaded. A switch
+        that cannot load the other version keeps the one on screen and says so (desktop
+        ``_restore_raw_toggle_value``)."""
         session = self.session
-        if session is None or mode == session.flavor:
+        if session is None:
+            return
+        if self._mode_busy:
+            self._refresh_chrome()
+            return
+        if mode == session.flavor:
             return
         if not session.available_modes(self.index).get(mode):
             self._refresh_chrome()
@@ -1020,15 +1105,38 @@ class ReaderScreen(Screen):
         hint = rm.capture_hint(self.page_no, self.page_count) if rm.is_paged(self.layout) else \
             {"fraction": self.fraction, "last": False}
         href = session.filenames[self.index] if self.index < len(session.filenames) else ""
+        previous = session.flavor
+        self._mode_busy = True
+        try:
+            if not await self._switch_flavor(session, mode, previous):
+                return
+            if self.disposed or session is not self.session:
+                return
+            index = session.filenames.index(href) if href in session.filenames else min(self.index, session.count - 1)
+            self._refresh_toc()
+            await self.render(index, hint=hint)
+        finally:
+            self._mode_busy = False
+            if not self.disposed and session is self.session:
+                self._refresh_chrome()  # the segment shows the flavour on screen (Dart moved it on the tap)
+
+    async def _switch_flavor(self, session: ReaderSession, mode: str, previous: str) -> bool:
+        """``session.set_flavor`` on the io pool. When it fails (the other EPUB does not load), the
+        session goes back to ``previous``: ``set_flavor`` names the new flavour before it loads, and
+        the page would say Original / Bilingual over the translated text. False after a failure."""
         try:
             await self._io(session.set_flavor, mode)
+            return True
         except Exception as exc:
             log.exception("switching the reader flavour failed")
+            if session.flavor != previous:
+                try:  # the session's own switch puts the previous EPUB back (cached)
+                    await self._io(session.set_flavor, previous)
+                except Exception:
+                    log.exception("restoring the reader flavour failed")
+                    session.flavor = previous
             self.notify(f"Could not switch: {exc}")
-            return
-        index = session.filenames.index(href) if href in session.filenames else min(self.index, session.count - 1)
-        self._refresh_toc()
-        await self.render(index, hint=hint)
+            return False
 
     # ---- page events ------------------------------------------------------------------------------
 
@@ -1114,7 +1222,7 @@ class ReaderScreen(Screen):
         elif kind == "selrect":
             self._selection_rect = event.rect
             if self.selection.visible and event.rect is not None:
-                self.selection.place(event.rect, self._size()[1])
+                self.selection.place(self._stack_rect(event.rect), self._size()[1])
         elif kind == "pinch":
             for _ in range(abs(event.step)):
                 self._on_pinch_step(1 if event.step > 0 else -1)
@@ -1147,7 +1255,7 @@ class ReaderScreen(Screen):
         session = self.session
         original = session is not None and session.flavor == rm.ORIGINAL
         self.selection.show(text, original_mode=original, target_language=self._target_language(),
-                            rect=self._selection_rect, height=self._size()[1])
+                            rect=self._stack_rect(self._selection_rect), height=self._size()[1])
 
     def _target_language(self) -> str:
         return str(self._config_get("output_language", "English") or "English").strip() or "English"
@@ -1371,11 +1479,10 @@ class ReaderScreen(Screen):
             relayout = True
         if old.native_toc != new.native_toc:
             self._refresh_toc()
+        self._paint_background()
         if relayout:
             self._spawn(self.render(self.index, hint=self._current_hint()))
             return
-        self.page_slot.bgcolor = self.theme.get("bg")
-        self._update(self.page_slot)
         if self.renderer == "webview":
             if self.webview is not None:
                 self.webview.bgcolor = self.theme.get("bg")
@@ -1487,14 +1594,11 @@ class ReaderScreen(Screen):
         if self.session is None or self.state != "ready":
             return
         layout = self._effective_layout()
-        width, height = self._size()
-        self.fallback.set_size(width, height)
-        self.toc.set_height(height)
+        self.toc.set_height(self._size()[1])  # the drawer / side panel: outside the page area, own SafeArea
         if self.panel_open and not self.tablet_layout():  # back to a phone width: the end drawer again
             self.panel_open = False
             self._apply_side_panel()
-        elif self.panel_open:
-            self.fallback.set_size(width - TOC_PANEL_WIDTH, height)
+        self.fallback.set_size(*self._page_size())
         if layout != self.layout:
             self.layout = layout
             self._spawn(self.render(self.index, hint=self._current_hint()))
@@ -1928,6 +2032,11 @@ class ReaderScreen(Screen):
             return None
         panel = LivePanel(chapter_file=chapter_file, feed=feed, on_stop=self._stop_live, on_hide=self._on_live_hidden,
                           mono_family=self.deps.extras.get("mono_family", "monospace"))
+        from glossarion_mobile.state.setting_writes import streaming_enabled
+
+        if not streaming_enabled(self._config_snapshot()):  # devfix4 #14: nothing streams, so no "waiting for stream…"
+            panel.status.value = (f"🛰️ Translating “{os.path.basename(chapter_file)}” — Streaming is off: "
+                                  "the chapter appears when it is done")
         spec = JobSpec(
             kind="single_chapter",
             title=f"{session.plan.title or os.path.splitext(os.path.basename(epub))[0]} · {chapter_file}",

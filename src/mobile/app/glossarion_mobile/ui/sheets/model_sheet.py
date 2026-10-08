@@ -804,19 +804,36 @@ class ModelSheet:
 
     # ---- profile / language tabs ---------------------------------------------------------------------
 
-    def _profile_preview(self, name: str) -> Optional[str]:
+    def _profile_texts(self) -> dict:
+        """Every profile's text as Settings › Profiles & prompts lists it (built-ins included on a fresh config); once per render."""
+        from glossarion_mobile.ui.screens.profiles import ProfileService
+
         store = self.env.store
-        if store is None:
-            return None
-        profiles = store.get("prompt_profiles", None)
-        if isinstance(profiles, dict) and isinstance(profiles.get(name), str):
-            lines = [ln.strip() for ln in profiles[name].splitlines() if ln.strip()][:3]
+        try:
+            return dict(ProfileService(store).listing().texts) if store is not None else {}
+        except Exception:
+            stored = store.get("prompt_profiles", None) if store is not None else None
+            return dict(stored) if isinstance(stored, dict) else {}
+
+    def _profile_preview(self, name: str, texts: Optional[dict] = None) -> Optional[str]:
+        text = (self._profile_texts() if texts is None else texts).get(name)
+        if isinstance(text, str):
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()][:3]
             return "\n".join(lines) or None
         return None
 
     def profile_rows(self) -> list:
+        from glossarion_mobile.ui.screens.profiles import SPECIALISED_GROUP, grouped_profile_names
+
         names = self.profiles or ([self.current["profile"]] if self.current["profile"] else [])
-        rows: list = [self._choice_row("profile", p, self._profile_preview(p)) for p in names]
+        texts = self._profile_texts()
+        rows: list = []
+        for title, group in grouped_profile_names(names):
+            if title == SPECIALISED_GROUP:  # chat order: the task-specific built-ins after the translation ones
+                rows.append(ft.Container(content=ft.Text(title, theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
+                                                         color=ft.Colors.PRIMARY),
+                                         padding=ft.Padding.only(left=16, top=8), key="profile-group-specialised"))
+            rows.extend(self._choice_row("profile", p, self._profile_preview(p, texts)) for p in group)
         store = self.env.store
         role = bool(store.get("system_prompt_to_user", False)) if store is not None else False
         self.role_toggle = ft.SegmentedButton(

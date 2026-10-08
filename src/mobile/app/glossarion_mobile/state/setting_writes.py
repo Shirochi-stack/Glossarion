@@ -17,6 +17,13 @@ The desktop selectors do more than store their own key:
   ``compression_factor`` (or hold the manual chunk size), and the Glossary Manager's Auto box /
   glossary output limit recompute ``glossary_compression_factor`` (U9).
 
+Glossarion Mobile's one Streaming switch (``STREAMING_KEY``, owner 2026-10-08) stands for the desktop
+"Real-time Translation (Streaming)" group: ``settings_rules.apply_streaming`` sets the four toggles the way
+their checkboxes do (stream thinking keeps the desktop Enable thoughts lock) and only the keys whose
+value changes are stored. An absent toggle counts as ON on mobile (``MOBILE_STREAMING_DEFAULT``; the
+desktop default stays off): every job's config snapshot gets it (``with_mobile_streaming_defaults``), and
+chat / Reader runs force streaming only while it is on (``streaming_enabled``).
+
 Every global writer on mobile (Settings tiles, ModelSheet / Plan chips, Chat settings › All chats,
 the Welcome flow) goes through ``write_setting`` / ``write_settings``, which run the shared rules
 (``settings_rules.apply_change``, the Profiles service over ``prompt_profiles``) on a copy of the
@@ -37,12 +44,24 @@ __all__ = [
     "CONTEXT_MODE_CHOICES",
     "CONTEXT_MODE_KEY",
     "CONTEXT_MODE_WRITES",
+    "MOBILE_STREAMING_DEFAULT",
     "PROFILE_KEY",
     "RULE_KEYS",
+    "STREAMING_KEY",
+    "STREAMING_KEYS",
+    "STREAMING_WRITES",
+    "THOUGHTS_DEFAULT",
     "context_mode_of",
+    "effective_streaming_values",
     "extraction_method_for_profile",
     "implied_changes",
     "output_mode_values",
+    "reset_streaming",
+    "streaming_enabled",
+    "streaming_mode",
+    "streaming_states",
+    "streaming_summary",
+    "with_mobile_streaming_defaults",
     "write_setting",
     "write_settings",
 ]
@@ -66,6 +85,22 @@ CONTEXT_MODE_CHOICES = (("off", "Off"), ("contextual_history", "Contextual Histo
                         ("rolling_summary_append", "Rolling Summary (Append)"))
 #: The keys the Context Mode combo writes (``apply_context_mode`` also enforces the batching mode).
 CONTEXT_MODE_WRITES = ("contextual", "use_rolling_summary", "rolling_summary_mode", "batching_mode")
+#: Glossarion Mobile's one Streaming switch (owner 2026-10-08) - not a config key: the desktop
+#: "Real-time Translation (Streaming)" group (Enable streaming responses, Stream thinking/reasoning logs,
+#: Allow streaming logs during batch mode, Allow forced-stream batch log) plus the Enable thoughts toggle
+#: the stream-thinking lock drives (``settings_rules.apply_streaming``).
+STREAMING_KEY = "streaming"
+#: ``settings_rules.STREAMING_KEYS`` (a literal: this module loads before the backend is on sys.path).
+STREAMING_KEYS = ("enable_streaming", "stream_thinking_logs", "allow_batch_stream_logs",
+                  "allow_authgpt_batch_stream_logs")
+#: Everything the switch writes: the four toggles and the thoughts lock (other_settings._sync_thoughts_lock_state).
+STREAMING_WRITES = STREAMING_KEYS + ("enable_thoughts",)
+#: What an absent streaming toggle means on Glossarion Mobile (owner 2026-10-08: ON; the desktop default
+#: stays off). A saved or imported value always wins, and the default itself is never written.
+MOBILE_STREAMING_DEFAULT = True
+#: Enable thoughts when absent (owner_state / run_env: ``config.get('enable_thoughts', True)``).
+THOUGHTS_DEFAULT = True
+_STREAMING_DEFAULTS = {**{key: MOBILE_STREAMING_DEFAULT for key in STREAMING_KEYS}, "enable_thoughts": THOUGHTS_DEFAULT}
 
 
 def _rules() -> Any:
@@ -140,6 +175,125 @@ def _write_context_mode(store: Any, mode: Any) -> list:
     return _set_many(store, changes) if changes else []
 
 
+def _stored_value(source: Any, key: str) -> tuple:
+    """``(present, value)`` of ``key`` in a config store (``has`` / ``get``) or a plain mapping."""
+    if source is None:
+        return False, None
+    if isinstance(source, Mapping):
+        return (True, source[key]) if key in source else (False, None)
+    try:
+        return (True, source.get(key)) if source.has(key) else (False, None)
+    except Exception:
+        return False, None
+
+
+def effective_streaming_values(source: Any) -> dict:
+    """``STREAMING_WRITES`` as a mobile run reads them: the stored value, else the mobile default (the
+    toggles ON, Enable thoughts on). ``source`` is a config store or a config mapping."""
+    values = {}
+    for key in STREAMING_WRITES:
+        present, value = _stored_value(source, key)
+        values[key] = value if present else _STREAMING_DEFAULTS[key]
+    return values
+
+
+def streaming_states(source: Any) -> dict:
+    """``{toggle: bool}`` the way a mobile run reads the four toggles (``settings_rules.streaming_states``
+    over the stored values, an absent toggle ON)."""
+    stored = {}
+    for key in STREAMING_KEYS:
+        present, value = _stored_value(source, key)
+        if present:
+            stored[key] = value
+    rules = _rules()
+    if rules is not None and hasattr(rules, "streaming_states"):
+        try:
+            return dict(rules.streaming_states(stored, unset=MOBILE_STREAMING_DEFAULT))
+        except Exception:
+            log.debug("streaming_states failed", exc_info=True)
+    return {key: bool(stored.get(key, MOBILE_STREAMING_DEFAULT)) for key in STREAMING_KEYS}
+
+
+def streaming_mode(source: Any) -> str:
+    """'on' / 'off' / 'custom' (the toggles differ: an imported desktop config, or the U8/U9 builds'
+    four switches) - what the Streaming switch shows."""
+    states = streaming_states(source).values()
+    return "on" if all(states) else "off" if not any(states) else "custom"
+
+
+def streaming_summary(source: Any) -> str:
+    """The Streaming switch's value line: "On", "Off" or "Custom · N of 4 on"."""
+    states = list(streaming_states(source).values())
+    count = sum(1 for on in states if on)
+    if count in (0, len(states)):
+        return "On" if count else "Off"
+    return f"Custom · {count} of {len(states)} on"
+
+
+def streaming_enabled(source: Any) -> bool:
+    """Requests stream on mobile: Enable streaming responses (stored, else ON). The chat and the Reader's
+    live translation force every streaming switch on (desktop: always) only while this is on."""
+    return bool(streaming_states(source)["enable_streaming"])
+
+
+def with_mobile_streaming_defaults(config: Any) -> Any:
+    """A job's config snapshot (changed in place and returned) with the mobile Streaming default for
+    every absent toggle and the desktop thoughts lock (stream thinking on keeps Enable thoughts on,
+    ``settings_rules.apply_thoughts_lock``). Saved values win; config.json is never written."""
+    if not isinstance(config, dict):
+        return config
+    for key in STREAMING_KEYS:
+        config.setdefault(key, MOBILE_STREAMING_DEFAULT)
+    if bool(config.get("stream_thinking_logs")) and not bool(config.get("enable_thoughts", THOUGHTS_DEFAULT)):
+        rules = _rules()
+        try:
+            rules.apply_thoughts_lock(config, True)
+        except Exception:
+            config["enable_thoughts"] = True
+    return config
+
+
+def _write_streaming(store: Any, on: Any) -> list:
+    """The Streaming switch: ``settings_rules.apply_streaming`` on a copy of the config (absent toggles
+    count as ON), then one write of every key whose value changed - never a no-op write (stream thinking's
+    rule would turn Enable thoughts off on one)."""
+    snapshot = getattr(store, "snapshot", None)
+    if not callable(snapshot):
+        return []
+    try:
+        config = dict(snapshot() or {})
+    except Exception:
+        return []
+    before = effective_streaming_values(config)
+    rules = _rules()
+    if rules is not None and hasattr(rules, "apply_streaming"):
+        try:
+            rules.apply_streaming(config, bool(on), unset=MOBILE_STREAMING_DEFAULT)
+        except Exception:
+            log.exception("apply_streaming failed")
+            return []
+    else:  # no backend (a broken build): the four toggles alone
+        config.update({key: bool(on) for key in STREAMING_KEYS})
+    after = effective_streaming_values(config)
+    changes = {key: after[key] for key in STREAMING_WRITES if bool(after[key]) != bool(before[key])}
+    return _set_many(store, changes) if changes else []
+
+
+def reset_streaming(store: Any) -> dict:
+    """Reset of the Streaming switch: the toggles' keys removed (absent = the mobile default, ON), and a
+    stored Enable thoughts OFF with them (the lock keeps thoughts on while streaming is on). Returns
+    ``{key: old value}`` of what was removed (Undo: ``store.set_many(old)``)."""
+    old = {}
+    for key in STREAMING_WRITES:
+        present, value = _stored_value(store, key)
+        if not present or (key == "enable_thoughts" and (bool(value) or not MOBILE_STREAMING_DEFAULT)):
+            continue
+        old[key] = value
+    for key in old:
+        store.unset(key)
+    return old
+
+
 def extraction_method_for_profile(name: Any) -> Optional[str]:
     """``prompt_profiles.extraction_method_for_profile``: 'standard' / 'enhanced' / None."""
     if not isinstance(name, str) or not name.strip():
@@ -189,6 +343,8 @@ def write_setting(store: Any, key: Any, value: Any) -> list:
         return _select_profile(store, value)
     if key == CONTEXT_MODE_KEY:
         return _write_context_mode(store, value)
+    if key == STREAMING_KEY:
+        return _write_streaming(store, value)
     snapshot = getattr(store, "snapshot", None)
     if key not in RULE_KEYS or not callable(snapshot):
         return _set_many(store, {key: value})

@@ -12,12 +12,23 @@ groups every assistant message up to the next user turn - the request cards, the
 "Extraction report" and the "Attachment actions" cards. Assistant messages after a
 plain text turn render as ordinary cards. A "QA scan" message (a chat QA job started from a
 Result card, the ＋ sheet or ``/qa``) is its own item wherever it sits.
+
+Window unit (devfix4, owner issues 12 + 13): the desktop renders every saved message as a card,
+mobile renders an attachment turn's request messages as rows of one JobCard. So the chat windows
+over its rendered cards, the ``build_items`` of the whole chat: ``item_sizes`` (the desktop
+``message_size``; a JobCard its report and the previews of the newest request rows it shows) feed
+the desktop loop (``tail_start``), and the window moves with the desktop's arithmetic:
+``shift_window`` (``_shift_history_window``: one page, ``end = min(total, start + limit)``) and
+``window_after_append`` (``_update_history_window_after_append``: follow new cards only when the
+window ended at the old tail). A text chat's cards are its messages, so it windows exactly like the
+dialog; a book turn is never cut in two, and its JobCard always knows its turn.
+``tests_host/test_chat_transcript_window.py`` compares the arithmetic with the dialog source.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 from glossarion_mobile.ui.chat.direct_text_rules import (
     DEFAULT_RENDERED_CARD_LIMIT,
@@ -31,16 +42,26 @@ __all__ = [
     "LIBRARY_LABEL",
     "QA_LABEL",
     "REPORT_LABEL",
+    "ROW_PREVIEW_CHARS",
     "TranscriptItem",
     "build_items",
+    "item_position",
+    "item_size",
+    "item_sizes",
     "message_size",
     "page_size",
+    "shift_window",
     "slide_window",
+    "tail_start",
     "tail_window",
+    "window_after_append",
+    "window_around",
 ]
 
 REPORT_LABEL = "Extraction report"
 ACTIONS_LABEL = "Attachment actions"
+#: characters of a request row's preview in a JobCard (``cards._request_row``)
+ROW_PREVIEW_CHARS = 400
 LIBRARY_LABEL = "Library job"
 #: A chat QA scan's card (storage ``{"qa_job", "folder", "source"}``; the scanned workspace in message[4])
 QA_LABEL = "QA scan"
@@ -75,6 +96,24 @@ def message_size(message: Sequence, index: int, expanded: Iterable[int] = ()) ->
     return size
 
 
+def _tail_start(count: int, size_of: Callable[[int], int], limit: int, budget: int) -> int:
+    """The ``_reset_history_window`` loop: walk back from the newest of ``count`` cards."""
+    card_limit = normalize_rendered_card_limit(limit)
+    start = count
+    visible_count = 0
+    visible_characters = 0
+    while start > 0:
+        size = size_of(start - 1)
+        if visible_count >= card_limit:
+            break
+        if visible_count >= 3 and visible_characters + size > budget:
+            break
+        start -= 1
+        visible_count += 1
+        visible_characters += size
+    return start
+
+
 def tail_window(
     messages: Sequence,
     limit: int = DEFAULT_RENDERED_CARD_LIMIT,
@@ -83,20 +122,17 @@ def tail_window(
 ) -> tuple:
     """``(start, end)`` of the newest-messages window (``_reset_history_window``)."""
     expanded = set(expanded)
-    card_limit = normalize_rendered_card_limit(limit)
-    start = len(messages)
-    visible_count = 0
-    visible_characters = 0
-    while start > 0:
-        size = message_size(messages[start - 1], start - 1, expanded)
-        if visible_count >= card_limit:
-            break
-        if visible_count >= 3 and visible_characters + size > budget:
-            break
-        start -= 1
-        visible_count += 1
-        visible_characters += size
+    start = _tail_start(len(messages), lambda i: message_size(messages[i], i, expanded), limit, budget)
     return (start, len(messages))
+
+
+def tail_start(
+    sizes: Sequence[int],
+    limit: int = DEFAULT_RENDERED_CARD_LIMIT,
+    budget: int = HISTORY_CHARACTER_BUDGET,
+) -> int:
+    """Start of the newest window over per-card ``sizes`` (``item_sizes``; the same desktop loop)."""
+    return _tail_start(len(sizes), lambda i: max(0, int(sizes[i] or 0)), limit, budget)
 
 
 def page_size(limit: int) -> int:
@@ -104,22 +140,48 @@ def page_size(limit: int) -> int:
     return max(2, normalize_rendered_card_limit(limit) // 3)
 
 
-def slide_window(bounds: tuple, total: int, limit: int, direction: int) -> tuple:
-    """Slide ``bounds`` by one page towards older (-1) or newer (+1) messages."""
-    start, end = bounds
+def shift_window(bounds: tuple, total: int, limit: int, direction: int) -> Optional[tuple]:
+    """Desktop ``_shift_history_window``: one page (``limit // 3``) towards older (-1) or newer (+1)
+    cards, keeping an overlap (``end = min(total, start + limit)``); None when nothing moves."""
+    total = max(0, int(total or 0))
+    if total <= 0:
+        return None
     limit = normalize_rendered_card_limit(limit)
-    step = page_size(limit)
-    if direction < 0:
-        start = max(0, start - step)
-        end = min(total, max(end - step, start + min(limit, total)))
-        if end - start > limit:
-            end = start + limit
+    start = max(0, min(int(bounds[0] or 0), total))
+    end = max(start, min(int(bounds[1] or total), total))
+    step = max(1, min(limit - 1, page_size(limit)))
+    if int(direction) < 0:
+        if start <= 0:
+            return None
+        new_start = max(0, start - step)
+        new_end = min(total, new_start + limit)
     else:
-        end = min(total, end + step)
-        start = max(0, min(start + step, end - limit))
-        if end - start > limit:
-            start = end - limit
-    return (max(0, start), max(0, end))
+        if end >= total:
+            return None
+        new_end = min(total, end + step)
+        new_start = max(0, new_end - limit)
+    if (new_start, new_end) == (start, end):
+        return None
+    return (new_start, new_end)
+
+
+def window_after_append(bounds: Optional[tuple], previous_count: int, total: int) -> Optional[tuple]:
+    """Desktop ``_update_history_window_after_append``: None when the window ended at the old tail
+    (it follows the new cards: re-tail), else the window kept and clamped to ``total``."""
+    previous_count = max(0, int(previous_count or 0))
+    visible_end = int((bounds[1] if bounds is not None else previous_count) or 0)
+    if visible_end >= previous_count:
+        return None
+    total = max(0, int(total or 0))
+    start = max(0, min(int(bounds[0] or 0), total))
+    return (start, max(start, min(visible_end, total)))
+
+
+def slide_window(bounds: tuple, total: int, limit: int, direction: int) -> tuple:
+    """Slide ``bounds`` by one page towards older (-1) or newer (+1) cards (``shift_window``);
+    ``bounds`` itself when it cannot move."""
+    shifted = shift_window(bounds, total, limit, direction)
+    return shifted if shifted is not None else (max(0, int(bounds[0] or 0)), max(0, int(bounds[1] or 0)))
 
 
 def window_around(total: int, limit: int, index: int) -> tuple:
@@ -135,22 +197,36 @@ def window_around(total: int, limit: int, index: int) -> tuple:
 @dataclass
 class TranscriptItem:
     kind: str  # user | user_file | assistant | job | qa
-    index: int  # message index (job: the owning user_file index, or -1 when it is outside the window)
+    # message index; a job's is the index of the user_file turn that owns it, also when that message
+    # lies outside ``build_items``' range (``detached``): the card keeps its turn (title, live run,
+    # Result state / Resume, workspace) wherever the range starts
+    index: int
     requests: list = field(default_factory=list)  # job: assistant indices of request cards
     report: Optional[int] = None  # job: index of the "Extraction report" card
     actions: Optional[int] = None  # job: index of the "Attachment actions" card
     library: Optional[int] = None  # job: index of the "Library job" card (Plan "Save to: Library", U9)
+    detached: bool = False  # job: its user_file is before ``build_items``' ``start``
 
     @property
     def key(self) -> str:
         if self.kind == "job":
-            anchor = self.index if self.index >= 0 else (self.requests[0] if self.requests else self.report)
-            return f"job-{anchor}"
+            return f"job-{self.index}"
         return f"m-{self.index}"
+
+    def shows(self, index: int) -> bool:
+        """True when this item's card shows message ``index`` (a JobCard: its turn's request, report,
+        actions and Library cards; the user_file itself is its own file card)."""
+        if self.kind != "job":
+            return self.index == index
+        return index in self.requests or index in (self.report, self.actions, self.library)
 
 
 def build_items(messages: Sequence, start: int = 0, end: Optional[int] = None) -> list:
-    """Render items for ``messages[start:end]`` with attachment turns grouped into JobCards."""
+    """Render items for ``messages[start:end]`` with attachment turns grouped into JobCards.
+
+    A JobCard is always its turn's: when the range starts inside a turn, its job item still carries
+    the owning user_file index (``detached``). The transcript builds the whole chat and windows the
+    items (``tail_start`` / ``shift_window``), so a turn is never cut in two."""
     end = len(messages) if end is None else min(end, len(messages))
     # Which user_file owns each assistant message (scan from the beginning so a window
     # starting mid-group still groups its cards).
@@ -187,8 +263,8 @@ def build_items(messages: Sequence, start: int = 0, end: Optional[int] = None) -
                 items.append(TranscriptItem("assistant", i))
                 continue
             job = jobs.get(file_index)
-            if job is None:
-                job = TranscriptItem("job", -1)
+            if job is None:  # the turn's file card is before the range: its JobCard keeps the turn
+                job = TranscriptItem("job", file_index, detached=True)
                 jobs[file_index] = job
                 items.append(job)
             if label == REPORT_LABEL:
@@ -200,3 +276,37 @@ def build_items(messages: Sequence, start: int = 0, end: Optional[int] = None) -
             else:
                 job.requests.append(i)
     return items
+
+
+def item_size(item: TranscriptItem, messages: Sequence, expanded: Iterable[int] = (),
+              row_page: int = DEFAULT_RENDERED_CARD_LIMIT) -> int:
+    """Characters one rendered card adds to the window: the desktop ``message_size`` of its message; a
+    JobCard its "Extraction report" / "Library job" text plus the previews of the newest ``row_page``
+    request rows it shows (``cards.JobCard``: ``ROW_PREVIEW_CHARS`` each)."""
+    count = len(messages)
+    if item.kind != "job":
+        return message_size(messages[item.index], item.index, expanded) if 0 <= item.index < count else 0
+    size = 0
+    for index in (item.report, item.library):
+        if index is not None and 0 <= index < count:
+            size += message_size(messages[index], index, expanded)
+    page = normalize_rendered_card_limit(row_page)
+    for index in item.requests[-page:]:
+        if 0 <= index < count:
+            size += min(ROW_PREVIEW_CHARS, _assistant_chars(messages[index], "content"))
+    return size
+
+
+def item_sizes(items: Sequence[TranscriptItem], messages: Sequence, expanded: Iterable[int] = (),
+               row_page: int = DEFAULT_RENDERED_CARD_LIMIT) -> list:
+    """``item_size`` of every item (the ``tail_start`` input)."""
+    expanded = frozenset(expanded)
+    return [item_size(item, messages, expanded, row_page) for item in items]
+
+
+def item_position(items: Sequence[TranscriptItem], index: int) -> Optional[int]:
+    """Where in ``items`` the card showing message ``index`` is (``TranscriptItem.shows``), or None."""
+    for position, item in enumerate(items):
+        if item.shows(index):
+            return position
+    return None

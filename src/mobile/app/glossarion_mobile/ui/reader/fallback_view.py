@@ -72,6 +72,8 @@ class FallbackPage:
         self.on_paragraph = on_paragraph
         self.on_scroll = on_scroll
         self.blocks: list[Block] = []
+        # the page area's size (the Reader passes the screen less the system bars / cutouts its
+        # SafeArea keeps the page out of, and less the tablet chapters panel)
         self.width = 400.0
         self.height = 800.0
         self._pinch_base = 1.0
@@ -79,6 +81,7 @@ class FallbackPage:
         self.pixels: Optional[float] = None
         self.min_extent = 0.0
         self.max_extent: Optional[float] = None
+        self.viewport: Optional[float] = None  # its visible height (None: no event since the size changed)
         self.scroll_events = 0
         self.render_serial = 0  # counts render() calls (a page_by that saw a new chapter drawn says nothing)
         self.list_view = ft.ListView(controls=[], expand=True, spacing=0, on_scroll=self._on_scroll,
@@ -97,8 +100,14 @@ class FallbackPage:
     def set_size(self, width: Optional[float], height: Optional[float]) -> None:
         if width:
             self.width = float(width)
-        if height:
+        if height and float(height) != self.height:
             self.height = float(height)
+            self.viewport = None  # rotated / resized: the last event's viewport is stale
+
+    def page_step(self) -> float:
+        """What an edge tap scrolls: 90 % of the list's visible height (its scroll events' viewport,
+        else the page area's height), so a turn never skips a line the reader has not seen."""
+        return 0.9 * max(1.0, min(self.viewport or self.height, self.height))
 
     def render(self, blocks: Sequence[Block], *, theme: Mapping[str, Any], settings: rm.ReaderSettings,
                images: Optional[Mapping[str, bytes]] = None, keep_offset: bool = False) -> None:
@@ -178,8 +187,8 @@ class FallbackPage:
         return self.pixels <= self.min_extent + EDGE_SLACK
 
     async def page_by(self, direction: int) -> str:
-        """Scroll a screen towards ``direction``: :data:`PAGE_EDGE` when the list is already at that
-        end (known metrics), or when it does not move (one at a bound only overscrolls; with nothing
+        """Scroll a screen (:meth:`page_step`) towards ``direction``: :data:`PAGE_EDGE` when the list is
+        already at that end (known metrics), or when it does not move (one at a bound only overscrolls; with nothing
         known about the list, a chapter shorter than the screen sends no scroll event at all, waited
         for ``PAGE_LATE_GRACE`` longer); else :data:`PAGE_SCROLLED` (also when the list is known to
         be able to move but its events are late: a late turn would skip the rest of the chapter)."""
@@ -191,7 +200,7 @@ class FallbackPage:
         before = self.pixels if self.pixels is not None else self.min_extent
         events, serial = self.scroll_events, self.render_serial
         try:
-            await self.list_view.scroll_to(delta=step * self.height * 0.9, duration=PAGE_SCROLL_MS)
+            await self.list_view.scroll_to(delta=step * self.page_step(), duration=PAGE_SCROLL_MS)
         except Exception as exc:  # not on screen (yet): neither scrolled nor at an edge
             log.debug("fallback scroll failed: %s", exc)
             return PAGE_SCROLLED
@@ -256,6 +265,12 @@ class FallbackPage:
         except (TypeError, ValueError):
             return
         self.pixels, self.min_extent, self.max_extent = pixels, low, extent
+        try:
+            viewport = float(getattr(e, "viewport_dimension", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            viewport = 0.0
+        if viewport > 0:
+            self.viewport = viewport
         self.scroll_events += 1
         fraction = max(0.0, min(1.0, pixels / extent)) if extent > 0 else 0.0
         call_handler(self.on_scroll, fraction)

@@ -34,9 +34,15 @@ FILTERS = (
 ADVANCED_GROUP = "Advanced"
 
 
+def _modified(ctx: Any, hit: SearchHit) -> bool:
+    """The hit's tile shows the "modified" dot (a virtual control: any key it stands for is modified)."""
+    check = getattr(ctx.schema, "is_modified", None)
+    return bool(check(ctx.store, hit.key)) if callable(check) else ctx.store.is_modified(config_path(hit.spec))
+
+
 def matches_filters(ctx: Any, hit: SearchHit, filters: Iterable[str], config: Optional[Any] = None) -> bool:
     for name in filters:
-        if name == "modified" and not ctx.store.is_modified(config_path(hit.spec)):
+        if name == "modified" and not _modified(ctx, hit):
             return False
         if name == "unavailable" and ctx.schema.availability(hit.key)[0]:
             return False
@@ -183,13 +189,15 @@ class SettingsSearch:
         kind = tile_kind(hit.spec, self.ctx.store.get(path))
         shown = (f"{len(value)} keys" if isinstance(value, (list, dict)) else "Not set") if (
             kind == "json" and str(getattr(hit.spec, "type", "")) == "secret") else summarize(value, kind, hit.spec)
+        virtual = getattr(self.ctx.schema, "virtual_summary", None)
+        shown = (virtual(self.ctx.store, hit.key) if callable(virtual) else None) or shown
         subtitle = f"{hit.key} · {shown}"
         available, reason = self.ctx.schema.availability(hit.key)
         trailing: Optional[ft.Control] = None
         if not available:
             trailing = ft.Text(reason or "Not on mobile", theme_style=ft.TextThemeStyle.LABEL_SMALL,
                                color=ft.Colors.ON_SURFACE_VARIANT)
-        elif self.ctx.store.is_modified(config_path(hit.spec)):
+        elif _modified(self.ctx, hit):
             trailing = ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.PRIMARY, tooltip="Modified")
         row = ft.ListTile(
             title=ft.Text(label_for(hit.spec), theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=ft.Colors.ON_SURFACE),

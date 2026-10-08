@@ -145,12 +145,14 @@ From top to bottom:
 6. **Recents.**
    - Group headers: **Today / Yesterday / Previous 7 days / <Month YYYY>** (labelSmall, primary colour).
    - The list is lazy (`ListView(build_controls_on_demand=True)`).
-7. **Footer** (sticky, `surfaceContainerLow`, 56 dp):
+7. **Footer** (pinned: it never scrolls; only the chat list above it does; `surfaceContainerLow`, 56 dp):
    - **Status chip.** Examples: "Gemini 3.5 Flash · 5 keys ✓", "GPT-6 Luna · ChatGPT #2 ✓", "GPT-6 Luna · Sign in with ChatGPT", "No API key: set up".
      - The last two use the warning colour.
      - The chip opens ModelSheet. In the sign-in case it opens the LoginSheet directly.
    - `IconButton(settings)` opens **Settings**.
+   - `IconButton(key)` "API keys" opens the **Multi-Key Manager** (`/settings/keys`; owner request 17: key settings are not in Chat settings). Back returns through Settings, like the other drawer-opened settings pages.
    - `IconButton(help_outline)` opens **Help** (bundled user guide).
+   - On phones the drawer content box is the NavigationDrawer list's viewport minus the navigation-bar padding (`AppShell._drawer_height`, re-fitted on `page.on_media_change`), so that list never scrolls the footer away.
 
 **Chat row (44 dp visual, 48 dp target).**
 - Title (bodyMedium, one line, ellipsis).
@@ -651,12 +653,13 @@ Every tap triggers `HapticFeedback.light_impact`.
 
 ### 2.8 Transcript (`Transcript`: `ListView(build_controls_on_demand=False, spacing=12, padding=12)` over a Python-side window)
 
-**Window.** On open, the last `direct_text_rendered_card_limit` messages are rendered (default 20, at least 3), within a 120,000-character budget (desktop rule).
+**Window.** On open, the last `direct_text_rendered_card_limit` cards are rendered (default 20, at least 3), within a 120,000-character budget (desktop rule). The window counts rendered cards (`transcript_model.build_items` of the whole chat): a text chat's cards are its messages, so it windows exactly like the desktop; a book turn is its file card + one JobCard (its request messages are rows of that card, each sized by its 400-character preview), so a turn is never cut in two and its JobCard always knows its turn (devfix4, owner issues 12 + 13).
 - The window *is* the virtualisation. Only windowed cards exist as controls, so every rendered card is built and can be a scroll target. That is why the list uses `build_controls_on_demand=False`.
-- Scrolling near the top (`on_scroll` within 600 px of the start):
-  - prepends `limit/3` older messages;
-  - drops the same number from the far end when the budget is exceeded;
-  - restores the offset with `scroll_to(offset=…)`.
+- The window moves like the desktop's (`transcript_model.shift_window` = `_shift_history_window`, `window_after_append` = `_update_history_window_after_append`; tests_host/test_chat_transcript_window.py compares them with the dialog). It re-tails only after cards were added to a window that ended at the old tail; a slide or a jump stays where it put the window. Actions that create a card (send, Plan, QA scan, batch) and ↓ show the newest cards.
+- Loading earlier / newer cards moves one page (`limit/3` cards; the window keeps `limit` cards, end = min(total, start + limit)):
+  - tapping a loader row (always works: a transcript shorter than the screen sends no scroll events) shows the loaded cards;
+  - a user scroll within 600 px of the start, or a pull past the top, prepends a page and puts the card that was at the top back in view with `scroll_to(scroll_key=…, duration=0)`; one load per gesture; the mirror at the end appends a page;
+  - after "↑ earlier" a live run no longer pulls the view to the end (the ↓ FAB shows).
 - Loader rows (desktop strings): "↑ Scroll for earlier messages (N hidden)" and "Scroll for newer messages (N hidden) ↓".
 
 **Lazy bodies.**
@@ -884,8 +887,9 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
 
 **Current item.** The last request label (bodySmall).
 
-**Requests (N)** (`ExpansionTile`)
-- Live request cards sorted by spine order. Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
+**Requests (N)** (`ExpansionTile`, open while the job runs, like Jobs › job; a Result's stays closed)
+- The turn's request cards: the cards the run already committed (the glossary gate freezes its phase into the chat; an earlier run of the same turn) followed by the live ones, in spine order. Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
+- The newest `direct_text_rendered_card_limit` rows are shown; "↑ Show N earlier requests (M hidden)" adds a page. Jump-to and search open the list on the target request.
 - Tapping a row opens a `RequestSheet` with the full streaming content and thinking.
 - These cards are persisted as v2 assistant messages exactly as desktop does.
 
@@ -978,7 +982,7 @@ In "This chat", every control shows "Inherited from: All chats" (or "Series <nam
 
 Sections are `ExpansionTile`s. The labels are exact desktop labels.
 
-1. **Model & prompt.** Model override · Prompt profile override · Target language · Default output mode (`direct_text_output_mode`).
+1. **Model & prompt.** Model override · Prompt profile override (every profile of Settings › Profiles & prompts, translation profiles first and the task-specific built-ins under a "Specialised" heading; a profile that no longer exists shows "<name> (missing)") · the profile's prompt card (System / User prompt label, Built-in and modified marks, first lines and size, extraction and "Skip prompt profile" notes; **Edit prompt** = `PromptEditorSheet` on the shared profile; **New profile…** = a copy of the current profile that becomes this chat's / this series' override, or the active profile in All chats; **Manage…** = Settings › Profiles & prompts for rename, delete / reset, import / export) · Target language · Default output mode (`direct_text_output_mode`). Edits from This chat never switch the global active profile. There are no API key settings here (keys: the drawer's Keys button).
 2. **Glossary.** `RadioGroup` bound to `direct_text_glossary_override_mode`:
    - "No Override" (`none`)
    - "No Override (Attachments Only)" (`attachments_only`, default)
@@ -1471,12 +1475,13 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 **Document**
 - `reader_doc.wrap_reader_html(mobile=True)` (`ReaderDocument.wrap(..., mobile=True)`), served from the in-app localhost HTTP server (`services/reader_server.py`: `http://127.0.0.1:<port>/<token>/reader.html?v=N`, a random 192-bit path token, Host-header guard, document CSP; Android allows cleartext for the loopback host only through the extension's `glossarion_network_security_config.xml`).
 - Book content never runs code in the page: chapter HTML loses `<script>`, frames, objects, `<base>`, meta refresh, `on*` handlers and `javascript:` URLs (`document.sanitize_book_html`), the book's CSS cannot close its `<style>` (`inert_css`), and the page's own scripts carry a per-page nonce that the document CSP (`script-src 'nonce-…'`) allows exclusively. `/img/<id>` serves only bytes that are an image by content, events are accepted only as JSON `POST`s, and a book's external link opens after an "Open link?" confirmation (http/https/mailto only).
-- Mobile additions: a viewport meta tag, `-webkit-column-break-*`, 16–20 dp padding, safe-area insets, `100dvh`.
+- Mobile additions: a viewport meta tag, `-webkit-column-break-*`, 16–20 dp padding, safe-area insets, `100dvh`. Paged layouts add the top / bottom safe-area insets once, on `body`, and give `#columns` the height that is left (`100dvh - 36px - env(safe-area-inset-top) - env(safe-area-inset-bottom)`, `!important` over the desktop `_setupColumns` inline `innerHeight - 36`). With no inset this is the desktop geometry: columns from 20 px to innerHeight − 16 px, same page counts. The image limits keep the desktop offsets from that column height.
+- The page layer (WebView, native page, empty state) sits in a `SafeArea` inside the Reader's full-screen Stack (`reader-page-safe`). The APK targets SDK 36, so Android 15+ runs the app edge to edge; the page never lies under the status bar, the navigation bar or a cutout, and its viewport is the area the reader sees. The chrome bars stay edge to edge with their own SafeAreas, the theme background fills the strips behind the system bars, and the selection chips map the page's selection rect into the Stack. Device fix 2026-10-08 (#10): before it, the last lines of pages were cut at the screen edge or hidden under the navigation bar.
 - Pagination uses CSS columns. Tap zones (left / right thirds) and swipes are handled in page JS.
 - Chapter changes navigate the existing WebView with `load_request` (`reader_view.navigate_webview`; flet-webview reads `url` only when the control is built). The first page builds the WebView with its URL, and a WebView whose navigation fails is rebuilt with the page URL (each build gets its own key, `reader-webview-N`). Device fix 2026-10-08: before it, no chapter after the first one loaded on Android/iOS.
 - Events reach Python as console messages `GLRDR:{json}` (`reader_doc.MOBILE_EVENT_PREFIX`, read through `on_console_message`) and, as a twin, `fetch` POSTs to `/<token>/__ev` (`MOBILE_EVENT_PATH`). Every event carries `{type, seq, chapter, …}`; `seq` de-duplicates the two transports and `GLRDR.setTransport('console'|'fetch'|'both')` narrows them. The Reader's own extras (`ui/reader/bridge.py`) add find / anchor / live restyle, a cleared-selection event and the selection rectangle.
 
-**Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls. It scrolls; edge taps scroll a screen and at the end/start of the list open the next/previous chapter (previous: at its end; `fallback_view.page_by`: a list known to be able to move never turns on late scroll events; a chapter shorter than the screen turns on the first tap); text is not OS-selectable (long-press a paragraph for its actions); another chapter opens at its top, the same chapter drawn again (Aa) keeps its offset. It is used:
+**Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls. It scrolls; edge taps scroll 90 % of what the list shows (its scroll viewport, else the page area) and at the end/start of the list open the next/previous chapter (previous: at its end; `fallback_view.page_by`: a list known to be able to move never turns on late scroll events; a chapter shorter than the screen turns on the first tap); text is not OS-selectable (long-press a paragraph for its actions); another chapter opens at its top, the same chapter drawn again (Aa) keeps its offset. It is used:
 - automatically on Windows/Linux dev, because flet-webview raises outside Android, iOS and macOS;
 - for the "Lightweight reader" setting;
 - on WebView failures.
@@ -1496,6 +1501,8 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 - **Original** and **Translated** are available when an overlay, dual path or raw workspace content exists.
 - **Bilingual** is new: `reader_doc.build_bilingual_chapter(raw_html, translated_html)` interleaves blocks paragraph by paragraph. When the block counts diverge by more than 15%, it falls back to whole-section order (original, then translated). It is enabled only when both versions of the chapter exist.
 - When switching, the position is kept with the proportional page hint.
+- One switch at a time (desktop `_raw_toggle_in_flight`): a tap while a switch loads snaps the segment back to the version being loaded. A switch that cannot load the other version keeps the one on screen and says so ("Could not switch: …", desktop `_restore_raw_toggle_value`). A book saved in Original whose raw EPUB no longer loads opens on its translation ("The original could not be opened; showing the translation"). A saved Bilingual is checked against the chapter that opens.
+- Bilingual on a chapter without both versions shows the translation (the highlighted segment) and comes back on the next chapter that has both (`ReaderSession.effective_flavor`); a reload in Bilingual (Show special files) keeps both versions.
 
 **Chapters drawer** (the View's `end_drawer` `NavigationDrawer`; a 320 dp side panel on tablet):
 - chapter list with progress status icons;
@@ -1527,7 +1534,7 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 1. If the chapter is completed, confirm "“{title}” is already translated…".
 2. `mark_chapter_pending_for_retranslation`, then a SINGLE_CHAPTER job.
 3. A native **LivePanel** opens: a half-height draggable sheet, *not* inside the WebView.
-   - Status line "🛰️ Translating “f” — waiting for stream…".
+   - Status line "🛰️ Translating “f” — waiting for stream…" (Streaming off: "🛰️ Translating “f” — Streaming is off: the chapter appears when it is done"; the job then does not force streaming, §4.15).
    - Content is a `Markdown` / `Text` column fed by `LiveLineClassifier` (90 ms drain).
    - Buttons "🧠 Thinking (n)" (expands the thinking log, at the log size §6.2), "⏹ Stop", "✕ Hide" (the job continues; the 🌐 icon becomes "🛰️ Live view").
 4. The outcome uses the exact strings:
@@ -1848,6 +1855,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 - **`/settings/profiles`:** a list of prompt profiles (built-in badge, modified dot), a FAB "New profile", and ⋯ Import / Export (FilePicker / Share).
 - **`/settings/profiles/<pid>`:** a `PromptEditor` (full-screen mono, token count, placeholder chips such as `{split_marker_instruction}` and `{glossary_prompt}`), a System ⇄ User role toggle, and an extraction-override section when the profile defines one. Actions: Save · Save as · Reset to default · Delete.
 - **`/settings/prefill`:** Assistant prefill (Asst. Prompt) profiles: list, editor, enable.
+- **From the chat (device fixes #15/#16):** Chat settings › Model & prompt edits and adds profiles through the same `ProfileService` with `keep_active=True` (This chat / This series edits never change `active_profile` or `text_extraction_method`; renaming or deleting the profile in use follows the desktop rule). Chats and series follow a profile renamed on the device; one deleted here, on the desktop or by an import inherits again (`ChatFeature.reconcile_profile_overrides` on every `prompt_profiles` change and once after launch). The chat's pickers (Chat settings, ModelSheet › Profile) list every profile of this page, the task-specific built-ins under "Specialised"; Settings › Profile & System Prompt links here and to Assistant prefill.
 - **"All prompts" index:** a searchable list of every PromptTile in the schema, each linking into its section. It covers:
   - Refine prompt; Full + raw prompts / header / footer
   - Configure All translation prompts; title prompt; metadata prompts
@@ -1888,7 +1896,11 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 `context_memory`, `epub_output`, `pdf`, `thinking` and `provider_options` take their listed keys out
 of the desktop sections, with their own sub-headings (Pacing, Multipass, Rolling summary, Input /
 Output, …); `other.response` keeps its id and is regrouped under Streaming / Retries / Truncation /
-Duplicates / Failure saving / HTTP / …. The remaining desktop sections keep their ids with the
+Duplicates / Failure saving / HTTP / …. Streaming is one switch (`VIRTUAL_SPECS["streaming"]`, owner
+2026-10-08) for the four desktop streaming toggles and Enable thoughts: on when they are absent,
+"Custom · N of 4 on" when they differ, and off stops streaming in chats and the Reader too. The folded
+keys stay in the section keys (counts, `section_for_key`, search maps them to the switch) and are
+listed in its ⓘ. The remaining desktop sections keep their ids with the
 mobile titles (`other.meta_data` "Metadata, TOC & headers", `other.processing` "Processing &
 extraction", `other.processing.extraction` "Chapter extraction", `other.image` "Image & vision").
 A desktop id the move emptied (`main.run`, `other.output`) resolves to the section that took its
@@ -2003,7 +2015,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `AppShell` (`shell/app_shell.py`) | Phone: a `page.views` stack with the chat root View. Tablet: one View with `Row[Sidebar, MainArea, SidePanel?]` | size class phone / large phone / tablet / wide; rebuilt only when the class changes | `View`, `Row`, `Container`, `SafeArea`, `page.on_resize` |
 | `Router` (`shell/router.py`) | Whitelist parser for paths and `glossarion://app/` URIs; a per-destination back stack on tablet | known route · ignored route · (backend not ready: the screen opens at once; actions that need the engine wait on "Preparing engine…") | `page.on_route_change`, `page.on_view_pop`, `page.push_route` |
 | ~~`BootView`~~ (adopted adaptation, U9) | Not built: the native splash (Halgakos) shows until Flet draws, then the shell mounts immediately. Until the warm import ends Send is `blocked` "Preparing engine…" and the drawer status chip says so; keys that could not be decrypted show the Settings home notice (→ re-enter in Keys) | — | native splash, `SendButton` blocked state, drawer status chip |
-| `ChatDrawer` / `Sidebar` (`shell/drawer.py`, `sidebar.py`) | Header (avatar, New chat, New scratch chat) · SearchBar · destination chips · Pinned · Series (U9) · Recents · footer (status chip, Settings, Help) | closed · open · searching (results replace the body) · sidebar (tablet, persistent) | `NavigationDrawer(controls=…)` on phone (Appendix C item 3); a `Container` column on tablet; `SearchBar`, `Chip`, `Control.badge`, `ExpansionTile`, `ListView(build_controls_on_demand=True)` for Recents (group headers are interleaved, so no prototype), `ListTile(on_long_press=…)` |
+| `ChatDrawer` / `Sidebar` (`shell/drawer.py`, `sidebar.py`) | Header (avatar, New chat, New scratch chat) · SearchBar · destination chips · Pinned · Series (U9) · Recents · footer (status chip, Settings, API keys, Help; pinned) | closed · open · searching (results replace the body) · sidebar (tablet, persistent) | `NavigationDrawer(controls=…)` on phone (Appendix C item 3); a `Container` column on tablet; `SearchBar`, `Chip`, `Control.badge`, `ExpansionTile`, `ListView(build_controls_on_demand=True)` for Recents (group headers are interleaved, so no prototype), `ListTile(on_long_press=…)` |
 | `SidePanel` (`shell/side_panel.py`) | 380 dp right panel: title row (title, pin, ✕) and swappable content | hidden · open · pinned (wide) | `Container(width=380)`, `AnimatedSwitcher` |
 | `JobStrip` (`shell/job_strip.py`) | 44 dp strip: `ProgressRing` with the kind icon · title + subtitle · queued badge · Stop | running · finishing · stopping · done (10 s) · failed (10 s) · hidden · dismissed until the next state change | `Container`, `ProgressRing`, `Text`, `IconButton`, `Control.badge`, `Dismissible`, `Semantics(live_region=True)` |
 | `LaunchBanner` (`shell/launch_banner.py`) | "N interrupted jobs" · **Resume** (most recent) · **Review** (→ `/jobs`) · ✕ | shown once per launch when `jobs/active.state` holds interrupted jobs | `Banner` via `page.show_dialog` |
@@ -2508,6 +2520,14 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
   - An auto-accepted glossary gate does not freeze the chat's request cards (the glossary-phase and translation-phase cards stay one live group until the run finishes).
   - Chat QA scans Direct Text workspaces through the shared opt-in; mobile scans default to sample size 0.
   - Log text is 8 sp.
+
+- **Device fixes part 2, 2026-10-08 (owner items 10-17 on the U8 APK; tests/parity/DISCREPANCIES.md "Device fixes part 2 (2026-10-08)").**
+  - One Streaming switch stands for the four desktop streaming toggles and Enable thoughts, and is on when they are absent (the desktop keeps four checkboxes, default off). Off also stops streaming in chats and the Reader's live translation, which the desktop always forces.
+  - The chat transcript windows its rendered cards (a book turn is its file card + one JobCard), not its saved messages; the running JobCard lists the turn's committed request cards before its live ones and pages its rows.
+  - The chat's profile pickers list the task-specific built-ins under "Specialised" after the translation profiles (the desktop combo and Settings › Profiles & prompts keep the stored order).
+  - Chat settings can edit and add prompt profiles (the desktop Direct Text dialog only has Skip prompt profile).
+  - The drawer / sidebar footer has an API keys button; its footer never scrolls.
+  - The Reader's page sits in a SafeArea and its mobile paged CSS sizes the columns from the space left between the insets.
 
 **Flet 1.0.3 constraints applied.** These came from source verification; details are in §5.0. In summary:
 - `scroll_to` needs an `ft.ScrollKey` and only reaches built items.

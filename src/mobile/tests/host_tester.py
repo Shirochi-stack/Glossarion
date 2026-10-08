@@ -240,7 +240,16 @@ class PyTester:
             await self._dispatch(field, "change", text)
 
     async def pump(self, duration: Any = None) -> None:
-        seconds = duration.total_seconds() if hasattr(duration, "total_seconds") else 0.05
+        """Flet's ``DurationValue``: an int is milliseconds (what ``UiDriver`` sends), or an
+        ``ft.Duration``; no duration is a short tick."""
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            seconds = duration / 1000.0
+        elif hasattr(duration, "in_milliseconds"):  # ft.Duration
+            seconds = duration.in_milliseconds / 1000.0
+        elif hasattr(duration, "total_seconds"):  # datetime.timedelta
+            seconds = duration.total_seconds()
+        else:
+            seconds = 0.05
         await asyncio.sleep(max(0.01, seconds))
 
     async def pump_and_settle(self, duration: Any = None) -> None:

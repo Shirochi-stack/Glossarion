@@ -34,6 +34,8 @@ U9 (UI_SPEC §1.1, §7.5):
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -57,6 +59,9 @@ from glossarion_mobile.ui.theme import HIT_TARGET
 __all__ = ["AppShell", "StackEntry"]
 
 log = logging.getLogger("glossarion.shell")
+
+#: The phone drawer box never gets shorter than this (header, search, chips, footer and a few chat rows).
+_DRAWER_MIN_HEIGHT = 300.0
 
 ScreenFactory = Callable[[RouteMatch], Screen]
 
@@ -142,20 +147,81 @@ class AppShell:
 
     # ---- building ------------------------------------------------------------------
 
-    def _drawer_height(self) -> float:
-        height = getattr(self.page, "height", None) or 640
+    def _system_insets(self) -> tuple[float, float]:
+        """(top, bottom) system insets from ``page.media``: the larger of ``padding`` and
+        ``view_padding`` on each side (``view_padding`` keeps the navigation bar while the keyboard is
+        up, so the result does not change when the keyboard opens)."""
         media = getattr(self.page, "media", None)
-        top = 0.0
+
+        def side(name: str) -> float:
+            values = [0.0]
+            for attr in ("padding", "view_padding"):
+                try:
+                    values.append(float(getattr(getattr(media, attr, None), name, 0) or 0))
+                except (TypeError, ValueError):
+                    pass
+            return max(values)
+
+        return side("top"), side("bottom")
+
+    def _drawer_height(self) -> float:
+        """Height of the phone drawer's content box (``drawer_box``).
+
+        Flutter's ``NavigationDrawer`` puts its children in its own ``ListView`` under
+        ``SafeArea(bottom: false)``: that list is the screen height minus the top inset (status bar)
+        and pads its end by the bottom inset (the navigation bar / gesture bar). A box of
+        ``height - top`` (the U1 size) made that list one bottom inset taller than its viewport, so a
+        drag on the drawer scrolled the whole content (footer included) and the footer sat under the
+        navigation bar (owner request 17: the footer must stay pinned; only the chat list scrolls).
+        The box is now exactly the list's viewport minus that end padding: the outer list cannot
+        scroll, ``ChatDrawer.body`` is the only scrolling part and the footer sits just above the
+        navigation bar. Below ``_DRAWER_MIN_HEIGHT`` (split screen) the content cannot fit anyway and
+        the drawer's own list scrolls it as a whole, so nothing becomes unreachable.
+        """
+        height = getattr(self.page, "height", None) or 640
+        top, bottom = self._system_insets()
+        return max(_DRAWER_MIN_HEIGHT, float(height) - top - bottom)
+
+    def apply_insets(self, e: Any = None) -> bool:
+        """``page.on_media_change`` (system bars, navigation mode, rotation): re-fit the phone drawer
+        box. True when its height changed (the keyboard alone never changes it)."""
+        box = self.drawer_box
+        if box is None:
+            return False
+        height = self._drawer_height()
+        if box.height == height:
+            return False
+        box.height = height
         try:
-            top = float(media.padding.top or 0) if media is not None and media.padding is not None else 0.0
-        except Exception:
-            top = 0.0
-        return max(360.0, float(height) - top)
+            box.update()
+        except Exception as exc:  # not mounted yet / no client
+            log.debug("drawer box update failed: %s", exc)
+        return True
+
+    def _install_media_hook(self) -> None:
+        """Follow ``page.on_media_change`` (chaining a handler someone else installed)."""
+        previous = getattr(self.page, "on_media_change", None)
+        if getattr(previous, "_glossarion_shell", None) is self:
+            return
+
+        def on_media_change(e: Any = None) -> None:
+            self.apply_insets(e)
+            if callable(previous):
+                result = previous(e)
+                if inspect.isawaitable(result):
+                    asyncio.ensure_future(result)
+
+        on_media_change._glossarion_shell = self  # type: ignore[attr-defined]
+        try:
+            self.page.on_media_change = on_media_change
+        except Exception as exc:  # a page without media events (host fakes)
+            log.debug("on_media_change not available: %s", exc)
 
     def mount(self) -> None:
         """Build the layout for the current width and install ``page.views`` (plus the invisible
         system text-scale probe in ``page.overlay``)."""
         self.text_probe.install(self.page)
+        self._install_media_hook()
         self._build()
         self._install_views()
 

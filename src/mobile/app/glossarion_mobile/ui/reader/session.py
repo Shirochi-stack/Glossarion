@@ -557,6 +557,8 @@ class ReaderSession:
             self._load_epub(path)
             if plan.mode == MODE_OVERLAY:
                 self._attach_overlay(plan.output_folder)
+            elif plan.mode == MODE_DUAL and self.flavor == rm.BILINGUAL:
+                self._ensure_dual_both()  # a reload in Bilingual (Show special files) needs the raw EPUB too
         with self.lock:
             if self.is_text:  # sections in reading order; no EPUB TOC
                 self.display_numbers = list(range(1, len(self.filenames) + 1))
@@ -788,8 +790,16 @@ class ReaderSession:
             available[rm.BILINGUAL] = False
         return available
 
+    def effective_flavor(self, index: int) -> str:
+        """The flavour chapter ``index`` shows: Bilingual needs both versions of the chapter, else the
+        translation (the segment ``ReaderChrome.set_modes`` highlights); the chosen Bilingual comes back on
+        the next chapter that has both."""
+        if self.flavor == rm.BILINGUAL and not self.available_modes(index).get(rm.BILINGUAL):
+            return rm.TRANSLATED
+        return self.flavor
+
     def chapter_html(self, index: int, flavor: Optional[str] = None) -> str:
-        flavor = flavor or self.flavor
+        flavor = flavor or self.effective_flavor(index)
         with self.lock:
             if not 0 <= index < max(len(self.raw_chapters), len(self.overlaid)):
                 return ""

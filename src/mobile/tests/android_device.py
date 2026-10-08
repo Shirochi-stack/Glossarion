@@ -2,7 +2,8 @@
 
 * ``Adb``: the emulator/device the tests run on (``ANDROID_SERIAL`` / ``FLET_TEST_DEVICE``),
   ``adb reverse`` (the app reaches the test's fake model server on 127.0.0.1), files pushed to
-  ``/sdcard/Download`` (MediaStore scan requested), the system Back key, ``uiautomator`` dumps.
+  ``/sdcard/Download`` (MediaStore scan requested), the system Back key, list swipes (they reach
+  the app because ``driver_patch`` lets device pointer events through), ``uiautomator`` dumps.
 * ``DocumentsPicker``: chooses a file in the system picker (DocumentsUI), which is a native
   activity the Flutter tester cannot see: it reads ``uiautomator dump`` and taps with
   ``input tap`` — the file when it is listed, else the Downloads root (via "Show roots"), else
@@ -25,6 +26,8 @@ from typing import Optional
 __all__ = ["Adb", "DocumentsPicker", "adb_available"]
 
 DOCUMENTS_UI = ("com.google.android.documentsui", "com.android.documentsui")
+#: ``Adb.swipe_up`` duration (ms): about 310 px/s on the CI emulator's 640 px screen
+SWIPE_MS = 700
 _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
 
@@ -84,11 +87,14 @@ class Adb:
             self._size = tuple(int(v) for v in match[-1]) if match else (1080, 1920)
         return self._size
 
-    def swipe_up(self) -> None:
-        """Scroll the list under the finger down by about a third of the screen."""
+    def swipe_up(self, duration_ms: int = SWIPE_MS) -> None:
+        """Scroll the list under the finger down by about a third of the screen. Slow enough that
+        the fling after it stays short: one step is well under a list's viewport height, so a row
+        below the fold can never jump past the top between two polls (``UiDriver`` taps once the
+        row is hittable)."""
         width, height = self.screen_size()
         x = width // 2
-        self.shell(f"input swipe {x} {int(height * 0.72)} {x} {int(height * 0.38)} 400", check=False)
+        self.shell(f"input swipe {x} {int(height * 0.72)} {x} {int(height * 0.38)} {int(duration_ms)}", check=False)
 
     def foreground_package(self) -> str:
         text = self.shell("dumpsys activity activities | grep -m 1 -E 'topResumedActivity|mResumedActivity'",

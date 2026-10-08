@@ -2740,10 +2740,20 @@ _MOBILE_COMMON_CSS = (
     "img, svg { -webkit-column-break-inside: avoid; }"
 )
 
+# Paged layouts: the desktop rule pads html AND body (10px / 26px each), so only <body> carries the
+# safe-area insets here (added once, never on both), and #columns gets the height that is really left
+# between them: a stylesheet !important wins over the inline ``innerHeight - 36`` of the desktop
+# ``_setupColumns``. With env() = 0 this is the desktop geometry (columns from 20px to innerHeight - 16px);
+# the image limits keep the desktop offsets from that column height (100vh first, then 100dvh where
+# the WebView has dynamic viewport units).
 _MOBILE_PAGED_CSS = (
-    "html, body { height: 100%; height: 100dvh; "
-    "padding-top: max(10px, env(safe-area-inset-top)); "
-    "padding-bottom: max(26px, env(safe-area-inset-bottom)); touch-action: pan-y; }"
+    "html { height: 100%; height: 100dvh; padding: 0; touch-action: pan-y; }"
+    "body { height: 100%; height: 100dvh; "
+    "padding-top: calc(20px + env(safe-area-inset-top, 0px)); "
+    "padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); touch-action: pan-y; }"
+    "#columns { "
+    "height: calc(100vh - 36px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important; "
+    "height: calc(100dvh - 36px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important; }"
     "#content { padding: 0 max(18px, env(safe-area-inset-right)) 0 "
     "max(18px, env(safe-area-inset-left)); }"
     "#content > :first-child, #content > div:first-child > :first-child "
@@ -2752,11 +2762,15 @@ _MOBILE_PAGED_CSS = (
     ".full-page-img-first, #content > .full-page-img:first-child "
     "{ -webkit-column-break-before: avoid !important; }"
     ".full-page-img + .full-page-img { -webkit-column-break-before: always; }"
-    "@supports (height: 100dvh) {"
-    " img, svg { max-height: calc(100dvh - 60px); }"
-    " .full-page-img { min-height: calc(100dvh - 40px); }"
-    " .full-page-img img { max-height: calc(100dvh - 100px); }"
-    "}"
+    "img, svg { "
+    "max-height: calc(100vh - 60px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); "
+    "max-height: calc(100dvh - 60px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }"
+    ".full-page-img { "
+    "min-height: calc(100vh - 40px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); "
+    "min-height: calc(100dvh - 40px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }"
+    ".full-page-img img { "
+    "max-height: calc(100vh - 100px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); "
+    "max-height: calc(100dvh - 100px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }"
 )
 
 _MOBILE_SCROLL_CSS = (
