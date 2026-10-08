@@ -127,7 +127,17 @@ class MangaScreen(Screen):
             self.feature.screen = None
 
     def handle_back(self) -> bool:
-        return self.editor_tab.handle_back()
+        """Android back (UI_SPEC §1.6) for the tab on screen: Files leaves selection mode first;
+        the Editor drops the selected box, then the edit tool; otherwise the View pops."""
+        tab = self.current_tab
+        if tab == "files":
+            if self.files_tab.selection_mode:
+                self.files_tab.exit_selection()
+                return True
+            return False
+        if tab == "editor":
+            return self.editor_tab.handle_back()
+        return False
 
     def refresh_all(self) -> None:
         for tab in self.tab_controls.values():

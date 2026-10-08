@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import flet as ft
 
@@ -14,7 +14,7 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import icon_data
 
-__all__ = ["CHIP_STATUS", "MangaTab", "export_sheet", "option_chip", "push", "reason_or_chip"]
+__all__ = ["CHIP_STATUS", "JobEnds", "MangaTab", "export_sheet", "option_chip", "push", "reason_or_chip"]
 
 log = logging.getLogger("glossarion.tools.manga")
 
@@ -41,6 +41,44 @@ def push(*controls: Any) -> None:
             control.update()
         except Exception:  # not mounted (host tests) / detached
             pass
+
+
+class JobEnds:
+    """``on_end(snapshot)`` whenever a job of any kind reaches a terminal state (the JobService's
+    ``on_transition``; ``JobWatch`` only follows the jobs a tab started). A lookup that a running
+    job refused (``services.manga.MangaBusy``: the job owned the process state) runs again once
+    that job is over; the JobService reports the end after the job has let go of it."""
+
+    def __init__(self, ctx: Any, on_end: Callable[[Any], Any]) -> None:
+        self.ctx = ctx
+        self.on_end = on_end
+        self._unsub: Optional[Callable[[], Any]] = None
+
+    def start(self) -> None:
+        if self._unsub is not None:
+            return
+        jobs = self.ctx.jobs
+        on_transition = getattr(jobs, "on_transition", None) if jobs is not None else None
+        if callable(on_transition):
+            try:
+                self._unsub = on_transition(self._on_transition)
+            except Exception:
+                log.debug("subscribing to job transitions failed", exc_info=True)
+
+    def stop(self) -> None:
+        unsub, self._unsub = self._unsub, None
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
+
+    def _on_transition(self, snap: Any, previous: Any) -> None:
+        if getattr(snap, "is_terminal", False):
+            try:
+                self.on_end(snap)
+            except Exception:
+                log.exception("manga job end handler failed")
 
 
 def option_chip(text: str, status: str, *, key: Optional[str] = None, dark: bool = False) -> ft.Control:

@@ -23,6 +23,14 @@ thread with the job's owner (``session.translate(image, owner=owner)``). The ses
 the app (the editor screen owns it; ``params["session"]`` is its registry token), so the screen
 sees the result in the session's page snapshot when the job ends.
 
+Before either kind runs the manga code (mobile, ``services.manga``): the job's config snapshot
+gets the phone defaults Settings shows and the Azure credential mitigation
+(``prepare_run``), ``OUTPUT_DIRECTORY`` is hidden for the job so pages are written next to their
+source like a desktop without an output folder (``hide_output_override``; the job's process
+state puts it back), and the registered models the run loads that are not on the device yet
+are downloaded with progress, verified and resumable, and stopped by the job's Stop
+(``ensure_run_models``, ``params["model_kinds"]``).
+
 Neither kind is resumable: a stopped batch is started again (the runner's own rules decide what
 is redone); an editor step is a click.
 """
@@ -141,6 +149,68 @@ def _reuse_imported_ocr(ctx: Any, runner: Any, path: str, files: list) -> int:
     return len(matches or {})
 
 
+def _prepare(ctx: Any) -> bool:
+    """Mobile (``services.manga``): the job's config snapshot gets the phone defaults Settings shows
+    and the Azure credential mitigation (``prepare_run``), and ``OUTPUT_DIRECTORY`` is hidden for
+    the job (``hide_output_override``). True when the output override is hidden."""
+    from glossarion_mobile.services import manga as svc
+
+    config = getattr(ctx.owner, "config", None)
+    if isinstance(config, dict):
+        for note in svc.prepare_run(config):
+            ctx.log(note)
+    return svc.hide_output_override()
+
+
+def _model_kinds(params: Mapping[str, Any], default: Optional[tuple]) -> Optional[tuple]:
+    kinds = params.get("model_kinds")
+    if kinds is None:
+        return default
+    return tuple(str(kind) for kind in kinds)
+
+
+def _download_models(ctx: Any, mobile: bool, kinds: Optional[tuple], report: Callable[[str, int], Any]) -> bool:
+    """Mobile: the registered models the run loads that are not on the device yet, downloaded
+    before it starts (``services.manga.ensure_run_models``: verified, resumable, the job's Stop
+    cancels and keeps the partial file). False when the job was stopped meanwhile. A failed
+    download fails the job (a run without its model would stall on every page: desktop bug 3 in
+    tests/parity/DISCREPANCIES.md "U8 Manga run env"), and so does a download cancelled by
+    anything but the job's own Stop (the Cancel of a model row: ``manga_models.cancel`` stops
+    every download of that model), so the job never ends "done" with nothing done."""
+    from glossarion_mobile.services import manga as svc
+
+    if not mobile or kinds == ():
+        return True
+    config = getattr(ctx.owner, "config", None)
+    models = svc.core("manga_models")
+    if models is None or not isinstance(config, dict):
+        return True
+    cancelled = getattr(models, "DownloadCancelled", None)
+    try:
+        svc.ensure_run_models(config, kinds=kinds, cancel=ctx.stop_requested, on_progress=report, log_fn=ctx.log)
+    except Exception as exc:
+        if cancelled is not None and isinstance(exc, cancelled):
+            if ctx.stop_requested():
+                ctx.log(f"⏹️ Model download stopped; it resumes on the next run ({exc})")
+                return False
+            raise _job_error("The model download was cancelled; start again to resume it") from exc
+        raise _job_error(f"A model this run needs could not be downloaded: {exc}") from exc
+    return True
+
+
+def _output_folder(outputs: list, fallback: str) -> Optional[str]:
+    """The job's output folder: the pages' folder, or the folder they all share."""
+    folders = sorted({os.path.dirname(p) for p in outputs})
+    if len(folders) == 1:
+        return folders[0]
+    if folders:
+        try:
+            return os.path.commonpath(folders)
+        except ValueError:
+            return fallback or folders[0]
+    return fallback or None
+
+
 def run_batch(ctx: Any) -> dict:
     from glossarion_mobile.services import manga as svc
 
@@ -162,13 +232,21 @@ def run_batch(ctx: Any) -> dict:
     output_root = str(params.get("output_root") or "")
     ctx.phase("Preparing manga translator")
     progress(0, len(run_files))
+    hidden = _prepare(ctx)
+    glossary_only = bool(params.get("glossary_only"))
+    if not _download_models(ctx, hidden, _model_kinds(params, ("detector",) if glossary_only else None),
+                            lambda title, pct: progress(0, len(run_files), label=f"Downloading {title} · {pct}%")):
+        return {"ok": None, "outputs": []}
+    if ctx.stop_requested():
+        return {"ok": None, "outputs": []}
     try:
         runner = runner_cls(
             ctx.owner, host=ctx.host, files=files, image_range=params.get("image_range") or "",
             folder_roots=params.get("folder_roots") or [], split_first_level=params.get("split_first_level"),
             skipped=params.get("skipped") or [], cbz_jobs=params.get("cbz_jobs") or {},
-            cbz_image_to_job=params.get("cbz_image_to_job") or {}, glossary_only=bool(params.get("glossary_only")),
-            progress=progress, output_root=output_root or None, image_state_manager=state_manager)
+            cbz_image_to_job=params.get("cbz_image_to_job") or {}, glossary_only=glossary_only,
+            progress=progress, output_root=None if hidden else (output_root or None),
+            image_state_manager=state_manager)
     except Exception as exc:
         raise _job_error(f"The manga translator could not start: {exc}") from exc
     imported = str(params.get("imported_ocr") or "")
@@ -203,8 +281,7 @@ def run_batch(ctx: Any) -> dict:
         all_outputs.append(glossary)
     if all_outputs:
         ctx.add_outputs(all_outputs)
-        folders = sorted({os.path.dirname(p) for p in outputs}) if outputs else []
-        ctx.set_output_dir(folders[0] if len(folders) == 1 else (output_root or (folders[0] if folders else None)))
+        ctx.set_output_dir(_output_folder(outputs, "" if hidden else output_root))
     progress(int(summary.get("completed") or 0), int(summary.get("total") or len(run_files)),
              failed=summary.get("failed"))
     if summary.get("stopped") or ctx.stop_requested():
@@ -265,6 +342,12 @@ def run_step(ctx: Any) -> dict:
         raise _job_error(f"Missing image(s): {', '.join(missing[:5])}")
     if step == "import_ocr" and not os.path.isfile(str(params.get("path") or "")):
         raise _job_error("The OCR file is missing.")
+    mobile = _prepare(ctx)
+    if not _download_models(ctx, mobile, _model_kinds(params, ()),
+                            lambda title, pct: ctx.phase(f"Downloading {title} · {pct}%")):
+        return {"ok": None, "outputs": []}
+    if ctx.stop_requested():
+        return {"ok": None, "outputs": []}
     ctx.phase(_STEP_PHASES.get(step, step))
     previous_log = getattr(session, "_log_callback", None)
 

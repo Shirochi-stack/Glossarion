@@ -39,7 +39,7 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.common import JobWatch, hint_text
 from glossarion_mobile.ui.tools.manga.box_sheet import BoxSheet
-from glossarion_mobile.ui.tools.manga.common import MangaTab, export_sheet, push
+from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
 __all__ = ["EditorTab", "Geometry", "TOOLS", "hit_test", "lasso_bounds", "normalize_rect"]
@@ -167,15 +167,22 @@ class EditorTab(MangaTab):
         self.selected: Optional[int] = None
         self.drag: Optional[dict] = None
         self.watch = JobWatch(ctx, self._on_step_end, self._on_step_change)
+        self.job_ends = JobEnds(ctx, self._on_any_job_end)
+        self._view_pending = False  # the translated page's lookup was refused by a running job
         self.sheet: Optional[BoxSheet] = None
         self.step_progress_text = ""
         self._gen = 0
         self._editing = False  # a box edit is in flight on the io pool
         self._listening = False
+        # the source viewer (and the tablet row holding it) kept across refreshes while the page
+        # and the Pan / Edit mode stay the same, so the InteractiveViewer keeps its zoom and pan
+        self._source_cache: Optional[tuple] = None  # (signature, control)
+        self._dual_cache: Optional[tuple] = None  # (source control, row)
 
     # ---- build --------------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
+        self._source_cache = self._dual_cache = None  # a new tree: nothing to keep in place
         self.strip = ft.ListView(controls=[], horizontal=True, height=76, spacing=6, key="me-strip")
         self.view_buttons = ft.SegmentedButton(
             segments=[ft.Segment(value="source", label=ft.Text("Source")),
@@ -248,6 +255,7 @@ class EditorTab(MangaTab):
     # ---- lifecycle ----------------------------------------------------------------------------------
 
     def did_show(self) -> None:
+        self.job_ends.start()
         for snap in self.watch.adopt((svc.KIND_STEP,)):
             self.session.step_job_id = getattr(snap, "id", None)
             self._on_step_change(snap)
@@ -260,12 +268,38 @@ class EditorTab(MangaTab):
             self.ctx.spawn(self.open_page(self.session.page_index))
         else:
             self.refresh()
+            if self._view_pending:
+                self.ctx.spawn(self._retry_translated())
 
     def on_session_loaded(self) -> None:
         self.refresh()
 
+    def _on_any_job_end(self, snap: Any) -> None:
+        """A job of any kind ended (``JobEnds``): a translated-page lookup it refused runs again."""
+        if self._view_pending:
+            self.ctx.spawn(self._retry_translated())
+
+    async def _retry_translated(self) -> str:
+        """The open page's translated view, looked up again after a running job refused it
+        (``MangaBusy``); still pending while a job owns the process state."""
+        path = self.image_path
+        if not path:
+            self._view_pending = False
+            return ""
+        try:
+            view = await self.ctx.io(self._display_translated)
+        except svc.MangaBusy:
+            return ""
+        if path != self.image_path:  # another page opened meanwhile: its own lookup applies
+            return ""
+        self._view_pending = False
+        self.translated_view = view
+        self.refresh()
+        return view
+
     def dispose(self) -> None:
         self.watch.stop()
+        self.job_ends.stop()
         if self._listening and self._on_session_event in self.session.editor_listeners:
             self.session.editor_listeners.remove(self._on_session_event)
         self._listening = False
@@ -314,11 +348,17 @@ class EditorTab(MangaTab):
         self.boxes = [dict(b) for b in (self.snapshot.get("boxes") or [])]
         if self.selected is not None and self.selected >= len(self.boxes):
             self.selected = None
-        self.translated_view = await self.ctx.io(self._display_translated)
+        try:
+            self.translated_view = await self.ctx.io(self._display_translated)
+            self._view_pending = False
+        except svc.MangaBusy:  # not known while another job runs: looked up again when it ends
+            self.translated_view = ""
+            self._view_pending = True
         self.refresh()
 
     def _display_translated(self) -> str:
-        """Blocking: the versioned display copy of the page's translated output."""
+        """Blocking: the versioned display copy of the page's translated output. Raises
+        ``MangaBusy`` when the page's output path cannot be looked up while a job runs."""
         snap = self.snapshot
         path = str(snap.get("translated_path") or snap.get("rendered_path") or "")
         if not path or not os.path.isfile(path):
@@ -396,8 +436,11 @@ class EditorTab(MangaTab):
         box_selected = has_page and self.selected is not None and 0 <= self.selected < len(self.boxes)
         for button in (self.delete_button, self.exclude_button, self.edit_button):
             button.disabled = busy or not box_selected
-        self.viewer_holder.content = self._viewer() if has_page else (
-            hint_text(self.session.editor_error) if self.session.editor_error else None)
+        if has_page:
+            self.viewer_holder.content = self._viewer()
+        else:
+            self._source_cache = self._dual_cache = None
+            self.viewer_holder.content = hint_text(self.session.editor_error) if self.session.editor_error else None
         self._render_steps(has_page)
         if push_now:
             push(self.root)
@@ -413,10 +456,25 @@ class EditorTab(MangaTab):
 
     def _viewer(self) -> ft.Control:
         if getattr(self.ctx, "tablet", False):
-            return ft.Row([ft.Container(content=self._source_viewer(), expand=True),
-                           ft.Container(content=self._translated_viewer(), expand=True)],
-                          expand=True, spacing=8, key=f"me-dual-{self._gen}")
-        return self._source_viewer() if self.view == "source" else self._translated_viewer()
+            if self._dual_cache is None:
+                self._source_cache = None  # a new row gets a new source viewer (never re-parented)
+            source = self._source_viewer()
+            translated = ft.Container(content=self._translated_viewer(), expand=True)
+            cached = self._dual_cache
+            if cached is not None and cached[0] is source:
+                row = cached[1]
+                row.controls[1] = translated  # the source side (and its zoom) stays in place
+                return row
+            row = ft.Row([ft.Container(content=source, expand=True), translated],
+                         expand=True, spacing=8, key=f"me-dual-{self._gen}")
+            self._dual_cache = (source, row)
+            return row
+        if self._dual_cache is not None:  # the tablet row is gone: so is the source viewer in it
+            self._dual_cache = self._source_cache = None
+        if self.view == "source":
+            return self._source_viewer()
+        self._source_cache = None  # leaving the tree: its zoom state goes with it
+        return self._translated_viewer()
 
     def _shapes(self) -> list:
         shapes: list = []
@@ -457,31 +515,48 @@ class EditorTab(MangaTab):
         return shapes
 
     def _source_viewer(self) -> ft.Control:
+        """The page with its boxes. Pan mode: the InteractiveViewer pans and zooms, and the
+        gesture surface on top only takes long-presses (box sheet): a pan recognizer there would
+        win Flutter's gesture arena against the viewer's own and swallow one-finger panning. Edit
+        modes: the surface takes taps and drags, the viewer stays put. The control is kept (same
+        objects, same keys, updated in place) while the page and the mode stay the same, so a
+        refresh (a box selected, a step finished) keeps the zoom; a new page or mode rebuilds it
+        under new keys (Flet freezes a subtree re-created under an old key)."""
         geometry = self.geometry
         aspect = (geometry.image_w / geometry.image_h) if geometry.image_w and geometry.image_h else 0.7
+        editing = self.tool != "pan"
+        signature = (self.image_path, editing, round(aspect, 6))
+        cached = self._source_cache
+        if cached is not None and cached[0] == signature:
+            self.canvas.shapes = self._shapes()
+            return cached[1]
         # every layer fills the aspect-ratio box: image, shapes, then the gesture surface on top
         self.canvas = cv.Canvas(shapes=self._shapes(), on_resize=self._on_canvas_resize, left=0, top=0, right=0,
                                 bottom=0, key=f"me-canvas-{self._gen}")
         image = ft.Image(src=self.image_path, fit=ft.BoxFit.FILL, gapless_playback=True, left=0, top=0, right=0,
                          bottom=0, key=f"me-image-{self._gen}")
-        editing = self.tool != "pan"
+        handlers: dict = {"on_long_press_start": self._on_long_press}
+        if editing:
+            handlers.update(on_tap_down=self._on_tap, on_pan_start=self._on_pan_start,
+                            on_pan_update=self._on_pan_update, on_pan_end=self._on_pan_end)
         self.gestures = ft.GestureDetector(
             content=ft.Container(bgcolor=ft.Colors.TRANSPARENT), drag_interval=DRAG_INTERVAL,
-            left=0, top=0, right=0, bottom=0,
-            on_tap_down=self._on_tap, on_long_press_start=self._on_long_press,
-            on_pan_start=self._on_pan_start, on_pan_update=self._on_pan_update, on_pan_end=self._on_pan_end,
-            key=f"me-gestures-{self._gen}")
+            left=0, top=0, right=0, bottom=0, key=f"me-gestures-{self._gen}", **handlers)
         stack = ft.Stack([image, self.canvas, self.gestures], aspect_ratio=aspect, key=f"me-stack-{self._gen}")
         self.interactive = ft.InteractiveViewer(content=stack, min_scale=1.0, max_scale=6.0, pan_enabled=not editing,
                                                 scale_enabled=not editing, key=f"me-iv-{self._gen}")
-        return ft.Container(content=self.interactive, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
-                            border_radius=tokens.RADII["field"], key=f"me-source-{self._gen}")
+        container = ft.Container(content=self.interactive, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                                 border_radius=tokens.RADII["field"], key=f"me-source-{self._gen}")
+        self._source_cache = (signature, container)
+        return container
 
     def _translated_viewer(self) -> ft.Control:
         path = self.translated_view
         if not path:
-            return ft.Container(content=hint_text("Not translated yet: run Translate (or Start in Files)."),
-                                alignment=ft.Alignment.CENTER, expand=True, key=f"me-translated-empty-{self._gen}")
+            text = ("Wait for the running job: the translated page shows once it has finished"
+                    if self._view_pending else "Not translated yet: run Translate (or Start in Files).")
+            return ft.Container(content=hint_text(text), alignment=ft.Alignment.CENTER, expand=True,
+                                key=f"me-translated-empty-{self._gen}")
         source = str(self.snapshot.get("translated_path") or self.snapshot.get("rendered_path") or path)
         return ft.Container(
             content=ft.InteractiveViewer(content=ft.Image(src=path, fit=ft.BoxFit.CONTAIN, gapless_playback=True),
@@ -788,6 +863,8 @@ class EditorTab(MangaTab):
         if kinds and not await ensure_models(self.ctx, self.session.models, self.ctx.config_snapshot(), kinds=kinds,
                                              action=svc.STEP_LABELS.get(step, step)):
             return None
+        if kinds:  # the job fetches what is still missing first (verified, resumable, Stop cancels)
+            extra = {**dict(extra or {}), "model_kinds": list(kinds)}
         spec = svc.step_spec(step, self.session.editor_token, self.image_path, images=images, index=index,
                              extra=extra)
         job_id = await self.ctx.submit(spec)
@@ -923,7 +1000,11 @@ class EditorTab(MangaTab):
         def scan() -> list:
             return svc.list_ocr_files(self.session.files.ocr_dir())[:30]
 
-        paths = await self.ctx.io(scan)
+        try:
+            paths = await self.ctx.io(scan)
+        except svc.MangaBusy as exc:  # the folder is not known while another job runs
+            self.ctx.say(str(exc))
+            return None
         if not paths:
             self.ctx.say("No auto-saved OCR files yet")
             return None

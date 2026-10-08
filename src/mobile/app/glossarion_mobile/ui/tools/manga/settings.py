@@ -233,6 +233,7 @@ class SettingsTab(MangaTab):
         self.cards: dict = {}
         self.tiles: dict = {}
         self.model_rows: dict = {}
+        self._previous_rows: dict = {}  # the rows of the build before (kept while they show the same model)
         self.group_built: set = set()
         self._unsubs: list = []
         self._gen = 0
@@ -325,7 +326,10 @@ class SettingsTab(MangaTab):
         if self.root is None:
             return
         self._gen += 1
-        self.model_rows = {}  # rebuilt with the cards
+        # rebuilt with the cards (``_download_row``); a row whose download runs is kept for later builds
+        # even while its card does not show it (another inpainting method picked meanwhile)
+        downloading = {slot: row for slot, row in self._previous_rows.items() if row.downloading}
+        self._previous_rows, self.model_rows = {**downloading, **self.model_rows}, {}
         cfg = self.config()
         self._card_body(self.ocr_card, self._ocr_controls(cfg))
         self._card_body(self.detection_card, self._detection_controls(cfg))
@@ -341,6 +345,20 @@ class SettingsTab(MangaTab):
         column = card.content
         header = column.controls[0]
         column.controls = [header, *controls]
+
+    def _download_row(self, slot: str, model_id: str, **kwargs: Any) -> ModelDownloadRow:
+        """The download row of ``model_id`` in its card (``slot``). A rebuild keeps the row of the
+        build before while it shows the same model (the same control, its status re-read unless its
+        own download runs): a download keeps reporting into the row on screen, and the rebuild its
+        status changes trigger does not orphan it."""
+        previous = self._previous_rows.get(slot)
+        if previous is not None and previous.model_id == model_id:
+            previous.sync()
+            row = previous
+        else:
+            row = ModelDownloadRow(self.ctx, self.session.models, model_id, **kwargs)
+        self.model_rows[slot] = row
+        return row
 
     # ---- OCR provider ------------------------------------------------------------------------------
 
@@ -442,9 +460,8 @@ class SettingsTab(MangaTab):
             self.tiles.update(tiles)
             out += controls
             if "rapidocr" in {e.id for e in self.session.models.entries()}:
-                row = ModelDownloadRow(self.ctx, self.session.models, "rapidocr", key_prefix=self.k("ms-rapidocr-model"),
-                                       allow_load=False, on_change=lambda entry: self.refresh())
-                self.model_rows["rapidocr"] = row
+                row = self._download_row("rapidocr", "rapidocr", key_prefix=self.k("ms-rapidocr-model"),
+                                         allow_load=False, on_change=lambda entry: self.refresh())
                 out.append(row.control)
         return out
 
@@ -592,9 +609,8 @@ class SettingsTab(MangaTab):
                     key=self.k(f"ms-variant-{selector}")))
         model_id = manager.detector_id(cfg) if manager.available else None
         if model_id:
-            row = ModelDownloadRow(self.ctx, manager, model_id, key_prefix=self.k("ms-detector-model"),
-                                   on_change=lambda entry: None)
-            self.model_rows["detector"] = row
+            row = self._download_row("detector", model_id, key_prefix=self.k("ms-detector-model"),
+                                     on_change=lambda entry: None)
             controls.append(row.control)
         else:
             controls.append(ReasonChip(reason="Model downloads unavailable",
@@ -753,9 +769,8 @@ class SettingsTab(MangaTab):
             if local in svc.ONNX_INPAINT_MODELS:
                 model_id = self.session.models.for_local_method(local) if self.session.models.available else None
                 if model_id:
-                    row = ModelDownloadRow(self.ctx, self.session.models, model_id, key_prefix=self.k("ms-inpaint-model"),
-                                           on_change=lambda entry: self._refresh_inpaint_status())
-                    self.model_rows["inpaint"] = row
+                    row = self._download_row("inpaint", model_id, key_prefix=self.k("ms-inpaint-model"),
+                                             on_change=lambda entry: self._refresh_inpaint_status())
                     controls.append(row.control)
                 else:
                     self.model_rows.pop("inpaint", None)

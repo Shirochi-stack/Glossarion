@@ -2890,10 +2890,20 @@ def build_ocr_config(config, ocr_provider=None):
     """The OCR config the desktop gives isolated worker translators (``_build_manga_worker_ocr_config``).
 
     ``{'provider': ...}`` plus ``google_credentials_path`` (existing file) or
-    ``azure_key`` / ``azure_endpoint`` when configured. *ocr_provider* defaults to
-    ``config['manga_ocr_provider']`` (then ``'custom-api'``), like the method's getattr fallback.
+    ``azure_key`` / ``azure_endpoint`` when configured. *ocr_provider* defaults to what the
+    desktop tab sets ``ocr_provider_value`` to before any worker reads it (the provider combo in
+    ``_build_pyside6_interface``, :data:`STARTUP_WIDGET_SOURCES`): ``manga_ocr_provider``, then
+    ``ocr_provider``, then ``'custom-api'``. The method's own getattr fallback never runs on the
+    desktop, so it is never used here either.
     """
-    return MangaEnvMixin._build_manga_worker_ocr_config(_ConfigView(config or {}, ocr_provider))
+    config = config or {}
+    if not ocr_provider:
+        ocr_provider = (
+            config.get('manga_ocr_provider')
+            or config.get('ocr_provider')
+            or 'custom-api'
+        )
+    return MangaEnvMixin._build_manga_worker_ocr_config(_ConfigView(config, ocr_provider))
 
 
 def prepare_manga_glossary_env(owner, *, glossary_prompt=None):

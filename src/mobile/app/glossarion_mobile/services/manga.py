@@ -24,12 +24,26 @@ The status chips (OCR provider, inpainting method) restate the desktop status la
 which file must exist); they are display only. Runs never read them: the job builds its
 OCR config and environment from the config snapshot with ``manga_env`` on the job thread.
 
+What a mobile run starts from (``prepare_run``, called by the MANGA / MANGA_STEP adapters on the
+job's config snapshot, never written back): the phone defaults Settings shows
+(``apply_phone_defaults``), the Azure credential mitigation of desktop bug 1 in
+tests/parity/DISCREPANCIES.md "U8 Manga run env" (``borrow_azure_credentials``), and no output
+override: the mobile env contract's ``OUTPUT_DIRECTORY`` is the platform's output root, not a
+folder the user chose, so the manga code writes each page next to its source copy in app storage
+(``<page>_translated/``), exactly like a desktop user without an output folder. Pages with the
+same name in different chapter folders therefore never overwrite each other. The Files tab
+computes its paths (translated pages, OCR Text folder, Create CBZ) and the selection's glossary
+auto-load (``<source>/Glossary``) with the same view (``manga_output_view``); a lookup a running
+job refused raises ``MangaBusy`` and the tabs retry it once the job is over.
+
 Pure Python (no Flet), Python 3.10 compatible.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import hashlib
 import importlib
 import json
 import logging
@@ -39,9 +53,10 @@ import threading
 import time
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
 __all__ = [
+    "AZURE_ENDPOINT_PLACEHOLDER",
     "BOX_STEPS",
     "DETECTORS",
     "FileGroup",
@@ -70,6 +85,7 @@ __all__ = [
     "K_USE_EDIT_ENDPOINT",
     "LOCAL_INPAINT_MODELS",
     "MISSING_CORE",
+    "MangaBusy",
     "MangaFileList",
     "ModelEntry",
     "ModelManager",
@@ -77,6 +93,7 @@ __all__ = [
     "OCR_PROVIDERS",
     "ONNX_INPAINT_MODELS",
     "OptionRow",
+    "PREFS_CBZ_JOBS",
     "PresetsBusy",
     "P_BUBBLE_DETECTION",
     "P_DETECTOR",
@@ -86,8 +103,10 @@ __all__ = [
     "STEPS",
     "STEP_LABELS",
     "TOOL_ROUTE",
+    "apply_phone_defaults",
     "azure_docintel_backend",
     "batch_spec",
+    "borrow_azure_credentials",
     "cached_font_preset_updates",
     "chip_text",
     "core",
@@ -98,23 +117,28 @@ __all__ = [
     "display_copy",
     "editor_session",
     "effective_setting",
+    "ensure_run_models",
     "font_preset_updates",
     "google_backend",
+    "hide_output_override",
     "importable",
     "inpaint_choice_updates",
     "inpaint_method_rows",
     "inpaint_status",
     "list_ocr_files",
     "local_model_rows",
+    "manga_output_view",
     "merged_manga_settings",
     "natural_sort_key",
     "new_editor_session",
     "now_stamp",
     "ocr_provider_rows",
+    "prepare_run",
     "presets_available",
     "rapidocr_reason",
     "register_editor_session",
     "rendering_reset_updates",
+    "run_ocr_provider",
     "step_spec",
     "test_image_edit_endpoint",
     "top_level_defaults",
@@ -771,6 +795,54 @@ class _HostLog:
                 pass
 
 
+class _MobileFilesHost:
+    """Before the moved mixins in the host's MRO: two moved methods run unchanged (``super()``) in
+    the setting a mobile manga job uses.
+
+    * ``_refresh_manga_selection_status``: the glossary auto-load every selection change triggers
+      (``_persist_selected_files`` / ``_load_persisted_files``) looks where a mobile manga job writes
+      the generated glossary: ``<source>/Glossary`` and ``<GLOSSARION_DATA_DIR>/MangaGlossary_Backup``,
+      i.e. without an output override (``manga_output_view``). While another job owns the process
+      state it runs as before and marks the glossary state stale (``glossary_stale``;
+      ``MangaFileList.refresh_glossary`` once the job is over).
+    * ``_add_cbz_archive_images``: every CBZ (added directly, found in a picked folder or in an
+      extracted ZIP) is extracted under ``<cbz root>/<archive id>/<name>`` (``_archive_key``), so two
+      archives with the same name never share an extraction folder (the app's CBZ root outlives the
+      session, unlike the desktop's per-session ``mkdtemp``).
+    """
+
+    glossary_stale = False
+
+    def _refresh_manga_selection_status(self, *, allow_autoload: bool = True) -> None:
+        refresh = super()._refresh_manga_selection_status  # type: ignore[misc]
+        config = self.main_gui.config  # type: ignore[attr-defined]
+        with manga_output_view(busy_ok=True) as active:
+            if not active:
+                if allow_autoload:
+                    self.glossary_stale = True
+                return refresh(allow_autoload=allow_autoload)
+            hidden = config.pop("output_directory", _NOT_SET) if _is_mobile() else _NOT_SET
+            try:
+                return refresh(allow_autoload=allow_autoload)
+            finally:
+                if hidden is not _NOT_SET:
+                    config["output_directory"] = hidden
+
+    def _add_cbz_archive_images(self, path: str, image_extensions: set) -> int:
+        add = super()._add_cbz_archive_images  # type: ignore[misc]
+        root = self._ensure_cbz_temp_root()  # type: ignore[attr-defined]
+        if not root:
+            return add(path, image_extensions)
+        self.cbz_temp_root = os.path.join(root, _archive_key(path))
+        try:
+            return add(path, image_extensions)
+        finally:
+            self.cbz_temp_root = root
+
+
+_NOT_SET = object()
+
+
 class _FilesHostBase:
     """The ``MangaTranslationTab`` attributes the moved Files / glossary methods read."""
 
@@ -833,7 +905,7 @@ def _files_host_class() -> type:
     key = tuple(id(m) for m in mixins)
     cls = _HOST_CLASS.get(key)
     if cls is None:
-        cls = type("MangaFilesHost", (_HostLog, *mixins, _FilesHostBase), {})
+        cls = type("MangaFilesHost", (_HostLog, _MobileFilesHost, *mixins, _FilesHostBase), {})
         _HOST_CLASS.clear()
         _HOST_CLASS[key] = cls
     return cls
@@ -860,16 +932,50 @@ _SKIPPED_FOLDERS = ("glossary", "ocr text", "mangaglossary_backup", "__macosx")
 
 
 def _safe_extract(archive: str, target: str) -> str:
-    """Extract a ZIP into ``target`` (no member may escape it)."""
-    os.makedirs(target, exist_ok=True)
-    root = os.path.realpath(target)
+    """Extract a ZIP into ``target`` (no member may escape it): into ``<target>.part`` first,
+    renamed into place when complete, so an interrupted extraction is never reused."""
+    partial = target + ".part"
+    if os.path.isdir(partial):
+        import shutil
+
+        shutil.rmtree(partial, ignore_errors=True)
+    os.makedirs(partial, exist_ok=True)
+    root = os.path.realpath(partial)
     with zipfile.ZipFile(archive) as zf:
         for member in zf.infolist():
-            dest = os.path.realpath(os.path.join(target, member.filename))
+            dest = os.path.realpath(os.path.join(partial, member.filename))
             if dest != root and not dest.startswith(root + os.sep):
                 raise ValueError(f"Unsafe path in the archive: {member.filename}")
-        zf.extractall(target)
+        zf.extractall(partial)
+    os.replace(partial, target)
     return target
+
+
+def _archive_key(path: str) -> str:
+    """A short id of an archive file (path, size, modification time). A ZIP / CBZ is extracted
+    under ``<root>/<id>/<name>``: a different archive that reuses a name (the Inbox reuses a deleted
+    copy's name; a re-exported archive) gets a fresh folder, the same archive added again reuses
+    its extraction, and the folder the user sees keeps the archive's name."""
+    try:
+        stat = os.stat(path)
+        identity = f"{os.path.normcase(os.path.abspath(path))}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        identity = os.path.normcase(os.path.abspath(path))
+    return hashlib.sha1(identity.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+
+
+def _under(path: str, folder: str) -> bool:
+    try:
+        folder = os.path.normcase(os.path.abspath(folder))
+        return os.path.commonpath([folder, os.path.normcase(os.path.abspath(path))]) == folder
+    except ValueError:
+        return False
+
+
+#: Prefs key (mobile_state.json, mobile-only state) of the CBZ archives in the Files selection:
+#: ``{archive: {"extract_dir", "out_dir"}}`` (the desktop tab keeps ``cbz_jobs`` in memory only;
+#: phones restart the app often, and the extracted pages must still be packed back after that).
+PREFS_CBZ_JOBS = "manga_cbz_jobs"
 
 
 class MangaFileList:
@@ -881,8 +987,10 @@ class MangaFileList:
     ``_toggle_skip_processing_for_path``, ``_parse_manga_image_range``,
     ``_manga_range_filtered_files``, ``_manga_process_groups_for_paths``,
     ``_persist_selected_files`` / ``_load_persisted_files`` (the desktop keys, written back
-    through ``save(updates)``) and ``_create_cbz_from_isolated_folders``. Every mutation holds
-    a lock (the tab runs them on the io pool).
+    through ``save(updates)``), ``_finalize_cbz_jobs`` and ``_create_cbz_from_isolated_folders``.
+    Every mutation holds a lock (the tab runs them on the io pool). The CBZ jobs of the
+    selection persist in ``prefs`` (``PREFS_CBZ_JOBS``). Output lookups and the glossary
+    auto-load see the folders as a mobile manga job does (``_output_view``, ``_MobileFilesHost``).
     """
 
     SORTS = ("name", "numeric", "date", "reverse")
@@ -891,11 +999,14 @@ class MangaFileList:
                  save: Optional[Callable[[dict], Any]] = None, temp_root: Optional[str] = None,
                  log_fn: Optional[Callable[[str], Any]] = None,
                  config_source: Optional[Callable[[], Mapping[str, Any]]] = None,
-                 folders_root: Optional[str] = None) -> None:
+                 folders_root: Optional[str] = None, prefs: Any = None) -> None:
         self._save = save
         self._config_source = config_source
+        self.prefs = prefs
+        self.cbz_root = temp_root or ""
         self.folders_root = folders_root or (os.path.join(os.path.dirname(temp_root), "folders") if temp_root else "")
         self.lock = threading.RLock()
+        self._ocr_dir_cache = ""
         cls = _files_host_class()
         self.host = cls(dict(config or {}), on_save=self._on_host_save, temp_root=temp_root, log_fn=log_fn)
 
@@ -913,6 +1024,18 @@ class MangaFileList:
                 self.host.sync_config(self._config_source())
             except Exception:
                 log.debug("reading the config for the manga files failed", exc_info=True)
+
+    @contextlib.contextmanager
+    def _output_view(self) -> Iterator[None]:
+        """Run moved methods that locate outputs as a mobile manga job sees them: the current
+        config without a desktop ``output_directory`` and no ``OUTPUT_DIRECTORY``
+        (``manga_output_view``; ``MangaBusy`` while a job owns the process state)."""
+        with self.lock:
+            self._sync()
+            if _is_mobile():
+                self.host.main_gui.config.pop("output_directory", None)
+            with manga_output_view():
+                yield
 
     # ---- state -------------------------------------------------------------------------------
 
@@ -996,11 +1119,7 @@ class MangaFileList:
         return [FileGroup(root=str(g.get("root") or ""), name=str(g.get("name") or ""),
                           files=tuple(g.get("files") or ())) for g in method(files) or []]
 
-    def output_path_for(self, path: str) -> str:
-        """Where the run writes ``path``'s translated page (``_get_manga_output_path_for_file``).
-
-        The desktop method creates the page's output folder; a folder it had to create for this
-        lookup only (still empty) is removed again, so viewing pages leaves no empty folders."""
+    def _output_path(self, path: str) -> str:
         method = getattr(self.host, "_get_manga_output_path_for_file", None)
         if not callable(method):
             return ""
@@ -1016,29 +1135,48 @@ class MangaFileList:
             pass
         return output
 
+    def output_path_for(self, path: str) -> str:
+        """Where the run writes ``path``'s translated page (``_get_manga_output_path_for_file``,
+        as a mobile job sees the output root: ``_output_view``). Raises ``MangaBusy`` while a job
+        owns the process state (the caller retries once the job is over: "not known yet" is not
+        "not translated").
+
+        The desktop method creates the page's output folder; a folder it had to create for this
+        lookup only (still empty) is removed again, so viewing pages leaves no empty folders."""
+        with self._output_view():
+            return self._output_path(path)
+
     def existing_outputs(self, paths: Optional[Sequence[str]] = None) -> list:
-        """Translated pages already on disk for ``paths`` (default: the run files)."""
+        """Translated pages already on disk for ``paths`` (default: the run files). Raises
+        ``MangaBusy`` while a job owns the process state."""
         found: list = []
-        for path in (paths if paths is not None else self.run_files()[0]):
-            output = self.output_path_for(path)
-            if output and os.path.isfile(output) and output not in found:
-                found.append(output)
+        with self._output_view():
+            for path in (paths if paths is not None else self.run_files()[0]):
+                output = self._output_path(path)
+                if output and os.path.isfile(output) and output not in found:
+                    found.append(output)
         return found
 
     # ---- edits ---------------------------------------------------------------------------------
 
     def add_paths(self, paths: Iterable[str]) -> int:
         """Images, CBZ archives and folders (``_add_dropped_manga_paths``); a ``.zip`` is a folder
-        that could not be picked directly (Android): it is extracted next to the session, then added
-        as that folder, so its subfolders keep the process grouping."""
+        that could not be picked directly (Android): it is extracted under the session, then added
+        as that folder, so its subfolders keep the process grouping.
+
+        Archives are extracted under ``<root>/<archive id>/<name>`` (``_archive_key``): a different
+        archive that reuses a name never shows the previous one's pages. Every CBZ, added directly or
+        found in a folder or ZIP, goes through the desktop's own extraction
+        (``_add_cbz_archive_images``) under its own archive id (the host's override)."""
         self._require()
         wanted: list = []
         for raw in paths:
             path = os.path.abspath(os.fspath(raw))
             if path.lower().endswith(".zip") and os.path.isfile(path):
                 stem = os.path.splitext(os.path.basename(path))[0]
-                target = os.path.join(self.folders_root or os.path.dirname(path), stem)
+                target = os.path.join(self.folders_root or os.path.dirname(path), _archive_key(path), stem)
                 if not os.path.isdir(target):
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
                     _safe_extract(path, target)
                 wanted.append(target)
             else:
@@ -1114,56 +1252,198 @@ class MangaFileList:
     # ---- persistence ---------------------------------------------------------------------------
 
     def _on_host_save(self, config: Mapping[str, Any]) -> None:
+        self._persist_cbz_jobs()
         if self._save is None:
             return
         updates = {key: copy.deepcopy(config[key]) for key in _HOST_SAVED_KEYS if key in config}
         if updates:
             self._save(updates)
 
+    def _persist_cbz_jobs(self) -> None:
+        """The CBZ jobs that still have pages in the selection -> ``prefs[PREFS_CBZ_JOBS]``."""
+        if self.prefs is None:
+            return
+        mapping = getattr(self.host, "cbz_image_to_job", {}) or {}
+        selected = set(self.host.selected_files)
+        wanted = {mapping[p] for p in selected if p in mapping}
+        jobs = {}
+        for archive, job in (getattr(self.host, "cbz_jobs", {}) or {}).items():
+            if archive in wanted and isinstance(job, Mapping):
+                jobs[str(archive)] = {"extract_dir": str(job.get("extract_dir") or ""),
+                                      "out_dir": str(job.get("out_dir") or "")}
+        try:
+            if (self.prefs.get(PREFS_CBZ_JOBS) or {}) != jobs:
+                self.prefs.set(PREFS_CBZ_JOBS, jobs)
+        except Exception:
+            log.debug("saving the manga CBZ jobs failed", exc_info=True)
+
+    def _restore_cbz_jobs(self) -> int:
+        """Re-attach the restored pages of an imported CBZ to their archive (``cbz_jobs`` /
+        ``cbz_image_to_job``), so a run after an app restart still writes them to the archive's
+        output folder and packs them back. Returns the number of archives restored."""
+        if self.prefs is None:
+            return 0
+        try:
+            stored = self.prefs.get(PREFS_CBZ_JOBS) or {}
+        except Exception:
+            return 0
+        if not isinstance(stored, Mapping):
+            return 0
+        restored = 0
+        for archive, job in stored.items():
+            if not isinstance(job, Mapping):
+                continue
+            extract_dir = str(job.get("extract_dir") or "")
+            if not extract_dir or not os.path.isdir(extract_dir):
+                continue
+            pages = [p for p in self.host.selected_files if _under(p, extract_dir)]
+            if not pages:
+                continue
+            self.host.cbz_jobs[str(archive)] = {"extract_dir": extract_dir, "out_dir": str(job.get("out_dir") or "")}
+            for page in pages:
+                self.host.cbz_image_to_job[page] = str(archive)
+            restored += 1
+        return restored
+
     def load(self, config: Mapping[str, Any]) -> int:
-        """Restore the persisted selection (``_load_persisted_files``; missing files dropped)."""
+        """Restore the persisted selection (``_load_persisted_files``; missing files dropped) and
+        the CBZ archives its pages came from (``PREFS_CBZ_JOBS``)."""
         if not self.available:
             return 0
         with self.lock:
             self.host.sync_config(config or {})
             self.host.selected_files = []
+            self.host.cbz_jobs = {}
+            self.host.cbz_image_to_job = {}
             self.host._load_persisted_files()
+            self._restore_cbz_jobs()
             return len(self.host.selected_files)
+
+    @property
+    def glossary_stale(self) -> bool:
+        """A selection change ran its glossary auto-load while another job owned the process
+        state, so it could not look where a mobile job writes the glossary (``refresh_glossary``)."""
+        return bool(getattr(self.host, "glossary_stale", False))
+
+    def refresh_glossary(self) -> bool:
+        """The selection's glossary auto-load again, persisted (``_persist_selected_files``: the
+        desktop keys, ``manga_generated_glossary_path``), as a mobile manga job sees the folders. For
+        the end of a MANGA job (its glossary pass wrote ``<source>/Glossary/<name>_manga_glossary.*``,
+        which only the job's own config snapshot knew) and after a stale selection change. False,
+        without touching anything, while a job owns the process state (the state stays stale)."""
+        if not self.available:
+            return False
+        with self.lock:
+            self._sync()
+            with manga_output_view(busy_ok=True) as active:
+                if not active:
+                    self.host.glossary_stale = True
+                    return False
+                self.host.glossary_stale = False
+                self.host._persist_selected_files()
+                return not self.host.glossary_stale
 
     # ---- CBZ / output ---------------------------------------------------------------------------
 
     def cbz_job_for(self, path: str) -> Optional[str]:
         return (getattr(self.host, "cbz_image_to_job", {}) or {}).get(path)
 
-    def create_cbz(self, files: Optional[Sequence[str]] = None) -> str:
-        """Create CBZ (desktop button): ``_create_cbz_from_isolated_folders`` over the run files;
-        returns the archive it wrote (``<output folder>/<folder name>_translated.cbz``)."""
+    def _folder_cbz(self, page: str) -> str:
+        """The archive ``_create_cbz_from_isolated_folders`` writes for a run whose first page is
+        ``page``: ``<folder>/<folder name>_translated.cbz`` (in the output override instead when one
+        is set, which a mobile job never has: ``_output_view``)."""
+        override = str(self.host.main_gui.config.get("output_directory") or "") or os.environ.get(
+            "OUTPUT_DIRECTORY", "")
+        parent = override if override and os.path.isdir(override) else os.path.dirname(page)
+        return os.path.join(parent, f"{os.path.basename(parent)}_translated.cbz")
+
+    def existing_cbz(self) -> list:
+        """Archives already packed for the selection, as a mobile job sees the folders:
+        ``<name>_translated.cbz`` next to each imported CBZ (``_finalize_cbz_jobs``) and the archive
+        of the run files' folder ("Create CBZ at end" / Create CBZ, ``_create_cbz_from_isolated_folders``;
+        the rule of ``HeadlessMangaRunner.cbz_paths``). Raises ``MangaBusy`` while a job owns the
+        process state."""
+        found: list = []
+        with self._output_view():
+            for archive in self.cbz_jobs:
+                base = os.path.splitext(os.path.basename(archive))[0]
+                packed = os.path.join(os.path.dirname(archive), f"{base}_translated.cbz")
+                if os.path.isfile(packed) and packed not in found:
+                    found.append(packed)
+            run = list(self.run_files()[0])
+            mapping = self.cbz_image_to_job
+            plain = [p for p in run if p not in mapping]
+            for page in dict.fromkeys(run[:1] + plain[:1]):
+                packed = self._folder_cbz(page)
+                if os.path.isfile(packed) and packed not in found:
+                    found.append(packed)
+        return found
+
+    def create_cbz(self, files: Optional[Sequence[str]] = None) -> list:
+        """Create CBZ (desktop button) over the run files; returns the archives written.
+
+        Pages of an imported CBZ are packed back into ``<name>_translated.cbz`` next to that
+        archive (``_finalize_cbz_jobs``, what a run does at its end: their outputs are in the
+        archive's own ``<name>_translated`` folder); every other page goes through
+        ``_create_cbz_from_isolated_folders`` (``<folder>/<folder name>_translated.cbz``). Raises the
+        desktop's FileNotFoundError when nothing is translated yet, MangaBusy while a job runs."""
         self._require()
-        with self.lock:
-            self._sync()
+        archives: list = []
+        error: Optional[BaseException] = None
+        with self._output_view():
             run = list(files) if files is not None else self.run_files()[0]
-            self.host._manga_processing_files = run
-            try:
-                self.host._create_cbz_from_isolated_folders()
-            finally:
-                self.host._manga_processing_files = None
-            override = str(self.host.main_gui.config.get("output_directory") or "") or os.environ.get(
-                "OUTPUT_DIRECTORY", "")
-            parent = override if override and os.path.isdir(override) else os.path.dirname(run[0])
-            return os.path.join(parent, f"{os.path.basename(parent)}_translated.cbz")
+            mapping = dict(getattr(self.host, "cbz_image_to_job", {}) or {})
+            from_cbz = [p for p in run if p in mapping]
+            plain = [p for p in run if p not in mapping]
+            if from_cbz:
+                self.host._manga_processing_files = from_cbz
+                try:
+                    self.host._finalize_cbz_jobs()
+                finally:
+                    self.host._manga_processing_files = None
+                for archive in dict.fromkeys(mapping[p] for p in from_cbz):
+                    base = os.path.splitext(os.path.basename(archive))[0]
+                    packed = os.path.join(os.path.dirname(archive), f"{base}_translated.cbz")
+                    if os.path.isfile(packed):
+                        archives.append(packed)
+            if plain:
+                self.host._manga_processing_files = plain
+                try:
+                    self.host._create_cbz_from_isolated_folders()
+                    archives.append(self._folder_cbz(plain[0]))
+                except FileNotFoundError as exc:
+                    error = exc
+                finally:
+                    self.host._manga_processing_files = None
+        if not archives:
+            raise error if error is not None else FileNotFoundError(
+                "No translated images found. Please translate some images first.")
+        return archives
 
     def ocr_dir(self) -> str:
-        """The OCR Text folder of the active output root (``_manga_ocr_output_dir``)."""
+        """The OCR Text folder of the active output root (``_manga_ocr_output_dir``, as a mobile
+        job sees it). While a job owns the process state: the last folder computed, ``MangaBusy``
+        when there is none yet."""
         method = getattr(self.host, "_manga_ocr_output_dir", None)
         if not callable(method):
             return ""
-        with self.lock:
-            self._sync()
-            return str(method())
+        try:
+            with self._output_view():
+                folder = str(method())
+        except MangaBusy:
+            if self._ocr_dir_cache:
+                return self._ocr_dir_cache
+            raise
+        self._ocr_dir_cache = folder
+        return folder
 
     def ocr_export_path(self) -> str:
-        """A timestamped export file in the OCR folder (``_manga_ocr_timestamped_export_filename``)."""
-        folder = self.ocr_dir()
+        """A timestamped export file in the OCR folder (``_manga_ocr_timestamped_export_filename``);
+        "" when the folder is not known (the caller exports elsewhere)."""
+        try:
+            folder = self.ocr_dir()
+        except MangaBusy:
+            return ""
         method = getattr(self.host, "_manga_ocr_timestamped_export_filename", None)
         if not folder or not callable(method):
             return ""
@@ -1564,16 +1844,170 @@ def list_ocr_files(folder: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Runs: what a mobile MANGA / MANGA_STEP job starts from
+# ---------------------------------------------------------------------------
+
+#: The Azure Computer Vision endpoint the desktop entry shows when none is saved (manga_env).
+AZURE_ENDPOINT_PLACEHOLDER = "https://YOUR-RESOURCE.cognitiveservices.azure.com/"
+
+
+class MangaBusy(RuntimeError):
+    """A Files action that needs the manga code's view of the process environment (no output
+    override) while another job owns ``os.environ`` (``job_runner.JOB_LOCK``)."""
+
+
+@contextlib.contextmanager
+def manga_output_view(*, busy_ok: bool = False) -> Iterator[bool]:
+    """The environment a mobile manga job runs the manga code with: no ``OUTPUT_DIRECTORY``
+    (``hide_output_override``), so translated pages, the OCR Text folder, Create CBZ and the
+    generated glossary resolve like a desktop without an output folder. For the Files tab's moved
+    methods that read it outside a job: taken under ``job_runner.JOB_LOCK`` (a running job owns
+    ``os.environ``) and put back on exit; ``MangaBusy`` while a job runs, or with ``busy_ok`` the
+    body runs with the environment untouched and the view yields False. Not mobile: a no-op (True)."""
+    if not _is_mobile():
+        yield True
+        return
+    lock = core_attr("job_runner", "JOB_LOCK")
+    if lock is not None and not lock.acquire(blocking=False):
+        if not busy_ok:
+            raise MangaBusy("Wait for the running job to finish")
+        yield False
+        return
+    try:
+        saved = os.environ.pop("OUTPUT_DIRECTORY", None)
+        try:
+            yield True
+        finally:
+            if saved is not None:
+                os.environ["OUTPUT_DIRECTORY"] = saved
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def hide_output_override() -> bool:
+    """Inside a mobile manga job (``job_runner.job_process_state`` puts the environment back when
+    the job ends): drop ``OUTPUT_DIRECTORY``, the mobile env contract's output root, which the
+    manga code would otherwise treat as a user's output override and write every page to
+    ``<root>/<page name>_translated/`` (chapter folders with the same page names overwrite each
+    other; every series shares one folder). Pages go next to their source copy in app storage
+    instead, like the desktop default. True when hidden (mobile)."""
+    if not _is_mobile():
+        return False
+    os.environ.pop("OUTPUT_DIRECTORY", None)
+    return True
+
+
+def apply_phone_defaults(config: dict) -> dict:
+    """The phone defaults into a run's config (``manga_models.apply_mobile_run_defaults``: every
+    phone default the config does not store, a stored value wins; mobile only), so the run loads
+    the detector / inpainter and uses the limits Settings shows."""
+    func = core_attr("manga_models", "apply_mobile_run_defaults")
+    if callable(func) and isinstance(config, dict):
+        func(config)
+    return config
+
+
+def run_ocr_provider(config: Mapping[str, Any]) -> str:
+    """The OCR provider a run starts with (the desktop tab's chain, ``manga_env.STARTUP_WIDGET_SOURCES``)."""
+    return str((config or {}).get(K_PROVIDER) or (config or {}).get("ocr_provider") or "custom-api")
+
+
+def borrow_azure_credentials(config: dict, *, mobile: Optional[bool] = None) -> list:
+    """Mobile mitigation, on a run's config snapshot (never saved), of desktop bug 1 in
+    tests/parity/DISCREPANCIES.md "U8 Manga run env" (the Document Intelligence start check).
+
+    The desktop start check of an Azure Document Intelligence run requires the Azure Computer
+    Vision key / endpoint (and puts them in the OCR config), while the translator loads the
+    provider with the Document Intelligence ones; its status label counts either pair ("uses
+    the same config as Azure CV"). The phone's Settings offer the Document Intelligence fields
+    only, so the job fills the empty (or placeholder) member of each pair from the other one.
+    Returns the keys it filled."""
+    if mobile is None:
+        mobile = _is_mobile()
+    if not mobile or not isinstance(config, dict) or run_ocr_provider(config) != "azure-document-intelligence":
+        return []
+
+    def text(key: str) -> str:
+        return str(config.get(key) or "").strip()
+
+    filled: list = []
+    for cv_key, di_key in ((K_AZURE_KEY, K_DOCINTEL_KEY), (K_AZURE_ENDPOINT, K_DOCINTEL_ENDPOINT)):
+        cv, di = text(cv_key), text(di_key)
+        cv_unset = not cv or (cv_key == K_AZURE_ENDPOINT and cv == AZURE_ENDPOINT_PLACEHOLDER)
+        if cv_unset and di:
+            config[cv_key] = di
+            filled.append(cv_key)
+        elif not di and not cv_unset:
+            config[di_key] = cv
+            filled.append(di_key)
+    return filled
+
+
+def prepare_run(config: dict) -> list:
+    """What a mobile MANGA / MANGA_STEP job does to its config snapshot (the HeadlessOwner's
+    config) before any manga code reads it: the phone defaults (``apply_phone_defaults``), no
+    desktop ``output_directory`` (see ``hide_output_override``) and the Azure credential
+    mitigation (``borrow_azure_credentials``). Returns lines for the job log. Not mobile: nothing."""
+    notes: list = []
+    if not isinstance(config, dict) or not _is_mobile():
+        return notes
+    apply_phone_defaults(config)
+    config.pop("output_directory", None)
+    filled = borrow_azure_credentials(config, mobile=True)
+    if filled:
+        notes.append("ℹ️ Azure Document Intelligence: using the same key and endpoint for the start check and "
+                     f"the provider ({', '.join(filled)} filled for this run)")
+    return notes
+
+
+def ensure_run_models(config: Mapping[str, Any], *, kinds: Optional[Sequence[str]] = None, cancel: Any = None,
+                      on_progress: Optional[Callable[[str, int], Any]] = None,
+                      log_fn: Optional[Callable[[str], Any]] = None) -> list:
+    """Blocking (job thread): download the registered models a run with ``config`` loads that are
+    not on the device yet (``manga_models.missing_models``, limited to ``kinds``: "detector",
+    "inpaint") through the download manager: pinned revision, resumable ``.partial``, size + sha256
+    verified, into the cache folders the backend reads. ``cancel`` (the job's stop check) raises
+    ``manga_models.DownloadCancelled`` and keeps the partial file for the next run;
+    ``on_progress(title, percent)``. Returns the model paths."""
+    models = core("manga_models")
+    if models is None:
+        return []
+    wanted = set(kinds) if kinds is not None else None
+    missing = [spec for spec in models.missing_models(dict(config or {})) if wanted is None or spec.kind in wanted]
+    paths: list = []
+    for spec in missing:
+        title = spec.title
+        if log_fn is not None:
+            log_fn(f"📥 Downloading {title} ({models.format_size(spec.size)}), needed by this run")
+        last = [-1]
+
+        def report(progress: Any, title: str = title, last: list = last) -> None:
+            percent = int(getattr(progress, "percent", 0) or 0)
+            if percent != last[0] and on_progress is not None:
+                last[0] = percent
+                on_progress(title, percent)
+
+        paths.append(models.download(spec, progress=report, cancel=cancel))
+        if log_fn is not None:
+            log_fn(f"✅ {title} downloaded")
+    return paths
+
+
+# ---------------------------------------------------------------------------
 # Jobs
 # ---------------------------------------------------------------------------
 
 
 def batch_spec(files: MangaFileList, *, title: str = "", output_root: str = "", glossary_only: bool = False,
-               editor_session: str = "", imported_ocr: str = "") -> Any:
+               editor_session: str = "", imported_ocr: str = "", model_kinds: Optional[Sequence[str]] = None) -> Any:
     """The MANGA job for the current Files selection (Start / Generate glossary): every file in
     visible order with the range, skips, folder roots and CBZ jobs (the runner applies them like
     the desktop Start; all process groups run). ``imported_ocr``: the last imported OCR JSON, which
-    the run reuses like the desktop's (``manga_env.import_ocr_session`` before Start)."""
+    the run reuses like the desktop's (``manga_env.import_ocr_session`` before Start).
+    ``model_kinds``: the downloadable models the job fetches before it starts
+    (``ensure_run_models``; default: every model the run loads, the detector only for a
+    glossary pass)."""
     from glossarion_mobile.services.jobs import JobSpec
 
     params = files.run_params()
@@ -1584,6 +2018,8 @@ def batch_spec(files: MangaFileList, *, title: str = "", output_root: str = "", 
         raise ValueError("No images to process (all skipped or outside the image range)")
     params["output_root"] = output_root
     params["glossary_only"] = bool(glossary_only)
+    if model_kinds is not None:
+        params["model_kinds"] = list(model_kinds)
     params["editor_session"] = editor_session  # the runner updates that session's page state
     params["imported_ocr"] = str(imported_ocr or "")
     groups = files.groups()

@@ -268,6 +268,11 @@ def test_inpainter_download_fallback_is_mobile_only():
 _HAVE_RUNTIME = all(importlib.util.find_spec(m) is not None for m in ("onnxruntime", "cv2", "numpy", "PIL"))
 _HAVE_ONNX_PACKAGE = importlib.util.find_spec("onnx") is not None
 runtime = pytest.mark.skipif(not _HAVE_RUNTIME, reason="onnxruntime, cv2, numpy and PIL are needed")
+# bubble_detector imports numpy and cv2 at module level; a test that builds no ONNX session (the
+# manga_models hand-off of hf_urllib_download) needs only those, so it also runs where onnxruntime
+# is not installed (CI's python-app job).
+_HAVE_BACKEND_IMPORTS = all(importlib.util.find_spec(m) is not None for m in ("cv2", "numpy"))
+backend = pytest.mark.skipif(not _HAVE_BACKEND_IMPORTS, reason="numpy and cv2 are needed to import bubble_detector")
 
 _ENV_KEYS = (
     "GLOSSARION_MOBILE", "GLOSSARION_NO_PROCESSES", "FLET_PLATFORM", "RTDETR_ONNX_ALLOW_PYTHON",
@@ -652,15 +657,70 @@ def test_hf_urllib_download_leaves_nothing_behind_on_failure(sandbox, hf_server,
     assert not (local_dir / "model.onnx.part").exists()
 
 
+def _pin_payload(sandbox, repo_id, filename, payload, *, revision="main"):
+    """Point the manga_models registry entry for (repo, file) at a synthetic payload served by
+    hf_server under ``revision`` (the real pins are the Hugging Face LFS objects)."""
+    import dataclasses
+    import hashlib
+    import manga_models
+
+    real = manga_models.find_spec(repo_id, filename)
+    assert real is not None, (repo_id, filename)
+    pinned = dataclasses.replace(real, revision=revision, size=len(payload),
+                                 sha256=hashlib.sha256(payload).hexdigest())
+    original = manga_models.find_spec
+    sandbox.mp.setattr(manga_models, "find_spec",
+                       lambda repo, name: pinned if (repo, name) == (repo_id, filename) else original(repo, name))
+    return pinned
+
+
+@backend
+def test_hf_urllib_download_hands_registered_models_to_manga_models(sandbox, hf_server, models):
+    """A pinned model (manga_models) is fetched by its download manager: pinned revision,
+    size + sha256 verification (a wrong body is rejected and nothing lands), ``.partial``."""
+    bd = sandbox.load(BUBBLE, mobile=True)
+    repo, name = "ogkalu/comic-text-and-bubble-detector", "detector.onnx"
+    spec = _pin_payload(sandbox, repo, name, models["rtdetr"], revision="0123abcd")
+    url = f"/{repo}/resolve/0123abcd/{name}"
+    local_dir = sandbox.tmp / "pinned"
+    hf_server.files[url] = bytes(reversed(models["rtdetr"]))  # same size, wrong bytes
+    import manga_models
+    with pytest.raises(manga_models.ChecksumMismatch):
+        bd.hf_urllib_download(repo, name, local_dir=str(local_dir))
+    assert not (local_dir / name).exists() and not (local_dir / (name + ".partial")).exists()
+    hf_server.files[url] = models["rtdetr"]
+    progress = []
+    path = bd.hf_urllib_download(repo_id=repo, filename=name, cache_dir=str(local_dir), local_dir=str(local_dir),
+                                 local_dir_use_symlinks=False, progress_callback=lambda *a: progress.append(a))
+    assert Path(path) == local_dir / name and Path(path).read_bytes() == models["rtdetr"]
+    assert hf_server.hits[-1] == url and progress and progress[-1][0] == 100
+    assert manga_models.is_installed(spec, str(local_dir), verify_hash=True)
+    hits = len(hf_server.hits)
+    assert bd.hf_urllib_download(repo, name, local_dir=str(local_dir)) == path
+    assert len(hf_server.hits) == hits  # installed: no request
+    # the run's immediate Stop (MangaTranslator's global cancellation) interrupts a download
+    sandbox.mp.setattr(sys.modules["manga_translator"].MangaTranslator, "is_globally_cancelled",
+                       staticmethod(lambda: True))
+    with pytest.raises(manga_models.DownloadCancelled):
+        bd.hf_urllib_download(repo, name, local_dir=str(sandbox.tmp / "stopped"))
+    assert len(hf_server.hits) == hits
+    # an explicit other revision is not the pinned file: the plain urllib path serves it
+    hf_server.files[f"/{repo}/resolve/other/{name}"] = b"plain"
+    assert Path(bd.hf_urllib_download(repo, name, local_dir=str(sandbox.tmp / "o"), revision="other")
+                ).read_bytes() == b"plain"
+
+
 @runtime
 def test_rtdetr_mobile_end_to_end_download_without_huggingface_hub(sandbox, hf_server, models):
     bd = sandbox.load(BUBBLE, mobile=True)
     repo = "/ogkalu/comic-text-and-bubble-detector/resolve/main/"
     hf_server.files[repo + "config.json"] = b"{}"
     hf_server.files[repo + "detector.onnx"] = models["rtdetr"]
+    _pin_payload(sandbox, "ogkalu/comic-text-and-bubble-detector", "detector.onnx", models["rtdetr"])
     det = bd.BubbleDetector(config_path=str(sandbox.tmp / "cfg.json"))
     assert det.load_rtdetr_onnx_model() is True
     assert (sandbox.tmp / "models" / "detector.onnx").read_bytes() == models["rtdetr"]
+    assert not (sandbox.tmp / "models" / "detector.onnx.partial").exists()
     assert (sandbox.tmp / "models" / "config.json").exists()
     import numpy as np
     assert det.detect_with_rtdetr_onnx(image=np.zeros((64, 64, 3), np.uint8)) == EXPECTED_DETECTIONS
@@ -767,9 +827,11 @@ def test_inpainter_mobile_keeps_refusing_torch_only_models(sandbox, hf_server, c
 def test_inpainter_mobile_downloads_onnx_model_without_huggingface_hub(sandbox, hf_server, models):
     module = sandbox.load(INPAINT, mobile=True)
     hf_server.files["/ogkalu/lama-manga-onnx-dynamic/resolve/main/lama-manga-dynamic.onnx"] = models["inpaint"]
+    _pin_payload(sandbox, "ogkalu/lama-manga-onnx-dynamic", "lama-manga-dynamic.onnx", models["inpaint"])
     inp = _inpainter(module, sandbox)
     assert inp.load_model("anime_onnx", "") is True
     cached = sandbox.tmp / "inpaint_cache" / "lama-manga-dynamic.onnx"
+    assert not Path(str(cached) + ".partial").exists()
     assert cached.read_bytes() == models["inpaint"]
     assert not Path(str(cached) + ".part").exists()
     assert inp.use_onnx is True and inp.onnx_session is not None

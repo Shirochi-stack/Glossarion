@@ -28,8 +28,10 @@ This module is the registry and download manager for those files:
   the variables are unset.
 * Phone defaults: ``MOBILE_MANGA_SETTINGS_OVERRIDES`` / ``MOBILE_TOP_LEVEL_OVERRIDES``
   (small INT8 detector, AOT inpainting, a lower HD resize limit, one worker),
-  applied by ``apply_mobile_defaults()`` only when ``mobile_runtime.is_mobile()``.
-  Desktop defaults are never changed.
+  applied only when ``mobile_runtime.is_mobile()``: to the defaults the settings UI shows
+  (``apply_mobile_defaults()``) and to the config a run starts from
+  (``apply_mobile_run_defaults()``, so the run uses what Settings shows). Desktop
+  defaults are never changed.
 
 Stdlib only (plus mobile_runtime); importable on Python 3.10 without the
 manga stack (no numpy / cv2 / onnxruntime), so the settings UI can show model
@@ -104,6 +106,7 @@ __all__ = [
     "mobile_default_overrides",
     "apply_mobile_defaults",
     "apply_mobile_top_level_defaults",
+    "apply_mobile_run_defaults",
 ]
 
 KIND_DETECTOR = "detector"
@@ -389,6 +392,60 @@ def apply_mobile_top_level_defaults(top_level_defaults: Dict[str, Any], *, force
     if force or mobile_runtime.is_mobile():
         result.update(copy.deepcopy(MOBILE_TOP_LEVEL_OVERRIDES))
     return result
+
+
+def _unset(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _fill_unset(target: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+    for key, value in defaults.items():
+        if isinstance(value, dict):
+            node = target.get(key)
+            if not isinstance(node, dict):
+                if not _unset(node):
+                    continue  # a stored non-dict value is the user's; leave it alone
+                node = target[key] = {}
+            _fill_unset(node, value)
+        elif _unset(target.get(key)):
+            target[key] = copy.deepcopy(value)
+
+
+def apply_mobile_run_defaults(config: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
+    """Put the phone defaults into the config a manga run starts from (in place; returns it).
+
+    The run reads the config with the desktop's own fallbacks (``detector.onnx``,
+    ``anime_onnx``, the 1536 px HD limit, desktop worker counts), so the phone defaults the
+    settings UI shows (``apply_mobile_defaults``) only take effect when they are in the config.
+    Every key of ``MOBILE_MANGA_SETTINGS_OVERRIDES`` / ``MOBILE_TOP_LEVEL_OVERRIDES`` that the
+    config does not store (absent, None or blank) is filled; a stored value always wins.
+
+    The local inpainting model is stored twice: ``manga_local_inpaint_model`` (what the
+    Settings tab shows and writes, and what ``required_models`` reads; the desktop calls it
+    "more up-to-date than nested inpainting") and ``manga_settings.inpainting.local_method``
+    (what the run's tab state reads). The run gets the top-level value in both when it is set,
+    else the nested one in both, so it loads the model Settings shows; the phone default fills
+    them only when neither is set.
+
+    Mobile only (or ``force``): on desktop the config is returned untouched.
+    """
+    if not isinstance(config, dict) or not (force or mobile_runtime.is_mobile()):
+        return config
+    manga = config.get("manga_settings")
+    if not isinstance(manga, dict):
+        manga = config["manga_settings"] = {}
+    inpainting = manga.get("inpainting")
+    if not isinstance(inpainting, dict):
+        inpainting = manga["inpainting"] = {}
+    top_key = "manga_local_inpaint_model"
+    top, nested = config.get(top_key), inpainting.get("local_method")
+    if not _unset(top):
+        inpainting["local_method"] = top
+    elif not _unset(nested):
+        config[top_key] = nested
+    _fill_unset(manga, MOBILE_MANGA_SETTINGS_OVERRIDES)
+    _fill_unset(config, MOBILE_TOP_LEVEL_OVERRIDES)
+    return config
 
 
 def _default_for(path: tuple, desktop_default: Any) -> Any:

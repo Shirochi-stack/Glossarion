@@ -15,7 +15,8 @@ the desktop and the mobile ``manga_runner.HeadlessMangaRunner`` run the same cod
   (tests/test_manga_env.py checks every default is overridden on the desktop).
 * the module helpers ``_natural_sort_key``, ``_MANGA_SKIP_PREFIX``, ... (manga_integration
   re-exports them); ``_get_app_dir`` honours ``GLOSSARION_DATA_DIR`` through
-  ``mobile_runtime.data_dir`` on non-Windows (desktop never sets it).
+  ``mobile_runtime.data_dir`` except in a frozen Windows build (desktop never sets it; the
+  mobile app does, also when it runs from source on a Windows dev machine).
 
 Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup (the
 ``ImageRenderer`` name below imports that Qt module lazily, only where the desktop calls it).
@@ -34,7 +35,7 @@ def _get_app_dir() -> str:
     if platform.system() == 'Windows':
         if getattr(sys, 'frozen', False):
             return os.path.dirname(sys.executable)
-        return os.path.dirname(os.path.abspath(__file__))
+        return data_dir(os.path.dirname(os.path.abspath(__file__)))
     return data_dir(os.getcwd())
 
 def _manga_cmd_debug_logging_enabled() -> bool:

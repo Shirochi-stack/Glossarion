@@ -679,6 +679,48 @@ def test_apply_mobile_defaults_only_on_mobile(monkeypatch):
     assert mm.apply_mobile_defaults({}, force=True)["advanced"]["max_workers"] == 1
 
 
+def test_apply_mobile_run_defaults_puts_the_phone_defaults_into_a_runs_config(env, monkeypatch):
+    """The run reads the config with the desktop fallbacks (detector.onnx, anime_onnx, 1536 px,
+    desktop worker counts); on mobile the phone defaults Settings shows must be in it."""
+    _mobile(monkeypatch, False)
+    desktop = {"manga_settings": {"ocr": {}}}
+    assert mm.apply_mobile_run_defaults(desktop) is desktop and desktop == {"manga_settings": {"ocr": {}}}
+    _mobile(monkeypatch)
+    fresh: dict = {}
+    assert mm.apply_mobile_run_defaults(fresh) is fresh
+    assert fresh["manga_settings"]["ocr"]["rtdetr_onnx_variant"] == "detector-v4-s_int8.onnx"
+    assert fresh["manga_settings"]["inpainting"]["local_method"] == "aot_onnx"
+    assert fresh["manga_local_inpaint_model"] == "aot_onnx"
+    assert fresh["manga_settings"]["advanced"] == {"hd_strategy_resize_limit": 1024, "max_workers": 1,
+                                                   "panel_max_workers": 1, "unload_models_after_translation": True}
+    assert [s.key for s in mm.required_models(fresh)] == [s.key for s in mm.required_models({})]  # the UI's models
+    # a stored value always wins (blank / None count as not stored); other keys stay untouched
+    stored = {"manga_settings": {"ocr": {"rtdetr_onnx_variant": "detector_int8.onnx", "bubble_detection_enabled": False},
+                                 "advanced": {"max_workers": 3, "hd_strategy_resize_limit": None, "x": 1}},
+              "manga_local_inpaint_model": "lama_onnx", "other": "kept"}
+    mm.apply_mobile_run_defaults(stored)
+    assert stored["manga_settings"]["ocr"] == {"rtdetr_onnx_variant": "detector_int8.onnx",
+                                               "bubble_detection_enabled": False}
+    assert stored["manga_settings"]["advanced"] == {"max_workers": 3, "hd_strategy_resize_limit": 1024, "x": 1,
+                                                    "panel_max_workers": 1, "unload_models_after_translation": True}
+    assert stored["other"] == "kept"
+    # the local inpainter is stored twice: the run follows the top-level value Settings shows
+    assert stored["manga_settings"]["inpainting"]["local_method"] == "lama_onnx"
+    nested_only = {"manga_settings": {"inpainting": {"local_method": "anime_onnx"}}}
+    mm.apply_mobile_run_defaults(nested_only)
+    assert nested_only["manga_local_inpaint_model"] == "anime_onnx"
+    both = {"manga_local_inpaint_model": "aot_onnx", "manga_settings": {"inpainting": {"local_method": "anime_onnx"}}}
+    mm.apply_mobile_run_defaults(both)
+    assert both["manga_settings"]["inpainting"]["local_method"] == "aot_onnx"
+    assert [s.key for s in mm.required_models(both)][-1] == "aot_onnx"
+    # a non-dict stored where the defaults expect a section is the user's: left alone
+    odd = {"manga_settings": {"advanced": "custom"}}
+    mm.apply_mobile_run_defaults(odd)
+    assert odd["manga_settings"]["advanced"] == "custom"
+    _mobile(monkeypatch, False)
+    assert mm.apply_mobile_run_defaults({}, force=True)["manga_local_inpaint_model"] == "aot_onnx"
+
+
 def test_required_models(env, monkeypatch):
     keys = lambda cfg: [s.key for s in mm.required_models(cfg)]  # noqa: E731
     assert keys({}) == ["rtdetr", "anime_onnx"]  # desktop GUI defaults

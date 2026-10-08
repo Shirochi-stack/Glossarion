@@ -101,8 +101,14 @@ MOVED_MODULE_NAMES = {
                          "_manga_filename_without_skip_prefix"),
     "manga_runner": ("_IS_WINDOWS", "_lower_current_thread_priority_and_affinity", "_demote_non_main_threads"),
 }
-#: The only edit inside a moved module helper.
-GET_APP_DIR_EDIT = ("    return os.getcwd()", "    return data_dir(os.getcwd())")
+#: The only edits inside a moved module helper: ``_get_app_dir`` honours GLOSSARION_DATA_DIR
+#: (mobile_runtime.data_dir returns its argument unchanged on desktop, which never sets it),
+#: except in a frozen Windows build.
+GET_APP_DIR_EDITS = (
+    ("    return os.getcwd()", "    return data_dir(os.getcwd())"),
+    ("        return os.path.dirname(os.path.abspath(__file__))",
+     "        return data_dir(os.path.dirname(os.path.abspath(__file__)))"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +338,9 @@ def test_module_helpers_are_verbatim():
                 continue  # inside the Windows block: checked below
             assert new is not None and old is not None, name
             if name == "_get_app_dir":
-                assert old.count(GET_APP_DIR_EDIT[0]) == 1
-                old = old.replace(*GET_APP_DIR_EDIT)
+                for before, after in GET_APP_DIR_EDITS:
+                    assert old.count(before) == 1, before
+                    old = old.replace(before, after)
             assert new == old, name
     # the Windows thread-priority block moved as one piece
     runner = _module_text("manga_runner")
@@ -1091,6 +1098,29 @@ def test_headless_state_replays_the_widget_values_the_desktop_builds(tmp_path, m
         assert state.azure_endpoint_entry.text() == "https://YOUR-RESOURCE.cognitiveservices.azure.com/"
 
 
+def test_mobile_run_defaults_reach_the_runs_tab_state_and_detector(tmp_path, monkeypatch):
+    """A fresh mobile config once the MANGA job put the phone defaults in
+    (``manga_models.apply_mobile_run_defaults``) runs with the AOT ONNX inpainter, the v4-S INT8
+    detector and the 1024 px limit Settings shows, not the desktop fallbacks the tab and the
+    translator read for missing keys (anime_onnx, detector.onnx)."""
+    import manga_env
+    import manga_models
+    from manga_translator import MangaTranslator
+
+    config = manga_models.apply_mobile_run_defaults({}, force=True)
+    with headless_owner(tmp_path / "phone", monkeypatch, copy.deepcopy(config)) as owner:
+        state = manga_env.HeadlessMangaState(owner)
+        assert state.local_model_type_value == "aot_onnx"
+        manga = owner.config["manga_settings"]
+        assert MangaTranslator._get_rtdetr_onnx_filename(None, manga["ocr"]) == "detector-v4-s_int8.onnx"
+        assert manga["advanced"]["hd_strategy_resize_limit"] == 1024 and manga["advanced"]["max_workers"] == 1
+    monkeypatch.undo()
+    with headless_owner(tmp_path / "desktop", monkeypatch, {}) as owner:
+        state = manga_env.HeadlessMangaState(owner)
+        assert state.local_model_type_value == "anime_onnx"
+        assert MangaTranslator._get_rtdetr_onnx_filename(None, {}) == "detector.onnx"
+
+
 def test_every_main_gui_name_the_manga_code_reads_is_provided_like_the_desktop(tmp_path, monkeypatch):
     import headless_owner as ho
 
@@ -1691,6 +1721,21 @@ def test_build_ocr_config_and_glossary_env_match_the_tab(tmp_path, monkeypatch):
     assert manga_env.build_ocr_config({"azure_vision_key": "k", "azure_vision_endpoint": "e"}, "azure") == {
         "provider": "azure", "azure_key": "k", "azure_endpoint": "e"}
     assert manga_env.build_ocr_config({}) == {"provider": "custom-api"}
+    # Without an explicit provider the helper resolves it like the desktop tab does before any
+    # worker reads ocr_provider_value (STARTUP_WIDGET_SOURCES: manga_ocr_provider, then
+    # ocr_provider, then custom-api), not with the method's never-used getattr fallback.
+    only_generic = {"ocr_provider": "azure", "azure_vision_key": "k", "azure_vision_endpoint": "https://e/"}
+    assert manga_env.build_ocr_config(only_generic) == {
+        "provider": "azure", "azure_key": "k", "azure_endpoint": "https://e/"}
+    assert manga_env.build_ocr_config({"manga_ocr_provider": "", "ocr_provider": "azure"}) == {"provider": "azure"}
+    assert manga_env.build_ocr_config({"manga_ocr_provider": "google", "ocr_provider": "azure"}) == {
+        "provider": "google"}
+    for index, config in enumerate((only_generic, {"manga_ocr_provider": "", "ocr_provider": "azure"},
+                                    {"manga_ocr_provider": "google", "ocr_provider": "azure"}, {})):
+        with headless_owner(tmp_path / f"tab{index}", monkeypatch, copy.deepcopy(config)) as owner:
+            state = manga_env.HeadlessMangaState(owner)  # the tab's widget values (desktop expressions)
+            assert manga_env.build_ocr_config(copy.deepcopy(config)) == state._build_manga_worker_ocr_config()
+        monkeypatch.undo()
     with headless_owner(tmp_path / "o", monkeypatch, {"glossary_target_language": "French",
                                                       "use_glossary_keys": False}) as owner:
         before = dict(os.environ)

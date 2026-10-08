@@ -3264,3 +3264,117 @@ Desktop bugs found (recorded, not fixed):
 - Still pre-existing and not changed: tests/test_job_runner.py's `scoped_process_state` tests leave
   PYTHONPATH removed and `test_reset_for_new_run` / tests/test_glossary_files.py's stop trace leave
   `GRACEFUL_STOP=0` / `TRANSLATION_CANCELLED=1` behind in the process.
+
+## U8 review fixes (mobile runs, model downloads, output paths, archives, editor gestures)
+
+The parity oracles stay frozen at 9355bb5d: HEAD (1cd68178) contains U8 itself (committed as
+9df4ebe4), so a re-freeze there would compare the moved code with itself. No moved method body
+changed; the desktop calls none of the new code paths.
+
+### Shared code (desktop behaviour unchanged)
+- `manga_env.build_ocr_config(config)` (contract helper, no desktop caller) resolves the provider
+  like the tab before any worker reads `ocr_provider_value` (`manga_ocr_provider`, then
+  `ocr_provider`, then `custom-api`) instead of the method's never-used getattr fallback; a parity
+  case compares it with a HeadlessMangaState's own `_build_manga_worker_ocr_config()`.
+- `manga_models.apply_mobile_run_defaults(config)`: mobile only, fills every phone default the
+  config does not store (absent / None / blank) into a run's config; the local inpainter, stored
+  twice, follows the top-level `manga_local_inpaint_model` (what mobile Settings shows and
+  `required_models` reads; the desktop calls it "more up-to-date than nested inpainting").
+- `bubble_detector.hf_urllib_download` (mobile only: reached through `_hf_download_fn` /
+  local_inpainter's mobile branch): a model the manga_models registry pins is downloaded by
+  `manga_models.download` (pinned revision, `.partial` resume, size + sha256 check) and stops with
+  the run's immediate Stop (MangaTranslator's global cancellation). A non-empty file already at the
+  target is still reused; unregistered files keep the plain urllib path.
+- `manga_files_core._get_app_dir`: second edit of the moved helper, the non-frozen Windows branch
+  goes through `mobile_runtime.data_dir` too (desktop never sets GLOSSARION_DATA_DIR, so it is
+  unchanged; the mobile app running from source on Windows no longer writes `OCR Text` /
+  `MangaGlossary_Backup` into src/). tests/test_manga_env.py pins both edits (GET_APP_DIR_EDITS).
+
+### Mobile (services.manga, job_kinds.manga, the Manga screens)
+- A MANGA / MANGA_STEP job prepares its config snapshot (never written back): the phone defaults
+  (above), no desktop `output_directory`, and the mitigation of desktop bug 1 in "U8 Manga run
+  env" (the Document Intelligence start check): for an Azure
+  Document Intelligence run the empty member of each key / endpoint pair (Computer Vision vs
+  Document Intelligence; the CV endpoint placeholder counts as empty) is filled from the other,
+  so the shared start check and the provider load both get the credentials Settings offers.
+- `OUTPUT_DIRECTORY` is hidden from the manga code in mobile manga jobs (the job's process state
+  puts it back) and in the Files tab's lookups (`manga_output_view`, under `job_runner.JOB_LOCK`;
+  "busy" while a job owns the process state). The mobile env contract's OUTPUT_DIRECTORY is the
+  platform's output root, which the manga code treats as a user's output override: every page went
+  to `<root>/<page name>_translated/`, so chapter folders with the same page names overwrote each
+  other and every series shared one folder and one `<root>_translated.cbz`. Pages now go next to
+  their source copy in app storage (the desktop default); the automatic OCR export and the
+  glossary backups go to the app folder (GLOSSARION_DATA_DIR).
+- The job downloads the registered models the run loads that are not on the device yet before it
+  starts (`ensure_run_models`: progress in the job, Stop cancels and keeps the partial file, a
+  failed download fails the job instead of stalling every page: "U8 Manga run env" desktop bug 3);
+  the editor passes the kinds
+  a step loads (`params["model_kinds"]`). The model dialog's "Start anyway" became "Download in the run".
+- Archives: a ZIP / CBZ is extracted under `<root>/<id of path + size + mtime>/<name>` (a different
+  archive that reuses a name gets its own folder; the folder keeps the archive's name). The
+  selection's CBZ jobs persist in mobile_state.json (`manga_cbz_jobs`) and are re-attached after a
+  restart; Create CBZ packs pages of an imported CBZ back into `<name>_translated.cbz` with the
+  moved `_finalize_cbz_jobs` (the others still go through `_create_cbz_from_isolated_folders`), and
+  the archives a run or Create CBZ wrote are listed under Output (share / save).
+- Editor: in Pan mode the gesture surface over the InteractiveViewer takes long-presses only (its pan
+  recognizer won Flutter's gesture arena and swallowed one-finger panning); the source viewer is
+  kept (same controls and keys, updated in place) while the page and the Pan / Edit mode stay the
+  same, so refreshes keep the zoom. Not verified on a device yet.
+- The offline E2E's manga scenario points GLOSSARION_DATA_DIR at its sandbox and finds the
+  automatic OCR export through the Files tab's `ocr_dir()`.
+
+### Desktop bug found (recorded, not fixed)
+1. **An output override flattens pages with the same name.** With an output folder set, the worker
+   (`_translation_worker`'s routing), `_get_manga_output_path_for_file` and the editor write every
+   page to `<override>/<page name>_translated/<page>`, so `ch1/001.png` and `ch2/001.png` of one run
+   overwrite each other, and Create CBZ packs the override folder's matching `_translated` folders
+   into `<override name>_translated.cbz`. Without an override (the default) pages stay next to their
+   source. Mobile no longer hits it (above).
+
+### Second review round (U8; mobile and test-only, no desktop change)
+References to the U8 desktop bugs name their section ("U8 Manga run env" desktop bug 3, "U8 review
+fixes" desktop bug 1): each U8 section numbers its own list.
+- **Lookups a running job refused.** While another job owns the process state
+  (`job_runner.JOB_LOCK`), `MangaFileList.output_path_for` / `existing_outputs` / `existing_cbz`
+  raise `MangaBusy` instead of answering "nothing" (and `ocr_dir()` without a folder computed
+  before). The Files tab keeps its earlier-outputs lookup pending (Create CBZ / Download images say
+  "Wait for the running job", not "Translate pages first"), the Editor its Translated view ("Wait
+  for the running job…"), and both run it again when a job of any kind ends (the JobService reports
+  the end after the job let go of the process state) and when the tab shows. Auto-saved OCR says
+  "Wait for the running job to finish" instead of "No auto-saved OCR files yet".
+- **Generated glossary in Settings.** The selection's glossary auto-load (the moved
+  `_refresh_manga_selection_status`, run by every selection change) now runs in the job's view
+  too (`services.manga._MobileFilesHost`, which calls the moved method unchanged): a glossary pass
+  writes `<source>/Glossary/<name>_manga_glossary.*` and `<GLOSSARION_DATA_DIR>/MangaGlossary_Backup`,
+  while the Files host looked in `<Output>/Glossary`, so `manga_generated_glossary_path` was never
+  stored and Settings › Glossary kept "No glossary loaded". After a MANGA job the Files tab runs the
+  auto-load again (`MangaFileList.refresh_glossary`, persisted like a selection change) and
+  re-renders Settings; a selection change made while another job ran is marked stale and refreshed
+  once a job ends.
+- **CBZ archives inside folders and ZIPs.** The archive-id extraction folder of the first round
+  covered a ZIP / CBZ added directly only; a CBZ found in a picked folder or an extracted ZIP still
+  went to the shared `<cbz root>/<name>`, so two series' `vol1.cbz` overwrote each other's pages and
+  a re-imported folder listed the old archive's pages too. `_MobileFilesHost._add_cbz_archive_images`
+  now gives every CBZ its `<cbz root>/<archive id>/` temp root around the moved method (the
+  per-batch temp-root juggling in `add_paths` is gone).
+- **Model rows.** `ModelDownloadRow` calls its `on_change` only when the status changes; download
+  progress re-renders the row alone. Settings rebuilt the whole tab on the UI loop for every
+  progress report (inline inpainting row, model sheet), with file IO in the rebuild; it now keeps a
+  row across its own rebuilds while it shows the same model (`SettingsTab._download_row`), so a
+  download keeps reporting into the row on screen.
+- **Back (UI_SPEC §1.6).** `MangaScreen.handle_back` follows the tab on screen: Files leaves
+  selection mode first; the Editor drops the selected box, then the edit tool; otherwise the View
+  pops. Before, every tab used the Editor's state.
+- **A download cancelled from a model row.** A row's Cancel (`manga_models.cancel`) also stops a
+  MANGA / MANGA_STEP job's download of that model; the job ended DONE with nothing done. Only the
+  job's own Stop now ends it stopped; otherwise it fails with "The model download was cancelled;
+  start again to resume it" (the partial file is kept).
+- **A batch that ended while the screen was closed.** The Files tab applies the session's batch end
+  when it shows again (run status, pages, archives, glossary; once per job). After an app restart
+  `existing_cbz` also finds the run's "Create CBZ at end" archive of the run files' folder (the
+  rule of `HeadlessMangaRunner.cbz_paths`), so it is listed under Output again.
+- **tests/test_mobile_compat_patches_manga.py (test-only).**
+  `test_hf_urllib_download_hands_registered_models_to_manga_models` builds no ONNX session, so it is
+  marked `backend` (numpy + cv2, what importing bubble_detector needs) instead of `runtime`
+  (onnxruntime): CI's python-app job, which has no onnxruntime, now runs the only test of the
+  bubble_detector → manga_models hand-off.

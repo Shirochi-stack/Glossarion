@@ -69,6 +69,33 @@ except ImportError as e:
 _HF_DOWNLOAD_LOCK = threading.Lock()
 
 
+def _registered_manga_model(repo_id, filename, revision=None):
+    """U8: the ``manga_models`` registry entry for (repo, file), or None (a file the registry
+    does not pin, another revision asked for explicitly, or no manga_models in this build)."""
+    try:
+        import manga_models
+    except Exception:
+        return None
+    try:
+        spec = manga_models.find_spec(repo_id, filename)
+    except Exception:
+        return None
+    if spec is None or (revision not in (None, '', 'main') and revision != spec.revision):
+        return None
+    return spec
+
+
+def _manga_run_cancelled():
+    """True once the manga run's immediate Stop has set MangaTranslator's global cancellation
+    (a download made inside a run stops with it; the partial file is kept for the next run)."""
+    module = sys.modules.get('manga_translator')
+    checker = getattr(getattr(module, 'MangaTranslator', None), 'is_globally_cancelled', None)
+    try:
+        return bool(checker()) if callable(checker) else False
+    except Exception:
+        return False
+
+
 def hf_urllib_download(repo_id, filename, cache_dir=None, local_dir=None, revision=None,
                        progress_callback=None, timeout=60.0, **_unused):
     """Fetch ``{HF_ENDPOINT}/{repo_id}/resolve/{revision}/{filename}`` with urllib.
@@ -79,12 +106,24 @@ def hf_urllib_download(repo_id, filename, cache_dir=None, local_dir=None, revisi
     to ``<target>.part`` and are renamed into place only when the size matches
     the server's Content-Length. ``progress_callback(percent, downloaded_mb,
     total_mb, speed_mb)`` has local_inpainter.download_model's signature.
+
+    A model the ``manga_models`` registry pins (the RT-DETR exports, the AOT / LaMa
+    ONNX inpainters) is downloaded by its download manager instead, to the same path:
+    the pinned revision, a resumable ``.partial`` file, size + sha256 verification;
+    the run's immediate Stop (or ``manga_models.cancel()``) interrupts it.
     """
     import urllib.parse
     import urllib.request
 
     base_dir = local_dir or cache_dir or 'models'
     target = os.path.join(base_dir, *str(filename).split('/'))
+    spec = _registered_manga_model(repo_id, filename, revision)
+    if spec is not None:
+        if os.path.isfile(target) and os.path.getsize(target) > 0:
+            return target  # a file already there is reused, as below
+        import manga_models
+        return manga_models.download(spec, dest_dir=base_dir, timeout=timeout, cancel=_manga_run_cancelled,
+                                     progress=manga_models.legacy_progress(progress_callback))
     with _HF_DOWNLOAD_LOCK:
         if os.path.isfile(target) and os.path.getsize(target) > 0:
             return target

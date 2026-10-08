@@ -46,7 +46,8 @@ class MangaSession:
     (``manga_editor_core.MangaEditorSession``, created on first use; jobs reach it by token)."""
 
     def __init__(self, *, data_dir: str, config_source: Optional[Callable[[], dict]] = None,
-                 save: Optional[Callable[[dict], Any]] = None, config: Optional[dict] = None) -> None:
+                 save: Optional[Callable[[dict], Any]] = None, config: Optional[dict] = None,
+                 prefs: Any = None) -> None:
         from glossarion_mobile.services import manga as svc
 
         self.data_dir = data_dir or os.getcwd()
@@ -57,8 +58,10 @@ class MangaSession:
         self.exports_dir = os.path.join(self.root, "exports")
         self._save = save
         self._config_source = config_source or (lambda: dict(config or {}))
+        # prefs (mobile_state.json): the CBZ archives of the selection survive an app restart
         self.files = svc.MangaFileList(self._config_source(), save=self.save, temp_root=self.cbz_root,
-                                       config_source=self._config_source, folders_root=self.folders_root)
+                                       config_source=self._config_source, folders_root=self.folders_root,
+                                       prefs=prefs)
         self.models = svc.ModelManager()
         self.editor: Any = None  # MangaEditorSession
         self.editor_token: Optional[str] = None
@@ -68,8 +71,10 @@ class MangaSession:
         self.loaded = False
         self.page_index = 0
         self.batch_job_id: Optional[str] = None
+        self.batch_end_applied: Optional[str] = None  # the batch whose end a Files tab has shown
         self.step_job_id: Optional[str] = None
         self.last_outputs: list = []
+        self.last_cbz: list = []  # CBZ archives the last run / Create CBZ wrote (Share / Save)
         self.last_result: dict = {}
         # the last imported OCR JSON ({"path", "matched", "files"}): the next Start reuses it (desktop)
         self.imported_ocr: Optional[dict] = None
@@ -202,7 +207,7 @@ class MangaFeature:
             paths = getattr(self.app, "paths", None)
             data_dir = str(getattr(paths, "data", "") or "") if paths is not None else ""
             self._session = MangaSession(data_dir=data_dir or os.getcwd(), config_source=self._config,
-                                         save=self._save)
+                                         save=self._save, prefs=getattr(self.app, "prefs", None))
         return self._session
 
     # ---- screens ------------------------------------------------------------------------------------

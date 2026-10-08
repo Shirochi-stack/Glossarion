@@ -31,8 +31,9 @@ async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, ki
                         action: str = "This run") -> bool:
     """Before a run or an editor step: the models it loads (``manga_models.missing_models`` for the
     config, limited to ``kinds``) that are not on the device yet. The first use asks — Download
-    (with progress in the model sheet), Start anyway (the run then downloads them itself, as the
-    desktop does, without progress) or Cancel. True: go on."""
+    (now, with progress in the model sheet), Download in the run (the job downloads them first,
+    verified and resumable, with its progress and Stop: ``services.manga.ensure_run_models``) or
+    Cancel. True: go on."""
     if not manager.available:
         return True
     try:
@@ -51,7 +52,8 @@ async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, ki
     answer = await ask(ctx, "Download models",
                        f"{action} needs {names}{f' ({size})' if size else ''}, not downloaded on this device yet. "
                        "Download now? Models are kept for later runs.",
-                       (("cancel", "Cancel", "text"), ("run", "Start anyway", "text"), ("download", "Download", "filled")),
+                       (("cancel", "Cancel", "text"), ("run", "Download in the run", "text"),
+                        ("download", "Download", "filled")),
                        key="manga-models-confirm")
     if answer == "run":
         return True
@@ -69,7 +71,12 @@ async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, ki
 
 
 class ModelDownloadRow:
-    """One registry model: status chip + Download / Cancel / Load / Delete (``key_prefix`` keys)."""
+    """One registry model: status chip + Download / Cancel / Load / Delete (``key_prefix`` keys).
+
+    ``on_change(entry)`` runs when the status changes (missing → downloading → ready / error,
+    loading, loaded, deleted), never for download progress: a progress report re-renders this
+    row only (an owner that rebuilds itself on every report would rebuild for the whole
+    download, up to ten times a second)."""
 
     def __init__(self, ctx: Any, manager: svc.ModelManager, model_id: str, *, title: Optional[str] = None,
                  key_prefix: str = "mdl", on_change: Optional[Callable[[svc.ModelEntry], Any]] = None,
@@ -81,6 +88,7 @@ class ModelDownloadRow:
         self.key_prefix = key_prefix
         self.on_change = on_change
         self.allow_load = allow_load
+        self._downloading = False  # this row's own download is running (its reports keep it current)
         self.entry: svc.ModelEntry = manager.status(model_id)
         self.title_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_MEDIUM, weight=ft.FontWeight.W_600,
                                   max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
@@ -141,29 +149,50 @@ class ModelDownloadRow:
         self.download_button.disabled = entry.status == "unavailable"
 
     def update(self, entry: Optional[svc.ModelEntry] = None) -> None:
+        previous = self.entry.status
         self.entry = entry if entry is not None else self.manager.status(self.model_id)
         self.render()
         push(self.control)
-        if self.on_change is not None:
+        if self.on_change is not None and self.entry.status != previous:
             try:
                 self.on_change(self.entry)
             except Exception:
                 log.debug("model row change handler failed", exc_info=True)
+
+    @property
+    def downloading(self) -> bool:
+        """This row's own download is running."""
+        return self._downloading
+
+    def sync(self) -> None:
+        """Re-read the registry status, for an owner that keeps this row across a rebuild of its
+        own (no push, no ``on_change``); not while this row's download runs (its reports are newer)."""
+        if self._downloading:
+            return
+        self.entry = self.manager.status(self.model_id)
+        self.render()
 
     def _post(self, entry: svc.ModelEntry) -> None:
         """Download progress (io thread) -> the UI loop."""
         dispatcher = getattr(self.ctx, "dispatcher", None)
         post = getattr(dispatcher, "post", None) if dispatcher is not None else None
         if callable(post) and getattr(dispatcher, "bound", False):
-            post(self.update, entry)
+            post(self._progress, entry)
         else:
+            self._progress(entry)
+
+    def _progress(self, entry: svc.ModelEntry) -> None:
+        if self._downloading:  # a report the loop gets after the download returned is stale
             self.update(entry)
 
     async def download(self) -> svc.ModelEntry:
-        self.entry = svc.ModelEntry(self.model_id, self.entry.label, kind=self.entry.kind, size=self.entry.size,
-                                    status="downloading", progress=0.0)
-        self.update(self.entry)
-        entry = await self.ctx.io(self.manager.download, self.model_id, self._post)
+        self._downloading = True
+        try:
+            self.update(svc.ModelEntry(self.model_id, self.entry.label, kind=self.entry.kind, size=self.entry.size,
+                                       status="downloading", progress=0.0))
+            entry = await self.ctx.io(self.manager.download, self.model_id, self._post)
+        finally:
+            self._downloading = False
         self.update(entry)
         if entry.status == "error":
             self.ctx.say(f"Download failed: {entry.error}")

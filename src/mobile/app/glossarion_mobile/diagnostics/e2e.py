@@ -1748,6 +1748,10 @@ class E2ESession:
         _check(added == self.MANGA_PAGES, f"the Files tab added {added} pages from the CBZ, not {self.MANGA_PAGES}")
         _check(files.cbz_jobs, "the CBZ was not registered as a CBZ job (no archive at the end)")
         spec = svc.batch_spec(files, output_root=str(self.root / "Output"))
+        # A mobile manga job runs the manga code without an output override (pages next to their
+        # source), so the automatic OCR export goes to the app folder (GLOSSARION_DATA_DIR): the
+        # sandbox's for this run.
+        self._set_env("GLOSSARION_DATA_DIR", str(self._dir("data")))
         mark = server.mark()
         server.ocr_text = FAKE_MANGA_OCR_TEXT  # OCR-response mode: every page "reads" the Korean bubble text
         try:
@@ -1781,8 +1785,12 @@ class E2ESession:
             members = sorted(n for n in archive.namelist() if not n.endswith("/"))
         _check(len(members) == self.MANGA_PAGES, f"the output CBZ holds {members}")
         _check(set(outcome.outputs) >= set(pages) | set(archives), f"job outputs {outcome.outputs}")
-        exports = sorted(Path(self.root / "Output" / "OCR Text").glob("*.json"))
-        _check(exports, "no automatic OCR export in Output/OCR Text")
+        # the run's automatic OCR export lands in the OCR Text folder the Files tab lists (a mobile
+        # job runs the manga code without an output override: services.manga.hide_output_override)
+        ocr_dir = files.ocr_dir()
+        _check(ocr_dir, "the Files tab has no OCR Text folder")
+        exports = sorted(Path(ocr_dir).glob("*.json"))
+        _check(exports, f"no automatic OCR export in {ocr_dir}")
         document = json.loads(exports[-1].read_text(encoding="utf-8"))
         _check(document.get("format") == "glossarion-manga-ocr", f"OCR export format {document.get('format')!r}")
         # the fake model tags Hangul it "translates": a tagged reply means the OCR text was in the request

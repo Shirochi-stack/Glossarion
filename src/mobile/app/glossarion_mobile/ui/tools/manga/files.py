@@ -16,8 +16,16 @@
   the download of a model the run loads that is not on the device yet (``ensure_models``).
   **Import OCR** (the editor's import: pages get their OCR / translations / boxes back) is also
   the OCR the next Start reuses, as on the desktop ("Imported OCR (N)", clearable).
-* Output: **Create CBZ** (the translated pages packed in run order) · **Download images**
-  (a ZIP of them) through the ExportSheet, and "Open in editor".
+* Output: **Create CBZ** (the translated pages packed in run order; pages of an imported CBZ
+  go back into ``<name>_translated.cbz`` next to it) · **Download images** (a ZIP of them)
+  through the ExportSheet, the CBZ archives the run or Create CBZ wrote (tap to share / save),
+  and "Open in editor". Translated pages sit next to their source copy in app storage
+  (``services.manga.hide_output_override``). While another job owns the process state the
+  lookup of earlier outputs waits ("Wait for the running job") and runs again when a job ends.
+* A batch that ended while no Files tab watched it (the screen was closed during the run) is
+  applied when the tab shows again: run status, pages, archives. After a batch, and after a
+  selection change made while a job ran, the selection's glossary auto-load runs again, so
+  Settings › Glossary shows the glossary the run generated.
 """
 
 from __future__ import annotations
@@ -32,7 +40,7 @@ from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, hint_text
-from glossarion_mobile.ui.tools.manga.common import MangaTab, export_sheet, push
+from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
 __all__ = ["FilesTab", "SORT_LABELS"]
@@ -54,6 +62,8 @@ class FilesTab(MangaTab):
         self.selection_mode = False
         self.sort_reverse = False
         self.watch = JobWatch(ctx, self._on_job_end, self._on_job_change)
+        self.job_ends = JobEnds(ctx, self._on_any_job_end)
+        self._outputs_pending = False  # the earlier-outputs lookup was refused by a running job
         self._unsub_view: Any = None
         self.console: Any = None
         self.console_job: Optional[str] = None
@@ -167,30 +177,86 @@ class FilesTab(MangaTab):
     # ---- lifecycle ---------------------------------------------------------------------------------
 
     def did_show(self) -> None:
+        self.job_ends.start()
         for snap in self.watch.adopt((svc.KIND_BATCH,)):
             self.session.batch_job_id = getattr(snap, "id", None)
             self._on_job_change(snap)
         if self.session.batch_job_id and self._unsub_view is None:
             self._subscribe_view()
+        self._catch_up_job_end()
+        self._retry_lookups()
 
     def on_session_loaded(self) -> None:
         self.refresh()
         if not self.session.last_outputs and self.session.files.files:
             self.ctx.spawn(self._find_outputs())
 
+    def _catch_up_job_end(self) -> None:
+        """The session's batch ended while no Files tab watched it (the screen was closed during the
+        run; ``JobWatch.adopt`` only takes live jobs): its end is applied now, once per job (run
+        status, translated pages, the archives it wrote, the glossary auto-load)."""
+        job_id = self.session.batch_job_id
+        if not job_id or job_id == self.session.batch_end_applied or job_id in self.watch.ended:
+            return
+        jobs = self.ctx.jobs
+        snapshot = getattr(jobs, "snapshot", None) if jobs is not None else None
+        if not callable(snapshot):
+            return
+        try:
+            snap = snapshot(job_id)
+        except Exception:
+            snap = None
+        if snap is None or not getattr(snap, "is_terminal", False):
+            return
+        self.watch.ended[job_id] = snap
+        self._on_job_end(snap)
+
+    def _retry_lookups(self) -> None:
+        """Lookups a running job refused (earlier outputs; the glossary auto-load of a selection
+        change), tried again; each stays pending while a job still owns the process state."""
+        if self._outputs_pending and self.session.files.files:
+            self.ctx.spawn(self._find_outputs())
+        if self.session.files.glossary_stale:
+            self.ctx.spawn(self._refresh_glossary())
+
+    def _on_any_job_end(self, snap: Any) -> None:
+        """A job of any kind ended (``JobEnds``): it no longer owns the process state."""
+        if getattr(snap, "id", None) in self.watch.job_ids:
+            # this tab's batch: ``_on_job_end`` applies it (and re-runs the glossary auto-load)
+            if self._outputs_pending and self.session.files.files:
+                self.ctx.spawn(self._find_outputs())
+            return
+        self._retry_lookups()
+
     async def _find_outputs(self) -> list:
-        """Pages translated by an earlier run (the run's per-page output rule) enable the output actions."""
+        """Pages translated by an earlier run (the run's per-page output rule) enable the output
+        actions; archives it packed for the selection are listed again. While another job owns
+        the process state the lookup waits (the actions say so) and runs again when a job ends."""
         try:
             found = await self.ctx.io(self.session.files.existing_outputs)
+            archives = await self.ctx.io(self.session.files.existing_cbz)
+        except svc.MangaBusy:
+            if not self._outputs_pending:
+                self._outputs_pending = True
+                self.refresh()
+            return []
         except Exception:
-            found = []
+            found, archives = [], []
+        changed = self._outputs_pending
+        self._outputs_pending = False
         if found and not self.session.last_outputs:
             self.session.last_outputs = list(found)
+            changed = True
+        if archives and not self.session.last_cbz:
+            self.session.last_cbz = list(archives)
+            changed = True
+        if changed:
             self.refresh()
         return found
 
     def dispose(self) -> None:
         self.watch.stop()
+        self.job_ends.stop()
         if self._unsub_view is not None:
             try:
                 self._unsub_view()
@@ -335,7 +401,8 @@ class FilesTab(MangaTab):
 
     def _render_outputs(self) -> None:
         outputs = [p for p in self.session.last_outputs if os.path.isfile(p)]
-        reason = None if outputs else "Translate pages first"
+        # "not known yet" (a running job refused the lookup) is not "not translated"
+        reason = None if outputs else ("Wait for the running job" if self._outputs_pending else "Translate pages first")
         self.cbz_button = action_button("Create CBZ", "ARCHIVE", lambda e: self.ctx.spawn(self.create_cbz()),
                                         key=f"mf-cbz-{self._build_gen}", reason=reason)
         self.download_button = action_button("Download images", "DOWNLOAD",
@@ -346,6 +413,13 @@ class FilesTab(MangaTab):
                                disabled=not self.session.files.files)
         self.output_holder.controls = [self.cbz_button, self.download_button, editor]
         rows = []
+        for path in [p for p in self.session.last_cbz if os.path.isfile(p)]:
+            rows.append(ft.ListTile(
+                leading=ft.Icon(ft.Icons.ARCHIVE), title=ft.Text(os.path.basename(path), max_lines=1,
+                                                                 overflow=ft.TextOverflow.ELLIPSIS),
+                subtitle=ft.Text("CBZ · tap to share or save", theme_style=ft.TextThemeStyle.BODY_SMALL),
+                on_click=lambda e, p=path: export_sheet(self.ctx, p), dense=True,
+                key=f"mf-cbz-out-{self._build_gen}-{len(rows)}"))
         for path in outputs[:50]:
             rows.append(ft.ListTile(
                 leading=ft.Image(src=path, width=40, height=40, fit=ft.BoxFit.COVER, cache_width=80, border_radius=4),
@@ -367,6 +441,7 @@ class FilesTab(MangaTab):
         except Exception as exc:
             self.ctx.say(f"Could not add the files: {exc}")
             return 0
+        self._after_selection_change()
         self.refresh()
         if added:
             self.ctx.remember_source("tools.manga", f"{len(files.files)} images")
@@ -419,7 +494,15 @@ class FilesTab(MangaTab):
             self.ctx.say(f"Could not update the list: {exc}")
             return None
         finally:
+            self._after_selection_change()
             self.refresh()
+
+    def _after_selection_change(self) -> None:
+        """A selection change made while another job owned the process state could not see the
+        folders a mobile job writes the generated glossary to: try again now (the job may be over),
+        and otherwise when a job ends (``_on_any_job_end``)."""
+        if self.session.files.glossary_stale:
+            self.ctx.spawn(self._refresh_glossary())
 
     def toggle_skip(self, path: str) -> Any:
         return self.ctx.spawn(self._mutate(self.session.files.toggle_skip, path))
@@ -610,13 +693,16 @@ class FilesTab(MangaTab):
         push(self.progress, self.run_status, self.stop_button, self.start_button)
 
     def _on_job_end(self, snap: Any) -> None:
+        self.session.batch_end_applied = getattr(snap, "id", None)
         result = dict(getattr(snap, "result", {}) or {})
         outputs = [p for p in (result.get("manga_outputs") or getattr(snap, "outputs", ()) or ())
                    if str(p).lower().endswith(svc.IMAGE_EXTENSIONS)]
         if outputs:
             self.session.last_outputs = list(outputs)
         self.session.last_result = result
-        cbz = result.get("manga_cbz") or []
+        cbz = [str(p) for p in (result.get("manga_cbz") or []) if p]
+        if cbz:  # the run's own archives (imported CBZs packed back, "Create CBZ at end")
+            self.session.last_cbz = cbz + [p for p in self.session.last_cbz if p not in cbz]
         error = getattr(snap, "error", None)
         if getattr(snap, "stopped", False):
             text = f"Stopped · {len(outputs)} page{'s' if len(outputs) != 1 else ''} translated"
@@ -641,6 +727,25 @@ class FilesTab(MangaTab):
                 self.screen.editor_tab.refresh()
             except Exception:
                 pass
+        # a glossary pass (or a run with the glossary workflow) wrote <source>/Glossary/...: only the
+        # job's config snapshot knew it, so the selection's auto-load runs again for Settings
+        self.ctx.spawn(self._refresh_glossary())
+
+    async def _refresh_glossary(self) -> bool:
+        """The selection's glossary auto-load as a mobile job sees the folders
+        (``MangaFileList.refresh_glossary``; it stores ``manga_generated_glossary_path``), then
+        Settings › Glossary re-renders. False while a job still owns the process state."""
+        try:
+            done = bool(await self.ctx.io(self.session.files.refresh_glossary))
+        except Exception:
+            log.debug("refreshing the manga glossary state failed", exc_info=True)
+            return False
+        if done and self.screen is not None:
+            try:
+                self.screen.settings_tab.refresh()
+            except Exception:
+                log.debug("refreshing the manga settings failed", exc_info=True)
+        return done
 
     # ---- output --------------------------------------------------------------------------------------
 
@@ -654,20 +759,31 @@ class FilesTab(MangaTab):
         return "manga"
 
     async def create_cbz(self) -> Optional[str]:
-        """Create CBZ: the desktop button's ``_create_cbz_from_isolated_folders`` over the run files."""
+        """Create CBZ over the run files (``MangaFileList.create_cbz``: pages of an imported CBZ are
+        packed back into ``<name>_translated.cbz``, the others by the desktop button's
+        ``_create_cbz_from_isolated_folders``); the first archive opens in the ExportSheet, every
+        one is listed under Output."""
         if not self.session.files.files:
             self.ctx.say("Add images first")
             return None
         try:
-            path = await self.ctx.io(self.session.files.create_cbz)
+            paths = await self.ctx.io(self.session.files.create_cbz)
+        except svc.MangaBusy:
+            self.ctx.say("Create the CBZ once the running job has finished")
+            return None
         except Exception as exc:
             self.ctx.say(f"Could not create the CBZ: {exc}")
             return None
-        if not path or not os.path.isfile(path):
+        paths = [p for p in (paths or []) if p and os.path.isfile(p)]
+        if not paths:
             self.ctx.say("No translated images found. Please translate some images first.")
             return None
-        export_sheet(self.ctx, path)
-        return path
+        self.session.last_cbz = paths + [p for p in self.session.last_cbz if p not in paths]
+        self.refresh()
+        if len(paths) > 1:
+            self.ctx.say(f"Created {len(paths)} CBZ files (listed under Output)")
+        export_sheet(self.ctx, paths[0])
+        return paths[0]
 
     async def download_images(self) -> Optional[str]:
         outputs = [p for p in self.session.last_outputs if os.path.isfile(p)]

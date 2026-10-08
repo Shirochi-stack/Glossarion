@@ -321,7 +321,9 @@ def test_file_list_runs_the_moved_desktop_methods(iso, tmp_path):
     assert [(g.name, len(g.files)) for g in files.groups()] == [("ch1", 3), ("ch2", 3)]
     assert files.add_paths([fixture["cbz"]]) == 3 and fixture["cbz"] in files.cbz_jobs
     assert files.add_paths([fixture["zip"]]) == 2  # a ZIP is the folder it contains
-    assert os.path.isdir(iso["data"] / "manga" / "folders" / "folderzip" / "sub")
+    # extracted under <folders>/<archive id>/<name>: the folder keeps the archive's name
+    zip_root = iso["data"] / "manga" / "folders" / svc._archive_key(fixture["zip"]) / "folderzip"
+    assert os.path.isdir(zip_root / "sub") and not os.path.exists(str(zip_root) + ".part")
     assert len(files.files) == 11
     files.set_range("2-4")
     assert files.parse_range() == ({2, 3, 4}, None) and files.range_status() == "3 in range · 3 of 11 will run"
@@ -339,8 +341,7 @@ def test_file_list_runs_the_moved_desktop_methods(iso, tmp_path):
     first = files.files[0]
     assert files.move(0, 3) and files.files[3] == first and files.host._manga_file_sort is None
     assert saved["manga_selected_files"] == files.files
-    assert set(saved["manga_selected_folder_roots"]) == {fixture["series"],
-                                                         str(iso["data"] / "manga" / "folders" / "folderzip")}
+    assert set(saved["manga_selected_folder_roots"]) == {fixture["series"], str(zip_root)}
     assert files.remove([first]) == 1 and first not in saved["manga_selected_files"]
     reloaded = svc.MangaFileList({}, temp_root=str(iso["data"] / "manga" / "cbz"))
     assert reloaded.load(saved) == len(files.files) - 0 and reloaded.is_skipped(third)
@@ -1839,6 +1840,705 @@ def test_editor_tab_edits_boxes_on_the_real_editor_session(iso, tmp_path, monkey
     asyncio.run(scenario())
 
 
+# ==========================================================================
+# What a mobile run starts from: phone defaults, models, output paths, archives, editor gestures
+# ==========================================================================
+
+
+@pytest.fixture
+def mobile(iso, monkeypatch):
+    """The app's environment contract marks the process as mobile (the iso fixture clears it)."""
+    monkeypatch.setenv("GLOSSARION_MOBILE", "1")
+    return iso
+
+
+class FakeDownloads:
+    """``manga_models.download`` stand-in: records (model, cancel), reports progress, can fail."""
+
+    def __init__(self, models) -> None:
+        self.models = models
+        self.calls: list = []
+        self.fail = None
+
+    def __call__(self, model, *, progress=None, cancel=None, **_kwargs):
+        spec = self.models.get_spec(model)
+        self.calls.append((spec.key, cancel))
+        if self.fail is not None:
+            raise self.fail
+        for done in (0, spec.size // 2, spec.size):
+            progress(self.models.DownloadProgress(spec.key, done, spec.size))
+        return self.models.model_path(spec)
+
+
+def _capturing_runner(monkeypatch, seen: dict):
+    import copy
+
+    class Capturing(FakeRunner):
+        def __init__(self, main_gui, **kwargs):
+            super().__init__(main_gui, **kwargs)
+            seen["env"] = os.environ.get("OUTPUT_DIRECTORY")
+            seen["config"] = copy.deepcopy(main_gui.config)
+
+    FakeRunner.instances = []
+    FakeRunner.summary = {"ok": True, "completed": 1, "failed": 0, "total": 1, "outputs": [], "cbz_paths": [],
+                          "stopped": False, "error": ""}
+    FakeRunner.hold = None
+    monkeypatch.setitem(sys.modules, "manga_runner", _module("manga_runner", HeadlessMangaRunner=Capturing,
+                                                             MangaRunError=FakeRunError))
+    return Capturing
+
+
+@needs_cores
+def test_mobile_batch_runs_with_the_phone_defaults_its_models_and_no_output_override(mobile, tmp_path, monkeypatch):
+    import manga_models
+
+    pages = [write_png(tmp_path / "in" / f"{n}.png") for n in (1, 2)]
+    seen: dict = {}
+    _capturing_runner(monkeypatch, seen)
+    downloads = FakeDownloads(manga_models)
+    monkeypatch.setattr(manga_models, "download", downloads)
+    stored = {"manga_ocr_provider": "azure-document-intelligence", "azure_document_intelligence_key": "k" * 32,
+              "azure_document_intelligence_endpoint": "https://di.example/", "output_directory": "C:/desktop/out"}
+    owner = types.SimpleNamespace(config=dict(stored))
+    params = {"files": pages, "run_files": pages, "output_root": str(mobile["Output"])}
+    ctx = FakeCtx(owner, params=params, inputs=pages)
+    assert manga_kind.run_batch(ctx)["ok"] is True
+    config = seen["config"]
+    # the run uses what Settings shows (manga_models phone defaults; the desktop fallbacks otherwise)
+    manga = config["manga_settings"]
+    assert manga["ocr"]["rtdetr_onnx_variant"] == "detector-v4-s_int8.onnx"
+    assert manga["inpainting"]["local_method"] == config["manga_local_inpaint_model"] == "aot_onnx"
+    assert manga["advanced"]["hd_strategy_resize_limit"] == 1024 and manga["advanced"]["panel_max_workers"] == 1
+    # ... after downloading the models it loads, verified and resumable, with progress and the job's Stop
+    assert [key for key, _cancel in downloads.calls] == ["rtdetr_v4_s_int8", "aot_onnx"]
+    assert all(cancel == ctx.stop_requested for _key, cancel in downloads.calls)
+    labels = [data["label"] for kind, data in ctx.events if kind == "progress"]
+    assert "Downloading RT-DETR v4-S INT8 · 0%" in labels and "Downloading AOT ONNX · 100%" in labels
+    assert any("Downloading AOT ONNX" in line for line in ctx.logs)
+    # no output override: the manga code writes each page next to its source (the job's process
+    # state puts OUTPUT_DIRECTORY back); the runner gets no output root of its own either
+    assert seen["env"] is None and "output_directory" not in config
+    assert FakeRunner.instances[-1].kwargs["output_root"] is None
+    # Document Intelligence: Settings' fields also fill the Computer Vision pair the start check reads
+    assert (config["azure_vision_key"], config["azure_vision_endpoint"]) == ("k" * 32, "https://di.example/")
+    assert any("Azure Document Intelligence" in line for line in ctx.logs)
+    assert owner.config is not stored and stored["output_directory"] == "C:/desktop/out"
+    # a glossary pass only fetches the detector; a Stop during a download ends the job before the run
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(mobile["Output"]))
+    downloads.calls.clear()
+    manga_kind.run_batch(FakeCtx(types.SimpleNamespace(config={}), params=dict(params, glossary_only=True)))
+    assert [key for key, _cancel in downloads.calls] == ["rtdetr_v4_s_int8"]
+    runs = len(FakeRunner.instances)
+    downloads.fail = manga_models.DownloadCancelled("detector-v4-s_int8.onnx: download cancelled at 10 bytes")
+    ctx = FakeCtx(types.SimpleNamespace(config={}), params=params)
+    ctx.request("immediate")
+    assert manga_kind.run_batch(ctx) == {"ok": None, "outputs": []} and len(FakeRunner.instances) == runs
+    assert any("resumes on the next run" in line for line in ctx.logs)
+    # cancelled by anything but the job's Stop (a model row's Cancel stops every download of the
+    # model): the job fails with the reason instead of ending "done" with nothing done
+    with pytest.raises(JobError, match="The model download was cancelled; start again to resume it"):
+        manga_kind.run_batch(FakeCtx(types.SimpleNamespace(config={}), params=params))
+    assert len(FakeRunner.instances) == runs
+    downloads.fail = manga_models.ModelDownloadError("detector-v4-s_int8.onnx: HTTP 404 Not Found")
+    with pytest.raises(JobError, match="could not be downloaded: .*HTTP 404"):
+        manga_kind.run_batch(FakeCtx(types.SimpleNamespace(config={}), params=params))
+    # an editor step fetches the kinds the editor asked for, then runs
+    downloads.fail = None
+    downloads.calls.clear()
+    session = FakeEditorSession(pages)
+    token = svc.register_editor_session(session)
+    ctx = FakeCtx(types.SimpleNamespace(config={}),
+                  params=svc.step_spec("clean", token, pages[0], extra={"model_kinds": ["inpaint"]}).params)
+    assert manga_kind.run_step(ctx)["ok"] is True
+    assert [key for key, _cancel in downloads.calls] == ["aot_onnx"] and session.calls[-1][0] == "clean"
+    assert "Downloading AOT ONNX · 100%" in ctx.phases
+    # desktop (no mobile contract): nothing of the above
+    monkeypatch.delenv("GLOSSARION_MOBILE")
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(mobile["Output"]))
+    downloads.calls.clear()
+    manga_kind.run_batch(FakeCtx(types.SimpleNamespace(config=dict(stored)), params=params))
+    assert downloads.calls == [] and seen["env"] == str(mobile["Output"])
+    assert "rtdetr_onnx_variant" not in (seen["config"].get("manga_settings") or {}).get("ocr", {})
+    assert FakeRunner.instances[-1].kwargs["output_root"] == str(mobile["Output"])
+
+
+@needs_cores
+def test_document_intelligence_runs_with_the_fields_settings_offer(mobile, tmp_path, monkeypatch):
+    import copy
+
+    di_only = {"manga_ocr_provider": "azure-document-intelligence", "azure_document_intelligence_key": "k" * 32,
+               "azure_document_intelligence_endpoint": "https://di.example/", "model": "gpt-4o-mini",
+               "api_key": "sk-test"}
+    # the status chip says Ready (the desktop rule: either pair), and the run now agrees
+    row = next(r for r in svc.ocr_provider_rows(di_only, mobile=True) if r.value == "azure-document-intelligence")
+    assert row.status == "ready" and row.chip == "Ready"
+    run = copy.deepcopy(di_only)
+    assert svc.borrow_azure_credentials(run) == ["azure_vision_key", "azure_vision_endpoint"]
+    assert (run["azure_vision_key"], run["azure_vision_endpoint"]) == ("k" * 32, "https://di.example/")
+    # only the Computer Vision pair (the desktop status counts it too), with the entry's placeholder endpoint
+    cv = {"ocr_provider": "azure-document-intelligence", "azure_vision_key": "cv",
+          "azure_vision_endpoint": svc.AZURE_ENDPOINT_PLACEHOLDER, "azure_document_intelligence_endpoint": "https://di/"}
+    assert svc.borrow_azure_credentials(cv) == ["azure_document_intelligence_key", "azure_vision_endpoint"]
+    assert cv["azure_document_intelligence_key"] == "cv" and cv["azure_vision_endpoint"] == "https://di/"
+    # stored values are never replaced; other providers and the desktop are left alone
+    both = dict(di_only, azure_vision_key="cv", azure_vision_endpoint="https://cv/")
+    assert svc.borrow_azure_credentials(both) == [] and both["azure_vision_key"] == "cv"
+    assert svc.borrow_azure_credentials(dict(di_only, manga_ocr_provider="azure")) == []
+    assert svc.borrow_azure_credentials(copy.deepcopy(di_only), mobile=False) == []
+    # the shared start check (unchanged; desktop bug 1 in DISCREPANCIES "U8 Manga run env") passes on
+    # the prepared snapshot
+    headless_owner = pytest.importorskip("headless_owner")
+    manga_env = pytest.importorskip("manga_env")
+    before = dict(os.environ)
+    try:
+        with pytest.raises(manga_env.MangaRunEnvError, match="Azure credentials not configured"):
+            manga_env.build_manga_run_env(headless_owner.HeadlessOwner(copy.deepcopy(di_only)))
+        prepared = copy.deepcopy(di_only)
+        assert svc.prepare_run(prepared)
+        manga_env.build_manga_run_env(headless_owner.HeadlessOwner(prepared))
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+
+
+@needs_cores
+def test_mobile_pages_with_the_same_name_keep_their_own_outputs(mobile, tmp_path):
+    import job_runner
+
+    fixture = make_series(tmp_path)
+    files = svc.MangaFileList({}, temp_root=str(mobile["data"] / "manga" / "cbz"))
+    assert files.add_paths([fixture["series"]]) == 6
+    ch1, ch2 = (os.path.join(fixture["series"], chapter, "1.png") for chapter in ("ch1", "ch2"))
+    # next to the source copy, like a desktop without an output folder: chapters never collide
+    assert files.output_path_for(ch1) == os.path.join(fixture["series"], "ch1", "1_translated", "1.png")
+    assert files.output_path_for(ch2) == os.path.join(fixture["series"], "ch2", "1_translated", "1.png")
+    assert os.environ["OUTPUT_DIRECTORY"] == str(mobile["Output"])  # put back after the lookup
+    # the OCR Text folder the job's automatic export uses (the app folder)
+    assert files.ocr_dir() == os.path.join(str(mobile["data"]), "OCR Text")
+    write_png(os.path.join(fixture["series"], "ch1", "1_translated", "1.png"))
+    assert files.existing_outputs() == [os.path.join(fixture["series"], "ch1", "1_translated", "1.png")]
+    # Create CBZ packs a folder's pages next to them, named after that folder
+    assert files.create_cbz([ch1]) == [os.path.join(fixture["series"], "ch1", "ch1_translated.cbz")]
+    # while a job owns the process state the Files tab does not touch os.environ
+    hold, release = threading.Event(), threading.Event()
+
+    def job():
+        with job_runner.JOB_LOCK:
+            hold.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=job)
+    thread.start()
+    try:
+        assert hold.wait(5)
+        # "not known while the job runs" is not "not translated": the callers retry later
+        with pytest.raises(svc.MangaBusy):
+            files.output_path_for(ch1)
+        with pytest.raises(svc.MangaBusy):
+            files.existing_outputs()
+        with pytest.raises(svc.MangaBusy):
+            files.existing_cbz()
+        assert files.ocr_dir() == os.path.join(str(mobile["data"]), "OCR Text")  # the last folder computed
+        with pytest.raises(svc.MangaBusy):  # never computed in this list yet: no folder to offer
+            svc.MangaFileList({}, temp_root=str(mobile["data"] / "manga" / "cbz")).ocr_dir()
+        with pytest.raises(svc.MangaBusy):
+            files.create_cbz([ch1])
+    finally:
+        release.set()
+        thread.join(5)
+    assert os.environ["OUTPUT_DIRECTORY"] == str(mobile["Output"])
+    assert svc.hide_output_override() is True and "OUTPUT_DIRECTORY" not in os.environ
+
+
+def _zip_of(path: Path, page: str, width: int) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = write_png(path.parent / "src" / page, width, 30)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.write(image, page)
+    return str(path)
+
+
+@needs_cores
+def test_a_reimported_archive_with_a_reused_name_shows_its_own_pages(iso, tmp_path):
+    files = svc.MangaFileList({}, temp_root=str(iso["data"] / "manga" / "cbz"))
+    names = lambda: [os.path.basename(p) for p in files.files]  # noqa: E731
+    archive = tmp_path / "Inbox" / "chapter.zip"
+    files.add_paths([_zip_of(archive, "red_page.png", 10)])
+    first = files.folder_roots
+    assert names() == ["red_page.png"] and os.path.basename(first[0]) == "chapter"
+    files.clear()
+    # the Inbox copy's name is reused by a different archive (the first copy was deleted)
+    archive.unlink()
+    files.add_paths([_zip_of(archive, "blue_page.png", 20)])
+    assert names() == ["blue_page.png"] and files.folder_roots != first
+    files.clear()
+    assert files.add_paths([str(archive)]) == 1 and names() == ["blue_page.png"]  # the same archive: reused
+    # a CBZ under a reused name, through the desktop's own extraction
+    files.clear()
+    cbz = tmp_path / "Inbox" / "vol.cbz"
+    files.add_paths([_zip_of(cbz, "old.png", 10)])
+    files.clear()
+    cbz.unlink()
+    files.add_paths([_zip_of(cbz, "new.png", 20)])
+    assert names() == ["new.png"] and list(files.cbz_jobs) == [str(cbz)]
+
+
+@needs_cores
+def test_cbz_pages_survive_a_restart_and_create_cbz_packs_them_back(iso, tmp_path):
+    fixture = make_series(tmp_path)
+    prefs = FakePrefs()
+    saved: dict = {}
+    temp_root = str(iso["data"] / "manga" / "cbz")
+    files = svc.MangaFileList({}, save=saved.update, temp_root=temp_root, config_source=lambda: dict(saved),
+                              prefs=prefs)
+    assert files.add_paths([fixture["cbz"]]) == 3
+    job = files.cbz_jobs[fixture["cbz"]]
+    assert prefs.data[svc.PREFS_CBZ_JOBS] == {fixture["cbz"]: job}
+    # the app restarts: a new list over the saved selection and the prefs
+    again = svc.MangaFileList({}, temp_root=temp_root, prefs=prefs)
+    assert again.load(saved) == 3
+    assert again.cbz_jobs == {fixture["cbz"]: job} and {again.cbz_job_for(p) for p in again.files} == {fixture["cbz"]}
+    # a run wrote the pages into the archive's own output folder (the moved worker's CBZ routing)
+    for page in again.files:
+        write_png(os.path.join(job["out_dir"], os.path.basename(page)))
+    expected = [os.path.join(job["out_dir"], os.path.basename(p)) for p in again.run_files()[0]]
+    assert again.existing_outputs() == expected
+    packed = os.path.join(os.path.dirname(fixture["cbz"]), "vol1_translated.cbz")
+    assert again.create_cbz() == [packed] and again.existing_cbz() == [packed]
+    with zipfile.ZipFile(packed) as archive:
+        assert sorted(archive.namelist()) == ["page1.png", "page2.png", "page3.png"]
+    # mixed selection: the archive's pages go back into it, the folder's pages into their folder's CBZ
+    assert again.add_paths([fixture["series"]]) == 6
+    chapter_page = os.path.join(fixture["series"], "ch1", "1.png")
+    write_png(again.output_path_for(chapter_page))
+    archives = again.create_cbz()
+    assert packed in archives and len(archives) == 2
+    again.clear()
+    assert prefs.data[svc.PREFS_CBZ_JOBS] == {}
+
+
+@needs_flet
+def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga import editor as me
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    pages = [write_png(tmp_path / "in" / f"{n}.png", 100, 200) for n in (1, 2)]
+    fake_session = FakeEditorSession(pages)
+    monkeypatch.setitem(sys.modules, "manga_editor_core",
+                        _module("manga_editor_core", MangaEditorSession=lambda *a, **k: fake_session,
+                                default_state_file=lambda: str(tmp_path / "state.json")))
+    monkeypatch.setattr(me, "image_size", lambda path: (100, 200))
+    monkeypatch.setitem(sys.modules, "manga_models", None)
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        ctx = _ctx(page, {}, jobs=FakeJobs(), files=FakeFiles(), output_root=str(iso["Output"]))
+        manga = _session(tmp_path, {})
+        manga.files.host.selected_files = list(pages)
+        manga.loaded = True
+        screen = MangaScreen(parse_route("/tools/manga?tab=editor"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        tab = screen.editor_tab
+        await tab.open_page(0)
+        viewer, surface = tab.interactive, tab.gestures
+        assert tab.tool == "pan" and viewer.pan_enabled and viewer.scale_enabled
+        # no pan recognizer over the viewer in Pan mode (it would win the gesture arena and swallow
+        # one-finger panning); a long-press still opens the box sheet
+        assert (surface.on_pan_start, surface.on_pan_update, surface.on_pan_end, surface.on_tap_down) == (
+            None, None, None, None)
+        assert surface.on_long_press_start is not None
+        # a refresh (box picked, step done) keeps the same viewer, so its zoom stays
+        tab.selected = None
+        tab.refresh()
+        await tab._apply_snapshot(await tab._snapshot())
+        assert tab.interactive is viewer and tab.viewer_holder.content.content is viewer
+        # an edit tool: a viewer that stays put, under new keys, with the drag handlers on the surface
+        tab.set_tool("box")
+        assert tab.interactive is not viewer and tab.interactive.key != viewer.key
+        assert not tab.interactive.pan_enabled and tab.gestures.on_pan_start is not None
+        editing = tab.interactive
+        tab.refresh()
+        assert tab.interactive is editing
+        tab.set_tool("pan")
+        assert tab.interactive is not editing and tab.gestures.on_pan_start is None
+        panning = tab.interactive
+        await tab.step_page(1)  # another page: another viewer
+        assert tab.interactive is not panning
+        # tablets keep the source side (and its zoom) while the translated side is rebuilt
+        ctx.tablet = True
+        tab.refresh()
+        row = tab.viewer_holder.content
+        tab.refresh()
+        assert tab.viewer_holder.content is row and row.controls[0].content.content is tab.interactive
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+# ==========================================================================
+# U8 review, second round: busy lookups, glossary auto-load, model rows, Back, archives, job ends
+# ==========================================================================
+
+
+def _hold_job_lock():
+    """Another job (an EPUB translation, say) owns the process state until ``release`` is set."""
+    import job_runner
+
+    hold, release = threading.Event(), threading.Event()
+
+    def job():
+        with job_runner.JOB_LOCK:
+            hold.set()
+            release.wait(30)
+
+    thread = threading.Thread(target=job, daemon=True)
+    thread.start()
+    assert hold.wait(5)
+    return release, thread
+
+
+def _translated_series(tmp_path) -> tuple:
+    """Inbox/Series/ch1 with its three pages translated next to their source (a mobile run's layout)."""
+    fixture = make_series(tmp_path)
+    ch1 = os.path.join(fixture["series"], "ch1")
+    pages = [os.path.join(ch1, f"{n}.png") for n in (1, 2, 10)]
+    outputs = [write_png(os.path.join(ch1, f"{n}_translated", f"{n}.png")) for n in (1, 2, 10)]
+    return ch1, pages, outputs
+
+
+def _fake_editor(monkeypatch, tmp_path, pages):
+    from glossarion_mobile.ui.tools.manga import editor as me
+
+    fake_session = FakeEditorSession(pages)
+    monkeypatch.setitem(sys.modules, "manga_editor_core",
+                        _module("manga_editor_core", MangaEditorSession=lambda *a, **k: fake_session,
+                                default_state_file=lambda: str(tmp_path / "state.json")))
+    monkeypatch.setattr(me, "image_size", lambda path: (40, 60))
+    return fake_session
+
+
+@needs_flet
+@needs_cores
+def test_lookups_a_running_job_refused_run_again_once_a_job_ends(mobile, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    _ch1, pages, outputs = _translated_series(tmp_path)
+    _fake_editor(monkeypatch, tmp_path, pages)
+    monkeypatch.setitem(sys.modules, "manga_models", None)
+    store = {"manga_selected_files": list(pages)}
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        jobs = FakeJobs()
+        ctx = _ctx(page, store, jobs=jobs, files=FakeFiles(), output_root=str(mobile["Output"]))
+        manga = _session(tmp_path, store)
+        screen = MangaScreen(parse_route("/tools/manga?tab=files"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        release, thread = _hold_job_lock()
+        try:
+            screen.did_show()
+            await _settle(30)
+            files_tab, editor = screen.files_tab, screen.editor_tab
+            assert len(manga.files.files) == 3 and manga.last_outputs == []
+            # "not known while the job runs" is not "not translated"
+            assert files_tab.cbz_button.controls[0].tooltip == "Wait for the running job"
+            screen.select_tab("editor")
+            await _settle(30)
+            assert editor.image_path == pages[0] and editor.translated_view == ""
+            assert editor._translated_viewer().content.value.startswith("Wait for the running job")
+            assert await editor.open_ocr_files() is None
+            assert ctx.notes[-1][0] == "Wait for the running job to finish"
+            screen.select_tab("files")
+            await _settle(10)
+            assert manga.last_outputs == []  # still refused: the retry waits for a job to end
+        finally:
+            release.set()
+            thread.join(5)
+        # a job of any kind ends: both lookups run again, without leaving the screen
+        job_id = await jobs.submit(JobSpec("translation", "Book"))
+        jobs.finish(job_id)
+        await _settle(30)
+        assert sorted(manga.last_outputs) == sorted(outputs)
+        assert files_tab.cbz_button.tooltip is None and not files_tab.cbz_button.disabled
+        assert editor.translated_view and editor._translated_viewer().content.content.src == editor.translated_view
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+@needs_cores
+def test_settings_shows_the_glossary_a_glossary_pass_generated(mobile, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    ch1, pages, _outputs = _translated_series(tmp_path)
+    monkeypatch.setitem(sys.modules, "manga_models", None)
+    store: dict = {}
+    # where the job writes it: the moved glossary paths without an output override (job's view)
+    csv = Path(ch1) / "Glossary" / "ch1_manga_glossary.csv"
+
+    def status(screen):
+        tab = screen.settings_tab
+        tab.refresh()
+        return next(c.value for c in tab.glossary_card.content.controls
+                    if str(getattr(c, "key", "") or "").startswith("ms-glossary-status"))
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        jobs = FakeJobs()
+        ctx = _ctx(page, store, jobs=jobs, files=FakeFiles(), output_root=str(mobile["Output"]))
+        manga = _session(tmp_path, store)
+        screen = MangaScreen(parse_route("/tools/manga?tab=files"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        screen.did_show()
+        await _settle()
+        tab = screen.files_tab
+        assert await tab.add_paths([ch1]) == 3
+        assert status(screen) == "No glossary loaded"
+        job_id = await tab.start(glossary_only=True)
+        assert jobs.specs[-1].params["glossary_only"] is True
+        csv.parent.mkdir(parents=True, exist_ok=True)
+        csv.write_text("type,raw_name,translated_name\ncharacter,김철수,Kim Cheolsu\n", encoding="utf-8")
+        jobs.finish(job_id, result={"manga_glossary_path": str(csv), "manga_glossary_only": True})
+        await _settle(30)
+        assert store["manga_generated_glossary_path"] == str(csv)
+        assert status(screen) == "Generated: ch1_manga_glossary.csv"
+        # ... and a selection change keeps it (the auto-load looks where the job wrote it)
+        await tab._mutate(manga.files.toggle_skip, pages[0])
+        assert store["manga_generated_glossary_path"] == str(csv) and not manga.files.glossary_stale
+        # a selection change while another job owns the process state cannot look there: it is
+        # marked stale and runs again once a job ends
+        release, thread = _hold_job_lock()
+        try:
+            await tab._mutate(manga.files.toggle_skip, pages[0])
+            await _settle(10)
+            assert manga.files.glossary_stale and store["manga_generated_glossary_path"] == ""
+        finally:
+            release.set()
+            thread.join(5)
+        other = await jobs.submit(JobSpec("translation", "Book"))
+        jobs.finish(other)
+        await _settle(30)
+        assert not manga.files.glossary_stale and store["manga_generated_glossary_path"] == str(csv)
+        assert status(screen) == "Generated: ch1_manga_glossary.csv"
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+class SteppedModels(FakeModels):
+    """FakeModels whose download reports progress several times (the core reports up to 10/s)."""
+
+    def __init__(self, steps: int = 6) -> None:
+        super().__init__()
+        self.steps = steps
+        self.on_report = None
+
+    def download(self, key, progress=None, cancel=None):
+        self.calls.append(("download", key))
+        for n in range(1, self.steps + 1):
+            report = types.SimpleNamespace(fraction=n / (self.steps + 1), phase="download")
+            self.active[key] = report
+            progress(report)
+            if self.on_report is not None:
+                self.on_report()
+        self.active.pop(key, None)
+        self.installed.add(key)
+        return f"/m/{key}"
+
+
+@needs_flet
+@pytest.mark.skipif(not _has("settings_schema"), reason="settings_schema not importable")
+def test_a_settings_model_download_reports_into_its_row_without_rebuilding_the_tab(iso, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.settings.context import SettingsContext
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    monkeypatch.setenv("GLOSSARION_MOBILE", "1")
+    fake = SteppedModels()
+    monkeypatch.setitem(sys.modules, "manga_models", fake)
+    store, schema = _settings_store(tmp_path)
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        ctx = _ctx(page, store, settings=SettingsContext(page=page, store=store, schema=schema),
+                   output_root=str(iso["Output"]))
+        manga = _session(tmp_path, {})
+        screen = MangaScreen(parse_route("/tools/manga?tab=settings"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        tab = screen.settings_tab
+        tab.did_show()
+        assert tab.select_inpaint("local", "aot_onnx")
+        row = tab.model_rows["inpaint"]
+        rebuilds: list = []
+        renders: list = []
+        on_screen: list = []
+        original_refresh, original_render = tab.refresh, row.render
+        tab.refresh = lambda push_now=True: (rebuilds.append(row.entry.status), original_refresh(push_now))[1]
+        row.render = lambda: (renders.append(row.entry.status), original_render())[1]
+        fake.on_report = lambda: on_screen.append(tab.model_rows.get("inpaint") is row
+                                                  and row.control in tab.inpaint_card.content.controls)
+        entry = await row.download()
+        assert entry.status == "ready" and fake.calls == [("download", "aot_onnx")]
+        # every progress report re-rendered the row; the tab was rebuilt for the two status changes
+        assert renders.count("downloading") >= fake.steps and rebuilds == ["downloading", "ready"]
+        # the rebuilds kept the row on screen, so the reports kept landing in it
+        assert on_screen == [True] * fake.steps
+        assert tab.model_rows["inpaint"] is row and row.control in tab.inpaint_card.content.controls
+        # an unrelated rebuild re-reads a kept row's status
+        fake.installed.discard("aot_onnx")
+        original_refresh()
+        assert tab.model_rows["inpaint"] is row and row.entry.status == "missing"
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+@needs_cores
+def test_back_follows_the_tab_on_screen(iso, tmp_path):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens.base import intercepts_back
+    from glossarion_mobile.ui.tools.manga.screen import TABS, MangaScreen
+
+    fixture = make_series(tmp_path)
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        store: dict = {}
+        ctx = _ctx(page, store, jobs=FakeJobs(), files=FakeFiles(), output_root=str(iso["Output"]))
+        manga = _session(tmp_path, store)
+        screen = MangaScreen(parse_route("/tools/manga?tab=files"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        screen.did_show()
+        await _settle()
+        files_tab, editor = screen.files_tab, screen.editor_tab
+        await files_tab.add_paths([fixture["series"]])
+        assert intercepts_back(screen)
+        # UI_SPEC §1.6 rule 2: selection mode exits before the View pops
+        files_tab._on_row_long_press(manga.files.files[0])
+        assert files_tab.selection_mode
+        assert screen.handle_back() is True and not files_tab.selection_mode and files_tab.selected == set()
+        assert screen.handle_back() is False
+        # editor state left from the Editor tab neither consumes Back elsewhere nor changes
+        editor.tool, editor.selected = "box", 0
+        assert screen.handle_back() is False and editor.tool == "box"
+        screen.tabs.selected_index = TABS.index("settings")
+        assert screen.handle_back() is False and editor.tool == "box"
+        screen.tabs.selected_index = TABS.index("editor")
+        assert screen.handle_back() is True and editor.selected is None and editor.tool == "box"
+        assert screen.handle_back() is True and editor.tool == "pan"
+        assert screen.handle_back() is False
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+def _cbz_with(path: Path, pages: dict) -> str:
+    """A CBZ at ``path`` with ``{member name: page width}`` (sources outside the archive's folder)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, width in pages.items():
+            zf.write(write_png(path.parent.parent / "_src" / path.parent.name / name, width, 30), name)
+    return str(path)
+
+
+@needs_cores
+def test_cbz_archives_in_folders_and_zips_get_their_own_extraction(iso, tmp_path):
+    files = svc.MangaFileList({}, temp_root=str(iso["data"] / "manga" / "cbz"),
+                              folders_root=str(iso["data"] / "manga" / "folders"))
+    names = lambda: [os.path.basename(p) for p in files.files]  # noqa: E731
+    # a picked folder of volumes, cleared, then another series' folder whose volume reuses the name
+    series_a, series_b = tmp_path / "picked" / "SeriesA", tmp_path / "picked" / "SeriesB"
+    _cbz_with(series_a / "vol1.cbz", {"a01.png": 10, "a02.png": 10})
+    _cbz_with(series_b / "vol1.cbz", {"b01.png": 20})
+    assert files.add_paths([str(series_a)]) == 2 and names() == ["a01.png", "a02.png"]
+    files.clear()
+    assert files.add_paths([str(series_b)]) == 1 and names() == ["b01.png"]
+    assert {files.cbz_job_for(p) for p in files.files} == {str(series_b / "vol1.cbz")}
+    # a re-imported folder whose volume was replaced by a different archive under the same name
+    files.clear()
+    _cbz_with(series_a / "vol1.cbz", {"new.png": 30})
+    assert files.add_paths([str(series_a)]) == 1 and names() == ["new.png"]
+    # two series ZIPs (Android's folder fallback) that each hold a vol1.cbz with a page1.png
+    files.clear()
+    zips = []
+    for name, width in (("ZipA", 11), ("ZipB", 22)):
+        cbz = _cbz_with(tmp_path / "build" / name / "vol1.cbz", {"page1.png": width})
+        archive = tmp_path / "Inbox" / f"{name}.zip"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.write(cbz, "vol1.cbz")
+        zips.append(str(archive))
+    assert files.add_paths([zips[0]]) == 1
+    first_page = files.files[0]
+    first_bytes = Path(first_page).read_bytes()
+    assert files.add_paths([zips[1]]) == 1 and len(files.files) == 2
+    assert Path(first_page).read_bytes() == first_bytes  # series A's page untouched by series B
+    jobs = files.cbz_jobs
+    assert len(jobs) == 2 and len({job["extract_dir"] for job in jobs.values()}) == 2
+    assert [files.cbz_job_for(p) for p in files.files] == list(jobs)
+
+
+@needs_flet
+@needs_cores
+def test_a_batch_that_ended_while_the_screen_was_closed_is_shown_on_return(mobile, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    ch1, pages, outputs = _translated_series(tmp_path)
+    monkeypatch.setitem(sys.modules, "manga_models", None)
+    store: dict = {}
+    packed = os.path.join(ch1, "ch1_translated.cbz")  # "Create CBZ at end" of a folder selection
+
+    async def open_screen(ctx, manga):
+        ctx.page.views[0].controls.clear()  # every visit gets a View of its own (the last one was popped)
+        ctx.page.update()
+        screen = MangaScreen(parse_route("/tools/manga?tab=files"), ctx, session=manga)
+        _mount(ctx.page, screen.get_body())
+        screen.did_show()
+        await _settle(30)
+        return screen
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        jobs = FakeJobs()
+        ctx = _ctx(session.page, store, jobs=jobs, files=FakeFiles(), output_root=str(mobile["Output"]))
+        manga = _session(tmp_path, store)
+        screen = await open_screen(ctx, manga)
+        assert await screen.files_tab.add_paths([ch1]) == 3
+        job_id = await screen.files_tab.start()
+        screen.dispose()  # the user leaves the tool during the run
+        with zipfile.ZipFile(packed, "w") as zf:
+            zf.write(outputs[0], "1.png")
+        jobs.finish(job_id, result={"manga_outputs": outputs, "manga_completed": 3, "manga_cbz": [packed]})
+        screen = await open_screen(ctx, manga)
+        tab = screen.files_tab
+        assert manga.last_cbz == [packed] and manga.last_outputs == outputs
+        assert tab.run_status.value == "Done · 3 translated · CBZ: ch1_translated.cbz"
+        assert str(tab.output_list.controls[0].key).startswith("mf-cbz-out-")
+        assert manga.batch_end_applied == job_id
+        tab.run_status.value = ""
+        tab.did_show()  # applied once
+        assert tab.run_status.value == ""
+        screen.dispose()
+        # the app restarts: the run's archive of the folder is found again with its pages
+        again = _session(tmp_path, store)
+        screen = await open_screen(ctx, again)
+        assert again.last_cbz == [packed] and sorted(again.last_outputs) == sorted(outputs)
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
 def _core_defs(module: str) -> dict:
     """``{"": {top-level name: signature or None}, "<Class>": {member: signature or None}}`` of a
     ``src/`` module, read with ``ast`` (no import: it holds where importing a core is skipped)."""
@@ -1915,7 +2615,8 @@ def test_bindings_match_the_shared_core_contracts():
              | set(env["MangaOcrSessionMixin"]))
     used = {"_add_dropped_manga_paths", "_sort_files", "_toggle_skip_processing_for_path", "_parse_manga_image_range",
             "_manga_range_filtered_files", "_manga_process_groups_for_paths", "_persist_selected_files",
-            "_load_persisted_files", "_create_cbz_from_isolated_folders", "_skip_key_for_path",
+            "_load_persisted_files", "_create_cbz_from_isolated_folders", "_finalize_cbz_jobs",
+            "_add_cbz_archive_images", "_skip_key_for_path",
             "_is_manually_skipped_processing_file", "_visible_range_skipped_keys", "_prune_skipped_processing_files",
             "_get_manga_output_path_for_file", "_manga_ocr_output_dir", "_manga_ocr_timestamped_export_filename"}
     assert used <= moved, sorted(used - moved)
@@ -1927,9 +2628,10 @@ def test_bindings_match_the_shared_core_contracts():
     models = _core_defs("manga_models")
     assert {"get_spec", "specs", "status", "download", "cancel", "delete", "load", "unload", "loaded", "disk_usage",
             "spec_for_inpaint_method", "spec_for_detector_variant", "missing_models", "format_size",
-            "apply_mobile_defaults", "apply_mobile_top_level_defaults", "MOBILE_DETECTOR_KEY", "KIND_DETECTOR",
-            "DownloadCancelled"} <= set(models[""])
-    assert _takes(models[""]["download"], "progress", strict=True)
+            "apply_mobile_defaults", "apply_mobile_top_level_defaults", "apply_mobile_run_defaults",
+            "MOBILE_DETECTOR_KEY", "KIND_DETECTOR", "DownloadCancelled"} <= set(models[""])
+    assert _takes(models[""]["download"], "progress", "cancel", strict=True)
+    assert _takes(models[""]["apply_mobile_run_defaults"], "config", "force", strict=True)
     assert {"path", "installed", "partial_bytes", "downloading"} <= set(models["ModelStatus"])
     assert {"fraction", "phase"} <= set(models["DownloadProgress"])
     assert {"key", "kind", "title", "size"} <= set(models["ModelSpec"])
