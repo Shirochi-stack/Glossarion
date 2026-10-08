@@ -27,9 +27,18 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import compile_model as cm
 from glossarion_mobile.ui.tools import targets as tg
-from glossarion_mobile.ui.tools.common import JobWatch, action_button, card, hint_text, schema_tiles
+from glossarion_mobile.ui.tools.common import (
+    JobWatch,
+    action_button,
+    card,
+    failed_job_card,
+    hint_text,
+    job_failed,
+    schema_tiles,
+)
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
 __all__ = ["ConverterScreen", "converter_eligibility"]
@@ -38,7 +47,8 @@ log = logging.getLogger("glossarion.tools.convert")
 
 _KIND_LABELS = {"epub": "EPUB workspace", "pdf": "PDF workspace", "txt": "Text workspace", "other": "Workspace"}
 #: The job kinds this screen submits (a reopened screen follows a queued / running one of its folder).
-CONVERTER_KINDS = ("compile_epub", "compile_pdf", "validate_epub", "rename_outputs")
+CONVERTER_KINDS = ("compile_epub", "compile_pdf", "validate_epub", "rename_outputs", "md_txt_sidecars",
+                   "br_to_paragraphs")
 
 
 def converter_eligibility(target: tg.ToolTarget) -> Optional[str]:
@@ -158,6 +168,11 @@ class ConverterScreen(Screen):
         if pdf_workspace and validate_reason is None:
             validate_reason = "EPUB workspaces only"
         rename_reason = none or (None if self.ctx.has_kind("rename_outputs") else "The job service is not running")
+        sidecar_reason = none or (None if self.ctx.has_kind("md_txt_sidecars") else "The job service is not running")
+        br_reason = none or (None if self.ctx.has_kind("br_to_paragraphs") else "The job service is not running")
+        if running:
+            sidecar_reason = sidecar_reason or "A job of this folder is running"
+            br_reason = br_reason or "A job of this folder is running"
         if running:
             epub_reason = epub_reason or "A compile job is running"
             pdf_reason = pdf_reason or "A compile job is running"
@@ -172,6 +187,14 @@ class ConverterScreen(Screen):
                           key="cv-validate-btn", reason=validate_reason),
             action_button("Rename Files", "DRIVE_FILE_RENAME_OUTLINE", lambda e: self.ctx.spawn(self.rename()),
                           key="cv-rename", reason=rename_reason),
+            # desktop Other Settings › Output MD / TXT "Generate MD" / "Generate TXT" (retroactive sidecars)
+            action_button("Generate MD", "DESCRIPTION", lambda e: self.ctx.spawn(self.generate_sidecars("md")),
+                          key="cv-gen-md", reason=sidecar_reason),
+            action_button("Generate TXT", "TEXT_SNIPPET", lambda e: self.ctx.spawn(self.generate_sidecars("txt")),
+                          key="cv-gen-txt", reason=sidecar_reason),
+            # desktop "Convert <br> tags to <p> paragraphs" › Apply to Existing Outputs
+            action_button("Apply <br> → <p> to outputs", "FORMAT_PARAGRAPH",
+                          lambda e: self.ctx.spawn(self.convert_br()), key="cv-br", reason=br_reason),
         ]
         snap = self.active_job
         self.stop_button.visible = running
@@ -267,6 +290,13 @@ class ConverterScreen(Screen):
         self._render_actions()
         return job_id
 
+    async def retry(self, snap: Any) -> Optional[str]:
+        """ErrorCard › Retry: the failed job's own spec again."""
+        spec = getattr(snap, "spec", None)
+        if spec is None:
+            return None
+        return await self._submit(spec, "Retrying")
+
     async def compile(self, fmt: str) -> Optional[str]:
         if self.target is None:
             self.open_picker()
@@ -297,6 +327,37 @@ class ConverterScreen(Screen):
         retain = bool(self.ctx.cfg("retain_source_extension", False))
         return await self._submit(cm.rename_spec(self.target, retain), "Renaming files")
 
+    def _folder_spec(self, kind: str, title_suffix: str, params: Optional[dict] = None) -> Any:
+        from glossarion_mobile.services.jobs import JobSpec
+
+        target = self.target
+        return JobSpec(kind=kind, title=f"{target.title}{title_suffix}", inputs=(target.folder,),
+                       params={"folder": target.folder, **(params or {})},
+                       origin={"type": "tool", "label": "Tools · Converter"})
+
+    async def generate_sidecars(self, fmt: str) -> Optional[str]:
+        """Generate MD / Generate TXT for the output folder (job ``md_txt_sidecars``)."""
+        if self.target is None or not self.target.folder:
+            self.open_picker()
+            return None
+        return await self._submit(self._folder_spec("md_txt_sidecars", "", {"format": fmt}),
+                                  f"Generating {fmt.upper()}")
+
+    async def convert_br(self) -> Optional[str]:
+        """Apply <br> → <p> to the output folder after the desktop confirmation (job ``br_to_paragraphs``)."""
+        if self.target is None or not self.target.folder:
+            self.open_picker()
+            return None
+        from glossarion_mobile.job_kinds.compile import BR_CONFIRM_TEXT, BR_CONFIRM_TITLE
+        from glossarion_mobile.ui.tools.common import ask
+
+        answer = await ask(self.ctx, BR_CONFIRM_TITLE,
+                           f"Modify existing HTML outputs for 1 selected input file(s)?\n\n{BR_CONFIRM_TEXT}",
+                           (("yes", "Yes", "destructive"), ("cancel", "Cancel", "text")), key="cv-br-confirm")
+        if answer != "yes":
+            return None
+        return await self._submit(self._folder_spec("br_to_paragraphs", ""), "Converting <br> to <p>")
+
     def _on_stop(self, e: Any = None) -> Any:
         snap = self.active_job
         if snap is None or self.ctx.jobs is None:
@@ -322,7 +383,10 @@ class ConverterScreen(Screen):
         result = dict(getattr(snap, "result", {}) or {})
         kind = getattr(snap, "kind", "")
         state = str(getattr(getattr(snap, "state", None), "value", ""))
-        if kind == "validate_epub":
+        if job_failed(snap):  # UI_SPEC §7.4: an ErrorCard with Retry · Copy error · View log
+            rows.append(failed_job_card(self.ctx, snap, key="cv-error",
+                                        on_retry=lambda s=snap: self.ctx.spawn(self.retry(s))))
+        elif kind == "validate_epub":
             passed = bool(result.get("all_passed"))
             rows.append(ft.Text("✅ All Valid!" if passed else "Validation Results",
                                 weight=ft.FontWeight.W_600, key="cv-validate-title"))
@@ -330,6 +394,21 @@ class ConverterScreen(Screen):
                 rows.append(ft.Text(line, selectable=True, theme_style=ft.TextThemeStyle.BODY_SMALL))
         elif kind == "rename_outputs":
             rows.append(ft.Text(str(result.get("rename") or snap.state_label), key="cv-rename-result"))
+        elif kind == "md_txt_sidecars":
+            info = result.get("md_txt") if isinstance(result.get("md_txt"), dict) else {}
+            rows.append(ft.Text(str(info.get("message") or snap.state_label), key="cv-md-txt-result",
+                                weight=ft.FontWeight.W_600))
+            if info:
+                rows.append(ft.Text(f"{str(info.get('format') or '').upper()}: {info.get('ok', 0)} written, "
+                                    f"{info.get('failed', 0)} failed of {info.get('total', 0)} HTML files",
+                                    theme_style=ft.TextThemeStyle.BODY_SMALL))
+        elif kind == "br_to_paragraphs":
+            rows.append(ft.Text(str(result.get("br_message") or snap.state_label), key="cv-br-result",
+                                weight=ft.FontWeight.W_600))
+            for audit in result.get("br_audit") or []:
+                rows.append(ft.Text(f"{os.path.basename(str(audit.get('output_dir') or ''))}: {audit.get('changed', 0)} "
+                                    f"converted, {audit.get('unchanged', 0)} unchanged, {audit.get('failed', 0)} failed "
+                                    f"({audit.get('scanned', 0)} scanned)", theme_style=ft.TextThemeStyle.BODY_SMALL))
         else:
             outputs = cm.outputs_of(getattr(snap, "outputs", ()) or ())
             if not outputs:
@@ -341,7 +420,7 @@ class ConverterScreen(Screen):
                     title=ft.Text(os.path.basename(path), max_lines=2),
                     subtitle=ft.Text(state.title(), theme_style=ft.TextThemeStyle.BODY_SMALL),
                     trailing=ft.IconButton(icon=ft.Icons.MORE_VERT, tooltip="Actions",
-                                           on_click=lambda e, p=path: self.output_actions(p)),
+                                           on_click=lambda e, p=path: self.output_actions(p), size_constraints=HIT_TARGET),
                     on_click=lambda e, p=path: self.output_actions(p), dense=True,
                     key=f"cv-output-{os.path.basename(path)}"))
         self.result_column.controls = rows

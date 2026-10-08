@@ -46,6 +46,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import webbrowser
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
@@ -245,6 +246,10 @@ class AppPaths:
             "USE_ASYNC_CHAPTER_EXTRACTION": "0",
             "PDF_EXTRACTION_WORKERS": "1",
             "QA_USE_THREAD_EXECUTOR": "1",
+            # gRPC (Gemini gRPC transport, Cloud TTS, Cloud Vision SDK; Tier B, U9): the Android
+            # grpcio build compiles c-ares in, which finds no DNS servers on Android 8+ without its
+            # JNI init, so resolve through getaddrinfo like every other client in the app.
+            "GRPC_DNS_RESOLVER": "native",
             # Bookkeeping (not read by the backend):
             "GLOSSARION_PLATFORM": self.platform,
         }
@@ -997,6 +1002,7 @@ def bootstrap(
 
         _install_webbrowser()
         _prime_platform_processor()
+        _quiet_known_warnings()
 
         state = BootState(
             paths=paths,
@@ -1055,6 +1061,21 @@ def _prime_platform_processor() -> None:
             _platform._syscmd_file = _no_file_command
         except Exception:
             pass
+
+
+# Warnings the app knows about and silences (bootstrap installs the filters; process-wide and
+# idempotent). google.api_core warns on every import of a gRPC-based Google package while grpcio is
+# older than 1.83 (no post-quantum TLS; Google moves its minimum to 1.83 in April 2027). grpcio
+# 1.81.0 is the newest Android/iOS build (pyproject.toml Tier B pins), so it would only clutter the logs.
+KNOWN_WARNINGS = (
+    (FutureWarning, r"Package \S+ depends on grpcio, currently installed at version \S+ "
+                    r"grpcio < 1\.83\.0 does not support Post-Quantum Cryptography"),
+)
+
+
+def _quiet_known_warnings() -> None:
+    for category, message in KNOWN_WARNINGS:
+        warnings.filterwarnings("ignore", message=message, category=category)
 
 
 def _flet_version() -> Optional[str]:

@@ -49,9 +49,34 @@ from glossarion_mobile.ui.reader import model as rm
 from glossarion_mobile.ui.reader.blocks import Block, html_to_blocks
 from glossarion_mobile.ui.reader.session import MODE_DUAL, MODE_OVERLAY, MODE_WORKSPACE, ReaderSession
 
-__all__ = ["BuiltDocument", "DocumentBuilder", "ImageRegistrar", "build_native_blocks", "defang_book_scripts",
-           "inert_css",
+__all__ = ["BuiltDocument", "DocumentBuilder", "EMPTY_CHAPTER_TEXT", "ImageRegistrar", "blocks_empty",
+           "build_native_blocks", "chapter_body_empty", "defang_book_scripts", "inert_css",
            "sanitize_book_html", "stamp_script_nonce", "tag_chapter_headings"]
+
+#: UI_SPEC §7.4 Reader row, Empty state.
+EMPTY_CHAPTER_TEXT = "This chapter is empty"
+_TAGS = re.compile(r"<[^>]*>")
+_MEDIA = re.compile(r"<\s*(img|image|svg|video|audio|object|embed|picture|canvas)\b", re.IGNORECASE)
+_NON_TEXT = re.compile(r"<\s*(script|style|head|title)\b[^>]*>.*?<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL)
+
+
+def chapter_body_empty(body: str) -> bool:
+    """A built chapter body with no visible text and no image / media (whitespace and ``&nbsp;`` only)."""
+    text = str(body or "")
+    if _MEDIA.search(text):
+        return False
+    visible = html_lib.unescape(_TAGS.sub(" ", _NON_TEXT.sub(" ", text)))
+    return not visible.replace("\u00a0", " ").strip()
+
+
+def blocks_empty(blocks: Any) -> bool:
+    """Native blocks with no text and no image (the fallback renderer would draw a blank page)."""
+    for block in blocks or ():
+        if getattr(block, "kind", "") == "image" or str(getattr(block, "text", "") or "").strip():
+            return False
+        if any(str(text or "").strip() for text, _style in (getattr(block, "spans", None) or ())):
+            return False
+    return True
 
 log = logging.getLogger("glossarion.reader")
 
@@ -222,6 +247,7 @@ class DocumentBuilder:
     def __init__(self, session: ReaderSession, register_image: Callable[..., str]) -> None:
         self.session = session
         self.registrar = ImageRegistrar(register_image, session)
+        self.font_faces: dict = {}  # imported Aa families -> served URL (ReaderScreen sets it)
         self._docs: dict = {}
         self._lock = threading.Lock()
 
@@ -308,6 +334,9 @@ class DocumentBuilder:
             body = tag_chapter_headings(doc.all_chapters_body(chapters), doc._get_theme())
         else:
             body = doc.process_html(sanitize_book_html(session.chapter_html(index, flavor)))
+            if chapter_body_empty(body):  # §7.4: never a blank themed page; the chrome (◀ ▶, Chapters) stays
+                body += (f'<p class="gl-empty-chapter" style="text-align:center;opacity:.7;margin-top:30vh">'
+                         f'{html_lib.escape(EMPTY_CHAPTER_TEXT)}</p>')
         # Belt and braces: nothing from the book can carry the nonce stamped below, even if the
         # sanitiser and the browser ever parse a chapter differently.
         body = defang_book_scripts(body)
@@ -318,7 +347,8 @@ class DocumentBuilder:
                                    chapter=index if layout == rm.LAYOUT_ALL else None,
                                    scroll_all=layout == rm.LAYOUT_ALL, hint=hint, find=find, anchor=anchor)
         has_shell = bridge.has_shell_bridge(page)
-        html = bridge.inject_extras(page, cfg, live_css=rm.override_css(theme, settings, layout=layout))
+        html = bridge.inject_extras(page, cfg, live_css=rm.override_css(theme, settings, layout=layout,
+                                                                       font_faces=self.font_faces))
         # Book scripts are gone (sanitize_book_html, inert_css, defang_book_scripts): every <script>
         # left is the page's own.
         nonce = secrets.token_urlsafe(18)

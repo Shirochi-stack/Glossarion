@@ -190,7 +190,8 @@ class BookCard(_CardBase):
                                             on_click=self._continue, width=28, height=28,
                                             style=ft.ButtonStyle(padding=0)),
                 right=0, bottom=4, width=tokens.SIZES["hit_target"], height=tokens.SIZES["hit_target"],
-                alignment=ft.Alignment.BOTTOM_RIGHT, key="continue"))
+                # the 28 dp visual sits in a 48 dp target: a tap beside it continues too (UI_SPEC §0 item 4)
+                on_click=self._continue, alignment=ft.Alignment.BOTTOM_RIGHT, key="continue"))
         if model.selected:
             stack.append(ft.Container(content=ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY, size=22),
                                       right=4, top=4, bgcolor=ft.Colors.SURFACE, border_radius=12, key="check"))

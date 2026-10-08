@@ -181,7 +181,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     import flet as ft
 
     from glossarion_mobile.ui import tokens
-    from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip
+    from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
     from glossarion_mobile.ui.components.section_card import SectionCard
     from glossarion_mobile.ui.screens.base import Screen
     from glossarion_mobile.ui.theme import semantic
@@ -365,9 +365,8 @@ class LocalAiScreen(Screen):  # type: ignore[misc,valid-type]
         controls.append(SectionCard(title="🦙 Ollama options", collapsible=True, expanded=False,
                                     children=options_children, key="lan-ollama-options"))
         controls.append(SectionCard(title="Unavailable on mobile", children=[
-            ft.ListTile(title=ft.Text("🦙 Load Ollama (ollamapull/)"), subtitle=ft.Text("Install, pull and update models"),
-                        disabled=True, dense=True, trailing=ReasonChip(reason=NOT_ON_MOBILE, detail=OLLAMAPULL_REASON),
-                        key="lan-ollamapull"),
+            unavailable_tile("🦙 Load Ollama (ollamapull/)", subtitle="Install, pull and update models",
+                             reason=NOT_ON_MOBILE, detail=OLLAMAPULL_REASON, key="lan-ollamapull"),
         ]))
         self.list_view = ft.ListView(controls=controls, expand=True, spacing=tokens.SPACING["sm"],
                                      padding=ft.Padding.symmetric(horizontal=tokens.SPACING["md"],

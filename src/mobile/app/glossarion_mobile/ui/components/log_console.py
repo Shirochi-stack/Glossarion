@@ -144,8 +144,11 @@ class LogConsole(ft.Column):
         self._after_change()
 
     def _append_text(self, text: str, force_new_block: bool = False) -> None:
-        if self.empty_text in self.list_view.controls:
-            self.list_view.controls.clear()
+        # identity, not ``in``: Flet controls are dataclasses whose ``==`` compares every field, and
+        # this runs once per log line (50k lines took 47 s on the host with ``in``; U9 budget)
+        controls = self.list_view.controls
+        if controls and controls[0] is self.empty_text:
+            controls.clear()
         blocks = self.list_view.controls
         if force_new_block or not blocks or self._block_counts[-1] >= self.block_lines:
             blocks.append(self._new_block())

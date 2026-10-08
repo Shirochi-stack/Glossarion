@@ -450,6 +450,39 @@ class GlossaryService:
         module, names = CONTRACT[op]
         return self.core.fn(module, *names)
 
+    def cbz_root(self) -> str:
+        """Where a CBZ picked for glossary extraction is unpacked: ``<data>/Inbox/_cbz``."""
+        data = str(getattr(self.paths, "data", "") or "") if self.paths is not None else ""
+        return os.path.join(data or os.environ.get("GLOSSARION_DATA_DIR", "") or os.getcwd(), "Inbox", "_cbz")
+
+    def expand_cbz(self, path: str) -> list:
+        """Blocking: a ``.cbz``'s page images for "Extract glossary with images / CBZ" (the desktop
+        expands a CBZ into its images when it is selected; the backend does not unpack it). The
+        extraction is the shared one Tools › Manga uses (``manga_files_core.MangaFilesMixin.
+        _add_cbz_archive_images``), under ``<Inbox>/_cbz/<archive id>/<name>`` (``services.manga
+        ._archive_key``: another archive reusing the name never shows these pages)."""
+        import manga_files_core as mfc  # shared, GUI-free (U8)
+
+        from glossarion_mobile.services.manga import _archive_key
+
+        service = self
+
+        class _CbzHost(mfc.MangaHooksMixin, mfc.MangaFilesMixin):
+            def _log(self, message: Any, level: str = "info") -> None:
+                service.log(message)
+
+        host = _CbzHost()
+        host.selected_files = []
+        host.cbz_jobs = {}
+        host.cbz_image_to_job = {}
+        root = os.path.join(self.cbz_root(), _archive_key(path))
+        os.makedirs(root, exist_ok=True)
+        host.cbz_temp_root = root
+        extensions = {ext for ext in getattr(mfc, "IMAGE_EXTENSIONS", ()) or ()} or {
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+        host._add_cbz_archive_images(path, extensions)
+        return list(host.selected_files)
+
     def available(self, op: str) -> bool:
         return self.fn(op) is not None
 
@@ -1372,6 +1405,61 @@ class GlossaryService:
                 except Exception as exc:
                     self.log(f"\u26a0\ufe0f Failed to copy glossary to EPUB output folder: {exc}")
         return {"updates": updates, "copied_to": copied_to, "mode": mode}
+
+    # ---- Map Glossaries to EPUBs (desktop TranslatorGUI._open_glossary_mapping_dialog) ---------------
+
+    def mapped_glossaries(self, epubs: Sequence[str]) -> list:
+        """Blocking: ``[(epub, glossary or "")]`` prefilled like the desktop rows: the saved
+        ``manual_glossary_map`` entry (``glossary_files.mapped_glossary_for_input``), else the guessed
+        glossary (``guess_glossary_for_input_file``), else empty."""
+        mapped_for = self.core.fn("glossary_files", "mapped_glossary_for_input")
+        if mapped_for is None:
+            raise CoreMissing("glossary_files.mapped_glossary_for_input")
+        existing = self.cfg("manual_glossary_map", {}) or {}
+        if not isinstance(existing, Mapping):
+            existing = {}
+        rows: list = []
+        for epub in epubs:
+            glossary = mapped_for(dict(existing), epub) or self.guess_glossary(epub) or ""
+            rows.append((epub, str(glossary or "")))
+        return rows
+
+    def guess_glossary(self, input_path: str) -> str:
+        """Blocking: the desktop Auto-Fill guess for one input (``glossary_files.guess_glossary_for_input_file``)."""
+        guess = self.core.fn("glossary_files", "guess_glossary_for_input_file")
+        if guess is None:
+            return ""
+        try:
+            return str(guess(input_path, self.config_snapshot()) or "")
+        except Exception:
+            return ""
+
+    def save_glossary_map(self, rows: Sequence[tuple]) -> dict:
+        """Blocking: the desktop mapping dialog's Save over ``rows`` [(epub, glossary text)].
+
+        ``glossary_files.build_glossary_mapping`` (a row pointing at a missing file refuses the save:
+        ``{"missing": [...]}``); otherwise the same steps as the dialog: ``manual_glossary_map``, the
+        global ``manual_glossary_path`` cleared (so it is not applied to every file), Append Glossary
+        on when a mapping exists, the "📑 Saved glossary mapping" log line, and in Manual Glossary
+        Only mode ``copy_mapped_glossaries_to_outputs``. Returns ``{"mapping", "missing", "copied"}``."""
+        build = self.core.fn("glossary_files", "build_glossary_mapping")
+        if build is None:
+            raise CoreMissing("glossary_files.build_glossary_mapping")
+        mapping, missing = build([(str(epub), str(text or "")) for epub, text in rows])
+        if missing:
+            return {"mapping": mapping, "missing": list(missing), "copied": None}
+        updates: dict = {"manual_glossary_map": dict(mapping), "manual_glossary_path": None}
+        if mapping:
+            updates["append_glossary"] = True
+        self.set_many(updates)
+        self.log(f"📑 Saved glossary mapping for {len(mapping)} EPUB(s)")
+        copied = None
+        mode = str(self.cfg("auto_glossary_mode", "") or "").lower()
+        if mode == "off_no_automap" and mapping:
+            copy_all = self.core.fn("glossary_files", "copy_mapped_glossaries_to_outputs")
+            if copy_all is not None:
+                copied = copy_all(dict(mapping), config=self.config_snapshot(), append_log=self.log)
+        return {"mapping": dict(mapping), "missing": [], "copied": copied}
 
     @staticmethod
     def load_prompt(path: str, mode: str) -> tuple:

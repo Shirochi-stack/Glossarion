@@ -21,18 +21,29 @@ from __future__ import annotations
 import html
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
 __all__ = [
+    "CURATED_REMNANT_GROUPS",
+    "CURATED_SECTIONS",
+    "CURATED_SOURCE_PREFIXES",
     "GROUP_ORDER",
     "GROUP_TITLES",
+    "HEADING_OVERRIDES",
     "SECTION_GROUPS",
+    "SECTION_ORDER",
+    "SECTION_TITLES",
     "TILE_KINDS",
+    "VIRTUAL_SPECS",
+    "VirtualSpec",
     "WINDOW_SIZE",
     "choice_options",
     "config_path",
     "env_names",
     "group_title",
+    "grouped_specs",
+    "sub_heading",
     "help_line",
     "humanize_key",
     "is_prompt",
@@ -65,8 +76,9 @@ TILE_KINDS = (
     "json",
 )
 
-# Tiles rendered at once in a SectionPage; larger sections slide this window.
-WINDOW_SIZE = 60
+# Tiles rendered at once in a SectionPage; larger sections slide this window. (64: Response handling &
+# retries, 61 tiles since U9 curated the refusal pattern limit in, stays one page with its links.)
+WINDOW_SIZE = 64
 
 # Settings home group order (UI_SPEC §4.15); unknown groups follow in first-seen order.
 GROUP_ORDER = (
@@ -105,11 +117,174 @@ SECTION_GROUPS = {
     "other.stored": "Advanced",
 }
 
+#: UI_SPEC §4.15 curated sections (U9): ``(id, title, home group, ((sub-heading, keys), ...))``.
+#: Each listed key moves out of its desktop schema section into the curated one (the schema stays the
+#: source of the tiles; the desktop dialogs are untouched); keys a build does not have are skipped. A
+#: curated id equal to a schema id (``other.response``) keeps that section and only regroups it: its
+#: remaining keys follow under "Other settings". A desktop section emptied by the move
+#: (``main.run``, ``other.output``) resolves to the curated section that took most of its keys.
+CURATED_SECTIONS: tuple = (
+    ("translation_defaults", "Translation defaults", "Translation", (
+        ("Language & output mode", ("output_language", "output_mode")),
+        ("Sampling & limits", ("translation_temperature", "disable_temperature", "max_output_tokens", "token_limit",
+                               "token_limit_disabled", "manual_chunk_size")),
+        ("Pacing", ("delay", "thread_submission_delay", "api_queue")),
+        ("Batch translation", ("batch_translation", "batch_size")),
+        ("Glossary", ("auto_glossary_mode", "enable_auto_glossary", "append_glossary", "append_glossary_auto_load",
+                      "fuzzy_auto_mapping", "manual_glossary_path", "manual_glossary_map", "title_trim_count",
+                      "group_affiliation_trim_count", "traits_trim_count", "refer_trim_count",
+                      "locations_trim_count")),
+        ("Chapters & cleanup", ("chapter_range", "use_spine_order", "REMOVE_AI_ARTIFACTS")),
+        ("Multipass", ("multipass_mode", "multipass_refinement_mode", "partial_b2_entries_per_request",
+                       "refinement_system_prompt", "refinement_user_prompt", "refinement_failed_system_prompt",
+                       "refinement_failed_user_prompt", "refinement_full_with_raw_system_prompt",
+                       "refinement_full_with_raw_user_prompt", "refinement_full_with_raw_raw_header",
+                       "refinement_full_with_raw_raw_footer", "refinement_full_with_raw_raw_role",
+                       "refinement_partial_system_prompt", "refinement_partial_user_prompt",
+                       "refinement_partial_b_system_prompt", "refinement_partial_b_user_prompt",
+                       "refinement_partial_b2_system_prompt", "refinement_partial_b2_user_prompt")),
+    )),
+    ("context_memory", "Context & memory", "Translation", (
+        # context_mode: the desktop Context Mode combo (VIRTUAL_SPECS); the three flags follow it
+        ("Context mode", ("context_mode", "contextual", "translation_history_limit", "translation_history_rolling",
+                          "include_source_in_history")),
+        ("Rolling summary", ("use_rolling_summary", "rolling_summary_mode", "rolling_summary_exchanges",
+                             "rolling_summary_max_entries", "rolling_summary_max_tokens", "summary_role",
+                             "rolling_summary_system_prompt", "rolling_summary_user_prompt")),
+    )),
+    ("other.response", "Response handling & retries", "Translation", (
+        ("Streaming", ("enable_streaming", "stream_thinking_logs", "allow_batch_stream_logs",
+                       "allow_authgpt_batch_stream_logs")),
+        ("Retries", ("max_retries", "max_retry_tokens", "retry_timeout", "timeout_retry_attempts", "chunk_timeout",
+                     "indefinite_rate_limit_retry", "ignore_retry_after")),
+        ("Truncation", ("retry_truncated", "truncation_retry_attempts", "char_ratio_truncation_enabled",
+                        "char_ratio_truncation_percent", "char_ratio_truncation_attempts",
+                        "char_ratio_min_output_chars", "missing_finish_as_prohibited",
+                        "unknown_finish_as_prohibited")),
+        ("Duplicates", ("duplicate_detection_mode", "duplicate_lookback_chapters", "retry_duplicate_bodies")),
+        ("Failure saving", ("save_partial_results", "save_prohibited_results", "preserve_original_text_on_failure")),
+        ("Safety checks", ("disable_refusal_checks", "refusal_pattern_length_limit", "disable_empty_safety_heuristic",
+                           "disable_qa_marker_checks", "qa_marker_length_limit")),
+        ("Stop logic", ("graceful_stop", "wait_for_chunks", "dispatch_order_timeout", "enable_chunk_progress")),
+        ("HTTP", ("enable_http_tuning", "connect_timeout", "read_timeout", "http_pool_connections",
+                  "http_pool_maxsize", "tor_proxy_enabled")),
+        ("Compression factor", ("auto_compression_factor", "compression_factor")),
+        ("Parallel extraction", ("enable_parallel_extraction", "extraction_workers")),
+        ("NIM / AuthND helpers", ("authnd_token_concurrency", "authnd_token_concurrency_auto",
+                                  "authnd_token_subprocess_concurrency", "authnd_token_timeout")),
+        ("Gemini Free chunking", ("gemini_free_adaptive_split", "gemini_free_html_splitter",
+                                  "gemini_free_html_text_node_transport", "gemini_free_min_subchunk_body_chars",
+                                  "gemini_free_subchunk_balancer", "gemini_free_subchunk_concurrency",
+                                  "gemini_free_subchunk_payload_format", "gemini_free_subchunk_prompt_chars",
+                                  "gemini_free_subchunk_safety_chars", "gemini_free_subchunk_start_delay",
+                                  "gemini_free_subchunk_timeout", "gemini_free_subchunk_url_chars")),
+    )),
+    ("epub_output", "EPUB output", "Translation", (
+        ("Layout & navigation", ("epub_layout_mode", "force_ncx_only", "epub_use_html_method")),
+        # FEATURE_MAP other-settings #111-#114 "EPUB output" (the desktop shows them with chapter extraction)
+        ("Contents", ("disable_epub_gallery", "disable_automatic_cover_creation", "skip_non_spine_special_files",
+                      "skip_unreferenced_epub_images")),
+        ("Styles", ("attach_css_to_chapters", "epub_css_override_path")),
+        ("File names", ("retain_source_extension",)),
+        ("Remote images", ("download_remote_image_urls", "remote_image_download_workers",
+                           "remote_image_download_interval")),
+        # enable_image_compression is the master switch the Vision compression dialog shares (Image & vision
+        # links here); the quality controls below only apply while it is on (FEATURE_MAP other-settings #170)
+        ("Image compression", ("enable_image_compression", "image_compression_quality", "exclude_cover_compression",
+                               "exclude_gif_compression")),
+        ("Sidecars", ("output_md", "output_txt", "output_sdlxliff")),
+    )),
+    ("pdf", "PDF", "Translation", (
+        ("Input", ("pdf_output_format", "pdf_async_page_threshold", "pdf_extraction_workers", "pdf_use_toc_sections",
+                   "pdf_render_mode")),
+        ("Input layout", ("pdf_paragraph_alignment", "pdf_header_alignment", "pdf_paragraph_justification",
+                          "pdf_rtl_paragraph_layout")),
+        ("Output", ("enable_pdf_output", "pdf_fast_rendering", "pdf_render_batch_size",
+                        "pdf_use_rapid_workspace_compiler", "pdf_generate_toc", "pdf_toc_page_numbers",
+                        "pdf_page_numbers", "pdf_page_number_alignment")),
+    )),
+    ("thinking", "Thinking & reasoning", "Models & keys", (
+        ("Thoughts", ("enable_thoughts",)),
+        ("Gemini", ("enable_gemini_thinking", "thinking_budget", "thinking_level")),
+        ("OpenAI / OpenRouter", ("enable_gpt_thinking", "gpt_effort", "gpt_reasoning_tokens",
+                                 "openrouter_use_reasoning_tokens", "pass_thinking_all_openai")),
+        ("Anthropic", ("enable_anthropic_thinking", "anthropic_effort", "anthropic_force_adaptive",
+                       "anthropic_thinking_budget")),
+        ("DeepSeek", ("enable_deepseek_thinking", "deepseek_effort", "deepseek_use_responses_api")),
+        ("Metadata & TOC requests", ("lightweight_thinking_level", "skip_book_title_thinking",
+                                     "skip_metadata_thinking", "skip_toc_thinking")),
+    )),
+    ("provider_options", "Provider options & safety", "Models & keys", (
+        ("Safety filters", ("disable_gemini_safety", "gemini_safety_threshold")),
+        ("OpenRouter", ("openrouter_preferred_provider", "openrouter_accept_identity", "openrouter_use_http_only")),
+        ("Service tier", ("gemini_service_tier", "force_service_tier_unknown_routes")),
+    )),
+)
+
+@dataclass(frozen=True)
+class VirtualSpec:
+    """A settings control that is not one config key (``SchemaAccess.spec`` falls back to these): its tile
+    reads and writes through ``state.setting_writes`` (U9: the desktop Context Mode combo)."""
+
+    key: str
+    label: str
+    type: str = "choice"
+    choices: tuple = ()
+    default: Any = None
+    tooltip: str = ""
+    section: str = ""
+    group: str = ""
+    readonly: str = ""
+    virtual: str = ""
+    discrepancies: tuple = ()
+
+
+def _context_mode_spec() -> VirtualSpec:
+    from glossarion_mobile.state.setting_writes import CONTEXT_MODE_CHOICES, CONTEXT_MODE_KEY
+
+    return VirtualSpec(
+        key=CONTEXT_MODE_KEY, label="Context mode", choices=CONTEXT_MODE_CHOICES, default="off",
+        section="context_memory", virtual="context_mode",
+        tooltip=("Off · Contextual History · Rolling Summary (Replace / Append): the desktop Context Mode. It sets "
+                 "Contextual translation, Use rolling summary and Rolling summary mode together, and Off turns "
+                 "batching to No batching (settings_rules.apply_context_mode)."))
+
+
+#: Settings controls without a config key of their own (key -> VirtualSpec).
+VIRTUAL_SPECS: dict = {"context_mode": _context_mode_spec()}
+
+
+#: Desktop sections the curated map takes keys from (a schema without them is left as it is).
+CURATED_SOURCE_PREFIXES = ("main.", "other.")
+
+#: Home group of a desktop section once the curated map moved keys out of it (what Context
+#: Management & Memory keeps is the desktop display scaling and the update check).
+CURATED_REMNANT_GROUPS = {"other.context": "Advanced"}
+
+#: Mobile titles of desktop sections the curated map regroups (UI_SPEC §4.15 names).
+SECTION_TITLES = {
+    "other.meta_data": "Metadata, TOC & headers",
+    "other.processing": "Processing & extraction",
+    "other.processing.extraction": "Chapter extraction",
+    "other.image": "Image & vision",
+    "other.context": "Desktop display scaling & update check",
+}
+
+#: Settings home order of the sections inside their groups (unlisted ones follow in schema order).
+SECTION_ORDER = (
+    "translation_defaults", "direct_text.settings", "context_memory", "other.response", "other.processing",
+    "other.processing.extraction", "other.meta_data", "epub_output", "pdf", "other.image",
+    "main.model", "other.endpoints", "thinking", "provider_options", "keys.pools",
+)
+
 _SECRET_TYPES = ("secret", "password")
 _PROMPT_TYPES = ("prompt", "text", "multiline", "textarea")
 _LIST_TYPES = ("list", "tuple", "array")
 _JSON_TYPES = ("dict", "json", "object", "map", "mapping")
 _SECRET_KEY_HINTS = ("api_key", "apikey", "_secret", "password", "_token", "cookie")
+#: Count / size settings whose names contain a secret hint ("_token" in glossary_max_output_tokens,
+#: the key-tree font size / heights): never masked (UI_SPEC §5.7 SecretTile is for credentials only).
+_NOT_SECRET_KEY = re.compile(r"(_tokens$|(^|_)max_|output_tokens|font_size|_heights?$|_count$|_limit$)")
 _PROMPT_KEY_HINTS = ("prompt", "instruction", "template", "system_message")
 _SEGMENT_LABEL_MAX = 12
 
@@ -140,9 +315,16 @@ def sample_value(spec: Any, value: Any = None) -> Any:
     if value is not None:
         return value
     default = spec_attr(spec, "default", None)
-    if isinstance(default, dict) and len(default) == 1 and str(next(iter(default))).startswith("$"):
+    if _is_reference(default):
         return None
     return default
+
+
+def _is_reference(value: Any) -> bool:
+    """A generated lazy default (``{'$ref': ...}``, ``{'$expr': ...}``, ``{'$ref': ..., 'as': 'list'}``)."""
+    return (isinstance(value, dict) and bool(value)
+            and all(str(k).startswith("$") or k == "as" for k in value)
+            and any(str(k).startswith("$") for k in value))
 
 
 _TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>")
@@ -226,11 +408,13 @@ def choice_options(spec: Any) -> list[tuple[Any, str]]:
 
 def is_secret(spec: Any) -> bool:
     kind = spec_type(spec)
+    key = str(spec_attr(spec, "key", "")).lower()
+    if key != "api_key" and _NOT_SECRET_KEY.search(key.rsplit(".", 1)[-1]):
+        return False
     if kind in _SECRET_TYPES:
         return True
     if kind not in ("str", "string"):
         return False
-    key = str(spec_attr(spec, "key", "")).lower()
     return key == "api_key" or any(hint in key for hint in _SECRET_KEY_HINTS)
 
 
@@ -306,6 +490,9 @@ def tile_kind(spec: Any, value: Any = None) -> str:
         sample = sample_value(spec, value)  # unknown contents -> JSON, never stringify dict items
         if isinstance(sample, (list, tuple)) and all(isinstance(v, str) for v in sample):
             return "list"
+        default = spec_attr(spec, "default", None)
+        if sample is None and _is_reference(default) and default.get("as") == "list":
+            return "list"  # a list constant of a backend module (QA emoticon patterns)
         return "json"
     if kind in _JSON_TYPES:
         return "json"
@@ -398,3 +585,79 @@ def ordered_groups(names: Sequence[str]) -> list[str]:
             seen.append(name)
     known = [g for g in GROUP_ORDER if g in seen]
     return known + [g for g in seen if g not in GROUP_ORDER]
+
+
+#: Sub-headings that replace the generator's desktop group where it picked a neighbouring group box (the
+#: Custom API Endpoints dialog reads as one "AuthZA / GLM Access Mode" group; output_directory sits
+#: under "Context Management & Memory") or where mobile shows a key next to its partner. Display only.
+HEADING_OVERRIDES = {
+    "use_custom_openai_endpoint": "Custom OpenAI endpoint",
+    "openai_base_url": "Custom OpenAI endpoint",
+    "azure_api_version": "Custom OpenAI endpoint",
+    "override_gemma_for_custom_endpoint": "Custom OpenAI endpoint",
+    "use_gemini_openai_endpoint": "Gemini custom endpoint",
+    "gemini_openai_endpoint": "Gemini custom endpoint",
+    "force_native_anthropic": "Anthropic custom endpoint",
+    "anthropic_base_url": "Anthropic custom endpoint",
+    "use_custom_image_edit_endpoint": "Custom image edit endpoint",
+    "custom_image_edit_endpoint": "Custom image edit endpoint",
+    "groq_base_url": "Provider base URLs",
+    "fireworks_base_url": "Provider base URLs",
+    "tts_voice": "Text-to-speech",
+    "openai_tts_endpoint": "Text-to-speech",
+    "output_directory": "Output folder",
+    "lang_prompt_behavior": "Configure All › Advanced",
+    "forced_source_lang": "Configure All › Advanced",
+    "metadata_translation_mode": "Custom metadata",
+    "translate_metadata_fields": "Custom metadata",
+    "metadata_field_prompts": "Custom metadata",
+    # Glossary Manager › Balanced/Full: the factor / limit beside their Auto box, the Single Pass header
+    # prompt beside the extraction prompt
+    "glossary_compression_factor": "Balanced/Full Extraction Settings",
+    "glossary_max_output_tokens": "Balanced/Full Extraction Settings",
+    "single_pass_glossary_header_prompt": "Balanced/Full Extraction Prompt",
+}
+
+
+def sub_heading(spec: Any) -> str:
+    """Heading of a setting inside its section page: ``HEADING_OVERRIDES``, else the desktop group box
+    (``spec.group``, e.g. "Foreign Character Detection", "Word Count Analysis"), else the nested path
+    between the parent object and the leaf ("Thresholds", "Language detection › Languages"); "" when flat."""
+    override = HEADING_OVERRIDES.get(str(spec_attr(spec, "key", "")))
+    if override:
+        return override
+    group = str(spec_attr(spec, "group", "") or "").strip()
+    if group:
+        return group
+    key = str(spec_attr(spec, "key", ""))
+    parts = key.split(".")
+    if spec_attr(spec, "parent", None) and len(parts) > 2:
+        return " › ".join(humanize_key(part) for part in parts[1:-1])
+    return ""
+
+
+def grouped_specs(specs: Sequence[Any]) -> tuple[list, dict]:
+    """``(specs, headings)``: the section's specs grouped by ``sub_heading`` (groups in the order they
+    first appear, the ungrouped ones last under "Other settings" when the section has groups), and
+    ``{key: heading}``. A section without any sub-heading keeps its order and has no headings."""
+    headings = [sub_heading(spec) for spec in specs]
+    if not any(headings):
+        return list(specs), {}
+    order: list = []
+    for heading in headings:
+        if heading and heading not in order:
+            order.append(heading)
+    buckets: dict = {heading: [] for heading in order}
+    rest: list = []
+    for spec, heading in zip(specs, headings):
+        (buckets[heading] if heading else rest).append(spec)
+    out: list = []
+    labels: dict = {}
+    for heading in order:
+        for spec in buckets[heading]:
+            out.append(spec)
+            labels[str(spec_attr(spec, "key", ""))] = heading
+    for spec in rest:
+        out.append(spec)
+        labels[str(spec_attr(spec, "key", ""))] = "Other settings"
+    return out, labels

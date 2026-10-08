@@ -47,6 +47,7 @@ __all__ = [
     "CatalogSnapshot",
     "EXCLUDED_PROVIDERS",
     "EXCLUDED_ROUTE_PREFIXES",
+    "EXCLUDED_STATUS",
     "FAMILY_TITLES",
     "ModelCatalogService",
     "ModelGroup",
@@ -60,9 +61,14 @@ __all__ = [
     "excluded_route",
     "family_of",
     "group_models",
+    "job_model",
+    "job_model_block",
+    "model_block",
+    "mobile_statuses",
     "model_needs_api_key",
     "normalize_custom_routes",
     "provider_excluded",
+    "provider_excluded_detail",
     "provider_label",
     "provider_of",
     "rank_models",
@@ -128,6 +134,64 @@ def excluded_detail(model: Optional[str]) -> Optional[str]:
         except Exception:
             reason = None
     return f"{reason or excluded_route(model)}. {KEPT_NOTE}".replace(".. ", ". ")
+
+
+#: Catalog status of an excluded provider (the poll's own status - "static fallback (ModuleNotFoundError …)",
+#: "connection refused" from a desktop localhost proxy - would read as a failure to fix).
+EXCLUDED_STATUS = "Not available on mobile"
+
+#: Job kinds that never need the configured model (compile / file tools, the unified-glossary merge, the QA
+#: scan, whose optional AI checks report their own failures).
+MODEL_FREE_JOB_KINDS = frozenset({"compile_epub", "compile_pdf", "validate_epub", "rename_outputs",
+                                  "md_txt_sidecars", "br_to_paragraphs", "retranslate", "qa_scan",
+                                  "unified_glossary"})
+
+
+def model_block(model: Optional[str]) -> Optional[tuple]:
+    """``(reason, detail)`` when ``model`` is a route excluded on mobile (the chat Send rule,
+    ``send_state.excluded_route_reason``: "ocz/ isn't available on mobile"), else None."""
+    reason = excluded_route(model)
+    return (reason, excluded_detail(model) or reason) if reason else None
+
+
+def job_model(params: Optional[Mapping[str, Any]] = None, config_get: Optional[Callable[..., Any]] = None) -> str:
+    """The model a job runs with: its ``config_overrides`` / ``model`` param, else the config's ``model``."""
+    params = params if isinstance(params, Mapping) else {}
+    overrides = params.get("config_overrides") if isinstance(params.get("config_overrides"), Mapping) else {}
+    model = overrides.get("model") or params.get("model")
+    if not model and config_get is not None:
+        try:
+            model = config_get("model", "")
+        except Exception:
+            model = ""
+    return str(model or "").strip()
+
+
+def job_model_block(kind: Any, params: Optional[Mapping[str, Any]] = None,
+                    config_get: Optional[Callable[..., Any]] = None) -> Optional[tuple]:
+    """The preflight of every job start (Library › Translate, Tools, glossary extraction, ...): ``(reason,
+    detail)`` when the job would run an excluded route (it would fail inside the client with desktop-only
+    text such as "OpenCode Zen adapter not found"), else None."""
+    name = str(getattr(kind, "value", kind) or "")
+    if name in MODEL_FREE_JOB_KINDS:
+        return None
+    return model_block(job_model(params, config_get))
+
+
+#: The route prefix of each excluded catalog provider (for its long reason).
+_EXCLUDED_PROVIDER_ROUTES = {"antigravity": "antigravity/", "ocagy": "ocagy/", "opencode-zen": "ocz/",
+                             "authza": "authza/", "autharena": "autharena/", "ollamapull": "ollamapull/"}
+
+
+def provider_excluded_detail(provider: Optional[str]) -> str:
+    """The InfoSheet text behind an excluded provider's "Not available on mobile" chip."""
+    name = str(provider or "").split(":", 1)[0].strip().lower()
+    return excluded_detail(_EXCLUDED_PROVIDER_ROUTES.get(name, name + "/")) or EXCLUDED_STATUS
+
+
+def mobile_statuses(statuses: Mapping[str, Any]) -> dict:
+    """Catalog poll statuses with the excluded providers' replaced by ``EXCLUDED_STATUS``."""
+    return {str(p): (EXCLUDED_STATUS if provider_excluded(p) else s) for p, s in dict(statuses or {}).items()}
 
 
 def login_route(model: Optional[str]) -> tuple:
@@ -835,8 +899,9 @@ class ModelCatalogService:
         options = self.options
         representative = self.representative_model(provider) if provider else None
         creds = self.credentials(provider, representative=representative)
-        # model_options guards its autharena_proxy imports (not bundled on mobile): a full refresh
-        # reports Arena as "unavailable in this build" instead of failing.
+        # model_options guards its autharena_proxy / ocagy_cli imports (not bundled on mobile): a full
+        # refresh reports Arena / OcAgy / OpenCode Zen as "unavailable in this build" instead of failing;
+        # apply_refresh shows every excluded provider as EXCLUDED_STATUS.
         previous_models = list(self.snapshot.models)
         try:
             result = options.refresh_provider_model_catalogs(
@@ -844,12 +909,7 @@ class ModelCatalogService:
                 provider_keys=creds["provider_keys"], custom_routes=creds["custom_routes"],
                 timeout=timeout, only_provider=provider,
             )
-        except ImportError as exc:
-            if provider is None and self._install_mobile_route_stubs():
-                return self._refresh_locked(None, explicit=explicit, timeout=timeout)
-            log.warning("catalog refresh failed: %s", exc)
-            return RefreshOutcome(provider, False, message=f"Catalog refresh failed: {exc}")
-        except Exception as exc:
+        except Exception as exc:  # ImportError included: a module this build does not bundle
             log.warning("catalog refresh failed: %s", exc)
             return RefreshOutcome(provider, False, message=f"Catalog refresh failed: {exc}")
         if explicit:
@@ -865,7 +925,8 @@ class ModelCatalogService:
         sparsely): an explicit poll re-adds the confirmed models (tombstones cleared), the picker
         list is re-merged and successful providers replace their seven-day markers."""
         previous = list(previous_models) if previous_models is not None else list(self.snapshot.models)
-        statuses = dict(getattr(result, "statuses", {}) or {})
+        # an excluded provider's poll status (a desktop helper module, a localhost proxy) is not a failure
+        statuses = mobile_statuses(getattr(result, "statuses", {}) or {})
         requested = getattr(result, "requested_provider", None)
         fn = self.core.fn("apply_provider_refresh")
         if fn is None:

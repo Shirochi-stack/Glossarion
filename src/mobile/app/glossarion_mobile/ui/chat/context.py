@@ -28,6 +28,13 @@ class ChatEnv(SettingsContext):
     open_output: Optional[Callable[[str], Any]] = None  # output folder -> file browser
     open_reader: Optional[Callable[..., Any]] = None  # async (workspace folder, attachment path) -> Reader (U5)
     pick_files: Optional[Callable[..., Any]] = None  # async (extensions, multiple) -> [paths]
+    # U9: async () -> the picked folder's app-owned copy (FileBridge.pick_folder); raises
+    # FolderPickUnavailable where the platform cannot hand over a folder (Android SAF trees)
+    pick_folder: Optional[Callable[[], Any]] = None
+    # U9: (route name, source path) -> a tool screen with this file as its source (Plan "Run as async batch")
+    open_tool_with_source: Optional[Callable[[str, str], Any]] = None
+    # U9: () -> the Tools ToolsContext (＋ › From Library: the SourcePicker of Library books)
+    tools_context: Optional[Callable[[], Any]] = None
     import_file: Optional[Callable[[str], Any]] = None  # picked path -> app-owned copy (FileBridge); blocking
     push_overlay: Optional[Callable[[Any], Any]] = None  # full-screen ft.View
     pop_overlay: Optional[Callable[[Any], Any]] = None

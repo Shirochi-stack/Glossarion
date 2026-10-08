@@ -12,6 +12,12 @@ glance" (the Chapters stats chips, the glossary summary, the last job).
 
 Values come from ``library_core.load_book_details`` (``metadata.json`` first, then
 the OPF, then the card) and its display helpers when the core offers them.
+
+Until the preview-phase details arrive the hero is a ``Skeleton("hero")`` (UI_SPEC §7.4). On a large
+phone in landscape (UI_SPEC §1.1) the same controls are arranged in two columns: hero, strip, read
+buttons and icon row | synopsis, metadata, tags and at a glance (``apply_layout``, called from
+``BookPageScreen.apply_size_class``; each arrangement gets fresh keys, Flet 1.0.3 freezes a subtree
+re-rendered under the same key).
 """
 
 from __future__ import annotations
@@ -22,9 +28,10 @@ from typing import Any, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.library.common import icon_button, section_title, stat_chip
 
-__all__ = ["OverviewTab", "hero_values", "primary_read_label", "progress_strip_text", "split_tags"]
+__all__ = ["OverviewTab", "hero_values", "primary_read_label", "progress_strip_text", "split_tags", "two_columns"]
 
 NO_SYNOPSIS = "No synopsis available."
 DASH = "—"
@@ -131,12 +138,24 @@ def progress_strip_text(book: Mapping[str, Any], model: Any = None) -> Optional[
     return "⏳  Translation in progress"
 
 
+def two_columns(size_class: Any, width: Optional[float], height: Optional[float]) -> bool:
+    """UI_SPEC §1.1 Large phone: "Book page Overview uses two columns in landscape"."""
+    name = str(getattr(size_class, "value", size_class) or "")
+    try:
+        landscape = float(width or 0) > float(height or 0) > 0
+    except (TypeError, ValueError):
+        landscape = False
+    return name == "large_phone" and landscape
+
+
 class OverviewTab:
     def __init__(self, page: Any) -> None:
         self.page = page
         self.ctx = page.ctx
         self.synopsis_expanded = False
         self.values: dict = {}
+        self.columns = False  # two-column landscape arrangement (``apply_layout``)
+        self.layout_builds = 0
 
     # ---- build --------------------------------------------------------------------------------
 
@@ -170,16 +189,20 @@ class OverviewTab:
         self.tags_row = ft.Row(wrap=True, spacing=6, run_spacing=6, key="ov-tags")
         self.glance = ft.Column(spacing=6, key="ov-glance")
         self.error_text = ft.Text("", color=ft.Colors.ERROR, visible=False, key="ov-error")
-        hero = ft.Row([
+        self.hero = ft.Row([
             self.cover,
             ft.Column([self.title_text, self.author_text, self.hero_chips], spacing=4, expand=True, tight=True),
-        ], vertical_alignment=ft.CrossAxisAlignment.START, spacing=12)
-        self.list = ft.ListView([
-            hero,
+        ], vertical_alignment=ft.CrossAxisAlignment.START, spacing=12, key="ov-hero")
+        self.skeleton = Skeleton("hero", count=2, label="Loading book…", key="ov-skeleton").control
+        self.left_items = [
+            self.skeleton,
+            self.hero,
             self.strip,
             ft.Row([self.read_button, self.raw_button, self.continue_button], wrap=True, spacing=8, run_spacing=6),
             self.icon_row,
             self.error_text,
+        ]
+        self.right_items = [
             section_title("SYNOPSIS"),
             self.synopsis_text,
             self.synopsis_toggle,
@@ -189,9 +212,36 @@ class OverviewTab:
             self.tags_row,
             section_title("At a glance"),
             self.glance,
-        ], spacing=tokens.SPACING["sm"], padding=12, expand=True, key="overview")
+        ]
+        self.list = ft.ListView(self._arranged(), spacing=tokens.SPACING["sm"], padding=12, expand=True,
+                                key="overview")
         self.render()
         return self.list
+
+    # ---- layout ----------------------------------------------------------------------------------
+
+    def _arranged(self) -> list:
+        if not self.columns:
+            return [*self.left_items, *self.right_items]
+        self.layout_builds += 1
+        n = self.layout_builds
+        spacing = tokens.SPACING["sm"]
+        return [ft.Row([
+            ft.Column(list(self.left_items), spacing=spacing, expand=1, tight=True, key=f"ov-left-{n}"),
+            ft.Column(list(self.right_items), spacing=spacing, expand=1, tight=True, key=f"ov-right-{n}"),
+        ], spacing=tokens.SPACING["md"], vertical_alignment=ft.CrossAxisAlignment.START, key=f"ov-columns-{n}")]
+
+    def apply_layout(self, size_class: Any) -> bool:
+        """Two columns on a large phone in landscape, one column otherwise; True when it changed."""
+        page = self.ctx.page
+        wanted = two_columns(size_class, getattr(page, "width", None), getattr(page, "height", None))
+        if wanted == self.columns:
+            return False
+        self.columns = wanted
+        if getattr(self, "list", None) is not None:
+            self.list.controls = self._arranged()
+            self.ctx.push(self.list)
+        return True
 
     # ---- render ----------------------------------------------------------------------------------
 
@@ -205,6 +255,9 @@ class OverviewTab:
         model = page.details_model()
         values = hero_values(book, details, model)
         self.values = values
+        loading = page.details is None  # the preview-phase details have not arrived yet
+        self.skeleton.visible = loading
+        self.hero.visible = not loading
         self.title_text.value = values["title"]
         self.author_text.value = values["author"] or ""
         chips = []
@@ -289,11 +342,7 @@ class OverviewTab:
         raw = str(book.get("raw_source_path") or "")
         has_raw = bool(raw) and not book.get("missing_raw_file")
         has_workspace = bool(book.get("output_folder"))
-        metadata_reason = None
-        if not (has_raw and raw.lower().endswith(".epub")):
-            metadata_reason = "Needs a raw EPUB"
-        elif not service.has_job_kind("metadata"):
-            metadata_reason = "Metadata translation is not available in this session"
+        metadata_reason = page.metadata_reason()  # shared with Book ⋯
 
         def icon(name: str, tip: str, handler: Any, reason: Optional[str], key: str) -> ft.Control:
             button = icon_button(name, reason or tip, handler, key=key, disabled=reason is not None)

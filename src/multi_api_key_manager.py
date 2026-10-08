@@ -7,7 +7,7 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 import os
 import sys
 from request_parameters import normalize_request_parameters
-from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, key_enabled_for_context,
+from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, context_presets, key_enabled_for_context,
                           normalize_disabled_contexts)
 import key_pool_service
 
@@ -5759,41 +5759,7 @@ class MultiAPIKeyDialog(QDialog):
                 position = "⭐ #1"
 
             # Determine status based on test results and current state
-            if key.last_test_result is None and hasattr(key, '_testing'):
-                status = "⏳ Testing..."
-                tags = ('testing',)
-            elif not key.enabled:
-                status = "Disabled"
-                tags = ('disabled',)
-            elif key.last_test_result == 'passed':
-                status = "✅ Passed"
-                tags = ('passed',)
-            elif key.last_test_result == 'failed':
-                status = "❌ Failed"
-                tags = ('failed',)
-            elif key.last_test_result == 'timeout':
-                status = "⏱️ Timed Out"
-                tags = ('timeout',)
-            elif key.last_test_result == 'rate_limited':
-                status = "⚠️ Rate Limited"
-                tags = ('ratelimited',)
-            elif key.last_test_result == 'error':
-                status = "❌ Error"
-                if key.last_test_message:
-                    status += f": {key.last_test_message[:20]}..."
-                tags = ('error',)
-            elif key.is_cooling_down and key.last_error_time:
-                remaining = int(key.cooldown - (time.time() - key.last_error_time))
-                if remaining > 0:
-                    status = f"Cooling ({remaining}s)"
-                    tags = ('cooling',)
-                else:
-                    key.is_cooling_down = False
-                    status = "Active"
-                    tags = ('active',)
-            else:
-                status = "Active"
-                tags = ('active',)
+            status, tags = key_pool_service.key_tree_status(key)
 
             # Times used (counter)
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
@@ -6497,11 +6463,13 @@ class MultiAPIKeyDialog(QDialog):
         )
 
         if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
             try:
                 # Validate it's a valid Google Cloud credentials file
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
+                    if is_google_service_account(creds_data):
                         self.google_creds_entry.setText(filename)
                         self._sync_parent_google_credentials(filename)
                         self._show_status(f"Selected Google credentials: {os.path.basename(filename)}")
@@ -6509,10 +6477,10 @@ class MultiAPIKeyDialog(QDialog):
                         QMessageBox.critical(
                             self,
                             "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                            INVALID_GOOGLE_CREDENTIALS
                         )
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
 
     def _browse_fallback_google_credentials(self):
         """Browse for Google Cloud credentials JSON file for fallback keys"""
@@ -6524,11 +6492,13 @@ class MultiAPIKeyDialog(QDialog):
         )
 
         if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
             try:
                 # Validate it's a valid Google Cloud credentials file
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
+                    if is_google_service_account(creds_data):
                         self.fallback_google_creds_entry.setText(filename)
                         self._sync_parent_google_credentials(filename)
                         self._show_fallback_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
@@ -6536,10 +6506,10 @@ class MultiAPIKeyDialog(QDialog):
                         QMessageBox.critical(
                             self,
                             "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                            INVALID_GOOGLE_CREDENTIALS
                         )
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
 
     # ===================================================================
     # GLOSSARY KEYS SECTION — mirrors fallback keys for glossary API calls
@@ -7843,10 +7813,12 @@ class MultiAPIKeyDialog(QDialog):
         )
 
         if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
             try:
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
+                    if is_google_service_account(creds_data):
                         self.glossary_google_creds_entry.setText(filename)
                         self._sync_parent_google_credentials(filename)
                         self._show_glossary_status(f"Selected glossary Google credentials: {os.path.basename(filename)}")
@@ -7854,10 +7826,10 @@ class MultiAPIKeyDialog(QDialog):
                         QMessageBox.critical(
                             self,
                             "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                            INVALID_GOOGLE_CREDENTIALS
                         )
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
 
     # ===================================================================
     # END GLOSSARY KEYS SECTION
@@ -9710,11 +9682,7 @@ class MultiAPIKeyDialog(QDialog):
                 checkbox.setTristate(False)
                 checkbox.setChecked(context in allowed)
 
-        image_routes = set(POOL_CONTEXTS['qa_scan']) | set(POOL_CONTEXTS['inpainter'])
-        presets = [('Enable all', set(routes)), ('Disable all', set())]
-        if image_routes.intersection(routes):
-            presets.append(('🖼️ Images only', image_routes))
-        for label, allowed in presets:
+        for label, allowed in context_presets(routes):
             button = QPushButton(label)
             button.clicked.connect(lambda checked=False, values=allowed: set_routes(values))
             shortcuts.addWidget(button)
@@ -10976,17 +10944,19 @@ class MultiAPIKeyDialog(QDialog):
             self, "Select Google Cloud Credentials JSON", "", "JSON files (*.json);;All files (*.*)"
         )
         if filename:
+            # The check and the load-failure message are shared with the mobile app (settings_rules)
+            from settings_rules import google_credentials_load_error, is_google_service_account
             try:
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
-                if 'type' in creds_data and 'project_id' in creds_data:
+                if is_google_service_account(creds_data):
                     self._dedicated_widget(pool_name, 'google_creds_entry').setText(filename)
                     self._sync_parent_google_credentials(filename)
                     self._dedicated_status(pool_name, f"Selected Google credentials: {os.path.basename(filename)}")
                 else:
                     QMessageBox.critical(self, "Error", "Invalid Google Cloud credentials file.")
             except Exception as exc:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {exc}")
+                QMessageBox.critical(self, "Error", google_credentials_load_error(exc))
 
     def _create_glossary_refinement_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'glossary_refinement')

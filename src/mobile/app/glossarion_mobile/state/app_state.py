@@ -62,6 +62,10 @@ class JobStripModel:
     state: str = "running"  # running | finishing | stopping | done | failed
     warning: bool = False  # subtitle in the warning colour (e.g. waiting for a glossary decision)
     owner_chat: Optional[str] = None  # cid of the chat that owns the job
+    # U9: the owning chat renders the job as its own Job card (a RunController run, params["chat_id"]),
+    # so its chat hides the strip; a chat-origin job without a card (Extract glossary, Compile, a
+    # Library translation from the Plan card) keeps the strip there (progress, Stop, Done · Open).
+    chat_card: bool = True
 
 
 @dataclass(frozen=True)

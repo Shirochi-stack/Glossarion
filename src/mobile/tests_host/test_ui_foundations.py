@@ -1051,10 +1051,12 @@ def test_components_construct_and_serialize():
     )
     assert isinstance(sheet.dialog, ft.BottomSheet) and sheet.dialog.show_drag_handle and sheet.dialog.scrollable
     assert len(sheet.tiles) == 3 and sheet.tiles[1].title.color == ft.Colors.ERROR
-    assert sheet.tiles[2].disabled and isinstance(sheet.tiles[2].trailing, ReasonChip)
+    # U9: an unavailable item keeps an enabled row (its ReasonChip must stay tappable); a tap explains it
+    assert not sheet.tiles[2].disabled and isinstance(sheet.tiles[2].trailing, ReasonChip)
+    assert sheet.tiles[2].title.color == ft.Colors.ON_SURFACE_VARIANT
     sheet._on_select(None, sheet.item("Rename"))
     sheet._on_select(None, sheet.item("Move to Series…"))
-    assert picked == ["rename"]
+    assert picked == ["rename"] and sheet.explained is sheet.item("Move to Series…")
     assert isinstance(ActionSheet([ActionItem("A")], tablet=True).dialog, ft.AlertDialog)
 
     confirm = ConfirmDialog(title="Delete chat?", body="This permanently removes…", destructive=True, items=["Folder A"])
@@ -1369,8 +1371,8 @@ def test_app_routes_selftest_and_view_stack(app_env):
             await session.dispatch_event(page._i, "view_pop", {"route": "/settings/logs"})
             assert _routes(page) == ["/", "/settings"]
 
-            # the Library (U5), the Glossaries (U6), Tools › Manga (U8) and a placeholder for a
-            # later milestone (Series, U9); in-app navigation syncs the client route
+            # the Library (U5), the Glossaries (U6), Tools › Manga (U8) and Series (U9); in-app
+            # navigation syncs the client route
             from glossarion_mobile.ui.glossary.home import GlossariesScreen
             from glossarion_mobile.ui.library.home import LibraryScreen
 
@@ -1384,7 +1386,8 @@ def test_app_routes_selftest_and_view_stack(app_env):
             assert getattr(app, "manga", None) is not None and "tools.manga" in app.manga.screens_built
             await app.navigate("/series/s1")
             assert _routes(page)[-1] == "/series/s1"
-            assert isinstance(app.shell.top_screen, PlaceholderScreen)
+            from glossarion_mobile.ui.chat.series_page import SeriesScreen
+            assert isinstance(app.shell.top_screen, SeriesScreen)
             app.navigate_to("jobs")
             assert await _wait(lambda: _routes(page) == ["/", "/jobs"])
             await _route(session, "/")

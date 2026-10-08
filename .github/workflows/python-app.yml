@@ -109,7 +109,14 @@ jobs:
           tests/test_manga_env.py \
           tests/test_manga_editor_core.py \
           tests/test_manga_models.py \
-          tests/test_google_vision_rest.py
+          tests/test_google_vision_rest.py \
+          tests/test_update_core.py \
+          tests/test_browser_driver.py \
+          tests/test_schema_p5b.py \
+          tests/parity/test_u9_extractions.py \
+          tests/parity/test_u9_gap_moves.py \
+          tests/parity/test_u9_gap_round3.py \
+          tests/parity/test_u9_gap_round4.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -145,6 +152,9 @@ jobs:
             # model registry, Google Vision / Azure Document Intelligence REST clients
             "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
             "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
+            # U9: the release check the desktop UpdateManager and the mobile About > Updates share,
+            # and the browser-driver seam (authnd/ + search/gemini keep their Qt helpers lazy)
+            "update_core", "browser_driver", "authnd_auth", "gemini_free",
         )
         failed = []
         for name in SHARED:
@@ -190,7 +200,7 @@ jobs:
       working-directory: src/mobile
       env:
         PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
-      run: uv run --no-project python -m compileall -q app tools ci tests_host
+      run: uv run --no-project python -m compileall -q app tools ci tests_host tests
 
     - name: Collect backend bundle
       working-directory: src/mobile
@@ -212,6 +222,14 @@ jobs:
         PYTHONIOENCODING: utf-8
         PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
       run: uv run --locked python tools/host_smoke.py --simulate android --bundle app/backend --json build/host_smoke_android.json
+
+    - name: Mobile CI and release gating (no tag trigger, gated release job, optional suites)
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+        PYTHONIOENCODING: utf-8
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --locked python -m pytest -p no:cacheprovider -o console_output_style=classic -q tests_host/test_ci_release.py
 
     - name: Upload host smoke report
       if: always()

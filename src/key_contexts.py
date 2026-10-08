@@ -73,6 +73,20 @@ def normalize_disabled_contexts(contexts):
     return sorted({normalize_context(c) for c in contexts if isinstance(c, str) and c.strip()})
 
 
+def context_presets(routes):
+    """The "Key request contexts" dialog's shortcut buttons: ``[(label, allowed contexts), ...]``.
+
+    'Enable all' / 'Disable all', plus '🖼️ Images only' (the QA-scan and inpainter pools' image
+    contexts) when *routes* serves one of them (multi_api_key_manager._edit_selected_key_contexts;
+    shared with Glossarion Mobile's KeyEditor and bulk context sheet).
+    """
+    image_routes = set(POOL_CONTEXTS['qa_scan']) | set(POOL_CONTEXTS['inpainter'])
+    presets = [('Enable all', set(routes)), ('Disable all', set())]
+    if image_routes.intersection(routes):
+        presets.append(('🖼️ Images only', image_routes))
+    return presets
+
+
 def current_key_context():
     return _REQUEST_CONTEXT.get() or 'translation'
 

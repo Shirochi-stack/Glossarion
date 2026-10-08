@@ -32,10 +32,11 @@ import flet as ft
 from glossarion_mobile.services.glossary import PROFILE_BUCKETS, CoreMissing
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import EmptyState
-from glossarion_mobile.ui.glossary.common import ask, prompt_text
+from glossarion_mobile.ui.glossary.common import ask, attach_mode_locks, prompt_text
+from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["GlossarySettingsTab", "ProfileBar", "TAB_SECTIONS", "MODE_KEYS"]
+__all__ = ["GlossarySettingsScreen", "GlossarySettingsTab", "ProfileBar", "SECTION_TABS", "TAB_SECTIONS", "MODE_KEYS"]
 
 log = logging.getLogger("glossarion.glossary.ui")
 
@@ -46,11 +47,24 @@ MODE_KEYS = ("auto_glossary_mode", "append_glossary", "append_glossary_auto_load
 #: tab -> (title, schema section ids, profile bucket, prompt keys of the bucket, extra leading keys)
 TAB_SECTIONS = {
     "general": ("General", ("glossary.general",), None, (), MODE_KEYS),
+    # glossary_target_language leads both generation tabs (desktop Glossary Manager Balanced/Full and
+    # Minimal tabs: "Target language" combo above the prompt; schema section main.prompt).
     "balanced": ("Balanced / Full Generation", ("glossary.balanced_full",), "balanced_full",
-                 ("manual_glossary_prompt3",), ()),
-    "minimal": ("Minimal Generation", ("glossary.minimal",), "minimal", ("unified_auto_glosary_prompt3",), ()),
+                 ("manual_glossary_prompt3",), ("glossary_target_language",)),
+    "minimal": ("Minimal Generation", ("glossary.minimal",), "minimal", ("unified_auto_glosary_prompt3",),
+                ("glossary_target_language",)),
     "refinement": ("Refinement", ("glossary.refinement",), "refinement",
                    ("glossary_refinement_system_prompt", "glossary_refinement_user_prompt"), ()),
+}
+
+
+#: Settings › Glossary section ids -> the tab that hosts them (UI_SPEC §4.1 / §4.15: "also at
+#: Settings › Glossary, the same pages as the Glossaries tabs").
+SECTION_TABS = {
+    "glossary.general": "general",
+    "glossary.balanced_full": "balanced",
+    "glossary.minimal": "minimal",
+    "glossary.refinement": "refinement",
 }
 
 
@@ -258,9 +272,10 @@ class ProfileBar:
 class GlossarySettingsTab:
     """One settings tab: a SectionPage over a synthetic section (extra keys + the schema sections)."""
 
-    def __init__(self, ctx: Any, tab: str) -> None:
+    def __init__(self, ctx: Any, tab: str, match: Any = None) -> None:
         self.ctx = ctx
         self.tab = tab
+        self.match = match  # a Settings search hit / All prompts tap: #<key> is focused (U9)
         self.title, self.section_ids, self.bucket_id, self.prompt_keys, self.leading_keys = TAB_SECTIONS[tab]
         self.page: Any = None
         self.profile_bar: Optional[ProfileBar] = None
@@ -290,7 +305,7 @@ class GlossarySettingsTab:
         from glossarion_mobile.ui.settings.schema_access import SectionInfo
         from glossarion_mobile.ui.settings.section_page import SectionPage
 
-        page = SectionPage(None, settings, section_id=self.section_ids[0])
+        page = SectionPage(self.match, settings, section_id=self.section_ids[0])
         page.section = SectionInfo(id=f"glossary.tab.{self.tab}", title=self.title, keys=tuple(self.keys()),
                                    group="Glossary")
         page.title = self.title
@@ -317,6 +332,11 @@ class GlossarySettingsTab:
             links.append(ft.TextButton(content="Editor preferences…", icon=ft.Icons.EDIT_NOTE,
                                        on_click=lambda e: self.ctx.settings.open_setting("glossary.editor"),
                                        key="gs-editor-prefs"))
+            # include_book_title_glossary / auto_inject_book_title live in Metadata, TOC & headers
+            links.append(ft.TextButton(content="Book title in glossary…", icon=ft.Icons.TITLE,
+                                       on_click=lambda e: self.ctx.settings.open_setting(
+                                           "other.meta_data", "include_book_title_glossary"),
+                                       key="gs-book-title"))
         elif self.tab == "balanced":
             links.append(ft.TextButton(content="Anti-Duplicate Parameters…", icon=ft.Icons.TUNE,
                                        on_click=lambda e: self.ctx.settings.open_setting("glossary.anti_duplicate"),
@@ -339,3 +359,42 @@ class GlossarySettingsTab:
         if self.profile_bar is not None:
             self.profile_bar.detach()
         self.shown = False
+
+
+class GlossarySettingsScreen(Screen):
+    """``/settings/s/glossary.<tab>``: one Glossary Manager settings tab as a pushed screen (the mode
+    row, the prompt profile bar and the links above the schema tiles), so prompt profiles and the
+    glossary mode can be managed without opening a glossary file (GlossaryFeature routes the
+    Settings › Glossary sections here)."""
+
+    def __init__(self, match: Any, ctx: Any, tab: str) -> None:
+        super().__init__(match)
+        self.ctx = ctx
+        self.tab = GlossarySettingsTab(ctx, tab, match=match)
+        self.title = f"Glossary · {self.tab.title}"
+        self._lock_unsubs: Optional[list] = None
+
+    def build_body(self) -> ft.Control:
+        return self.tab.build()
+
+    def actions(self) -> list:
+        """The SectionPage's Search and ⋯ Save now · Discard changes since opening · Reset this section."""
+        self.get_body()  # the shell asks for the actions before the body
+        page = self.tab.page
+        return page.actions() if page is not None else []
+
+    def did_show(self) -> None:
+        if self._lock_unsubs is None:
+            # U9: the Glossary Manager's mode locks here too (the Glossary view's lock pass, shared): a
+            # mode switched on this page writes the locked toggles' forced values, as desktop does
+            self._lock_unsubs = attach_mode_locks(self.ctx)
+        self.tab.did_show()
+
+    def dispose(self) -> None:
+        for unsub in self._lock_unsubs or ():
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._lock_unsubs = None
+        self.tab.dispose()

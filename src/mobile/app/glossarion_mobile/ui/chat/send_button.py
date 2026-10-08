@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
-from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.chat.send_state import SendAction, SendInputs, SendState, SendStopMachine
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
@@ -42,7 +42,7 @@ class SendStopButton(ft.Container):
             content=ft.Container(),
             duration=tokens.MOTION["send_morph_ms"],
             reverse_duration=tokens.MOTION["send_morph_ms"],
-            transition=ft.AnimatedSwitcherTransition.SCALE,
+            transition=motion.switcher_transition(ft.AnimatedSwitcherTransition.SCALE),
         )
         self.menu = ft.ContextMenu(
             content=self.switcher,
@@ -128,6 +128,8 @@ class SendStopButton(ft.Container):
         state = self.machine.state
         changed = state is not self.rendered_state
         if changed:
+            # scale morph; a cross-fade under reduce motion (UI_SPEC §6.3)
+            self.switcher.transition = motion.switcher_transition(ft.AnimatedSwitcherTransition.SCALE)
             self.switcher.content = self._visual_control(state)
             self.menu.primary_items = self._menu_items()
             self.rendered_state = state

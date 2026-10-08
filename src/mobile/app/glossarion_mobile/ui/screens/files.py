@@ -15,10 +15,11 @@ files inside a root, never a root itself). Listing runs on a worker thread.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
@@ -31,9 +32,11 @@ from glossarion_mobile.ui.screens.job_detail import export_sheet
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["ROOT_LABELS", "FileBrowserScreen", "FileEntry", "IMAGE_VIEW_EXTENSIONS", "delete_entry", "describe_size",
-           "list_folder", "media_kind", "rename_entry", "rename_problem", "resolve_location"]
+           "is_qa_report", "list_folder", "media_kind", "open_media_viewer", "rename_entry", "rename_problem",
+           "resolve_location", "root_for"]
 
-ROOT_LABELS = (("output", "Output"), ("library", "Library"), ("inbox", "Inbox"), ("chats", "Chat workspaces"))
+ROOT_LABELS = (("output", "Output"), ("library", "Library"), ("inbox", "Inbox"), ("chats", "Chat workspaces"),
+               ("payloads", "Payloads"), ("logs", "Logs"))
 MAX_ENTRIES = 2000
 _ICONS = {
     ".epub": "MENU_BOOK", ".pdf": "PICTURE_AS_PDF", ".txt": "DESCRIPTION", ".md": "DESCRIPTION",
@@ -63,6 +66,53 @@ def media_kind(path: str) -> Optional[str]:
     if ext in audio:
         return "audio"
     return None
+
+
+#: The QA Scanner's report file (``<folder>/<name>_Scan Report/validation_results.html``).
+QA_REPORT_NAME = "validation_results.html"
+
+
+def is_qa_report(path: str) -> bool:
+    return os.path.basename(str(path or "")).lower() == QA_REPORT_NAME
+
+
+def open_media_viewer(path: str, *, push_overlay: Optional[Callable[[Any], Any]],
+                      pop_overlay: Optional[Callable[[Any], Any]], files: Any = None, page: Any = None,
+                      notify: Optional[Callable[..., Any]] = None, tablet: bool = False,
+                      spawn: Optional[Callable[[Any], Any]] = None) -> Any:
+    """The chat's full-screen MediaViewer on one image / video / audio file (zoom, play through
+    ``AudioHub``, Share, Save to… = the file's ExportSheet, Open externally = the share sheet), pushed
+    with ``push_overlay``; ``pop_overlay(view)`` closes it. None when the file is no media or there is
+    no overlay stack (callers fall back to sharing). Files › Open with › Media viewer and the Book page's
+    🔊 Play audio use it."""
+    from glossarion_mobile.ui.chat.media_cards import AudioHub
+    from glossarion_mobile.ui.chat.media_model import MediaItem
+    from glossarion_mobile.ui.components.media_viewer import MediaViewer
+
+    kind = media_kind(path)
+    if kind is None or push_overlay is None:
+        return None
+    run = spawn if spawn is not None else (lambda coro: asyncio.ensure_future(coro))
+
+    def share(target: str) -> Any:
+        return run(files.share([target])) if files is not None else None
+
+    def save(target: str) -> Any:
+        if files is None or page is None:
+            return None
+        sheet = export_sheet(files, target, page=page, notify=notify, tablet=tablet)
+        sheet.show(page)
+        return sheet
+
+    def close() -> None:
+        if pop_overlay is not None:
+            pop_overlay(viewer.view)
+
+    viewer = MediaViewer([MediaItem(kind, path, os.path.isfile(path))], on_close=close,
+                         on_save=save, on_share=share, on_open_external=share,
+                         audio_hub=AudioHub() if kind == "audio" else None, spawn=run)
+    push_overlay(viewer.view)
+    return viewer
 
 
 @dataclass(frozen=True)
@@ -95,6 +145,16 @@ def _inside(path: str, root: str) -> bool:
         return os.path.commonpath([real, base]) == base
     except (OSError, ValueError):
         return False
+
+
+def root_for(path: str, roots: Mapping[str, str], order: Sequence[str] = ("output", "chats", "library")) -> Optional[str]:
+    """The first root of ``order`` (a ``JobsFeature.file_roots`` key) whose folder contains ``path``, else None
+    (the file browser refuses folders outside its roots)."""
+    for name in order:
+        base = str(roots.get(name) or "")
+        if base and path and _inside(path, base):
+            return name
+    return None
 
 
 def resolve_location(roots: Mapping[str, str], root: str, fid: Optional[str],
@@ -382,42 +442,33 @@ class FileBrowserScreen(Screen):
                        icon="IOS_SHARE", key="open-share",
                        disabled_reason=None if self.files is not None else "Sharing is not available"),
         ]
+        if is_qa_report(entry.path):  # the QA Scanner's validation_results.html: its report viewer (U6)
+            items.insert(0, ActionItem("QA report viewer", lambda: self.open_qa_report(entry), icon="FACT_CHECK",
+                                       key="open-qa-report",
+                                       disabled_reason=None if self.navigate is not None and self.file_ref is not None
+                                       else "The QA report viewer is not available here"))
         sheet = ActionSheet(items, title="Open with", subtitle=entry.name, tablet=self.tablet)
         if self.page is not None:
             sheet.show(self.page)
         self.last_sheet = sheet
         return sheet
 
+    def open_qa_report(self, entry: FileEntry) -> Optional[str]:
+        """``tools.qa.report`` on a QA Scanner report (``rid`` = its file ref)."""
+        if self.navigate is None or self.file_ref is None:
+            return None
+        rid = self.file_ref(entry.path)
+        self.navigate("tools.qa.report", {"rid": rid})
+        return rid
+
     def open_media(self, entry: FileEntry) -> Any:
         """The chat's full-screen MediaViewer on one image / video / audio file (zoom, play, Share,
         Save to…, Open externally: the file's own ExportSheet and share sheet)."""
-        from glossarion_mobile.ui.chat.media_cards import AudioHub
-        from glossarion_mobile.ui.chat.media_model import MediaItem
-        from glossarion_mobile.ui.components.media_viewer import MediaViewer
-
-        kind = media_kind(entry.path)
-        if kind is None or self.push_overlay is None:
-            return None
-
-        def share(path: str) -> Any:
-            return self._spawn(self.files.share([path])) if self.files is not None else None
-
-        def save(path: str) -> Any:
-            if self.files is None or self.page is None:
-                return None
-            sheet = export_sheet(self.files, path, page=self.page, notify=self.notify, tablet=self.tablet)
-            sheet.show(self.page)
-            return sheet
-
-        def close() -> None:
-            if self.pop_overlay is not None:
-                self.pop_overlay(viewer.view)
-
-        viewer = MediaViewer([MediaItem(kind, entry.path, os.path.isfile(entry.path))], on_close=close,
-                             on_save=save, on_share=share, on_open_external=share,
-                             audio_hub=AudioHub() if kind == "audio" else None, spawn=self._spawn)
-        self.media_viewer = viewer
-        self.push_overlay(viewer.view)
+        viewer = open_media_viewer(entry.path, push_overlay=self.push_overlay, pop_overlay=self.pop_overlay,
+                                   files=self.files, page=self.page, notify=self.notify, tablet=self.tablet,
+                                   spawn=self._spawn)
+        if viewer is not None:
+            self.media_viewer = viewer
         return viewer
 
     def open_text(self, entry: FileEntry) -> Optional[str]:

@@ -352,14 +352,17 @@ def js_call(function: str, *args: Any) -> str:
 # ---- events -------------------------------------------------------------------------------------
 
 
-def parse_console_message(message: Any) -> Optional[dict]:
-    """The event dict of a ``GLRDR:`` console line (``None`` for other console output)."""
+def parse_console_message(message: Any, prefix: str = CONSOLE_PREFIX) -> Optional[dict]:
+    """The event dict of a ``GLRDR:`` console line (``None`` for other console output).
+
+    ``prefix`` lets another page protocol share this console channel parser: the
+    WebViewBridge's hidden pages answer with ``GLWVB:`` lines (services/webview_bridge.py)."""
     text = str(message or "")
-    at = text.find(CONSOLE_PREFIX)
+    at = text.find(prefix)
     if at < 0 or at > 16:  # some WebViews prefix the source location
         return None
     try:
-        payload = json.loads(text[at + len(CONSOLE_PREFIX):])
+        payload = json.loads(text[at + len(prefix):])
     except ValueError:
         return None
     return payload if isinstance(payload, dict) else None

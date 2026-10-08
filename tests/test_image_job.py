@@ -136,8 +136,13 @@ def _git_ok():
 
 
 #: Every U7 (image / RPG Maker, QA Stop) change of translator_gui.py vs its parent: (first old line, last old
-#: line, new line count) of each non-equal difflib block.
+#: line, new line count) of each non-equal difflib block. U9 gap closures moved more code out (pinned by
+#: tests/parity/test_u9_extractions.py, test_u9_gap_moves.py and tests/test_translation_pipeline.py); their
+#: spans are listed too, so the file still changes nowhere else.
 TG_U7_SPANS = (
+    (224, 324, 2),       # U9: _fmt_bytes / _sweep_size_capped_dir -> shutdown_utils (imported under the old names)
+    (328, 328, 1),       #   _sweep_large_caches docstring
+    (330, 415, 4),       #   ... its body calls shutdown_utils.sweep_large_caches(script_file=__file__)
     (1342, 1341, 8),     # import the Direct Text rule functions from direct_text_store
     (2751, 2759, 5),     # dialog __init__: configured_glossary_override_mode(...)
     (3560, 3564, 2),     # _on_glossary_override_toggled: glossary_override_config_updates(mode)
@@ -147,9 +152,17 @@ TG_U7_SPANS = (
     (3754, 3754, 9),     #   _accept: manual_glossary_source_record(...)
     (3761, 3789, 1),     #   ... result.update(record)
     (5700, 5700, 1),     # _rename_chat: chat_rename_title(new_title)
+    (12277, 12276, 2),   # U9 review: select_google_credentials imports the settings_rules check + messages
+    (12281, 12281, 1),   #   if is_google_service_account(creds_data):
+    (12300, 12300, 1),   #   INVALID_GOOGLE_CREDENTIALS (tests/parity/test_u9_gap_round4.py runs it vs the frozen one)
+    (12303, 12303, 1),   #   google_credentials_load_error(e)
     (13613, 13623, 8),   # _authgem_projects_loaded: authgem_auth.authgem_project_items(...)
     (13625, 13635, 1),   #   ... authgem_auth.choose_authgem_project_index(...)
-    (23578, 25280, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
+    (14648, 14657, 1),   # U9: _show_model_info_dialog imports model_options.provider_info_html
+    (14659, 14851, 1),   #   ... info_text = provider_info_html() (the HTML moved verbatim)
+    (19821, 19845, 0),   # U9: _rename_input_for_existing_workspace_collision moved into run_env.RunEnvMixin
+    (23411, 23468, 0),   # U9: _get_pdf_range_entries_for_preview moved into the GlossaryPipelineMixin
+    (23577, 25279, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
     # U7 Integrate: the QA Stop handlers call the qa_scan_runtime stop helpers (tests/test_u7_tool_cores.py
     # pins them against the frozen blocks)
     (26497, 26496, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)

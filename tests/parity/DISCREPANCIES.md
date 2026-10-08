@@ -3378,3 +3378,323 @@ fixes" desktop bug 1): each U8 section numbers its own list.
   marked `backend` (numpy + cv2, what importing bubble_detector needs) instead of `runtime`
   (onnxruntime): CI's python-app job, which has no onnxruntime, now runs the only test of the
   bubble_detector → manga_models hand-off.
+
+## U9 gap closures, audit round 2 (key_pool_service, glossary_document, run_env moves; Library seam; settings rules)
+
+Pinned by tests/parity/test_u9_gap_moves.py (oracle: `git show 96da1ec6`, the parent of the moves).
+
+### Moves (behaviour unchanged, each pinned)
+
+- **Multi-Key Manager Status column.** The `if/elif` chain of `MultiAPIKeyDialog._refresh_key_list`
+  that picks Testing / Disabled / Passed / Failed / Timed Out / Rate Limited / Error / Cooling (Ns) /
+  Active is `key_pool_service.key_tree_status(key)` now (moved verbatim; an expired cooldown still
+  clears `is_cooling_down`); the tree calls it. Mobile key cards read the same rule plus the running
+  client's per-key stats (`live_key_stats`: success / error counts, cooldown), so a key cooling down
+  during a job shows "Cooling (Ns)" there too.
+- **Glossary Manager Entry Type Configuration / Custom Fields.** The legacy `term` -> `terms`
+  normalisation, the list order (built-in first), Add Type (lower-cased, blank / duplicate warnings)
+  and the built-in guard of × Remove are `glossary_document.normalize_legacy_entry_types` /
+  `sorted_entry_types` / `add_entry_type` / `entry_type_remove_warning`; the Custom Fields Add /
+  Remove flag rule is `glossary_document.description_removed_flag`. The closures call them and keep
+  their widgets and message boxes (the warning title/text come back as a tuple). Recorded, not fixed:
+  × Remove's guard checks `['character', 'term']` while the list hides × for `['character', 'terms']`
+  (a `terms` row never shows ×; the guard's `term` can never be clicked).
+- **Workspace-collision rename.** `TranslatorGUI._rename_input_for_existing_workspace_collision` moved
+  verbatim into `run_env.RunEnvMixin` (TranslatorGUI inherits it; `_handle_file_selection` still calls
+  it on `self`), so HeadlessOwner has it: mobile's translate / glossary adapters rename an app-owned
+  input copy (Inbox, Library/Raw) whose workspace belongs to another format, like the desktop file
+  selection (`Novel.epub` next to a `Novel` workspace of `Novel.pdf` -> `Novel_EPUB.epub`); the Library
+  raw registry / origins follow the rename and the job result lists it. A user original is never
+  renamed (mobile only ever runs on app-owned copies).
+
+### Seam gap fixed: the compile / source lookups honour GLOSSARION_LIBRARY_DIR
+
+`epub_converter._glossarion_library_dir()` and TransateKRtoEN's `_library_origins_raw_epubs_for_stem` /
+`_library_raw_inputs_epubs_for_stem` built `~/Documents/Glossarion/Library` by hand. Glossarion Mobile
+keeps its Library in app storage (`GLOSSARION_LIBRARY_DIR`), so `_organized_library_replacement_target`
+read a `library_origins.txt` that did not exist: Compile EPUB never replaced the organized
+`Library/Translated` copy (a stale copy stayed and the new EPUB was a duplicate in the workspace),
+and the compile / translation source-reference lookups silently fell back to `source_epub.txt`.
+All three now call `library_core.library_root_path()` through a lazy import (falling back to the old
+expression), the U1 `output_naming._library_dir()` fix; the same path on desktop when the variable is
+unset (pinned).
+
+### Shared rule added (no desktop caller)
+
+- `settings_rules.apply_change(config, 'output_language', value)` runs the target-language fan-out
+  (`fan_out_target_language`, i.e. `ConfigStateMixin.update_target_language`). The desktop never calls
+  `apply_change`; mobile's global writers (Settings tiles, ModelSheet / Plan chips, Chat settings ›
+  All chats, Welcome) go through it, together with the output-mode / glossary-mode / thinking rules
+  and `prompt_profiles.select_profile` for the main profile (`text_extraction_method`).
+
+### Schema overlay (display only; desktop tables never read it)
+
+- `READONLY_REASONS`: the legacy output-mode flags (`enable_image_translation`,
+  `enable_image/video/audio/refinement_output_mode`) "Follow Output mode".
+- `glossary_refinement_chunking_mode` sits in Glossary › Refinement as "Request mode" with the
+  desktop combo's two choices and tooltip (`TOOLTIP_OVERRIDES`, new); `custom_field_description_removed`
+  is internal state (the Custom Fields editor maintains it).
+
+
+## U9 gap closures, audit round 4 (key_pool_service, key_contexts, settings_rules, model_options; mobile only otherwise)
+
+Pinned by `tests/parity/test_u9_gap_round4.py` (oracle: the desktop at 96da1ec6) and
+`src/mobile/tests_host/test_u9_gap_round4.py`.
+
+### Moves (behaviour unchanged, each pinned)
+
+- `IndividualEndpointDialog._validate` / `_is_azure_endpoint` -> `key_pool_service.individual_endpoint_error` /
+  `is_azure_endpoint` (same messages, same order of checks); the dialog calls them and still shows the
+  message in its "Validation Error" box. `INDIVIDUAL_ENDPOINT_SHORTCUTS` lists the dialog's shortcut buttons.
+  `validate_entry` (mobile only; the desktop never calls it) now refuses an invalid per-key endpoint too.
+- `multi_api_key_manager._edit_selected_key_contexts`'s preset buttons -> `key_contexts.context_presets`
+  (Enable all · Disable all · 🖼️ Images only when the pool serves an image context); the dialog loops over it.
+- The desktop Google credential pickers' check (`translator_gui.select_google_credentials`,
+  `multi_api_key_manager._browse_google_credentials` / `_browse_fallback_google_credentials` /
+  `_browse_glossary_google_credentials` / `_dedicated_browse_google_credentials`) ->
+  `settings_rules.is_google_service_account` (a JSON with `type` and `project_id`), `INVALID_GOOGLE_CREDENTIALS`
+  and `google_credentials_load_error` ("Failed to load credentials: …"). U9 review: the pickers call them (each
+  keeps its own read, success steps and the dedicated pools' shorter refusal); `settings_rules.google_credentials_error`
+  (mobile KeyEditor / Settings path tile) is built from the same three. `test_live_desktop_pickers_equal_the_frozen_ones`
+  runs the five live pickers against the frozen ones (readable, refused, unreadable, scalar, missing files and a
+  failing success step).
+
+### Shared rules added (no desktop caller)
+
+- `settings_rules.text_extraction_method` (owner_state's `initialize_extraction_variables`) and the visibility
+  rules `extraction:standard` / `extraction:enhanced` (other_settings `on_extraction_method_change`: the
+  BeautifulSoup option for Standard, the html2text frame for Enhanced).
+- `model_options.refresh_provider_model_catalogs`: when `ocagy_cli` is not bundled (looked up with
+  `importlib.util.find_spec`, never imported), OcAgy and OpenCode Zen report "unavailable in this build" like
+  Arena. On desktop the module ships, so the statuses and polls are unchanged.
+
+### Schema overlay (display only; desktop tables never read it)
+
+- `VISIBLE_IF`: Fix Stray p&gt; (Standard) and the eight html2text options (Enhanced).
+- `READONLY_REASONS`: `contextual` / `use_rolling_summary` / `rolling_summary_mode` "Follow Context mode" (the
+  mobile Context mode selector writes them through `settings_rules.apply_context_mode`, like the desktop
+  combo); the 13 `direct_text_*` keys are "Edited in Chat settings › All chats" (typed as text by the
+  generator); `selected_files` (the desktop's runtime selection) moves to internal state.
+- `TYPE_OVERRIDES` / `CHOICES_OVERRIDES` / `LABEL_FIXES`: Reader & Library and Progress Manager keys get their
+  stored types and the desktop values (`library_core._ALL_SIZES`, the sort modes, `reader_doc.READER_LAYOUTS`,
+  `READER_THEME_NAMES`); `vision_ocr_source_prepass` gets Auto / On / Off (values the backend reads).
+- `MOBILE_NOTES` / `MOBILE_PARTIAL_REASONS`: Advanced FFT watermark removal is slow on phones; the manga
+  worker cap below.
+
+### Mobile divergences (intentional; desktop unchanged)
+
+- Manga jobs on a phone run at most 2 parallel panels / workers (`services.manga.cap_workers` in
+  `prepare_run`, on the job's config copy; the stored value is kept and the job log says it was lowered).
+- Library › Translate… "Review glossary before translating": the translate job pauses after its automatic
+  glossary phase (`job_kinds.translate.glossary_review_gate`: the backend's approval callback for this job and
+  a wrapper around the owner instance's `_auto_load_glossary_after_extraction`); ■ No stops the job. The
+  desktop has no gate for book jobs and never sets the param.
+- Jobs whose model is a route excluded on mobile are not queued (`model_catalog.job_model_block` in
+  `JobsFeature.submit`, the TranslateSheet and the Extract glossary sheet), instead of failing inside the API
+  client with desktop-only text.
+
+
+## U9 browser-driver seam (browser_driver; authnd_auth / gemini_free rewired)
+
+Pinned by `tests/test_browser_driver.py` (Python 3.10, no Qt: a scripted fake Qt page and a fake driver
+page model the same website) and `src/mobile/tests_host/test_webview_bridge.py`.
+
+### Moves (behaviour unchanged on desktop)
+
+- **AuthND hCaptcha minting.** The flow inside `authnd_auth._mint_captcha_token_qt` moved line for line into
+  `_mint_captcha_token_flow(page, …)`; its page scripts are `_captcha_injection_script(...)` and
+  `CAPTCHA_STATE_SCRIPT`. The Qt helper (subprocess by default, inline on request) runs the flow on its
+  QWebEnginePage exactly as before (same scripts, same order, same re-injection, same timeouts).
+- **Gemini Free AI Mode.** The submit flow moved into `gemini_free._submit_ai_mode_prompt(...)` (scripts
+  `_ai_mode_set_prompt_script(prompt)` and `AI_MODE_CLICK_SEND_SCRIPT`); the QtWebEngine helpers call it.
+- `cancel_stream` of both routes also calls `browser_driver.cancel_pages(owner)`: a no-op on desktop, where no
+  driver is ever registered.
+
+### Mobile (no desktop effect)
+
+- `browser_driver` is the seam: a driver interface, a registry, `use_driver()` (no helper subprocesses, or a
+  driver registered), `BrowserUnavailable` ("needs the in-app browser"), a never-blocking `cancel_pages` and a
+  load wait. Glossarion Mobile registers its hidden-WebView driver (`services.webview_bridge`) where flet-webview
+  runs; `authnd_auth.get_captcha_token` / `gemini_free.load_ai_mode_prompt_text` and the per-request search then
+  run the same flows on driver pages, and `_mint_captcha_token_subprocess` / `_run_search_subprocess_once` refuse
+  to start a process (the two spawn-ratchet baselines are gone from `backend_manifest.toml`).
+- `gemini_free.send_chat_completion` uses the desktop helper orchestration in driver mode, so sub-chunking,
+  concurrency, start delay and the sub-chunk timeout apply on mobile (one hidden page per helper request, at most 4).
+- Settings: the two "planned for U9" UNAVAILABLE rules are gone; only `authnd_token_subprocess_concurrency`
+  stays unavailable on mobile (no helper subprocesses).
+- Best effort, shown in Accounts › Experimental: an interactive hCaptcha challenge cannot be answered by the
+  hidden page (the request fails at the token timeout); flet-webview cannot set the user agent or
+  Accept-Language; Google consent / verification pages surface as errors; pages may pause in the background.
+
+
+## U9 P5b: the desktop settings tables are built from the settings schema (settings_schema.desktop_*)
+
+Pinned by `tests/test_schema_p5b.py` (oracle: the literals at 1cd68178) and `tests/test_headless_owner.py`
+(`_MOVE_EDITS` entry for `_init_variables`).
+
+- `SettingsPersistenceMixin._apply_live_settings_to_config` (save_config) builds `settings_map` with
+  `settings_schema.desktop_settings_map(self)`; `ConfigStateMixin._init_variables` builds `bool_vars` /
+  `str_vars` with `desktop_bool_vars(self)` / `desktop_str_vars(self)`. The rows come from the generated
+  `settings_schema_data.DESKTOP_SETTINGS_MAP` / `DESKTOP_BOOL_VARS` / `DESKTOP_STR_VARS`.
+- Proven equal before the switch: every row in order, keys, sources (lists; `('config', key)` tuples),
+  defaults (value and type, evaluated fresh per call like the literal: `getattr(self, 'default_*', '')`,
+  `self.config.get(...)`, new `[]` / `{}`), converters (the same builtin / named function objects; the 75
+  lambdas are replaced by functions applying the schema's ConvSpec and agree on more than 9,000 inputs,
+  exceptions included), plus HeadlessOwner runs with the 1cd68178 methods vs the working tree on random states
+  (same attributes, config, collected settings, startup environment). Cost: 0.11 ms per save (literal 0.02 ms).
+- The literals live on line for line in `src/mobile/tools/frozen_desktop_tables.py`, the generator's input
+  (`schema_extract` splices each one back in place of its `desktop_*()` call). Changing a desktop table now means:
+  edit that file, run `python src/mobile/tools/schema_extract.py`, move the pins (docstring of the frozen file).
+- Desktop bug kept, not fixed: the `thinking_budget`, `gpt_reasoning_tokens` and `anthropic_thinking_budget`
+  converters (`int(v) if str(v).lstrip('-').isdigit() else default`) raise ValueError on values such as `--5`;
+  save_config then fails and restores config.json from its backup. Identical before and after P5b.
+
+
+## U9 update check (update_core; update_manager.UpdateManager rewired)
+
+Pinned by `tests/test_update_core.py` (oracle: `git show 1cd68178:src/update_manager.py`).
+
+- The GUI-free members of `UpdateManager` moved verbatim into `update_core.UpdateCoreMixin`
+  (`MIN_UPDATE_SIZE`, `_eligible_update_asset`, `_validate_update_file`, `GITHUB_API_URL`, `GITHUB_LATEST_URL`,
+  `_detect_build_variant`, `_detect_arch`, `_detect_platform`, `_asset_platform`, `_asset_arch`,
+  `fetch_multiple_releases`, `_save_last_check_time`). Two splits: the try-body of
+  `_check_for_updates_internal` is `_check_for_updates_core`, the config part of `skip_version` is
+  `_skip_latest_version`; the desktop inherits the mixin and keeps its message boxes. Same results, config
+  writes, check times, release state and message boxes on 12 scripted GitHub scenarios × silent × force_show.
+- Mobile: `HeadlessUpdateChecker` runs the same check on the mobile config (same `auto_update_check`,
+  `last_update_check_time`, `skipped_versions` keys); About › Updates picks the APK for the device ABI or the
+  AltStore / SideStore links on iOS. The mobile app is never published (owner's rule), so a release without a
+  mobile asset is a normal answer ("…has no Android build. See the release page."). Self-install stays excluded.
+
+
+## U9 Tier B (plan dependency rule; src/mobile/pyproject.toml, tests_host/test_tier_b.py)
+
+- Pinned for every Android / iOS target (`check_mobile_wheels.py`): `grpcio==1.81.0`, `grpcio-status==1.81.0`,
+  `google-api-core==2.41.0`, `google-ai-generativelanguage==0.12.1` (Gemini gRPC transport),
+  `google-cloud-translate==3.28.0` (paid google-translate route; translate_v2 is REST), `google-cloud-texttospeech==2.38.0`
+  (Audio mode voices) and `google-cloud-vision==3.16.0`. grpcio-status >= 1.84 needs grpcio >= 1.84, which has
+  no mobile build. The bootstrap env contract sets `GRPC_DNS_RESOLVER=native` (the Android grpcio build's c-ares
+  finds no DNS servers on Android 8+ without its JNI init).
+- Mobile behaviour change vs U8: with google-cloud-vision installed, manga Google Cloud Vision OCR takes the SDK
+  path like the desktop; `google_vision_rest` stays the fallback when the import fails.
+- Vertex: every google-cloud-aiplatform release requires protobuf<7 (the app pins 7.35.0), so it is not shipped.
+  `UnifiedClient._send_vertex_model_garden` tolerates the ImportError of the unused `aiplatform` / `vertexai`
+  imports on mobile only (`_is_mobile_runtime()`); desktop re-raises exactly as before. Vertex Gemini runs
+  through google-genai (`vertexai=True`) and Vertex Claude through `anthropic.AnthropicVertex`, REST +
+  google-auth service-account tokens, the desktop code unchanged.
+- Not shipped, disabled with a reason (settings_schema overlay): the QA silent-truncation embeddings
+  (`qa_scanner_settings.truncation_embed_threshold`; sentence-transformers needs torch / hf-xet) and the
+  Argos offline MT provider value (`sdlxliff_machine_translation_provider` = argos; ctranslate2, sentencepiece,
+  stanza -> torch). Azure Document Intelligence keeps the U8 REST client: azure-ai-documentintelligence resolves,
+  but `ocr_manager` imports `azure.ai.formrecognizer` (U8 Integrate, OCR providers, desktop bug 3).
+- Forward risk: google-api-core 2.41 warns that Google Cloud packages will require grpcio >= 1.83 (post-quantum
+  TLS) from April 2027; upgrading needs a grpcio >= 1.83 Android / iOS build (none on pypi.flet.dev today).
+
+
+## U9 gap closures, audit round 1 (shutdown_utils, model_options, key_pool_service, metadata_defaults, progress cores, manga cores)
+
+Pinned by `tests/parity/test_u9_extractions.py` (oracle: `git show 96da1ec6`); the PDF range preview by
+`tests/test_translation_pipeline.py`, the Clear Boxes halves by `tests/test_manga_editor_core.py`.
+
+### Moves (behaviour unchanged, each pinned)
+
+- translator_gui `_fmt_bytes` / `_sweep_size_capped_dir` / `_sweep_large_caches` -> `shutdown_utils.fmt_bytes` /
+  `sweep_size_capped_dir` / `sweep_large_caches` (public names; the script folder comes from `script_file`;
+  `extra_roots` lets mobile cap its Payloads / http_requests folders at the same 400 MB at launch).
+- translator_gui `_show_model_info_dialog` text -> `model_options.PROVIDER_INFO_HTML` (the dialog shows the same
+  HTML; the mobile ModelSheet ⓘ renders it instead of its own one-paragraph text).
+- other_settings `test_api_connections` endpoint collection / probe loop -> `key_pool_service.collect_test_endpoints`
+  / `run_endpoint_tests` (`self` -> `owner`); Settings › Endpoints › Test connection shows one row per endpoint.
+- other_settings `HeaderTranslationHelpDialog` sections -> `metadata_defaults.HEADER_HELP_SECTIONS` (Tools › Headers ⓘ).
+- Retranslation_GUI's untranslated-rows closure -> `progress_core.untranslated_manual_entries` (mobile Manual
+  editing sidecars) and its QA search-term extraction -> `progress_actions.qa_issue_search_target` (Edit file
+  jumps to the QA issue).
+- translator_gui `_get_pdf_range_entries_for_preview` -> the GlossaryPipelineMixin (Choose chapters preview).
+- manga_integration `_show_model_info` text -> `manga_models.MODEL_INFO`; Reset to Defaults values ->
+  `manga_settings_defaults.RENDERING_RESET_VALUES`; the custom image-edit endpoint test ->
+  `manga_env.normalize_custom_image_edit_url` / `probe_custom_image_edit_endpoint` (the desktop keeps its message
+  box and label colours); manga_settings_dialog's mask preset arguments -> `manga_settings_defaults.MASK_PRESETS`;
+  MangaImagePreviewWidget `_on_clear_boxes_clicked`'s state half -> `manga_editor_core` (Editor › Clear boxes).
+
+
+## U9 gap closures, audit round 3 (settings_rules, metadata_defaults)
+
+Pinned by `tests/parity/test_u9_gap_round3.py` (oracle: `git show 96da1ec6`) and
+`src/mobile/tests_host/test_u9_gap_round3.py`.
+
+- GlossaryManager_GUI `_update_glossary_compression` (Balanced/Full "Compression Factor" + Auto) ->
+  `settings_rules.glossary_output_limit` / `glossary_auto_compression_factor`; the closure keeps its widget work in
+  the same order. `settings_rules.apply_glossary_auto_compression` is its config side for mobile (no desktop caller).
+- metadata_batch_translator `_reset_all_prompts_to_defaults`'s key list -> `metadata_defaults.METADATA_PROMPT_RESET_KEYS`;
+  its config side (remove those keys, blank `book_title_prompt`, re-seed the defaults) ->
+  `metadata_defaults.reset_metadata_prompts`. U9 review: the desktop method calls it (then clears the gui's
+  `book_title_prompt` attribute, saves, reloads and refreshes its widgets as before);
+  `test_live_reset_config_side_equals_the_frozen_method` runs the live and the frozen method up to the save.
+- New lock / change rules (mobile only) lock `compression_factor` while `auto_compression_factor` is on and
+  `glossary_compression_factor` while `glossary_auto_compression` is on, recomputing them with the desktop's own
+  threshold tables (`ConfigStateMixin._update_auto_compression_factor` and the Glossary Manager closure).
+
+
+## U9 Integrate (wiring, packaging, docs)
+
+- `browser_driver` and `update_core` are module-level imports of `authnd_auth` / `gemini_free` and
+  `update_manager`, so they are in both blocks of all 14 PyInstaller specs (`tests/test_mobile_runtime.py`).
+- The app installs the WebViewBridge, About › Updates, Series, the keyboard shortcuts and the Logs & diagnostics
+  start-up from `app.py`; 'U9' is in `SHIPPED_MILESTONES`, so every route's milestone has shipped and no route
+  shows a placeholder (`tests_host/test_u9_integrate.py`).
+- Series (optional, mobile only): `mobile_series.json` beside the chat sidecar; a chat's series is `series_id` in
+  `direct_text_chats.mobile.json` (never in `direct_text_chats.json`); series defaults sit between the global
+  config and the chat's own overrides (`ChatStoreAdapter.override_layers`). The desktop has no Series.
+- Not shipped: the optional iOS Share Extension (README "iOS Share Extension": files reach the app through
+  Open-in / Files and the CFBundleDocumentTypes, now including images for manga pages).
+
+
+## U9 review fixes (config export credentials, gRPC SDKs on first use, credential pickers / metadata reset rewired, CI)
+
+- Mobile config exports (Settings › Backup & restore; mobile only): "Export with API keys (passphrase)" also
+  encrypts, and "Export settings (without API keys)" also removes, every credential outside
+  `api_key_encryption`'s field lists: the settings_schema keys typed `secret` (nested ones included,
+  `qa_scanner_settings.ai_truncation_api_key`) and the Azure OCR keys (`azure_vision_key`,
+  `azure_document_intelligence_key`, `azure_key`): `services.config_export.secret_fields` / `without_secrets`.
+  An export that would still hold a plain-text credential is refused. `api_key_encryption` (what config.json
+  encrypts at rest, desktop and phone) is unchanged.
+- `unified_api_client` on the mobile runtime only (`_DEFER_GRPC_SDKS = _is_mobile_runtime()`): `grpc_gemini_client`
+  and `google.cloud.translate_v2` (its package imports the gRPC translate_v3 client) are imported by the first
+  request that uses the gRPC Gemini transport / the paid google-translate route (`_ensure_grpc_gemini` /
+  `_ensure_google_translate`), not by the launch warm import (host: 331 fewer modules, about 250 ms of the
+  2.1-2.4 s warm import; grpcio is no longer loaded at launch). Desktop: the flag is False, the imports run at
+  import time and the two checks evaluate exactly as before (`GEMINI_GRPC_AVAILABLE or _ensure_grpc_gemini()`
+  only calls the helper when the flag is already False, and it then returns False without importing).
+  The bootstrap filters google-api-core's grpcio < 1.83 post-quantum FutureWarning (`KNOWN_WARNINGS`).
+- Desktop rewires (behaviour unchanged, pinned against the frozen 96da1ec6 methods): the Google credential pickers
+  (audit round 4) and Configure All › Reset all prompts (audit round 3), see those sections.
+- Parity oracle: `tests/parity/freeze_legacy.py` freezes `settings_schema` and `settings_schema_data` whole
+  (`SHARED_HELPER_MODULES`), and frozen code's `importlib.import_module` of a frozen module name returns the
+  frozen copy, so an oracle frozen after P5b keeps its own settings_map / bool_vars / str_vars (and the
+  `_format_plain_decimal_setting` converter of its own run_env). The current oracle (9355bb5d) predates P5b and
+  is unaffected.
+- CI: python-app runs `tests/parity/test_u9_extractions.py`, `test_u9_gap_moves.py`, `test_u9_gap_round3.py`
+  and `test_u9_gap_round4.py` (they pin the U9 desktop rewires; `git show` of 96da1ec6 needs the full
+  history the job already fetches). Build Mobile: `IOS_SIMULATOR_SMOKE_POLICY: required` (passed in run
+  37728461336); the Android UI tests stay optional. The release job stays manual-only and gated.
+
+### Second review round (U9; mobile and test-only, no desktop change)
+- **Series glossary prefill.** The chat view keeps one "Provide Manual Glossary" source for every chat, and
+  `SeriesFeature._prefill_glossary` only replaced it for a chat it had prefilled before, so a Series B chat
+  opened after a Series A chat offered (and on "Use glossary" ran) Series A's file; a chat outside any series
+  and Series page › Clear kept it too. The feature now remembers the one path it put on the view: on every
+  chat switch / series change that prefill follows the chat shown (its series' file, or an empty sheet), and
+  a file the user picked in the sheet is never replaced.
+- **API keys live stats (UI_SPEC §7.3).** `KeysScreen._tick_live_stats` sleeps with `foreground.poll_sleep`
+  (parks while the app is in the background) and skips its ticks while another screen or an overlay covers
+  it (`ModelsKeysFeature._is_shown`), with one refresh when shown again. It re-rendered and pushed the whole
+  key list every second while a key cooled down, hidden or not. `poll_sleep` now returns whether it parked.
+- **Back in key selection (UI_SPEC §1.6 rule 2, pre-existing since U4).** `KeysScreen.handle_back` leaves
+  selection mode before the View pops.
+- **Endpoints search landing.** The Settings › Endpoints list builds every card (`build_controls_on_demand=False`,
+  like SectionPage), so `scroll_to(scroll_key=…)` reaches a tile of the lower sections (Text-to-speech,
+  Vertex AI, Replicate) instead of highlighting it off screen.
+- **Manga › Inpainting › Import model file….** No model extension (.safetensors / .pt / .pth / .ckpt / .onnx)
+  has an Android MIME type or iOS UTI, so the Android / iOS picker gets no filter and the extension is checked
+  after the pick (a wrong file is refused and its Inbox copy removed); the desktop keeps the Browse filter.
+  The picker's Inbox copy is moved into `<manga root>/models` instead of copied (a model was stored twice).

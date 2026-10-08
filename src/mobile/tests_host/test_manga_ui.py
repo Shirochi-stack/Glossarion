@@ -1299,6 +1299,32 @@ def _settings_store(tmp_path):
     return store, schema
 
 
+def _chips_under_disabled(root, seen: list | None = None) -> list:
+    """ReasonChips with a disabled ancestor (content / controls / title / subtitle / leading / trailing / tabs);
+    ``seen`` collects every chip reached."""
+    import flet as ft
+
+    from glossarion_mobile.ui.components.reason_chip import ReasonChip
+
+    found: list = []
+
+    def walk(control, disabled):
+        if isinstance(control, ReasonChip):
+            if seen is not None:
+                seen.append(control.reason)
+            if disabled:
+                found.append(control.reason)
+        disabled = disabled or bool(getattr(control, "disabled", False))
+        for name in ("content", "controls", "title", "subtitle", "leading", "trailing", "tabs"):
+            child = getattr(control, name, None)
+            for kid in (child if isinstance(child, (list, tuple)) else [child]):
+                if isinstance(kid, ft.Control):
+                    walk(kid, disabled)
+
+    walk(root, False)
+    return found
+
+
 @needs_flet
 @pytest.mark.skipif(not _has("settings_schema"), reason="settings_schema not importable")
 def test_settings_tab_providers_inpainting_rendering_and_schema_groups(iso, tmp_path, monkeypatch):
@@ -1325,7 +1351,9 @@ def test_settings_tab_providers_inpainting_rendering_and_schema_groups(iso, tmp_
         tab.did_show()
         tiles = tab.provider_tiles
         assert list(tiles) == [v for v, _l in svc.OCR_PROVIDERS]
-        assert tiles["manga-ocr"].disabled and isinstance(tiles["manga-ocr"].trailing, ReasonChip)
+        # U9: the row stays enabled with no tap action, so its ReasonChip opens the reason (UI_SPEC §5.2)
+        assert not tiles["manga-ocr"].disabled and tiles["manga-ocr"].on_click is None
+        assert isinstance(tiles["manga-ocr"].trailing, ReasonChip)
         assert not tiles["custom-api"].disabled
         assert not tab.select_provider("easyocr") and store.get("manga_ocr_provider") is None
         assert tab.select_provider("azure") and store.get("manga_ocr_provider") == "azure"
@@ -1346,6 +1374,9 @@ def test_settings_tab_providers_inpainting_rendering_and_schema_groups(iso, tmp_
         assert store.get("manga_local_inpaint_model") == "aot_onnx"
         assert store.get(("manga_settings", "inpainting", "local_method")) == "aot_onnx"
         assert "inpaint" in tab.model_rows
+        # U9 (UI_SPEC §5.2): no ReasonChip of the tab sits under a disabled control (Flet would disable it)
+        seen: list = []
+        assert _chips_under_disabled(screen.get_body(), seen) == [] and seen
         assert not tab.select_inpaint("local", "lama")  # torch JIT
         assert tab.select_inpaint("local", "custom-image-edit")
         tab.set_image_edit_endpoint(" https://img.example/v1 ")
@@ -1727,9 +1758,27 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
         assert {"ms-replicate-key", "ms-inpaint-quality"} <= set(_by_key(tab.inpaint_card))
         assert tab.select_inpaint("local", "custom-image-edit")
         inpaint = _by_key(tab.inpaint_card)
-        assert inpaint["ms-edit-batch"].value is True and inpaint["ms-edit-test"].disabled  # no shared test yet
+        assert inpaint["ms-edit-batch"].value is True
+        shared_test = callable(svc.core_attr("manga_env", "test_custom_image_edit_endpoint"))
+        assert inpaint["ms-edit-test"].disabled is (not shared_test)  # the shared desktop test (manga_env)
+        assert "ms-edit-keys" in inpaint  # Image keys -> the inpainter key pool
+        inpaint["ms-edit-keys"].on_click(None)
+        assert ctx.navigated[-1][:2] == ("settings.keys.pool", {"pool": "inpainter"})
+        # U9: Model information ⓘ, the mask presets of the desktop dialog (B&W Manga / Colored / Uniform)
+        assert {"ms-model-info", "ms-mask-bw_manga", "ms-mask-colored", "ms-mask-uniform"} <= set(inpaint)
+        assert tab.show_model_info("aot")
+        assert tab.apply_mask_preset("uniform")
+        assert store.get(("manga_settings", "mask_dilation")) == 0
+        assert store.get(("manga_settings", "use_all_iterations")) is True
+        assert store.get(("manga_settings", "empty_bubble_dilation_iterations")) == 2
         assert tab.select_inpaint("local", "anime_onnx") and "inpaint" not in tab.model_rows  # not in FakeModels
         assert tab.select_inpaint("local", "aot_onnx") and tab.model_rows["inpaint"].model_id == "aot_onnx"
+        assert "ms-model-import" in _by_key(tab.inpaint_card)  # desktop Browse -> Import model file…
+        tab.set("manga_aot_onnx_model_path", str(tmp_path / "mine.onnx"))
+        tab.refresh(push_now=False)
+        assert "ms-model-clear" in _by_key(tab.inpaint_card)
+        tab.clear_model_file("aot_onnx")
+        assert store.get("manga_aot_onnx_model_path") == ""
         for mode, key in (("multiplier", "ms-font-mult"), ("fixed", "ms-font-size")):
             tab._set_and_refresh("manga_font_size_mode", mode)
             assert key in _by_key(tab.render_card)
@@ -1739,11 +1788,12 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
         tab._set_and_refresh("manga_shadow_enabled", False)
         render = _by_key(tab.render_card)
         assert "ms-shadow-color-hex" not in render
-        # presets come from the shared module (enabled with it); Reset is not shared: disabled with a reason
+        # presets and Reset come from the shared module (enabled with it; a reason chip without it)
         assert render["ms-preset-small"].disabled is (not svc.presets_available())
-        assert render["ms-render-reset"].disabled
-        assert any(isinstance(c, ReasonChip) for row in tab.render_card.content.controls
-                   for c in (getattr(row, "controls", None) or ()))
+        assert render["ms-render-reset"].disabled is (not svc.rendering_reset_available())
+        has_chip = any(isinstance(c, ReasonChip) for row in tab.render_card.content.controls
+                       for c in (getattr(row, "controls", None) or ()))
+        assert has_chip is (not (svc.presets_available() and svc.rendering_reset_available()))
         # the Files tab's selection writes are not settings: no re-render for them
         gen = tab._gen
         tab._on_config_changed("manga_selected_files")
@@ -1751,6 +1801,59 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
         tab._on_config_changed("manga_bg_style")
         assert tab._gen == gen + 1
         screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_import_model_file_picks_any_file_on_mobile_and_moves_the_inbox_copy(iso, tmp_path):
+    """Inpainting › Import model file…: no model extension has an Android MIME type / iOS UTI, so the
+    mobile picker gets no filter and the pick is checked afterwards (a wrong file is refused and its
+    Inbox copy removed); the model's Inbox copy moves into <root>/models instead of being stored twice.
+    The desktop keeps the Browse filter."""
+    from glossarion_mobile.ui.tools.manga.settings import SettingsTab
+
+    inbox = tmp_path / "Inbox"
+    inbox.mkdir()
+
+    class PickFiles:
+        def __init__(self, platform):
+            self.platform = platform
+            self.calls: list = []
+            self.next = ("", False)
+
+        async def pick_files(self, **kwargs):
+            self.calls.append(kwargs)
+            name, reused = self.next
+            path = inbox / name
+            if not path.exists():
+                path.write_bytes(b"model bytes")
+            return [types.SimpleNamespace(path=str(path), name=name, reused=reused)]
+
+    store: dict = {}
+    files = PickFiles("android")
+    ctx = _ctx(None, store, files=files)
+    session = _session(tmp_path, store)
+    tab = SettingsTab(ctx, session)
+    models = Path(session.root) / "models"
+
+    async def scenario():
+        files.next = ("notes.txt", False)
+        assert await tab.import_model_file("aot") is None
+        assert files.calls[-1]["allowed_extensions"] is None  # the mobile picker shows every file
+        assert "not a model file" in ctx.notes[-1][0] and not (inbox / "notes.txt").exists()
+        assert not store.get("manga_aot_model_path")
+        files.next = ("big.onnx", False)
+        path = await tab.import_model_file("aot")
+        assert Path(path) == models / "big.onnx" and Path(path).is_file()
+        assert not (inbox / "big.onnx").exists() and store["manga_aot_model_path"] == path  # moved, not copied
+        (inbox / "kept.pt").write_bytes(b"kept")
+        files.next = ("kept.pt", True)  # identical content was already in the Inbox: that file stays
+        assert Path(await tab.import_model_file("lama")) == models / "kept.pt" and (inbox / "kept.pt").exists()
+        files.platform = "windows"
+        files.next = ("desk.safetensors", False)
+        assert await tab.import_model_file("aot")
+        assert files.calls[-1]["allowed_extensions"] == list(SettingsTab.MODEL_FILE_EXTENSIONS)
 
     asyncio.run(scenario())
 
@@ -1834,6 +1937,16 @@ def test_editor_tab_edits_boxes_on_the_real_editor_session(iso, tmp_path, monkey
         assert len(tab.boxes) == 1 and tab.boxes[0]["translation"] == "Hello!"
         tab.selected = 0
         assert await tab.delete_selected() and tab.boxes == []
+        # U9: Clear boxes (the desktop's Clear Boxes halves, manga_editor_core): confirm, then every box goes
+        tab.set_tool("box")
+        tab.pan_start(5, 10)
+        tab.pan_update(25, 40)
+        await tab.pan_end()
+        assert len(tab.boxes) == 1
+        ctx.extras["answers"] = ["no"]
+        assert not await tab.clear_boxes() and len(tab.boxes) == 1
+        ctx.extras["answers"] = ["yes"]
+        assert await tab.clear_boxes() and tab.boxes == []
         screen.dispose()
         manga.editor.close()
 

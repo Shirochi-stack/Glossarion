@@ -95,7 +95,7 @@ class PlusSheet:
         )
         self.mode_content = mode_content
         self.mode_options = ft.AnimatedSwitcher(content=self._options_for(self.output_row.mode), duration=200,
-                                                key="plus-mode-options")
+                                                reverse_duration=200, key="plus-mode-options")
         self.tool_tiles = {
             tool_id: ft.ListTile(
                 leading=ft.Icon(icon_data(icon)),

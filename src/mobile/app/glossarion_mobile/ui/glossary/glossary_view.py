@@ -22,10 +22,12 @@ from typing import Any, Optional
 import flet as ft
 
 from glossarion_mobile.ui.components.empty_state import EmptyState
+from glossarion_mobile.ui.glossary.common import attach_mode_locks, mode_locks_changed
 from glossarion_mobile.ui.glossary.editor import EditorPane
 from glossarion_mobile.ui.glossary.settings_tabs import GlossarySettingsTab
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["GLOSSARY_TABS", "GlossaryScreen"]
 
@@ -172,7 +174,7 @@ class GlossaryScreen(Screen):
         feature = self.ctx.feature
         self.extract_button = ft.IconButton(icon=ft.Icons.AUTO_AWESOME, tooltip="Extract glossary",
                                             on_click=lambda e: self.ctx.spawn(self.open_extract())
-                                            if feature else None, key="gv-extract")
+                                            if feature else None, key="gv-extract", size_constraints=HIT_TARGET)
         self.menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Glossary", key="gv-menu", items=[
             ft.PopupMenuItem(content="Glossary progress", icon=ft.Icons.PLAYLIST_ADD_CHECK,
                              on_click=lambda e: feature.open_progress_for_path(self.path) if feature else None),
@@ -180,8 +182,43 @@ class GlossaryScreen(Screen):
                              on_click=lambda e: self.ctx.spawn(self.editor.reload(force=True))),
             ft.PopupMenuItem(content="Share file", icon=ft.Icons.SHARE,
                              on_click=lambda e: self.ctx.spawn(self.editor.share_file())),
+            ft.PopupMenuItem(content="Search settings", icon=ft.Icons.SEARCH,
+                             on_click=lambda e: self.search_settings()),
+            ft.PopupMenuItem(content="Discard settings changes since opening", icon=ft.Icons.UNDO,
+                             on_click=lambda e: self.discard_settings_changes()),
         ])
         return [self.extract_button, self.menu]
+
+    def _settings_page(self) -> Any:
+        """The SectionPage of the selected settings tab (None on the Editor tab)."""
+        tab = self.settings_tabs.get(self.current_tab) if hasattr(self, "tabs") else None
+        return getattr(tab, "page", None) if tab is not None else None
+
+    def search_settings(self) -> Any:
+        page = self._settings_page()
+        if page is None:
+            settings = getattr(self.ctx, "settings", None)
+            if settings is not None:
+                from glossarion_mobile.ui.settings.search import SettingsSearch, search_sheet
+
+                sheet = search_sheet(SettingsSearch(settings, on_open=lambda hit: settings.open_setting(
+                    hit.section_id, hit.key), autofocus=True))
+                settings.show_dialog(sheet)
+                return sheet
+            return None
+        return page.open_search()
+
+    def discard_settings_changes(self) -> list:
+        """⋯ Discard changes since opening (desktop Glossary Manager Cancel): the selected settings
+        tab's SectionPage restores the config it opened with."""
+        page = self._settings_page()
+        if page is None:
+            self.ctx.say("Open a settings tab (General, Balanced/Full, Minimal, Refinement) first")
+            return []
+        changed = page.discard_changes()
+        self.ctx.say(f"Discarded {len(changed)} change{'s' if len(changed) != 1 else ''}" if changed
+                     else "Nothing changed since this tab opened")
+        return changed
 
     # ---- body ---------------------------------------------------------------------------------------------
 
@@ -231,17 +268,8 @@ class GlossaryScreen(Screen):
             return
         if not self.shown:
             self.shown = True
-            try:
-                self.service.apply_mode_locks()  # the Glossary Manager's lock pass on open
-            except Exception:
-                log.exception("glossary mode lock pass failed")
-            store = getattr(self.ctx.settings, "store", None)
-            if store is not None:
-                try:
-                    self._unsubs.append(store.observe("auto_glossary_mode", lambda key, value: self.ctx.post_ui(
-                        self._on_mode_changed)))
-                except Exception:
-                    log.debug("observing the glossary mode failed", exc_info=True)
+            # the Glossary Manager's lock pass on open and on every mode change (shared with Settings › Glossary)
+            self._unsubs.extend(attach_mode_locks(self.ctx))
             self.ctx.spawn(self.editor.open(self.path, source_path=self._source_path))
             if self.ctx.feature is not None and not self.ctx.feature.listing:
                 self._spawn_listing()
@@ -249,9 +277,7 @@ class GlossaryScreen(Screen):
         self._on_tab()
 
     def _on_mode_changed(self) -> None:
-        changed = self.service.apply_mode_locks()
-        if changed:
-            log.info("glossary mode locks applied: %s", sorted(changed))
+        mode_locks_changed(self.ctx)
 
     def handle_back(self) -> bool:
         if self.editor.selecting:

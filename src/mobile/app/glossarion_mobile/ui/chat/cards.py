@@ -9,9 +9,11 @@ glossary in a full-screen raw editor (atomic save that keeps the UTF-8 BOM, like
 Plan -> Queued -> Running -> Result. Running shows the ProgressWatcher progress
 ("Chapter 12/48 · 3 in flight · ETA …"), the current request and the live request
 cards (``Requests (N)``); Result groups the persisted request cards, the desktop
-"Extraction report" and the "Attachment actions" (Read · Share/Export · Compile ·
-QA scan · Open output · Retry failed · Migrate (the desktop Migrate, U7); an action that
-cannot run is shown disabled with a ReasonChip, nothing hidden).
+"Extraction report", the output chips of the turn's own workspace (compiled EPUB / PDF,
+``*_translated.txt``, subtitles, SDLXLIFF, glossary; ``set_outputs``) and the "Attachment
+actions" (Read · Share/Export · Compile ▾ EPUB / PDF · QA scan · Open output · Retry failed ·
+Migrate (the desktop Migrate, U7); an action that cannot run is shown disabled with a ReasonChip,
+nothing hidden).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.chat.chat_ops import OUTPUT_KINDS
 from glossarion_mobile.ui.chat.direct_text_rules import (
     attachment_icon,
     attachment_kind_label,
@@ -35,12 +38,15 @@ from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = [
     "ATTACHMENT_ACTIONS",
+    "GLOSSARY_QUESTION_KINDS",
     "GlossaryApprovalCard",
     "GlossaryEditorView",
+    "GlossaryReviewSheet",
     "JobCard",
     "NO_GLOSSARY_FILE_TEXT",
     "RequestSheet",
     "glossary_preview",
+    "glossary_question",
     "save_text_keep_bom",
 ]
 
@@ -51,9 +57,10 @@ _MUTED = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
 ATTACHMENT_ACTIONS = (
     ("read", "Read", "AUTO_STORIES", None),
     ("export", "Share / Export", "IOS_SHARE", None),
-    ("compile", "Compile", "MENU_BOOK", None),
+    ("compile", "Compile ▾", "MENU_BOOK", None),
     ("qa", "QA scan", "FACT_CHECK", None),
     ("open_output", "Open output", "FOLDER_OPEN", None),
+    ("progress", "Progress", "TIMELINE", None),
     ("retry", "Retry failed", "REPLAY", None),
     ("migrate", "Migrate", "DRIVE_FILE_MOVE", None),
 )
@@ -62,7 +69,7 @@ ATTACHMENT_ACTION_REASONS = {
     # The desktop QA scan skips Direct Text workspaces ("⏭️ Excluding Direct Text source from QA
     # scan"; qa_scan_runtime.is_direct_text_qa_path), and a chat attachment workspace is one.
     "qa": "Chat workspaces are not QA-scanned (desktop: Direct Text is excluded); "
-          "use Save to Library, then Tools › QA Scanner",
+          "use Migrate (moves it to the Library), then Tools › QA Scanner",
 }
 
 
@@ -204,6 +211,56 @@ class GlossaryApprovalCard(ft.Container):
     def _edit(self, e: Any = None) -> None:
         if self.on_edit is not None and self.path:
             self.on_edit(self.path)
+
+
+#: Blocking job questions the approval card answers (the chat run's and the Library review gate's).
+GLOSSARY_QUESTION_KINDS = ("glossary_approval", "direct_text_glossary_approval")
+
+
+def glossary_question(snapshot: Any) -> Optional[dict]:
+    """The pending glossary-approval question of a job snapshot (``{id, kind, data}``), else None."""
+    question = getattr(snapshot, "question", None) if snapshot is not None else None
+    if not isinstance(question, dict) or str(question.get("kind") or "") not in GLOSSARY_QUESTION_KINDS:
+        return None
+    return question
+
+
+class GlossaryReviewSheet:
+    """A job's glossary question answered outside a chat (UI_SPEC §3.10 / Appendix C "Book-origin glossary
+    gate": the Book page, Jobs › job): the approval card's content (✏️ Edit · ✓ Yes · ■ No) in a sheet.
+    ``on_answer(accepted)`` answers the job (``JobService.answer``); closing the sheet leaves it waiting."""
+
+    def __init__(self, *, path: str, info: Optional[dict] = None, on_answer: Callable[[bool], Any],
+                 on_edit: Optional[Callable[[str], Any]] = None, title: str = "") -> None:
+        from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+
+        self.on_answer = on_answer
+        self.answered: Optional[bool] = None
+        self._page: Any = None
+        self.card = GlossaryApprovalCard(path=path, info=info, on_answer=self._answered, on_edit=on_edit,
+                                         key="review-approval-card")
+        controls: list[ft.Control] = []
+        if title:
+            controls.append(ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, max_lines=2,
+                                    overflow=ft.TextOverflow.ELLIPSIS, key="review-approval-title"))
+        controls.append(self.card)
+        self.dialog = bottom_sheet(sheet_frame(scroll_column(controls)), key="review-approval-sheet")
+
+    def _answered(self, accepted: bool) -> None:
+        self.answered = bool(accepted)
+        self.close()
+        self.on_answer(bool(accepted))
+
+    def show(self, page: Any) -> "GlossaryReviewSheet":
+        self._page = page
+        if page is not None:
+            page.show_dialog(self.dialog)
+        return self
+
+    def close(self) -> None:
+        from glossarion_mobile.ui.components.dialogs import close_dialog
+
+        close_dialog(self._page, self.dialog)
 
 
 class GlossaryEditorView:
@@ -382,6 +439,7 @@ class JobCard(ft.Container):
         phase: CardPhase = CardPhase("done"),
         on_action: Optional[Callable[[str], Any]] = None,
         on_open_request: Optional[Callable[[dict], Any]] = None,
+        on_open_output: Optional[Callable[[str, str], Any]] = None,
         key: Any = None,
         dark: bool = False,
     ) -> None:
@@ -390,6 +448,8 @@ class JobCard(ft.Container):
         self.phase = phase
         self.on_action = on_action
         self.on_open_request = on_open_request
+        self.on_open_output = on_open_output
+        self.outputs: list = []
         self.dark = dark
         self.title_text = ft.Text("", theme_style=ft.TextThemeStyle.TITLE_SMALL, expand=True, max_lines=2,
                                   overflow=ft.TextOverflow.ELLIPSIS)
@@ -399,6 +459,13 @@ class JobCard(ft.Container):
         self.line_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED, visible=False)
         self.current_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, visible=False, max_lines=1,
                                     overflow=ft.TextOverflow.ELLIPSIS)
+        # U9 (UI_SPEC §2.12.3 / §2.12.4): the running card's issue chip ("Rate limited · retrying in 30 s",
+        # "Key cooling", "Waiting for network…") and the Result's "N QA failed" chip (-> Progress)
+        self.issue_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.HOURGLASS_TOP, size=16),
+                                  visible=False, key="job-issue")
+        self.failed_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
+                                   visible=False, key="job-qa-failed",
+                                   on_click=lambda e: self.on_action("progress") if self.on_action else None)
         self.requests_column = ft.Column([], spacing=2, tight=True)
         self.requests_tile = ft.ExpansionTile(title="Requests (0)", controls=[self.requests_column], visible=False,
                                               maintain_state=True, dense=True)
@@ -409,6 +476,8 @@ class JobCard(ft.Container):
         self.ocr_tile = ft.ExpansionTile(title="OCR (0)", controls=[ft.Container(content=self.ocr_column, padding=8)],
                                          visible=False, dense=True, key="job-ocr")
         self.plan_box = ft.Column([], spacing=8, tight=True, visible=False)
+        # UI_SPEC §2.12.4 Result: the turn's output files (tap: open / share)
+        self.outputs_row = ft.Row([], wrap=True, spacing=6, run_spacing=4, visible=False, key="job-outputs")
         self.buttons = ft.Row([], wrap=True, spacing=8, run_spacing=4)
         self.action_buttons: dict = {}
         icon_name = attachment_icon(str(self.attachment.get("extension") or ""))
@@ -426,10 +495,13 @@ class JobCard(ft.Container):
                 self.progress,
                 self.line_text,
                 self.current_text,
+                self.issue_chip,
+                self.failed_chip,
                 self.plan_box,
                 self.requests_tile,
                 self.ocr_tile,
                 self.report_tile,
+                self.outputs_row,
                 self.buttons,
             ],
             spacing=6,
@@ -468,6 +540,8 @@ class JobCard(ft.Container):
         self.ring.visible = live
         self.progress.visible = name in ("running", "stopping", "force_stopping")
         self.plan_box.visible = name == "plan"
+        if hasattr(self, "outputs_row"):
+            self.outputs_row.visible = bool(self.outputs) and not live and name not in ("plan", "queued")
         self.action_buttons = {}
         buttons: list[ft.Control] = []
         if name == "plan":
@@ -482,6 +556,7 @@ class JobCard(ft.Container):
             buttons = [
                 self._button("stop", "Stop", "error") if name == "running" else self._button("force_stop", "Force stop", "error"),
                 self._button("open_reader", "Open reader"),
+                self._button("progress", "Progress", "text"),
                 self._button("log", "Log", "text"),
             ]
         else:
@@ -495,6 +570,17 @@ class JobCard(ft.Container):
             if name in ("stopped", "interrupted"):
                 buttons.insert(0, self._button("resume", "Resume", "filled"))
         self.buttons.controls = buttons
+
+    def set_issue(self, label: str) -> None:
+        """The running card's issue chip (empty: hidden)."""
+        self.issue_chip.label = ft.Text(label)
+        self.issue_chip.visible = bool(label) and self.phase.live
+
+    def set_failed(self, count: int) -> None:
+        """Result: "N QA failed" (failed + QA-failed chapters) opens the Progress manager's Chapters."""
+        count = max(0, int(count or 0))
+        self.failed_chip.label = ft.Text(f"{count} QA failed")
+        self.failed_chip.visible = count > 0 and not self.phase.live and self.phase.name != "plan"
 
     def set_progress(self, fraction: Optional[float], line: str = "", current: str = "") -> None:
         self.progress.value = None if fraction is None else max(0.0, min(1.0, float(fraction)))
@@ -520,12 +606,40 @@ class JobCard(ft.Container):
         self.ocr_tile.title = f"OCR ({len(entries)})"
         self.ocr_tile.visible = bool(entries)
 
+    def set_outputs(self, outputs: Sequence[tuple]) -> None:
+        """Result: one chip per output file ``(path, kind)`` (``chat_ops.workspace_outputs``)."""
+        self.outputs = [(str(path), str(kind)) for path, kind in outputs or ()]
+        chips = []
+        for index, (path, kind) in enumerate(self.outputs):
+            label, icon = OUTPUT_KINDS.get(kind, (kind.upper() or "File", "INSERT_DRIVE_FILE"))
+            name = os.path.basename(path)
+            chips.append(ft.Chip(
+                label=ft.Text(f"{label} · {name}", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                leading=ft.Icon(icon_data(icon), size=16), tooltip=name,
+                on_click=(lambda e, p=path, k=kind: self.on_open_output(p, k)) if self.on_open_output else None,
+                key=f"job-output-{index}"))
+        self.outputs_row.controls = chips
+        self.outputs_row.visible = bool(chips) and not self.phase.live and self.phase.name not in ("plan", "queued")
+
     def set_report(self, markdown: str) -> None:
         self.report_md.value = display_markdown(markdown)
         self.report_tile.visible = bool(str(markdown or "").strip())
 
-    def set_plan(self, controls: Sequence[ft.Control]) -> None:
+    def set_plan(self, controls: Sequence[ft.Control], start_menu: Sequence[tuple] = ()) -> None:
+        """The Plan body; ``start_menu`` [(action id, label)] adds the Start ▾ split (UI_SPEC §2.12.1
+        "Run as async batch")."""
         self.plan_box.controls = list(controls)
+        if start_menu and self.phase.name == "plan":
+            menu = ft.PopupMenuButton(
+                icon=ft.Icons.ARROW_DROP_DOWN, tooltip="More ways to start", key="plan-start-menu",
+                items=[ft.PopupMenuItem(content=label, on_click=(lambda e, a=action_id: self.on_action(a))
+                                        if self.on_action else None)
+                       for action_id, label in start_menu],
+            )
+            controls_row = list(self.buttons.controls)
+            controls_row.insert(1 if controls_row else 0, menu)
+            self.buttons.controls = controls_row
+            self.action_buttons["start_menu"] = menu
 
     def push(self) -> None:
         try:

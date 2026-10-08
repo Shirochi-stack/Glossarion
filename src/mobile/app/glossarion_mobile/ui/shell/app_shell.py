@@ -17,6 +17,19 @@ Routes with presentation ``sheet`` open a placeholder bottom sheet without
 touching the stack; ``handled`` routes never reach the shell (the app handles
 them). Views pushed with ``push_overlay`` (the U0 device-checks screen) are
 not routable and are dropped on the next navigation.
+
+U9 (UI_SPEC §1.1, §7.5):
+
+* The shell is the page's ``components.surface`` host: on tablets chat settings, job
+  detail, compare and the term sheet open in the right SidePanel (``present`` /
+  ``open_screen_in_panel``); an unpinned panel closes on navigation. While it is open the
+  chat column, and so the composer's output-mode style, is computed without its 380 dp.
+* The layout follows the *effective* text scale (Appearance × the system font scale the
+  ``ui.text_scale`` probe measures) and is re-applied when either changes, so the >= 160 %
+  rules (pills → "Options (n)", the mode chip, the model-only header) engage at 200 %
+  system text.
+* A size-class change calls ``Screen.apply_size_class`` on every open screen (master-detail
+  at >= 1200 dp: Settings, Book page, Manga).
 """
 
 from __future__ import annotations
@@ -28,12 +41,14 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 from glossarion_mobile.state.app_state import AppState, JobStripModel
+from glossarion_mobile.ui import text_scale as ts
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.chat_view import ChatView
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.responsive import Layout, SizeClass, layout_for
 from glossarion_mobile.ui.router import FULLSCREEN, HANDLED, ROOT, ROUTES_BY_NAME, SHEET, RouteMatch, parse_route
-from glossarion_mobile.ui.screens.base import Screen, build_screen_view
+from glossarion_mobile.ui.screens.base import SHIPPED_MILESTONES, Screen, build_screen_view
 from glossarion_mobile.ui.shell.drawer import ChatDrawer
 from glossarion_mobile.ui.shell.job_strip import JobStrip
 from glossarion_mobile.ui.shell.side_panel import SidePanel
@@ -81,11 +96,13 @@ class AppShell:
         self.drawer = drawer
         self.screen_factory = screen_factory
         self.on_back = on_back  # tablet main-area back button -> app pops and syncs the route
-        self.layout: Layout = layout_for(getattr(page, "width", None) or 0, state.text_scale.value)
+        self.layout: Layout = layout_for(getattr(page, "width", None) or 0, ts.effective(state))
         self.current: RouteMatch = parse_route("/")  # the chat-root route ("/" or "/chat/<cid>")
         self.stack: list[StackEntry] = []
         self.overlays: list[ft.View] = []
-        self.side_panel = SidePanel()
+        self.side_panel = SidePanel(on_change=self._on_side_panel_change)
+        self.panel_screen: Optional[Screen] = None  # a screen shown in the SidePanel (job detail)
+        self.text_probe = ts.TextScaleProbe()
         self.global_strip = JobStrip(on_open=lambda: None)
         self.root_view: Optional[ft.View] = None
         self.nav_drawer: Optional[ft.NavigationDrawer] = None
@@ -100,6 +117,7 @@ class AppShell:
         self.sheets_shown: list[InfoSheet] = []
         self.builds = 0
         self._unsubs: list[Callable[[], None]] = []
+        surface.register(page, self)
 
     # ---- properties --------------------------------------------------------------
 
@@ -135,13 +153,19 @@ class AppShell:
         return max(360.0, float(height) - top)
 
     def mount(self) -> None:
-        """Build the layout for the current width and install ``page.views``."""
+        """Build the layout for the current width and install ``page.views`` (plus the invisible
+        system text-scale probe in ``page.overlay``)."""
+        self.text_probe.install(self.page)
         self._build()
         self._install_views()
 
     def attach(self) -> None:
         if not self._unsubs:
-            self._unsubs = [self.state.job_strip.subscribe(self._on_job_strip)]
+            self._unsubs = [
+                self.state.job_strip.subscribe(self._on_job_strip),
+                self.state.text_scale.subscribe(lambda _value: self.apply_text_scale()),
+                ts.subscribe(lambda _value: self.apply_text_scale()),
+            ]
         self.drawer.attach()
         self.chat_view.attach()
 
@@ -149,15 +173,28 @@ class AppShell:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        self.side_panel.close()
         self.drawer.detach()
         self.chat_view.detach()
         for entry in self.stack:
             entry.screen.dispose()
+        surface.unregister(self.page, self)
+
+    def _effective_scale(self) -> float:
+        """Appearance text scale × the measured system font scale (``ui.text_scale``)."""
+        return ts.effective(self.state)
+
+    def chat_layout(self) -> Layout:
+        """The layout the chat column gets: the window layout, narrowed by the SidePanel while it
+        is open on a tablet (UI_SPEC §2.3 width rules follow the chat column)."""
+        if not (self.tablet and self.side_panel.is_open):
+            return self.layout
+        return layout_for(self.layout.width, self.layout.text_scale, side_panel=True)
 
     def _build(self) -> None:
         self.builds += 1
         layout = self.layout
-        self.chat_view.apply_layout(layout)
+        self.chat_view.apply_layout(self.chat_layout())
         self.global_strip.set_model(self.state.job_strip.value)
         # Every wrapper is re-created; inner controls (drawer content, chat column,
         # screen bodies) move into the new wrappers.
@@ -228,7 +265,8 @@ class AppShell:
             return ft.Column(
                 [
                     self.chat_view.header.build(tablet=True),
-                    ft.Container(content=self.chat_view.build_body(self.layout, self._main_available_width()), expand=True),
+                    ft.Container(content=self.chat_view.build_body(self.chat_layout(), self._main_available_width()),
+                                 expand=True),
                 ],
                 spacing=0,
                 expand=True,
@@ -294,18 +332,21 @@ class AppShell:
         While the main area shows a screen the root View cannot pop (``can_pop=False``), so the
         back reaches ``on_confirm_pop``: the screen's ``handle_back`` first (leave selection mode,
         UI_SPEC §1.6 rule 2), else the main-area stack pops (rule 5). With the chat in the main
-        area the root can pop and the system default applies (rule 6: leave the app).
+        area the root can pop and the system default applies (rule 6: leave the app). An open
+        SidePanel is the tablet form of a sheet, so back closes it first (rule 1).
         """
         root = self.root_view
         if root is None:
             return
-        root.can_pop = self._top_panel_entry() is None
+        root.can_pop = self._top_panel_entry() is None and not self.side_panel.is_open
         root.on_confirm_pop = self._on_root_confirm_pop
 
     async def _on_root_confirm_pop(self, e: Any = None) -> None:
         view = getattr(e, "control", None) or self.root_view
-        leave = self._top_panel_entry() is None
-        if not leave:
+        leave = self._top_panel_entry() is None and not self.side_panel.is_open
+        if self.side_panel.is_open:
+            self.side_panel.close()  # rule 1: the panel (a sheet on phones) closes first
+        elif not leave:
             try:
                 self._on_tablet_back()
             except Exception:
@@ -437,6 +478,7 @@ class AppShell:
             if not self.stack and match.route == self.current.route:
                 self._install_views()
                 return False
+            self._close_unpinned_panel()
             for entry in self.stack:
                 entry.screen.dispose()
             self.stack = []
@@ -444,6 +486,8 @@ class AppShell:
             self._install_views()
             return True
         wanted, existing = self._plan(match, reset, in_app)
+        if presentation != FULLSCREEN:
+            self._close_unpinned_panel()
         new_stack: list[StackEntry] = []
         created: list[StackEntry] = []
         for item in wanted:
@@ -465,8 +509,13 @@ class AppShell:
         return changed
 
     def show_sheet(self, match: RouteMatch) -> InfoSheet:
+        """A ``sheet`` route nothing handled (a deep link to it): say where it lives."""
         spec = match.spec
-        sheet = InfoSheet(title=spec.title, body=f"This sheet arrives in {spec.milestone}.")
+        if spec.milestone in SHIPPED_MILESTONES:
+            body = f"{spec.title} opens from its screen; this link cannot show it on its own."
+        else:
+            body = f"This sheet arrives in {spec.milestone}."
+        sheet = InfoSheet(title=spec.title, body=body)
         self.sheets_shown.append(sheet)
         sheet.show(self.page)
         return sheet
@@ -476,6 +525,8 @@ class AppShell:
         if self.overlays:
             self.overlays.pop()
         elif self.stack:
+            if not self.stack[-1].fullscreen:
+                self._close_unpinned_panel()
             self.stack.pop().screen.dispose()
         self._install_views()
         return self.current_route
@@ -555,11 +606,85 @@ class AppShell:
         except Exception as exc:  # drawer already closed / no client
             log.debug("close_drawer: %s", exc)
 
+    # ---- side panel (components.surface host) ----------------------------------------------
+
+    def present(self, content: ft.Control, *, title: str, owner: Any = None,
+                on_close: Optional[Callable[[], Any]] = None) -> bool:
+        """Show ``content`` in the SidePanel (tablets only); False on phones."""
+        if not self.tablet:
+            return False
+        self.side_panel.open(title, content, owner=owner, on_close=on_close)
+        return True
+
+    def hosts(self, owner: Any) -> bool:
+        return self.side_panel.hosts(owner)
+
+    def dismiss(self, owner: Any) -> bool:
+        return self.side_panel.dismiss(owner)
+
+    def open_screen_in_panel(self, match: RouteMatch) -> bool:
+        """A route's screen in the SidePanel (tablets: job detail from the JobStrip, UI_SPEC §1.7);
+        the screen is disposed when the panel closes or shows something else."""
+        if not self.tablet:
+            return False
+        screen = self.screen_factory(match)
+        body = screen.get_body()
+        actions = list(screen.actions() or [])
+        content: ft.Control = body
+        if actions:
+            content = ft.Column([ft.Row(actions, alignment=ft.MainAxisAlignment.END, spacing=0, wrap=True),
+                                 ft.Container(content=body, expand=True)], spacing=0, expand=True)
+
+        def release(s: Screen = screen) -> None:
+            if self.panel_screen is s:
+                self.panel_screen = None
+            s.dispose()
+
+        self.side_panel.open(screen.title or match.spec.title, content, owner=screen, on_close=release)
+        self.panel_screen = screen
+        screen.did_show()
+        return True
+
+    def _close_unpinned_panel(self) -> None:
+        if self.side_panel.is_open and not self.side_panel.pinned:
+            self.side_panel.close()
+
+    def _on_side_panel_change(self, is_open: bool) -> None:
+        """The panel opened or closed: the main area is 380 dp narrower / wider."""
+        if not self.tablet or self.main_area is None:
+            return
+        self.chat_view.apply_layout(self.chat_layout())
+        self._sync_root_back()  # back closes an open panel first (UI_SPEC §1.6 rule 1)
+        if self._top_panel_entry() is None:  # the chat is in the main area: re-centre its column
+            self.main_area.content = self._main_content()
+            try:
+                self.main_area.update()
+            except Exception:
+                pass
+        if self.root_view is not None:
+            try:
+                self.root_view.update()
+            except Exception:
+                pass
+
     # ---- resizing ------------------------------------------------------------------------
 
     def apply_width(self, width: Optional[float], height: Optional[float] = None) -> bool:
         """``page.on_resize``: rebuild only when the size class changes."""
-        new = layout_for(width or 0, self.state.text_scale.value)
+        return self._apply_layout(layout_for(width or 0, self._effective_scale()))
+
+    def apply_text_scale(self) -> bool:
+        """The Appearance text size or the system font scale changed: re-apply the >= 160 % rules
+        (composer, header) without a rebuild; True when the compact state changed."""
+        old = self.layout
+        new = layout_for(old.width, self._effective_scale())
+        if new == old:
+            return False
+        self._apply_layout(new)
+        self.update()  # the header height follows the scale even when the compact state does not change
+        return (new.compact_text, new.output_row) != (old.compact_text, old.output_row)
+
+    def _apply_layout(self, new: Layout) -> bool:
         old = self.layout
         if self.drawer_box is not None:
             self.drawer_box.height = self._drawer_height()
@@ -567,26 +692,47 @@ class AppShell:
             self.layout = new
             if self.nav_drawer is not None:
                 self.nav_drawer.width = new.drawer_width
-            if (new.output_row, new.compact_text) != (old.output_row, old.compact_text):
+            chat = self.chat_layout()
+            current = self.chat_view.layout
+            if (chat.output_row, chat.compact_text, chat.text_scale) != (current.output_row, current.compact_text,
+                                                                         current.text_scale):
                 # the composer's output-mode control follows the chat column, which also
                 # changes inside a class on tablets (UI_SPEC §2.3); no shell rebuild
-                self.chat_view.apply_layout(new)
+                self.chat_view.apply_layout(chat)
             return False
         self.layout = new
+        if not new.persistent_sidebar:
+            self.side_panel.close()  # phones have no SidePanel: its owner's on_close runs
         self.state.size_class.set(new.size_class)
         if new.persistent_sidebar != old.persistent_sidebar:
             self._build()
             self._install_views()
         else:
-            self.chat_view.apply_layout(new)
+            self.chat_view.apply_layout(self.chat_layout())
             if self.tablet:
                 self.sidebar.width = new.sidebar_width
                 self.side_panel.set_pin_available(new.size_class is SizeClass.WIDE)
+                if new.size_class is not SizeClass.WIDE and self.side_panel.pinned:
+                    self.side_panel.pinned = False
                 self.main_area.content = self._main_content()
             else:
                 self.nav_drawer.width = new.drawer_width
                 self.root_view.controls = [self.chat_view.build_body(new)]
+        self._notify_size_class(new.size_class)
         return True
+
+    def _notify_size_class(self, size_class: SizeClass) -> None:
+        """Open screens re-arrange for the new class (``Screen.apply_size_class``: master-detail)."""
+        screens = [entry.screen for entry in self.stack]
+        if self.panel_screen is not None:
+            screens.append(self.panel_screen)
+        for screen in screens:
+            handler = getattr(screen, "apply_size_class", None)
+            if callable(handler):
+                try:
+                    handler(size_class)
+                except Exception:
+                    log.exception("%s.apply_size_class failed", type(screen).__name__)
 
     def update(self) -> None:
         try:

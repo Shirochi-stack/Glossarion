@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
-from glossarion_mobile.ui.theme import icon_data
+from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
 __all__ = ["MAX_CHIPS", "QUICK_CHIPS", "QuickChips", "chips_for_attachment"]
 
@@ -78,7 +78,7 @@ class QuickChips:
         ]
         if chips:
             chips.append(ft.IconButton(icon=ft.Icons.CLOSE, icon_size=16, tooltip="Hide suggestions",
-                                       on_click=lambda e, p=path: self.dismiss(p), key=f"quick-dismiss-{self._gen}"))
+                                       on_click=lambda e, p=path: self.dismiss(p), key=f"quick-dismiss-{self._gen}", size_constraints=HIT_TARGET))
         self.row.controls = chips
         self.row.visible = bool(chips)
         self.control.visible = bool(chips)

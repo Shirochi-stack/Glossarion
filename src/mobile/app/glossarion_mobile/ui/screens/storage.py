@@ -65,6 +65,13 @@ def storage_folders(paths: Any) -> list:
         StorageFolder("cache", "Cache", str(getattr(paths, "cache", "") or ""), clearable=True),
         StorageFolder("temp", "Temporary files", str(getattr(paths, "temp", "") or ""), clearable=True),
         StorageFolder("logs", "Logs", str(getattr(paths, "logs", "") or "")),
+        # U9: the API client's request/response dumps and the HTTP request log (Logs & diagnostics)
+        StorageFolder("payloads", "Payloads", os.path.join(data, "Payloads") if data else "", clearable=True,
+                      note="API request/response dumps (Logs & diagnostics › Save payloads)"),
+        StorageFolder("http_requests", "HTTP requests",
+                      os.path.join(str(getattr(paths, "logs", "") or ""), "http_requests")
+                      if getattr(paths, "logs", "") else "", clearable=True,
+                      note="Logs & diagnostics › HTTP logging"),
     ]
     return [folder for folder in out if folder.path]
 

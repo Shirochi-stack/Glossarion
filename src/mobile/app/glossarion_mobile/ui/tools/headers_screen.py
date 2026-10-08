@@ -25,12 +25,37 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import headers_model as hm
 from glossarion_mobile.ui.tools import targets as tg
-from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text, schema_tiles
+from glossarion_mobile.ui.tools.common import (
+    JobWatch,
+    action_button,
+    ask,
+    card,
+    failed_job_card,
+    hint_text,
+    job_failed,
+    schema_tiles,
+)
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
-__all__ = ["HeadersScreen", "MetadataFieldsSheet", "PromptsSheet", "headers_eligibility"]
+__all__ = ["HeadersScreen", "MetadataFieldsSheet", "PromptsSheet", "header_help_markdown", "headers_eligibility"]
+
+
+def header_help_markdown() -> tuple:
+    """``(title, markdown)`` of the desktop "Header Translation - Help" guide (the shared
+    ``metadata_defaults.HEADER_HELP_SECTIONS``, moved out of other_settings.HeaderTranslationHelpDialog)."""
+    try:
+        from metadata_defaults import HEADER_HELP_SECTIONS, HEADER_HELP_TITLE
+    except Exception:
+        return "Header Translation - Help", "The header translation guide is not in this build."
+    parts = []
+    for section in HEADER_HELP_SECTIONS:
+        parts.append(f"**{section.get('title', '')}**")
+        parts.extend(str(line) for line in section.get("content", ()))
+        parts.append("")
+    return HEADER_HELP_TITLE, "\n\n".join(p for p in parts if p is not None).strip()
 
 log = logging.getLogger("glossarion.tools.headers")
 
@@ -55,7 +80,11 @@ def headers_eligibility(target: tg.ToolTarget) -> Optional[str]:
 
 
 class PromptsSheet:
-    """"Configure All Prompts": the prompt tiles of the desktop dialog's tabs."""
+    """"Configure All Prompts": the prompt tiles of the desktop dialog's tabs (Book Title, Chapter Headers,
+    Metadata Fields, ⚙️ Advanced) and its "Reset all prompts to defaults"."""
+
+    RESET_TITLE = "Reset All Prompts"
+    RESET_BODY = "Are you sure you want to reset ALL prompts to their default values?\n\nThis cannot be undone."
 
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
@@ -70,8 +99,12 @@ class PromptsSheet:
                                      weight=ft.FontWeight.W_600),
                              hint_text("{target_lang} is replaced with the output language."),
                              *sections,
-                             ft.Row([ft.TextButton(content="Close", on_click=lambda e: self.close(),
-                                                   key="prompts-close")], alignment=ft.MainAxisAlignment.END)],
+                             ft.Row([ft.TextButton(content="Reset all prompts to defaults", icon=ft.Icons.RESTART_ALT,
+                                                   on_click=lambda e: self.ctx.spawn(self.confirm_reset()),
+                                                   key="prompts-reset"),
+                                     ft.TextButton(content="Close", on_click=lambda e: self.close(),
+                                                   key="prompts-close")],
+                                    alignment=ft.MainAxisAlignment.END, wrap=True)],
                             tight=True, spacing=tokens.SPACING["sm"], scroll=ft.ScrollMode.AUTO)
         self.sheet = ft.BottomSheet(content=ft.Container(content=content, padding=tokens.SPACING["sheet_padding"]),
                                     show_drag_handle=True, scrollable=True, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH)
@@ -84,6 +117,40 @@ class PromptsSheet:
 
     def close(self) -> None:
         close_dialog(self._page, self.sheet)
+
+    async def confirm_reset(self) -> bool:
+        """The desktop "Reset all prompts to defaults" (Yes / No, default No) -> ``reset()``."""
+        answer = await ask(self.ctx, self.RESET_TITLE, self.RESET_BODY,
+                           (("yes", "Yes", "destructive"), ("no", "No", "text")), key="prompts-reset")
+        if answer != "yes":
+            return False
+        return self.reset()
+
+    def reset(self) -> bool:
+        """Remove the prompt keys, blank the book title prompt and re-seed the defaults
+        (``headers_model.reset_prompt_changes``), then refresh the tiles."""
+        settings = getattr(self.ctx, "settings", None)
+        store = getattr(settings, "store", None) if settings is not None else None
+        if store is None:
+            return False
+        try:
+            removed, written = hm.reset_prompt_changes(store.snapshot())
+        except Exception:
+            log.exception("resetting the metadata prompts failed")
+            return False
+        for key in removed:
+            store.unset(key)
+        if written:
+            store.set_many(dict(written))
+        for tile in self.tiles.values():
+            try:
+                tile.refresh()
+            except Exception:
+                pass
+        say = getattr(self.ctx, "say", None)
+        if callable(say):
+            say("All prompts reset to their defaults")
+        return True
 
 
 class MetadataFieldsSheet:
@@ -255,17 +322,25 @@ class HeadersScreen(Screen):
                                  on_change=self._on_rebuild, key="hd-rebuild")
         self.header_actions = ft.Row(wrap=True, spacing=8, run_spacing=8, key="hd-header-actions")
         self.run_status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="hd-status")
+        # UI_SPEC §7.4: a failed headers / metadata job as an ErrorCard (Retry · Copy error · View log)
+        self.header_error = ft.Container(visible=False, key="hd-header-error")
+        self.metadata_error = ft.Container(visible=False, key="hd-metadata-error")
+        self.failed: dict = {}  # job kind -> the failed snapshot shown
+        self.error_builds = 0
         self.stop_button = ft.OutlinedButton(content="⏹ Stop Headers", on_click=self._on_stop, visible=False,
                                              key="hd-stop")
         self.progress = ft.ProgressBar(visible=False, key="hd-progress")
         header_tiles, self.header_tiles = schema_tiles(self.ctx, HEADER_SETTING_KEYS)
         headers = card("Chapter headers & TOC", [
             self.header_actions, self.rebuild, ft.Row([self.stop_button]), self.progress, self.run_status,
+            self.header_error,
             *header_tiles,
             ft.TextButton(content="All Meta Data settings", icon=ft.Icons.SETTINGS,
                           on_click=lambda e: self.open_settings("other.meta_data"), key="hd-meta-settings"),
         ], icon="TITLE", key="hd-headers",
-            subtitle="Translates the chapter titles from the raw EPUB's spine and updates the chapter files.")
+            subtitle="Translates the chapter titles from the raw EPUB's spine and updates the chapter files.",
+            trailing=ft.IconButton(icon=ft.Icons.INFO_OUTLINE, tooltip="Header translation help", key="hd-help",
+                                   on_click=lambda e: self.open_help(), size_constraints=HIT_TARGET))
         meta_tiles, self.meta_tiles = schema_tiles(self.ctx, METADATA_SETTING_KEYS)
         mode = str(self.ctx.cfg("metadata_translation_mode", "together") or "together")
         self.mode_radio = ft.RadioGroup(
@@ -283,6 +358,7 @@ class HeadersScreen(Screen):
                     ft.FilledTonalButton(content="Configure All Prompts", icon=ft.Icons.EDIT_NOTE,
                                          on_click=lambda e: self.open_prompts(), key="hd-prompts")], wrap=True),
             self.metadata_actions,
+            self.metadata_error,
         ], icon="LABEL", key="hd-metadata", subtitle="Book title, author, description… into metadata.json and the EPUB.")
         self._render_books()
         return ft.ListView(controls=[books, headers, metadata], expand=True, spacing=tokens.SPACING["md"],
@@ -306,7 +382,7 @@ class HeadersScreen(Screen):
             rows.append(ft.ListTile(leading=ft.Icon(ft.Icons.MENU_BOOK), title=ft.Text(target.title, max_lines=2),
                                     subtitle=ft.Text(subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=3),
                                     trailing=ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Remove",
-                                                           on_click=lambda e, t=target: self.remove_target(t)),
+                                                           on_click=lambda e, t=target: self.remove_target(t), size_constraints=HIT_TARGET),
                                     dense=True, key=f"hd-book-{target.key}"))
         if not rows:
             rows.append(hint_text("No book chosen yet.", key="hd-no-books"))
@@ -347,11 +423,42 @@ class HeadersScreen(Screen):
             from glossarion_mobile.services.jobs import progress_line
 
             self.run_status.value = f"{snap.state_label} · {progress_line(snap) or snap.phase}"
-        elif snap is not None:
+        elif snap is not None and not job_failed(snap):
             self.run_status.value = f"{snap.state_label}: {snap.title}" + (f" — {snap.error}" if snap.error else "")
         else:
             self.run_status.value = ""
-        self.ctx.push(self.header_actions, self.metadata_actions, self.stop_button, self.progress, self.run_status)
+        self._render_errors()
+        self.ctx.push(self.header_actions, self.metadata_actions, self.stop_button, self.progress, self.run_status,
+                      self.header_error, self.metadata_error)
+
+    def _render_errors(self) -> None:
+        """The ErrorCards of the last failed headers / metadata job (fresh keys per build)."""
+        self.error_builds += 1
+        for kind, slot in (("translate_headers", self.header_error), ("metadata", self.metadata_error)):
+            snap = self.failed.get(kind)
+            if snap is None:
+                slot.content, slot.visible = None, False
+                continue
+            slot.content = failed_job_card(self.ctx, snap, key=f"hd-error-{kind}-{self.error_builds}",
+                                           on_retry=lambda s=snap: self.ctx.spawn(self.retry(s)))
+            slot.visible = True
+
+    async def retry(self, snap: Any) -> Optional[str]:
+        """ErrorCard › Retry: resubmit the failed job's spec."""
+        spec = getattr(snap, "spec", None)
+        if spec is None:
+            return None
+        self.failed.pop(getattr(snap, "kind", ""), None)
+        job_id = await self.ctx.submit(spec)
+        if not job_id:
+            self._render_actions()
+            return None
+        self.watch.watch(job_id)
+        snapshot = getattr(self.ctx.jobs, "snapshot", None)
+        if getattr(snap, "kind", "") == "translate_headers" and callable(snapshot):
+            self.active_job = snapshot(job_id)
+        self._render_actions()
+        return job_id
 
     # ---- lifecycle ------------------------------------------------------------------------------------
 
@@ -552,6 +659,16 @@ class HeadersScreen(Screen):
         else:
             self.ctx.go("settings.section", {"section": section})
 
+    def open_help(self) -> Any:
+        """ⓘ on "Chapter headers & TOC": the desktop Header Translation help guide (InfoSheet)."""
+        from glossarion_mobile.ui.components.info_sheet import InfoSheet
+
+        title, body = header_help_markdown()
+        sheet = InfoSheet(title=title, body=body, markdown=True)
+        if self.ctx.page is not None:
+            sheet.show(self.ctx.page)
+        return sheet
+
     # ---- jobs ----------------------------------------------------------------------------------------------
 
     def _on_job_change(self, snap: Any) -> None:
@@ -560,7 +677,15 @@ class HeadersScreen(Screen):
             self._render_actions()
 
     def _on_job_end(self, snap: Any) -> None:
-        if getattr(snap, "kind", "") == "translate_headers":
+        kind = getattr(snap, "kind", "")
+        if kind in ("translate_headers", "metadata"):
+            if job_failed(snap):
+                self.failed[kind] = snap
+            else:
+                self.failed.pop(kind, None)
+        if kind == "translate_headers":
             self.active_job = snap
+            self._render_actions()
+        elif kind == "metadata":
             self._render_actions()
         self.ctx.spawn(self.refresh_status())

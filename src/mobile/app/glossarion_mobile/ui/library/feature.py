@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from glossarion_mobile.ui.router import RouteMatch
+from glossarion_mobile.ui.text_scale import effective as effective_text_scale
 
 __all__ = ["IMPLEMENTED_ROUTES", "LibraryFeature", "SCREEN_ROUTES"]
 
@@ -109,7 +110,43 @@ class LibraryFeature:
                 self._unsubs.append(on_transition(self._on_transition))
             except Exception:
                 log.exception("subscribing to job transitions failed")
+        drawer = getattr(app, "drawer", None)
+        if drawer is not None and hasattr(drawer, "register_search"):
+            drawer.register_search("books", self.search_books)  # the drawer's unified search (UI_SPEC §1.3)
         self._wrap_lifecycle()
+
+    # ---- drawer search ---------------------------------------------------------------------------
+
+    async def search_books(self, query: str) -> list:
+        """Drawer › Books: both shelves through the shared ``book_matches_query`` (off the UI loop)."""
+        return await self.run_io(self._search_books_blocking, query)
+
+    def _search_books_blocking(self, query: str) -> list:
+        from glossarion_mobile.ui.shell.drawer import SEARCH_LIMIT, SearchHit
+
+        service = self.service
+        hits: list = []
+        for shelf, label in (("progress", "In progress"), ("completed", "Completed")):
+            for book in service.snapshot.shelf(shelf):
+                if len(hits) >= SEARCH_LIMIT:
+                    return hits
+                if not service.matches_query(book, query):
+                    continue
+                bid = service.bid_for(book)
+                kind = str(book.get("type") or book.get("workspace_kind") or "").upper()
+                hits.append(SearchHit(
+                    title=str(book.get("name") or "Book"),
+                    subtitle=" · ".join(part for part in (label, kind) if part),
+                    icon="MENU_BOOK",
+                    open=lambda b=bid: self._navigate("library.book", {"bid": b}),
+                    key=bid,
+                ))
+        return hits
+
+    def _navigate(self, name: str, params: Optional[dict] = None) -> None:
+        navigate = getattr(self.app, "navigate_to", None)
+        if navigate is not None:
+            navigate(name, params)
 
     def detach(self) -> None:
         for unsub in self._unsubs:
@@ -191,7 +228,7 @@ class LibraryFeature:
         state = getattr(app, "state", None)
         scale = 1.0
         try:
-            scale = float(state.text_scale.value) if state is not None else 1.0
+            scale = effective_text_scale(state) if state is not None else 1.0  # app x system (U9)
         except Exception:
             scale = 1.0
         ctx = LibraryContext(
@@ -208,6 +245,7 @@ class LibraryFeature:
             intents=getattr(app, "intents", None),
             copy_text=getattr(app, "_copy_text", None),
             reader=lambda: getattr(app, "reader", None),
+            glossary=lambda: getattr(app, "glossary_feature", None),
             push_overlay=self._push_overlay,
             pop_overlay=self._pop_overlay,
             foreground=self.foreground,
@@ -268,15 +306,85 @@ class LibraryFeature:
         from glossarion_mobile.ui.components.empty_state import EmptyState
         from glossarion_mobile.ui.screens.base import Screen
 
+        feature = self
+        route_name = match.name
+
         class _Pick(Screen):
+            """No ``?out=``: the SourcePicker (Recent outputs · Library · Chat workspaces · Browse; UI_SPEC
+            §4.2 / §4.3), then the chosen output folder's Book page (Chapters / Glossary)."""
+
             title = "Glossary progress" if tab == "glossary" else "Progress manager"
+            picker: Any = None
+            _opened = False
 
             def build_body(self_inner) -> Any:
                 return EmptyState(icon="LIST_ALT", title=self_inner.title,
-                                  body="Open a book from the Library to see its chapter and glossary progress.",
-                                  primary=("Open Library", lambda e: ctx.go("library")), key="progress-pick")
+                                  body="Choose an output folder: a Library book, a recent output, a chat workspace "
+                                       "or a file you browse to.",
+                                  primary=("Choose a workspace…", lambda e: self_inner.open_picker()),
+                                  key="progress-pick")
+
+            def did_show(self_inner) -> None:
+                if not self_inner._opened:
+                    self_inner._opened = True
+                    self_inner.open_picker()
+
+            def open_picker(self_inner) -> Any:
+                self_inner.picker = feature.open_progress_picker(route_name)
+                return self_inner.picker
 
         return _Pick(match)
+
+    def open_progress_picker(self, route_name: str = "tools.progress") -> Any:
+        """The Tools SourcePicker for the Progress manager / Glossary progress (eligible: an output folder);
+        the chosen folder becomes a Library-style row (like ChatFeature.open_progress) and its route id."""
+        tools = getattr(self.app, "tools", None)
+        context = getattr(tools, "context", None)
+        if not callable(context):
+            navigate = getattr(self.app, "navigate_to", None)
+            if navigate is not None:
+                navigate("library")
+            return None
+        from glossarion_mobile.ui.tools.source_picker import SourcePicker
+
+        ctx = context()
+
+        def chosen(targets: list) -> None:
+            if targets:
+                self.spawn(self.open_progress_target(targets[0], route_name))
+
+        picker = SourcePicker(ctx, title="Open the Progress manager on…", multi=False,
+                              eligible=lambda t: None if t.folder else "Needs an output folder",
+                              on_done=chosen, segment="library", find_folder=True)
+        if self.page is not None:
+            picker.show(self.page)
+        return picker
+
+    async def open_progress_target(self, target: Any, route_name: str = "tools.progress") -> Optional[str]:
+        """``tools.progress?out=<bid>`` for a picked ToolTarget (its output folder + raw source)."""
+        service = self.service
+        folder = str(getattr(target, "folder", "") or "")
+        if not folder or service is None:
+            return None
+        source = str(getattr(target, "source", "") or "")
+        bid = str(getattr(target, "bid", "") or "")
+        if not bid:
+            def row() -> dict:
+                name = os.path.basename(os.path.normpath(folder))
+                progress = os.path.join(folder, "translation_progress.json")
+                book = {"name": name, "folder_name": name, "path": folder, "output_folder": folder,
+                        "type": "in_progress", "is_in_progress": True, "in_library": False,
+                        "progress_file": progress if os.path.isfile(progress) else ""}
+                if source and os.path.isfile(source):
+                    book["raw_source_path"] = source
+                return book
+
+            book = await self.run_io(row)
+            bid = service.bid_for(book)
+        navigate = getattr(self.app, "navigate_to", None)
+        if navigate is not None:
+            navigate(route_name, None, {"out": bid})
+        return bid
 
     def screen_factory(self, match: RouteMatch) -> Any:
         screen = None

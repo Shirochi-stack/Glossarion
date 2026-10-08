@@ -315,6 +315,10 @@ app_files = [
     ('manga_models.py', '.'),
     ('google_vision_rest.py', '.'),
     ('azure_document_intelligence_rest.py', '.'),
+    # Mobile rewrite U9: the browser-driver seam (authnd_auth / gemini_free; the mobile WebViewBridge
+    # registers a driver) and the GUI-free release check update_manager inherits (update_core)
+    ('browser_driver.py', '.'),
+    ('update_core.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -515,6 +519,10 @@ app_modules = [
     'async_batch_core',
     'output_tools_core',
     'sdlxliff_review_core',
+    # Mobile rewrite U9: the browser-driver seam (authnd_auth / gemini_free; the mobile WebViewBridge
+    # registers a driver) and the GUI-free release check update_manager inherits (update_core)
+    'browser_driver',
+    'update_core',
 ]
 # GUI Framework
 gui_modules = [

@@ -5,8 +5,8 @@ build number M*1_000_000+m*10_000+p*100), the backend bundle manifest
 (``app/backend/_bundle_info.py`` written by ``tools/collect_backend.py``: git sha,
 dirty flag, module count, bundle sha256, collection time), Python / Flet versions,
 platform, the bundled third-party packages with their licence metadata
-(``importlib.metadata``, read on a worker thread), links, and **Run the Welcome guide
-again** (``/welcome``).
+(``importlib.metadata``, read on a worker thread), links, the in-app **User guide** (the bundled
+``assets/user_guide.md``, also Help › User guide) and **Run the Welcome guide again** (``/welcome``).
 """
 
 from __future__ import annotations
@@ -22,11 +22,46 @@ import flet as ft
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.screens.page_base import PageScreen, human_size, section
 
-__all__ = ["AboutScreen", "BUNDLE_FIELDS", "bundle_info", "license_rows", "version_rows"]
+__all__ = ["AboutScreen", "BUNDLE_FIELDS", "USER_GUIDE_ASSET", "bundle_info", "license_rows", "load_user_guide",
+           "show_user_guide", "version_rows"]
 
 BUNDLE_FIELDS = ("BUILD_VERSION", "GIT_SHA", "GIT_DIRTY", "GENERATED_AT", "COLLECTED_WITH_PYTHON", "BUNDLE_SHA256",
                  "MODULE_COUNT", "TOTAL_BYTES", "COLLECTOR_VERSION")
 PROJECT_URL = "https://github.com/Shirochi-stack/Glossarion"
+#: The bundled user guide (``src/mobile/app/assets``; Help › User guide and About › Guides).
+USER_GUIDE_ASSET = "user_guide.md"
+GUIDE_MISSING = "The user guide is not in this build."
+
+
+def _assets_dir(paths: Any = None) -> Path:
+    found = getattr(paths, "assets_dir", None) if paths is not None else None
+    if found:
+        return Path(found)
+    return Path(__file__).resolve().parents[3] / "assets"  # app/assets next to the package (dev runs)
+
+
+def load_user_guide(paths: Any = None) -> str:
+    """Blocking: the bundled user guide Markdown ('' when the asset is missing)."""
+    try:
+        return (_assets_dir(paths) / USER_GUIDE_ASSET).read_text(encoding="utf-8-sig")
+    except OSError:
+        return ""
+
+
+async def show_user_guide(page: Any, paths: Any = None, *, run_io: Any = None) -> Any:
+    """Help › User guide / About › Guides › User guide: the bundled Markdown in an InfoSheet."""
+    import asyncio
+
+    from glossarion_mobile.ui.components.info_sheet import InfoSheet
+
+    if run_io is not None:
+        text = await run_io(load_user_guide, paths)
+    else:
+        text = await asyncio.to_thread(load_user_guide, paths)
+    sheet = InfoSheet(title="User guide", body=text or GUIDE_MISSING, markdown=bool(text))
+    if page is not None:
+        sheet.show(page)
+    return sheet
 
 
 def bundle_info(backend_dir: Any) -> dict:
@@ -166,6 +201,8 @@ class AboutScreen(PageScreen):
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
             section("Version", details, key="about-version"),
             section("Guides", [
+                ft.ListTile(leading=ft.Icon(ft.Icons.MENU_BOOK), title=ft.Text("User guide"),
+                            on_click=lambda e: self.spawn(self.open_user_guide()), key="about-user-guide"),
                 ft.ListTile(leading=ft.Icon(ft.Icons.WAVING_HAND), title=ft.Text("Run the Welcome guide again"),
                             on_click=lambda e: self.rerun_welcome(), key="about-welcome"),
                 ft.ListTile(leading=ft.Icon(ft.Icons.OPEN_IN_NEW), title=ft.Text("Project page"),
@@ -177,6 +214,9 @@ class AboutScreen(PageScreen):
 
     def rerun_welcome(self) -> Optional[str]:
         return self.ctx.go("welcome")
+
+    async def open_user_guide(self) -> Any:
+        return await show_user_guide(getattr(self.ctx, "page", None), self.paths, run_io=self.io)
 
     def _open(self, url: str) -> None:
         if self.open_url is not None:

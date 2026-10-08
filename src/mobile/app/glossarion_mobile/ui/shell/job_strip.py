@@ -11,10 +11,16 @@ queued badge · Stop (same state vocabulary as Send). Tap opens job detail.
 job ends the strip shows "Done · Book" / "Stopped · Book" / "Failed · Book"
 with an **Open** / **View** button (the feature clears it after 10 s).
 Swiping it down hides it until the job's state changes (UI_SPEC §1.7).
+
+44 dp is a minimum, not a fixed height (UI_SPEC §7.5: nothing but images has a fixed
+height): at 200 % text the two lines need more and the strip grows instead of clipping them.
+The live region announces at most once per ``ANNOUNCE_SECONDS`` (§7.5); in between only
+the visible text changes.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import field
 from typing import Any, Callable, Optional
 
@@ -39,6 +45,8 @@ class JobStrip(ft.Container):
     ENDED_STATES = ("done", "failed")
     #: Downward fling speed (logical px/s) that dismisses the strip.
     DISMISS_VELOCITY = 250.0
+    #: Screen readers hear the strip at most this often (UI_SPEC §7.5).
+    ANNOUNCE_SECONDS = 10.0
 
     def init(self) -> None:
         super().init()
@@ -55,10 +63,14 @@ class JobStrip(ft.Container):
         self.end_icon = ft.Icon(ft.Icons.TASK_ALT, size=24, visible=False)
         self.open_button = ft.TextButton(content="Open", on_click=self._open, visible=False)
         self.dismissed_state: Optional[str] = None
+        self._announced_at = 0.0
+        self._announced_state: Optional[str] = None
         self.semantics = ft.Semantics(
             live_region=True,
             content=ft.Row(
                 [
+                    # 44 dp minimum height: the row grows with the text (200 % scale) instead of clipping
+                    ft.Container(width=0, height=tokens.SIZES["job_strip"]),
                     ft.Stack(
                         [
                             self.ring,
@@ -78,7 +90,6 @@ class JobStrip(ft.Container):
         )
         self.gestures = ft.GestureDetector(content=self.semantics, on_vertical_drag_end=self._on_drag_end)
         self.content = self.gestures
-        self.height = tokens.SIZES["job_strip"]
         self.bgcolor = ft.Colors.SURFACE_CONTAINER_HIGHEST
         self.border_radius = tokens.RADII["job_strip"]
         self.margin = ft.Margin.symmetric(horizontal=8, vertical=4)
@@ -123,7 +134,16 @@ class JobStrip(ft.Container):
             "finishing": "Graceful stop requested. Tap again to force stop.",
             "stopping": "Force stop requested",
         }.get(model.state, "Stop")
-        self.semantics.label = f"{model.title}. {model.subtitle}".strip()
+        self._announce(model)
+
+    def _announce(self, model: JobStripModel) -> None:
+        """Update the spoken label on a state change, else at most once per ``ANNOUNCE_SECONDS``
+        (a live region re-announces every label change: progress ticks would flood TalkBack)."""
+        now = time.monotonic()
+        if model.state != self._announced_state or now - self._announced_at >= self.ANNOUNCE_SECONDS:
+            self.semantics.label = f"{model.title}. {model.subtitle}".strip()
+            self._announced_state = model.state
+            self._announced_at = now
 
     def set_model(self, model: Optional[JobStripModel]) -> None:
         self.model = model

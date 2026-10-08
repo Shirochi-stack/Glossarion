@@ -9,13 +9,15 @@ current config and replaces config.json atomically
 phone reloads ``MobileConfigStore`` in place (a running job keeps its snapshot).
 Pending edits are flushed first so the safety backup holds them.
 
-Also: export of config.json without API keys (Share), and links to profile and key
-pool import / export.
+Also: export of config.json without API keys (Share; every credential removed:
+``config_export.secret_fields``), **Export with API keys (passphrase)** and **Import config…**
+(``services.config_export``: the same credentials re-encrypted with a passphrase-derived key in the
+shared ``api_key_encryption`` ENC: format, so the keys can move to another device; U9), and links to
+profile and key pool import / export.
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -26,6 +28,7 @@ import flet as ft
 
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 from glossarion_mobile.ui.screens.page_base import PageScreen, human_size, section
+from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["BackupScreen", "config_without_keys", "delete_backup", "list_backups", "restore_backup"]
 
@@ -60,26 +63,11 @@ def delete_backup(config_path: str, name: str) -> None:
 
 
 def config_without_keys(config: dict) -> dict:
-    """A copy of ``config`` with every API key field removed (``api_key_encryption`` field lists)."""
-    out = copy.deepcopy(dict(config or {}))
-    try:
-        import api_key_encryption
+    """A copy of ``config`` with every credential removed (``services.config_export.without_secrets``: the
+    ``api_key_encryption`` field lists, the settings_schema ``secret`` keys and the Azure OCR keys)."""
+    from glossarion_mobile.services.config_export import without_secrets
 
-        handler = api_key_encryption.get_handler()
-        plain = list(getattr(handler, "api_key_fields", []) or [])
-        lists_fn = getattr(handler, "multi_key_list_fields", None)
-        if lists_fn is None:
-            lists_fn = lambda: api_key_encryption.APIKeyEncryption.multi_key_list_fields(handler)  # noqa: E731
-        lists = list(lists_fn())
-    except Exception:
-        plain, lists = ["api_key"], []
-    for key in plain:
-        out.pop(key, None)
-    for key in lists:
-        entries = out.get(key)
-        if isinstance(entries, list):
-            out[key] = [{k: v for k, v in e.items() if k != "api_key"} if isinstance(e, dict) else e for e in entries]
-    return out
+    return without_secrets(config)
 
 
 def _when(mtime: Any) -> str:
@@ -93,10 +81,12 @@ class BackupScreen(PageScreen):
     title = "Backup & restore"
 
     def __init__(self, match: Any, ctx: Any, *, share_file: Optional[Callable[[str], Any]] = None,
-                 temp_dir: Optional[str] = None) -> None:
+                 temp_dir: Optional[str] = None, pick_files: Optional[Callable[..., Any]] = None) -> None:
         super().__init__(match, ctx)
         self.share_file = share_file
         self.temp_dir = temp_dir
+        self.pick_files = pick_files
+        self.passphrase_dialog: Any = None
         self.backups: list = []
         self.list_column = ft.Column(spacing=0, tight=True)
         self.status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
@@ -115,6 +105,16 @@ class BackupScreen(PageScreen):
             section("Export & import", [
                 ft.ListTile(title=ft.Text("Export settings (without API keys)"), leading=ft.Icon(ft.Icons.IOS_SHARE),
                             on_click=self._on_export, disabled=self.share_file is None, key="backup-export"),
+                ft.ListTile(title=ft.Text("Export with API keys (passphrase)"), leading=ft.Icon(ft.Icons.ENHANCED_ENCRYPTION),
+                            subtitle=ft.Text("Keys re-encrypted with a passphrase you choose, for another device",
+                                             theme_style=ft.TextThemeStyle.BODY_SMALL),
+                            on_click=lambda e: self.ask_passphrase(export=True), disabled=self.share_file is None,
+                            key="backup-export-keys"),
+                ft.ListTile(title=ft.Text("Import config…"), leading=ft.Icon(ft.Icons.FILE_OPEN),
+                            subtitle=ft.Text("A passphrase export; a safety backup is made first",
+                                             theme_style=ft.TextThemeStyle.BODY_SMALL),
+                            on_click=lambda e: self.spawn(self.pick_import()), disabled=self.pick_files is None,
+                            key="backup-import-config"),
                 ft.ListTile(title=ft.Text("Prompt profiles import / export"), leading=ft.Icon(ft.Icons.SWAP_VERT),
                             on_click=lambda e: self.ctx.go("settings.profiles"), key="backup-profiles"),
                 ft.ListTile(title=ft.Text("Key pools import / export"), leading=ft.Icon(ft.Icons.KEY),
@@ -151,7 +151,7 @@ class BackupScreen(PageScreen):
             trailing=ft.Row([
                 ft.TextButton(content="Restore", on_click=lambda e, en=entry: self.confirm_restore(en)),
                 ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Delete",
-                              on_click=lambda e, en=entry: self.confirm_delete(en)),
+                              on_click=lambda e, en=entry: self.confirm_delete(en), size_constraints=HIT_TARGET),
             ], tight=True, spacing=0),
             dense=True,
             key=f"backup-{name}",
@@ -237,3 +237,113 @@ class BackupScreen(PageScreen):
 
     async def _on_export(self, e: Any = None) -> None:
         await self.export_without_keys()
+
+    # ---- passphrase export / import (U9) ------------------------------------------------------------
+
+    def ask_passphrase(self, *, export: bool, path: str = "") -> ft.AlertDialog:
+        """The passphrase dialog: twice for an export, once for an import."""
+        from glossarion_mobile.services.config_export import MIN_PASSPHRASE
+        from glossarion_mobile.ui.components.dialogs import close_dialog
+
+        first = ft.TextField(label="Passphrase", password=True, can_reveal_password=True, autofocus=True,
+                             key="backup-pass-1")
+        second = ft.TextField(label="Repeat passphrase", password=True, can_reveal_password=True,
+                              visible=export, key="backup-pass-2")
+        error = ft.Text("", color=ft.Colors.ERROR, visible=False, key="backup-pass-error")
+
+        def fail(text: str) -> None:
+            error.value = text
+            error.visible = True
+            try:
+                error.update()
+            except Exception:
+                pass
+
+        def ok(e: Any = None) -> None:
+            value = str(first.value or "")
+            if len(value) < MIN_PASSPHRASE:
+                fail(f"Use at least {MIN_PASSPHRASE} characters")
+                return
+            if export and value != str(second.value or ""):
+                fail("The passphrases do not match")
+                return
+            close_dialog(self.page, dialog)
+            self.spawn(self.export_with_keys(value) if export else self.import_config(path, value))
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("Export with API keys" if export else "Import config"),
+            content=ft.Column([
+                ft.Text("Anyone with this file and the passphrase can use your API keys. The passphrase is not "
+                        "stored; it cannot be recovered." if export else
+                        "Enter the passphrase the export was made with.", theme_style=ft.TextThemeStyle.BODY_SMALL),
+                first, second, error,
+            ], tight=True, spacing=8),
+            actions=[ft.TextButton(content="Cancel", on_click=lambda e: close_dialog(self.page, dialog)),
+                     ft.FilledButton(content="Export" if export else "Import", on_click=ok, key="backup-pass-ok")],
+            key="backup-pass-dialog",
+        )
+        self.passphrase_dialog = dialog
+        if self.page is not None:
+            self.page.show_dialog(dialog)
+        return dialog
+
+    async def export_with_keys(self, passphrase: str) -> Optional[str]:
+        from glossarion_mobile.services import config_export as ce
+
+        store = self.store
+        directory = self.temp_dir or os.path.dirname(store.path)
+        path = os.path.join(directory, time.strftime("glossarion_config_%Y%m%d-%H%M%S.json"))
+
+        def write() -> str:
+            os.makedirs(directory, exist_ok=True)
+            return ce.write_export(path, ce.export_config(store.snapshot(), passphrase))
+
+        try:
+            await self.io(write)
+        except Exception as exc:
+            self.say(f"Export failed: {exc}")
+            return None
+        if self.share_file is not None:
+            result = self.share_file(path)
+            if hasattr(result, "__await__"):
+                await result
+        return path
+
+    async def pick_import(self) -> Optional[str]:
+        if self.pick_files is None:
+            return None
+        result = self.pick_files(["json"], False)
+        if hasattr(result, "__await__"):
+            result = await result
+        paths = [str(getattr(item, "path", item)) for item in (result or []) if item]
+        if not paths:
+            return None
+        self.ask_passphrase(export=False, path=paths[0])
+        return paths[0]
+
+    async def import_config(self, path: str, passphrase: str) -> bool:
+        """Read, decrypt (passphrase), safety-backup the current config, then replace it in place."""
+        from glossarion_mobile.services import config_export as ce
+
+        store = self.store
+
+        def run() -> int:
+            config = ce.import_config(ce.read_export(path), passphrase)
+            store.flush()
+            store.backup_now()
+            changed = store.revert_to(config)
+            store.flush()
+            return len(changed)
+
+        try:
+            changed = await self.io(run)
+        except ce.WrongPassphrase:
+            self.say("Wrong passphrase")
+            return False
+        except Exception as exc:
+            self.say(f"Import failed: {exc}")
+            return False
+        self.say(f"Config imported ({changed} setting{'s' if changed != 1 else ''} changed); "
+                 "the previous config is in the backups")
+        await self.refresh()
+        return True

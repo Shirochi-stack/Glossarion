@@ -33,6 +33,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import ChoiceDialog, JobWatch, action_button, card, hint_text
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
@@ -129,7 +130,7 @@ class AsyncBatchScreen(Screen):
 
     def actions(self) -> list:
         return [ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Reload the job list", key="async-reload",
-                              on_click=lambda e: self.ctx.spawn(self.reload()))]
+                              on_click=lambda e: self.ctx.spawn(self.reload()), size_constraints=HIT_TARGET)]
 
     def build_body(self) -> ft.Control:
         model = str(self.ctx.cfg("model", "") or "")

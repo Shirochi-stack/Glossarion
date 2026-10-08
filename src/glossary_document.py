@@ -238,6 +238,82 @@ def configured_entry_types(config, custom_entry_types=None):
     return custom_entry_types or (config or {}).get('custom_entry_types', {}) or {}
 
 
+#: Entry types the Entry Type Configuration list puts first and offers no × for (the desktop list).
+BUILTIN_ENTRY_TYPES = ('character', 'terms')
+
+
+def normalize_legacy_entry_types(custom_entry_types):
+    """Legacy ``term`` -> ``terms`` in *custom_entry_types* (in place; returned).
+
+    Moved from the Glossary Manager's Entry Type Configuration (GlossaryManager_GUI)."""
+    # Normalize legacy key "term" -> "terms"
+    if 'term' in custom_entry_types and 'terms' not in custom_entry_types:
+        custom_entry_types['terms'] = custom_entry_types.pop('term')
+    # If both exist, prefer "terms" and drop legacy duplicate
+    if 'term' in custom_entry_types and 'terms' in custom_entry_types:
+        custom_entry_types.pop('term', None)
+    return custom_entry_types
+
+
+def sorted_entry_types(custom_entry_types):
+    """``[(type, config), ...]``: built-in first, then custom alphabetically (the desktop list order)."""
+    # Sort types: built-in first, then custom alphabetically
+    return sorted(custom_entry_types.items(),
+                  key=lambda x: (x[0] not in ['character', 'terms'], x[0]))
+
+
+def add_entry_type(custom_entry_types, text, has_gender):
+    """"Add Type": ``(type name, None)`` after adding it to *custom_entry_types* (in place), or
+    ``(None, (title, message))`` - the desktop warning - for a blank or duplicate name."""
+    type_name = text.strip().lower()
+    if not type_name:
+        return None, ("Invalid Input", "Please enter a type name")
+
+    if type_name in custom_entry_types:
+        return None, ("Duplicate Type", f"Type '{type_name}' already exists")
+
+    # Add the new type
+    custom_entry_types[type_name] = {
+        'enabled': True,
+        'has_gender': has_gender
+    }
+    return type_name, None
+
+
+def entry_type_remove_warning(type_name):
+    """The desktop warning ``(title, message)`` when *type_name* may not be removed, else None."""
+    if type_name in ['character', 'term']:
+        return ("Cannot Remove", "Built-in types cannot be removed")
+    return None
+
+
+def description_removed_flag(action, field):
+    """Custom Fields: the ``custom_field_description_removed`` value after *action* ('add' /
+    'remove') of *field*, or None when the flag stays (any field but "description")."""
+    if field.lower() == 'description':
+        # If user manually adds "description" back, clear the removal flag;
+        # if user manually removes "description", set flag to prevent re-adding
+        return action != 'add'
+    return None
+
+
+def custom_fields_flag_updates(old_fields, new_fields):
+    """``{'custom_field_description_removed': bool}`` for an edit of the whole Custom Fields list
+    (the removed fields, then the added ones, through ``description_removed_flag``), else {}."""
+    old_fields = [str(f) for f in (old_fields or [])]
+    new_fields = [str(f) for f in (new_fields or [])]
+    flag = None
+    for field in old_fields:
+        if field not in new_fields:
+            changed = description_removed_flag('remove', field)
+            flag = changed if changed is not None else flag
+    for field in new_fields:
+        if field not in old_fields:
+            changed = description_removed_flag('add', field)
+            flag = changed if changed is not None else flag
+    return {} if flag is None else {'custom_field_description_removed': flag}
+
+
 class EditorOwner:
     """The TranslatorGUI state the desktop editor reads besides the document, for one config.
 

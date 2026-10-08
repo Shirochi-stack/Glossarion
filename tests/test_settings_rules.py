@@ -89,8 +89,10 @@ def test_adapters_run_with_pyside6_blocked():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
     line = out.stdout.strip().splitlines()[-1]
+    # U9 (gap audit round 3): the compression factors lock while their Auto boxes are on
     assert line.endswith("3.0 contextual_history ['append_glossary', 'append_glossary_auto_load', 'batching_mode', "
-                         "'enable_thoughts', 'fuzzy_auto_mapping', 'fuzzy_auto_mapping_threshold', "
+                         "'compression_factor', 'enable_thoughts', 'fuzzy_auto_mapping', "
+                         "'fuzzy_auto_mapping_threshold', 'glossary_compression_factor', "
                          "'translation_temperature'] ('authgem',) False")
 
 

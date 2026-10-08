@@ -8,6 +8,10 @@ mode (the chat's ``effective_glossary_label``, the desktop rule) - plus:
   book-origin jobs; enabled only when the translate job kind supports the pause);
 * "Open in chat instead" (one book: a new chat with the raw file attached, via the
   IntentRouter's Translate-in-new-chat handler);
+* U9: the chat Plan card's pieces: the glossary chip opens the PlanGlossarySheet (Map glossaries…
+  for several EPUBs), "Run options" (``plan_card.RunOptionsPanel``: "Only for this run" values
+  become the job's ``config_overrides``) and, for one book, "Choose chapters" (range + Spine order
+  + the desktop 🔍 preview);
 * **Start**: ``LibraryService.translate_spec`` -> ``JobsFeature.submit`` (origin =
   book, so the Book page strip, the JobStrip and Jobs show it).
 
@@ -53,6 +57,19 @@ def _glossary_label(config_get: Any) -> str:
         return f"Glossary: {mode.replace('_', ' ').title()} (auto)"
 
 
+def _settings_ctx() -> Any:
+    """The SettingsContext the Run options tiles use (the app's sheet environment), or None."""
+    try:
+        from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+        ctx = sheet_env().ctx
+    except Exception:
+        return None
+    if ctx is None or getattr(ctx, "store", None) is None:
+        return None
+    return ctx
+
+
 class TranslateSheet:
     def __init__(self, ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str]) -> None:
         self.ctx = ctx
@@ -85,8 +102,33 @@ class TranslateSheet:
         profile = str(cfg("active_profile", "") or "")
         target = str(cfg("output_language", "") or "English")
         facts = [f"Model: {model}" if model else "Model: (not set)", f"Profile: {profile}" if profile else "",
-                 f"→ {target}", _glossary_label(cfg)]
+                 f"→ {target}"]
         self.fact_chips = [ft.Chip(label=ft.Text(f), key=f"fact-{i}") for i, f in enumerate(facts) if f]
+        # U9 preflight: a model route excluded on mobile cannot start (chat Send's rule and reason)
+        from glossarion_mobile.services.model_catalog import model_block
+
+        self.model_block = model_block(model) if model else None
+        if self.model_block is not None:
+            self.fact_chips.insert(1, ReasonChip(reason=self.model_block[0], detail=self.model_block[1],
+                                                 key="fact-model-excluded"))
+        self.glossary_chip = ft.Chip(label=ft.Text(_glossary_label(cfg)), leading=ft.Icon(ft.Icons.MENU_BOOK, size=16),
+                                     on_click=lambda e: self.open_glossary(), key="fact-glossary")
+        self.fact_chips.append(self.glossary_chip)
+        settings_ctx = _settings_ctx()
+        self.run_panel: Any = None
+        self.range_chip: Optional[ft.Chip] = None
+        run_controls: list[ft.Control] = []
+        if settings_ctx is not None and ready:
+            from glossarion_mobile.ui.chat.plan_card import RunOptionsPanel
+
+            self.run_panel = RunOptionsPanel(settings_ctx, on_change=lambda values, only: self._refresh_range(),
+                                             key="lib-run-options")
+            self.range_chip = ft.Chip(label=ft.Text(self.run_panel.range_chip_label()),
+                                      leading=ft.Icon(ft.Icons.FORMAT_LIST_NUMBERED, size=16),
+                                      on_click=lambda e: self.open_choose_chapters(),
+                                      disabled=len(self.ready_sources) != 1, key="fact-range")
+            self.fact_chips.append(self.range_chip)
+            run_controls.append(self.run_panel.control)
         supported = review_gate_supported()
         self.review_switch = ft.Switch(label="Review glossary before translating", value=False,
                                        disabled=not supported, key="review-glossary")
@@ -96,9 +138,15 @@ class TranslateSheet:
                                          detail="The translate job pauses for glossary review only in the chat "
                                                 "in this build; book translations run without the gate, as on "
                                                 "desktop."))
+        else:  # U9: the job pauses after its glossary phase; the Book page asks Edit · Yes · No
+            review_row.append(ft.Text("Pauses after the glossary is generated: Edit · Yes · No on the Book page.",
+                                      theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                      key="review-glossary-hint"))
         jobs_ok = service.jobs is not None and service.has_job_kind("translate")
         self.start_reason = None if jobs_ok and ready else (
             "The job service is not running" if not jobs_ok else "No raw source file resolves for the selection")
+        if self.start_reason is None and self.model_block is not None:
+            self.start_reason = self.model_block[0]
         self.start_button = ft.FilledButton(content="Start", icon=ft.Icons.PLAY_ARROW, on_click=self._on_start,
                                             disabled=self.start_reason is not None, key="start")
         chat_handler = self._chat_handler()
@@ -116,6 +164,7 @@ class TranslateSheet:
             ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600, key="title"),
             *rows,
             ft.Row(self.fact_chips, wrap=True, spacing=6, run_spacing=6),
+            *run_controls,
             ft.Row(review_row, wrap=True),
             ft.Text(self.start_reason or "", color=ft.Colors.ERROR, visible=bool(self.start_reason),
                     theme_style=ft.TextThemeStyle.BODY_SMALL, key="start-reason"),
@@ -150,8 +199,9 @@ class TranslateSheet:
         service = self.ctx.service
         # The sources were resolved on the io pool when the sheet opened: never re-run the
         # registry reads / directory scans of raw_source() on the UI loop.
+        overrides = self.run_panel.config_overrides() if self.run_panel is not None else {}
         spec = service.translate_spec(self.ready_books, review_glossary=bool(self.review_switch.value),
-                                      sources=self.ready_sources)
+                                      sources=self.ready_sources, config_overrides=overrides)
         job_id = await service.submit(spec)
         self.started_job = job_id
         self.close()
@@ -177,6 +227,57 @@ class TranslateSheet:
 
     def _on_chat(self, e: Any = None) -> Any:
         return self.open_in_chat()
+
+    # ---- U9: glossary chip, Choose chapters ------------------------------------------------------------
+
+    def _glossary_feature(self) -> Any:
+        getter = getattr(self.ctx, "glossary", None)
+        return getter() if callable(getter) else None
+
+    def open_glossary(self) -> Any:
+        """The glossary chip: the PlanGlossarySheet for this run (Map glossaries… with several EPUBs)."""
+        feature = self._glossary_feature()
+        if feature is None or not hasattr(feature, "open_plan_glossary_sheet"):
+            self.ctx.say("The glossary tools are not available in this session")
+            return None
+        book = self.ready_books[0] if len(self.ready_books) == 1 else None
+        return feature.open_plan_glossary_sheet(book=book, inputs=list(self.ready_sources),
+                                                on_changed=self._refresh_glossary)
+
+    def _refresh_glossary(self) -> None:
+        self.glossary_chip.label = ft.Text(_glossary_label(self.ctx.service.cfg))
+        self.ctx.push(self.glossary_chip)
+
+    def _refresh_range(self) -> None:
+        if self.range_chip is not None and self.run_panel is not None:
+            self.range_chip.label = ft.Text(self.run_panel.range_chip_label())
+            self.ctx.push(self.range_chip)
+
+    def open_choose_chapters(self) -> Any:
+        """Choose chapters (one book): range + Spine order + the desktop 🔍 preview, written through the
+        Run options' store (this run, or Settings with the switch off)."""
+        if self.run_panel is None or len(self.ready_sources) != 1:
+            return None
+        from glossarion_mobile.ui.chat.plan_card import ChooseChaptersSheet
+        from glossarion_mobile.ui.chat.plan_model import range_preview
+
+        panel = self.run_panel
+        path = self.ready_sources[0]
+        store = panel.store
+
+        def preview(text: str, spine: bool) -> dict:
+            snapshot = store.snapshot() if store is not None and hasattr(store, "snapshot") else {}
+            return range_preview(snapshot, path, text, spine)
+
+        def applied() -> None:
+            panel.refresh_summary()
+            self._refresh_range()
+
+        self.chapters_sheet = ChooseChaptersSheet(store=store, path=path, preview=preview, io=self.ctx.io,
+                                                  on_applied=applied,
+                                                  spine_available=not str(path).lower().endswith(".pdf"))
+        self.chapters_sheet.show(self.ctx.page)
+        return self.chapters_sheet
 
 
 async def open_translate_sheet(ctx: Any, books: Sequence[Mapping[str, Any]]) -> TranslateSheet:

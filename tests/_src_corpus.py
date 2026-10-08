@@ -94,9 +94,19 @@ def desktop_gui_files() -> list:
     return [SRC_DIR / f"{m}.py" for m in DESKTOP_GUI_MODULES if (SRC_DIR / f"{m}.py").exists()]
 
 
+#: U9 P5b: the desktop builds its settings tables (``settings_map``, ``bool_vars``, ``str_vars``) from the
+#: settings schema; the literals they replaced live on, line for line, in this frozen copy (the
+#: generator's input, proven equal to the built tables by tests/test_schema_p5b.py).
+DESKTOP_TABLE_LITERALS = SRC_DIR / "mobile" / "tools" / "frozen_desktop_tables.py"
+
+
 def desktop_gui_source() -> str:
-    """translator_gui.py followed by the shared modules (one string, LF)."""
-    return "\n".join(module_source(m) for m in DESKTOP_GUI_MODULES if (SRC_DIR / f"{m}.py").exists())
+    """translator_gui.py followed by the shared modules and the frozen desktop table literals (one
+    string, LF), so a test that greps for a settings-table row still finds it."""
+    parts = [module_source(m) for m in DESKTOP_GUI_MODULES if (SRC_DIR / f"{m}.py").exists()]
+    if DESKTOP_TABLE_LITERALS.exists():
+        parts.append(DESKTOP_TABLE_LITERALS.read_bytes().decode("utf-8-sig").replace("\r\n", "\n"))
+    return "\n".join(parts)
 
 
 def _class_node(module: str, class_name: str):

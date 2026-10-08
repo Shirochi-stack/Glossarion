@@ -17,14 +17,17 @@ __all__ = ["InfoSheet"]
 
 
 class InfoSheet:
-    def __init__(self, *, title: str, body: str = "", actions: Optional[Sequence[ft.Control]] = None) -> None:
+    def __init__(self, *, title: str, body: str = "", actions: Optional[Sequence[ft.Control]] = None,
+                 markdown: bool = False) -> None:
         self.title = title
         self.body = body
         self._page: Any = None
         controls: list[ft.Control] = [
             ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
         ]
-        if body:
+        if body and markdown:  # rich help (the desktop provider information, the header help)
+            controls.append(ft.Markdown(body, selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB))
+        elif body:
             controls.append(ft.Text(body, theme_style=ft.TextThemeStyle.BODY_MEDIUM, selectable=True))
         if actions:
             controls.append(ft.Row(list(actions), wrap=True, spacing=8, run_spacing=8))

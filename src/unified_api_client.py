@@ -1321,6 +1321,14 @@ print = _gui_print
 # On desktop the extra class is ImportError again, i.e. nothing extra.
 _MOBILE_IMPORT_FAILURE = Exception if _is_mobile_runtime() else ImportError
 
+# Glossarion Mobile (U9 Tier B) defers the two optional SDKs that pull grpcio in at import time:
+# grpc_gemini_client (grpc + ~110 google.ai.generativelanguage modules) and google.cloud.translate_v2
+# (its package imports the gRPC translate_v3 client). Every app launch warm-imports this module while
+# both routes are opt-in, so on mobile the first request that uses one imports it
+# (_ensure_grpc_gemini / _ensure_google_translate). On desktop this is False and both imports below
+# run at import time as before.
+_DEFER_GRPC_SDKS = _is_mobile_runtime()
+
 # OpenAI SDK
 try:
     import openai
@@ -1347,6 +1355,8 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
 
 # Gemini gRPC client (optional - raw gRPC transport for maximum performance)
 try:
+    if _DEFER_GRPC_SDKS:
+        raise ImportError("grpc_gemini_client is imported on first use on mobile (_ensure_grpc_gemini)")
     from grpc_gemini_client import GrpcGeminiClient, GrpcGeminiError, GrpcGeminiResponse, GRPC_AVAILABLE as GEMINI_GRPC_AVAILABLE
 except (ImportError, _MOBILE_IMPORT_FAILURE):
     GrpcGeminiClient = None
@@ -1404,11 +1414,55 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     DEEPL_AVAILABLE = False
 
 try:
+    if _DEFER_GRPC_SDKS:
+        raise ImportError("google.cloud.translate_v2 is imported on first use on mobile (_ensure_google_translate)")
     from google.cloud import translate_v2 as google_translate
     GOOGLE_TRANSLATE_AVAILABLE = True
 except (ImportError, _MOBILE_IMPORT_FAILURE):
     google_translate = None
     GOOGLE_TRANSLATE_AVAILABLE = False
+
+# Mobile only (_DEFER_GRPC_SDKS): the deferred imports above, done once by the first request that
+# needs them. On desktop nothing is pending and these return the import-time availability.
+_GRPC_GEMINI_PENDING = _DEFER_GRPC_SDKS
+_GOOGLE_TRANSLATE_PENDING = _DEFER_GRPC_SDKS
+_DEFERRED_SDK_LOCK = threading.Lock()
+
+
+def _ensure_grpc_gemini():
+    """GEMINI_GRPC_AVAILABLE, after importing grpc_gemini_client if mobile deferred it."""
+    global _GRPC_GEMINI_PENDING, GrpcGeminiClient, GrpcGeminiError, GrpcGeminiResponse, GEMINI_GRPC_AVAILABLE
+    if _GRPC_GEMINI_PENDING:
+        with _DEFERRED_SDK_LOCK:
+            if _GRPC_GEMINI_PENDING:
+                try:
+                    import grpc_gemini_client as _grpc_gemini
+                except Exception as exc:
+                    print(f"⚠️ gRPC Gemini transport unavailable: {exc}")
+                else:
+                    GrpcGeminiClient = _grpc_gemini.GrpcGeminiClient
+                    GrpcGeminiError = _grpc_gemini.GrpcGeminiError
+                    GrpcGeminiResponse = _grpc_gemini.GrpcGeminiResponse
+                    GEMINI_GRPC_AVAILABLE = _grpc_gemini.GRPC_AVAILABLE
+                _GRPC_GEMINI_PENDING = False
+    return GEMINI_GRPC_AVAILABLE
+
+
+def _ensure_google_translate():
+    """GOOGLE_TRANSLATE_AVAILABLE, after importing google.cloud.translate_v2 if mobile deferred it."""
+    global _GOOGLE_TRANSLATE_PENDING, google_translate, GOOGLE_TRANSLATE_AVAILABLE
+    if _GOOGLE_TRANSLATE_PENDING:
+        with _DEFERRED_SDK_LOCK:
+            if _GOOGLE_TRANSLATE_PENDING:
+                try:
+                    from google.cloud import translate_v2 as _translate_v2
+                except Exception as exc:
+                    print(f"⚠️ Google Cloud Translate unavailable: {exc}")
+                else:
+                    google_translate = _translate_v2
+                    GOOGLE_TRANSLATE_AVAILABLE = True
+                _GOOGLE_TRANSLATE_PENDING = False
+    return GOOGLE_TRANSLATE_AVAILABLE
 
 # AuthGPT - ChatGPT subscription via OAuth (optional)
 try:
@@ -8859,7 +8913,7 @@ class UnifiedClient:
                     self._original_client_type = 'gemini'
                     self.client_type = 'openai'
                 print(f"[DEBUG] Gemini using OpenAI-compatible endpoint: {base_url}")
-            elif _is_grpc_endpoint and GEMINI_GRPC_AVAILABLE:
+            elif _is_grpc_endpoint and (GEMINI_GRPC_AVAILABLE or _ensure_grpc_gemini()):
                 # Raw gRPC transport — auto-detected from bare hostname
                 # Don't create the client here; _send_gemini will create it on-the-fly
                 # with the correct API key for each request (important for multi-key mode)
@@ -15050,11 +15104,25 @@ class UnifiedClient:
 
         response = None
         try:
-            from google.cloud import aiplatform
+            try:
+                from google.cloud import aiplatform
+            except ImportError:
+                # Glossarion Mobile (U9 Tier B): google-cloud-aiplatform needs protobuf<7 and cannot
+                # be installed next to the app's protobuf 7. Nothing below uses it (or vertexai):
+                # Vertex Gemini runs through google-genai and Vertex Claude through
+                # anthropic.AnthropicVertex, both REST + google-auth. Desktop keeps the error.
+                if not _is_mobile_runtime():
+                    raise
+                aiplatform = None
             from google.oauth2 import service_account
             from google.auth.transport.requests import Request
             import google.auth.transport.requests
-            import vertexai
+            try:
+                import vertexai
+            except ImportError:
+                if not _is_mobile_runtime():
+                    raise
+                vertexai = None
             
             # Get logger
             logger = logging.getLogger(__name__)
@@ -21768,7 +21836,7 @@ class UnifiedClient:
                     
                     return response
                     
-                elif use_grpc_transport and GEMINI_GRPC_AVAILABLE:
+                elif use_grpc_transport and (GEMINI_GRPC_AVAILABLE or _ensure_grpc_gemini()):
                     # ========== RAW gRPC TRANSPORT ==========
                     # Maximum performance: binary protobuf over HTTP/2
                     grpc_ep = gemini_endpoint.strip() if gemini_endpoint else getattr(self, '_grpc_endpoint', 'generativelanguage.googleapis.com')
@@ -32275,7 +32343,7 @@ class UnifiedClient:
     def _send_google_translate(self, messages, temperature=None, max_tokens=None, response_name=None):
         """Send messages to Google Translate API with markdown/HTML structure fixes"""
         
-        if not GOOGLE_TRANSLATE_AVAILABLE:
+        if not (GOOGLE_TRANSLATE_AVAILABLE or _ensure_google_translate()):
             raise UnifiedClientError(
                 "Google Cloud Translate not installed. Run: pip install google-cloud-translate\n"
                 "Also ensure you have Google Cloud credentials configured."

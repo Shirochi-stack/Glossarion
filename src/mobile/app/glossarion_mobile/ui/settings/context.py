@@ -123,4 +123,11 @@ class SettingsContext:
         return route
 
     def open_setting(self, section_id: str, key: Optional[str] = None) -> Optional[str]:
+        schema = getattr(self, "schema", None)
+        resolve = getattr(schema, "resolve_section_id", None)
+        if callable(resolve):  # the curated map may show the key in another section (U9)
+            try:
+                section_id = resolve(section_id, key) or section_id
+            except Exception:
+                pass
         return self.go("settings.section", {"section": section_id}, fragment=key)

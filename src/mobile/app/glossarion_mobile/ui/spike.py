@@ -325,7 +325,7 @@ class SpikeApp:
 
     def _title(self) -> ft.Control:
         version = (self.state.version if self.state else {}) or {}
-        subtitle = f"U0 device spike · v{version.get('version') or '?'} · {self.paths.platform if self.paths else '?'}"
+        subtitle = f"Device spike · v{version.get('version') or '?'} · {self.paths.platform if self.paths else '?'}"
         return ft.Column(
             tight=True,
             spacing=0,

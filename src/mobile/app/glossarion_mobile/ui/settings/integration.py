@@ -230,8 +230,10 @@ class SettingsFeature:
             screen: Any = SettingsHome(match, self.ctx, implemented_routes=IMPLEMENTED_ROUTES)
         elif match.name == "settings.section":
             from glossarion_mobile.ui.settings.section_page import SectionPage
+            from glossarion_mobile.ui.settings.settings_home import section_screen_for
 
-            screen = SectionPage(match, self.ctx)
+            # a section with its own page (Glossary tabs, Endpoints) opens it, also from search hits
+            screen = section_screen_for(self.ctx, match) or SectionPage(match, self.ctx)
         elif match.name == "settings.env_preview":
             from glossarion_mobile.ui.screens.env_preview import EnvPreviewScreen
 

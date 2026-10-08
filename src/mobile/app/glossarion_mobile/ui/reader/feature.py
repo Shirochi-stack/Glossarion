@@ -249,6 +249,7 @@ class ReaderFeature:
             extras["share_files"] = share
         opener = getattr(app, "opener", None)
         state = getattr(app, "state", None)
+        extras["state"] = state  # the effective text scale (the Reader's "Text size in Aa" hint)
         server = self.ensure_server() if webview_supported(page) else None
         # The jobs feature owns the one platform wakelock (reference-counted, services.wakelock).
         wakelock_owner = getattr(getattr(app, "jobs", None), "wakelock_owner", None)

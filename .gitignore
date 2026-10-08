@@ -226,6 +226,12 @@ tests/**
 !tests/test_manga_editor_core.py
 !tests/test_manga_models.py
 !tests/test_google_vision_rest.py
+# Mobile rewrite (U9): the browser-driver seam (authnd/ + search/gemini on the WebViewBridge), the
+# GUI-free release check (update_core, verbatim vs git show) and the schema-built desktop tables
+# (P5b: frozen literals == settings_schema.desktop_*() rows, HeadlessOwner differential runs).
+!tests/test_browser_driver.py
+!tests/test_update_core.py
+!tests/test_schema_p5b.py
 !tests/fixtures/
 !tests/fixtures/manga_editor/
 !tests/fixtures/manga_editor/**

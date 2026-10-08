@@ -78,10 +78,12 @@ _API_MARKERS = ("📤", "📥", "🌐", "api call", "api request", "http ", "sta
 
 
 def classify_log_line(text: str) -> str:
-    """Coarse LogConsole group for one line (``info``/``error``/``thinking``/``api``).
+    """Coarse LogConsole filter group for one line (``info``/``error``/``thinking``/``api``).
 
-    Placeholder until the shared request/log classifier is extracted (U3,
-    ``direct_text_store``); it only keys on the desktop log's emoji and words.
+    Only the console's All / Errors / Thinking / API filter uses it: request cards come from the
+    shared ``direct_text_stream`` request model and the running card's wait chips (rate limit,
+    key cooldown, network) from the shared ``direct_text_stream.classify_request_issue``
+    (``services.jobs.classify_issue``). It keys on the desktop log's emoji and words.
     """
     lowered = f" {text.lower()} "
     if any(marker in lowered for marker in _THINKING_MARKERS):

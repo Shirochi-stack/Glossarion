@@ -5,6 +5,8 @@ This module is intentionally not an official Gemini API client. It uses Qt
 WebEngine to open Google Search's AI/search page and extract the rendered page
 text. The public entry point mirrors the other browser-backed auth modules:
 send_chat_completion(...) returns a dict with content/finish_reason/raw_response.
+Where a browser_driver is in use (Glossarion Mobile's hidden WebView, no helper
+processes), the same AI Mode flow runs on the driver's pages instead.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse
+
+import browser_driver
+import mobile_runtime
 
 
 SEARCH_BASE_URL = "https://www.google.com/search"
@@ -283,6 +288,9 @@ def _page_snapshot_script(prompt: str = "") -> str:
 }})()
 """
 
+# browser_driver page owner: cancel_stream() cancels only this route's in-app browser pages.
+BROWSER_OWNER = "gemini_free"
+
 _cancel_event = threading.Event()
 _active_helper_processes: set = set()
 _active_helper_lock = threading.Lock()
@@ -343,6 +351,9 @@ def cancel_stream() -> None:
     The helpers are snapshotted here so a late sweep cannot reach the next run's.
     """
     _cancel_event.set()
+    # Pages of a registered browser driver (Glossarion Mobile's hidden WebViews): their
+    # pending calls fail at once. Never blocks; a no-op without a driver (desktop).
+    browser_driver.cancel_pages(BROWSER_OWNER)
     with _active_helper_lock:
         helpers = list(_active_helper_processes)
     if not helpers:
@@ -1660,12 +1671,17 @@ def _cleanup_profile_root(profile_root: Any) -> None:
         pass
 
 
+def _default_viewport_size() -> tuple[int, int]:
+    width = max(320, _env_int("GEMINI_FREE_VIEWPORT_WIDTH", 1280))
+    height = max(480, _env_int("GEMINI_FREE_VIEWPORT_HEIGHT", 900))
+    return width, height
+
+
 def _set_default_page_viewport(page: Any) -> None:
     try:
         from PySide6.QtCore import QSize
 
-        width = max(320, _env_int("GEMINI_FREE_VIEWPORT_WIDTH", 1280))
-        height = max(480, _env_int("GEMINI_FREE_VIEWPORT_HEIGHT", 900))
+        width, height = _default_viewport_size()
         page.setViewportSize(QSize(width, height))
     except Exception:
         pass
@@ -1932,6 +1948,15 @@ def load_ai_mode_prompt_text(
     user_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Open AI Mode, submit the prompt through the page UI, and return rendered text."""
+    if browser_driver.use_driver("GEMINI_FREE_MODE"):
+        # Glossarion Mobile (no helper processes) or GEMINI_FREE_MODE=driver: the same flow
+        # on a page of the registered browser driver (hidden WebView).
+        return _load_ai_mode_prompt_text_driver(
+            prompt,
+            timeout=timeout,
+            wait_after_load_ms=wait_after_load_ms,
+            user_agent=user_agent,
+        )
     _setup_qt_environment()
 
     from PySide6.QtCore import QEventLoop, QTimer, QUrl
@@ -1961,13 +1986,6 @@ def load_ai_mode_prompt_text(
         loop.exec()
         return holder.get("value")
 
-    def run_json(script: str, js_timeout_ms: int = 15000) -> Dict[str, Any]:
-        raw = run_js(script, js_timeout_ms=js_timeout_ms)
-        try:
-            return json.loads(raw or "{}")
-        except Exception:
-            return {}
-
     def wait_ms(ms: int) -> None:
         wait_loop = QEventLoop()
         QTimer.singleShot(max(1, int(ms)), wait_loop.quit)
@@ -1989,7 +2007,29 @@ def load_ai_mode_prompt_text(
         if not load_state.get("ok"):
             raise RuntimeError(f"Qt WebEngine failed to load {base_url}")
 
-        set_prompt_script = f"""
+        return _submit_ai_mode_prompt(
+            prompt,
+            run_js=run_js,
+            wait_ms=wait_ms,
+            base_url=base_url,
+            timeout=timeout,
+            wait_after_load_ms=wait_after_load_ms,
+        )
+    finally:
+        try:
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
+        except Exception:
+            pass
+        _cleanup_profile_root(profile_root)
+
+
+def _ai_mode_set_prompt_script(prompt: str) -> str:
+    """Page script: put ``prompt`` into the AI Mode textarea (JSON result: ok, error, counts)."""
+    return f"""
 (() => {{
   const promptText = {json.dumps(prompt, ensure_ascii=False)};
   const visibleScore = (element) => {{
@@ -2039,12 +2079,10 @@ def load_ai_mode_prompt_text(
   }});
 }})()
 """
-        set_state = run_json(set_prompt_script, js_timeout_ms=15000)
-        if not set_state.get("ok"):
-            detail = str(set_state.get("error") or "AI Mode textarea not found")
-            raise RuntimeError(detail)
 
-        click_send_script = """
+
+# Page script: press AI Mode's Send button (JSON result: ok, error, label, button counts).
+AI_MODE_CLICK_SEND_SCRIPT = """
 (() => {
   const visibleScore = (element) => {
     if (!element) return 0;
@@ -2082,72 +2120,134 @@ def load_ai_mode_prompt_text(
   return JSON.stringify({ok: true, label: candidate.label, buttonCount: buttons.length});
 })()
 """
-        click_state: Dict[str, Any] = {}
-        click_timeout = min(10, max(2, int(timeout_seconds or 10)))
-        click_deadline = time.time() + click_timeout
-        while time.time() < click_deadline:
-            if _is_cancelled():
-                raise RuntimeError("stream cancelled")
-            wait_ms(250)
-            click_state = run_json(click_send_script, js_timeout_ms=10000)
-            if click_state.get("ok"):
-                break
-        if not click_state.get("ok"):
-            detail = str(click_state.get("error") or "AI Mode send button not ready")
-            raise RuntimeError(detail)
 
-        wait_after_ms = wait_after_load_ms
-        if wait_after_ms is None:
-            wait_after_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
-        stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 2500)
-        deadline = _timeout_deadline(timeout)
-        min_ready_at = time.time() + max(0, int(wait_after_ms)) / 1000.0
-        last_result: Dict[str, Any] = {}
-        last_answer = ""
-        last_change_at = time.time()
 
-        while not _deadline_expired(deadline):
-            if _is_cancelled():
-                raise RuntimeError("stream cancelled")
-            result = run_json(_page_snapshot_script(prompt), js_timeout_ms=5000)
-            result["submit_mode"] = "ui"
-            result["search_base_url"] = base_url
-            result["submit_state"] = {"set": set_state, "click": click_state}
-            last_result = result
-            if _google_blocked(result):
-                return result
+def _submit_ai_mode_prompt(
+    prompt: str,
+    *,
+    run_js: Callable[..., Any],
+    wait_ms: Callable[[int], None],
+    base_url: str,
+    timeout: int,
+    wait_after_load_ms: Optional[int],
+) -> Dict[str, Any]:
+    """Type the prompt into the loaded AI Mode page, press Send and wait for a stable answer.
 
-            text = str(result.get("text") or "")
-            lines = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
-            answer = "\n".join(_extract_ai_answer_lines(lines, prompt)).strip()
-            if _contains_generation_failure(answer.splitlines() or lines):
-                return result
-            if answer and answer != last_answer:
-                last_answer = answer
-                last_change_at = time.time()
-            if (
-                answer
-                and time.time() >= min_ready_at
-                and not result.get("busy")
-                and (time.time() - last_change_at) * 1000 >= max(0, int(stable_ms))
-            ):
-                return result
+    Shared by ``load_ai_mode_prompt_text``'s QtWebEngine page and a browser-driver page
+    (``_load_ai_mode_prompt_text_driver``, Glossarion Mobile's hidden WebView): same scripts
+    and timing. ``run_js(script, js_timeout_ms)`` returns the expression's value or None;
+    ``wait_ms(ms)`` lets the page run.
+    """
+    timeout_seconds = _timeout_seconds(timeout)
 
-            wait_ms(500)
-
-        title = str(last_result.get("title") or "").strip()
-        url = _safe_url_for_log(last_result.get("url") or base_url)
-        raise RuntimeError(f"Google Search AI Mode did not produce a response after UI submit. title={title!r} url={url}")
-    finally:
+    def run_json(script: str, js_timeout_ms: int = 15000) -> Dict[str, Any]:
+        raw = run_js(script, js_timeout_ms=js_timeout_ms)
         try:
-            page.deleteLater()
-            profile.deleteLater()
-            cleanup_loop = QEventLoop()
-            QTimer.singleShot(100, cleanup_loop.quit)
-            cleanup_loop.exec()
+            return json.loads(raw or "{}")
         except Exception:
-            pass
-        _cleanup_profile_root(profile_root)
+            return {}
+
+    set_prompt_script = _ai_mode_set_prompt_script(prompt)
+    set_state = run_json(set_prompt_script, js_timeout_ms=15000)
+    if not set_state.get("ok"):
+        detail = str(set_state.get("error") or "AI Mode textarea not found")
+        raise RuntimeError(detail)
+
+    click_send_script = AI_MODE_CLICK_SEND_SCRIPT
+    click_state: Dict[str, Any] = {}
+    click_timeout = min(10, max(2, int(timeout_seconds or 10)))
+    click_deadline = time.time() + click_timeout
+    while time.time() < click_deadline:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        wait_ms(250)
+        click_state = run_json(click_send_script, js_timeout_ms=10000)
+        if click_state.get("ok"):
+            break
+    if not click_state.get("ok"):
+        detail = str(click_state.get("error") or "AI Mode send button not ready")
+        raise RuntimeError(detail)
+
+    wait_after_ms = wait_after_load_ms
+    if wait_after_ms is None:
+        wait_after_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
+    stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 2500)
+    deadline = _timeout_deadline(timeout)
+    min_ready_at = time.time() + max(0, int(wait_after_ms)) / 1000.0
+    last_result: Dict[str, Any] = {}
+    last_answer = ""
+    last_change_at = time.time()
+
+    while not _deadline_expired(deadline):
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        result = run_json(_page_snapshot_script(prompt), js_timeout_ms=5000)
+        result["submit_mode"] = "ui"
+        result["search_base_url"] = base_url
+        result["submit_state"] = {"set": set_state, "click": click_state}
+        last_result = result
+        if _google_blocked(result):
+            return result
+
+        text = str(result.get("text") or "")
+        lines = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
+        answer = "\n".join(_extract_ai_answer_lines(lines, prompt)).strip()
+        if _contains_generation_failure(answer.splitlines() or lines):
+            return result
+        if answer and answer != last_answer:
+            last_answer = answer
+            last_change_at = time.time()
+        if (
+            answer
+            and time.time() >= min_ready_at
+            and not result.get("busy")
+            and (time.time() - last_change_at) * 1000 >= max(0, int(stable_ms))
+        ):
+            return result
+
+        wait_ms(500)
+
+    title = str(last_result.get("title") or "").strip()
+    url = _safe_url_for_log(last_result.get("url") or base_url)
+    raise RuntimeError(f"Google Search AI Mode did not produce a response after UI submit. title={title!r} url={url}")
+
+
+def _load_ai_mode_prompt_text_driver(
+    prompt: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    wait_after_load_ms: Optional[int] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """``load_ai_mode_prompt_text`` on a page of the registered browser driver.
+
+    Glossarion Mobile's hidden WebView loads AI Mode and runs the QtWebEngine helper's flow
+    (``_submit_ai_mode_prompt``) in this worker thread. Like the helper it waits for the first
+    finished load (or the request timeout); a Stop (``cancel_stream``) ends the page's calls.
+    """
+    driver = browser_driver.require_driver("Gemini Free")
+    base_url = _build_search_base_url()
+    timeout_seconds = _timeout_seconds(timeout)
+    page = driver.open_page(
+        owner=BROWSER_OWNER,
+        user_agent=user_agent or DEFAULT_USER_AGENT,
+        viewport=_default_viewport_size(),
+        cancel_check=_is_cancelled,
+    )
+    try:
+        page.load(base_url)
+        if not browser_driver.wait_until_loaded(page, timeout_seconds):
+            raise RuntimeError(f"The in-app browser failed to load {base_url}")
+        return _submit_ai_mode_prompt(
+            prompt,
+            run_js=page.run_js,
+            wait_ms=page.wait,
+            base_url=base_url,
+            timeout=timeout,
+            wait_after_load_ms=wait_after_load_ms,
+        )
+    finally:
+        page.close()
 
 
 def _send_chat_completion_qt_once(
@@ -2423,6 +2523,57 @@ def _extract_json_from_process(stdout: str) -> Dict[str, Any]:
     raise RuntimeError("Gemini Free helper did not return JSON")
 
 
+def _run_search_driver_once(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str,
+    timeout: int,
+    max_tokens: Optional[int],
+    log_fn: Optional[Callable[[str], None]] = None,
+    wait_log_event: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
+    """One helper request, in this worker thread, on a browser-driver page.
+
+    The desktop helper process (``--search-helper``) runs ``_send_chat_completion_qt`` with
+    the request's messages, model, max tokens and helper timeout on its QtWebEngine page;
+    without helper processes (Glossarion Mobile) the same call runs here and
+    ``load_ai_mode_prompt_text`` opens a page of the registered browser driver. The helper's
+    error text is kept; a Stop ends it with "stream cancelled".
+    """
+    browser_driver.require_driver("Gemini Free")
+    message_list = list(messages or [])
+    helper_timeout = _timeout_seconds(timeout)
+    helper_timeout_arg = 0 if helper_timeout is None else max(30, int(helper_timeout))
+    wait_timer: Optional[threading.Timer] = None
+    if log_fn:
+        def _log_still_waiting() -> None:
+            should_log_wait = wait_log_event is None or not wait_log_event.is_set()
+            if wait_log_event is not None:
+                wait_log_event.set()
+            if should_log_wait and not _is_cancelled():
+                _log(log_fn, "⏳ Gemini Free: still waiting for the in-app browser...")
+
+        wait_timer = threading.Timer(10, _log_still_waiting)
+        wait_timer.daemon = True
+        wait_timer.start()
+    try:
+        return _send_chat_completion_qt(
+            messages=message_list,
+            model=model,
+            timeout=helper_timeout_arg,
+            max_tokens=max_tokens,
+        )
+    except browser_driver.BrowserUnavailable:
+        raise
+    except Exception as exc:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled") from exc
+        raise RuntimeError(f"Gemini Free browser helper failed: {_short_error(exc)}") from exc
+    finally:
+        if wait_timer is not None:
+            wait_timer.cancel()
+
+
 def _run_search_subprocess_once(
     *,
     messages: Iterable[Dict[str, Any]],
@@ -2433,6 +2584,18 @@ def _run_search_subprocess_once(
     wait_log_event: Optional[threading.Event] = None,
     ephemeral_profile: bool = False,
 ) -> Dict[str, Any]:
+    if not mobile_runtime.subprocesses_available() or browser_driver.use_driver("GEMINI_FREE_MODE"):
+        # The helper boundary. Glossarion Mobile has no helper processes (GEMINI_FREE_MODE=driver
+        # asks for the same): the helper's request runs in this worker thread on a page of the
+        # registered browser driver instead.
+        return _run_search_driver_once(
+            messages=messages,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+            wait_log_event=wait_log_event,
+        )
     message_list = list(messages or [])
     helper_timeout = _timeout_seconds(timeout)
     helper_timeout_arg = 0 if helper_timeout is None else max(30, int(helper_timeout))
@@ -2824,6 +2987,18 @@ def send_chat_completion(
     """Send a chat-style prompt through the browser-backed Search/Gemini route."""
     del temperature
     timeout_value = int(timeout or _env_int("GEMINI_FREE_TIMEOUT", DEFAULT_TIMEOUT))
+    if browser_driver.use_driver("GEMINI_FREE_MODE"):
+        # Glossarion Mobile (no helper processes) or GEMINI_FREE_MODE=driver: the helper
+        # orchestration (adaptive sub-chunks, concurrency, start delay, sub-chunk timeout) with
+        # each helper request on a page of the registered browser driver (hidden WebView).
+        _log(log_fn, "🌐 Gemini Free: opening the in-app browser (hidden WebView)")
+        return _run_search_subprocess(
+            messages=messages,
+            model=model,
+            timeout=timeout_value,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+        )
     mode = os.getenv("GEMINI_FREE_MODE", "subprocess").strip().lower()
     if mode == "inline":
         return _send_chat_completion_qt(

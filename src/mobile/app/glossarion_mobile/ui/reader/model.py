@@ -34,6 +34,7 @@ Positions
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -66,12 +67,15 @@ __all__ = [
     "clamp_page",
     "coerce_setting",
     "config_updates",
+    "CUSTOM_FONT_EXTENSIONS",
+    "custom_font_families",
     "double_page_allowed",
     "EMBEDDED_CSS",
     "MARGIN_RANGE",
     "MODE_LABELS",
     "MODE_SHORT_LABELS",
     "effective_layout",
+    "font_face_css",
     "font_stack",
     "is_paged",
     "mode_availability",
@@ -113,8 +117,42 @@ LINE_SPACING_RANGE = (1.0, 3.0)
 EMBEDDED_CSS = "Embedded CSS"
 
 #: Aa › Text font families: the desktop "Embedded CSS" plus generic families that exist on
-#: every phone (the desktop combo lists the Windows/macOS system fonts by name).
+#: every phone (the desktop combo lists the Windows/macOS system fonts by name); the fonts imported
+#: with Tools › Converter › Load Font… follow (``custom_font_families``, served as ``@font-face``).
 FONT_FAMILIES = (EMBEDDED_CSS, "Serif", "Sans", "Mono")
+#: Font files ``custom_font_families`` lists (output_tools_core.FONT_EXTS).
+CUSTOM_FONT_EXTENSIONS = (".ttf", ".otf", ".woff", ".woff2")
+
+
+def custom_font_families(fonts_dir: str) -> list:
+    """Blocking: ``[(family, path)]`` of the imported fonts (the file stem names the family; the first
+    file of a stem wins), sorted by family."""
+    out: dict = {}
+    try:
+        names = sorted(os.listdir(fonts_dir), key=str.casefold)
+    except (OSError, TypeError):
+        return []
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        if ext.lower() not in CUSTOM_FONT_EXTENSIONS:
+            continue
+        family = _clean_family(stem)
+        path = os.path.join(fonts_dir, name)
+        if family and family.lower() not in {f.lower() for f in out} and os.path.isfile(path):
+            out[family] = path
+    return sorted(out.items(), key=lambda item: item[0].casefold())
+
+
+def _clean_family(text: str) -> str:
+    return "".join(c for c in str(text or "") if c not in "'\";{}<>\\").strip()
+
+
+def font_face_css(family: str, font_faces: Optional[Mapping[str, str]]) -> str:
+    """``@font-face`` for an imported family (``font_faces``: family -> served URL), else ''."""
+    url = (font_faces or {}).get(family)
+    if not url:
+        return ""
+    return f"@font-face {{ font-family: '{_clean_family(family)}'; src: url('{url}'); font-display: swap; }}"
 _FONT_STACKS = {
     "serif": "Georgia, 'Noto Serif', 'Times New Roman', serif",
     "sans": "-apple-system, Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif",
@@ -339,7 +377,8 @@ def _css_color(value: Any, fallback: str) -> str:
     return fallback
 
 
-def override_css(theme: Mapping[str, Any], settings: ReaderSettings, *, layout: Optional[str] = None) -> str:
+def override_css(theme: Mapping[str, Any], settings: ReaderSettings, *, layout: Optional[str] = None,
+                 font_faces: Optional[Mapping[str, str]] = None) -> str:
     """The live ``<style id="glrdr-live">`` text: theme colours + typography + page margins.
 
     Applied with ``GLRDR.applyStyle(css)`` on every Aa change (no reload) and baked into
@@ -362,6 +401,11 @@ def override_css(theme: Mapping[str, Any], settings: ReaderSettings, *, layout: 
         typography += f" font-family: {stack} !important;"
     rules = [
         f"html, body {{ background: {bg} !important; color: {fg} !important; }}",
+    ]
+    face = font_face_css(settings.font_family, font_faces)
+    if face:
+        rules.insert(0, face)
+    rules += [
         f"{text_target} {{ {typography} }}",
         f"h1, h2, h3, h4, h5, h6 {{ color: {heading} !important; }}",
         f"a {{ color: {link} !important; }}",

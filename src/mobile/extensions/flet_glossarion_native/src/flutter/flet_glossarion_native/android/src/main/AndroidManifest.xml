@@ -44,7 +44,7 @@
             android:taskAffinity=""
             android:theme="@android:style/Theme.NoDisplay">
 
-            <!-- "Open with": documents, archives, subtitles, glossaries. -->
+            <!-- "Open with": documents, archives, subtitles, glossaries, images (manga pages). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -68,6 +68,7 @@
                 <data android:mimeType="application/xliff+xml" />
                 <data android:mimeType="application/x-xliff+xml" />
                 <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="image/*" />
             </intent-filter>
 
             <!-- "Share": the same types, plus images (manga pages) and shared text. -->

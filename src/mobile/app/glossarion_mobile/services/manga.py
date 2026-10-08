@@ -108,6 +108,7 @@ __all__ = [
     "batch_spec",
     "borrow_azure_credentials",
     "cached_font_preset_updates",
+    "cached_rendering_reset_updates",
     "chip_text",
     "core",
     "core_attr",
@@ -128,6 +129,9 @@ __all__ = [
     "list_ocr_files",
     "local_model_rows",
     "manga_output_view",
+    "mask_preset_rows",
+    "mask_preset_updates",
+    "model_info_text",
     "merged_manga_settings",
     "natural_sort_key",
     "new_editor_session",
@@ -137,6 +141,7 @@ __all__ = [
     "presets_available",
     "rapidocr_reason",
     "register_editor_session",
+    "rendering_reset_available",
     "rendering_reset_updates",
     "run_ocr_provider",
     "step_spec",
@@ -396,14 +401,33 @@ DETECTORS = (
     ("custom", "Custom Model"),
 )
 
-def chip_text(reason: Optional[str]) -> str:
-    """The short ReasonChip text of a reason ("Needs PyTorch · not available on mobile." -> "Needs PyTorch")."""
-    text = str(reason or "").strip()
+#: Short chips for the reasons ``settings_schema`` gives torch-only / non-functional values (their full
+#: sentence stays the ReasonChip detail): matched on the reason text, case-insensitively.
+REASON_CHIPS = (("pytorch", "Needs PyTorch"), ("torch", "Needs PyTorch"), ("ensemble", "Needs PyTorch"),
+                ("not functional", "Not functional"))
+
+
+def chip_text(reason: Optional[str], label: Optional[str] = None) -> str:
+    """The short ReasonChip text of a reason ("Needs PyTorch · not available on mobile." -> "Needs PyTorch").
+
+    A known reason gets its fixed chip (``REASON_CHIPS``); otherwise the first clause, unless that
+    only repeats the row's ``label`` ("RT-DETR (PyTorch)" -> "RT-DETR"), and never cut mid-word."""
+    full = str(reason or "").strip()
+    lowered = full.lower()
+    for needle, chip in REASON_CHIPS:
+        if needle in lowered:
+            return chip
+    text = full
     for sep in (" · ", " (", ". ", "; "):
         if sep in text:
             text = text.split(sep, 1)[0]
     text = text.rstrip(".")
-    return text if len(text) <= 32 else text[:30].rstrip() + "…"
+    if label and text and str(label).lower().startswith(text.lower()):
+        text = "Not available on mobile"
+    if len(text) <= 32:
+        return text
+    cut = text[:31].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return (cut or text[:30]) + "…"
 
 
 def value_reason(key: str, value: Any, *, mobile: Optional[bool] = None) -> Optional[str]:
@@ -570,7 +594,7 @@ def detector_rows(*, mobile: Optional[bool] = None) -> list:
     for value, label in DETECTORS:
         reason = value_reason(key, value, mobile=mobile)
         rows.append(OptionRow(value, label, "unavailable" if reason else "ready",
-                              chip_text(reason), reason))
+                              chip_text(reason, label), reason))
     return rows
 
 
@@ -579,7 +603,7 @@ def inpaint_method_rows(*, mobile: Optional[bool] = None) -> list:
     for value, label in INPAINT_METHODS:
         reason = value_reason(K_INPAINT_METHOD, value, mobile=mobile) if value != "skip" else None
         rows.append(OptionRow(value, label, "unavailable" if reason else "ready",
-                              chip_text(reason), reason))
+                              chip_text(reason, label), reason))
     return rows
 
 
@@ -739,17 +763,85 @@ def font_preset_updates(preset: str) -> dict:
     return {}
 
 
+_RESET_KEY = "__rendering_reset__"
+
+
+def rendering_reset_available() -> bool:
+    """Whether this build has the shared Rendering › Reset values (cheap: manga_settings_defaults)."""
+    if callable(core_attr("manga_settings_defaults", "rendering_reset_updates")):
+        return True
+    return isinstance(core_attr("manga_settings_defaults", "RENDERING_RESET_UPDATES", "RENDERING_RESET_DEFAULTS"),
+                      Mapping)
+
+
+def cached_rendering_reset_updates() -> Optional[dict]:
+    """The reset's config writes when already measured in this session (UI loop safe), else None."""
+    with _PRESET_LOCK:
+        cached = _PRESET_CACHE.get(_RESET_KEY)
+    return copy.deepcopy(cached) if cached is not None else None
+
+
 def rendering_reset_updates() -> dict:
-    """Config writes of Rendering › Reset (desktop ``_reset_rendering_to_defaults``), shared only."""
-    value = core_attr("manga_settings_defaults", "rendering_reset_updates", "RENDERING_RESET_UPDATES",
-                      "RENDERING_RESET_DEFAULTS")
-    if callable(value):
+    """Blocking (io pool): config writes of Rendering › Reset to Defaults (desktop
+    ``_reset_rendering_to_defaults``: ``manga_settings_defaults.RENDERING_RESET_VALUES`` saved through
+    ``_save_rendering_settings``). Measured on scratch headless tabs like the font presets, so it runs
+    under ``job_runner.JOB_LOCK`` (``PresetsBusy`` while a job owns the process state); cached for the
+    session (the values do not depend on the config)."""
+    cached = cached_rendering_reset_updates()
+    if cached is not None:
+        return cached
+    func = core_attr("manga_settings_defaults", "rendering_reset_updates")
+    if callable(func):
+        job_lock = core_attr("job_runner", "JOB_LOCK")
+        if job_lock is not None and not job_lock.acquire(blocking=False):
+            raise PresetsBusy("Reset can be applied once the running job has finished")
         try:
-            value = value()
+            updates = _config_updates(func({}))
         except Exception:
             log.exception("rendering_reset_updates failed")
             return {}
+        finally:
+            if job_lock is not None:
+                job_lock.release()
+        if updates:
+            with _PRESET_LOCK:
+                _PRESET_CACHE[_RESET_KEY] = copy.deepcopy(updates)
+        return updates
+    value = core_attr("manga_settings_defaults", "RENDERING_RESET_UPDATES", "RENDERING_RESET_DEFAULTS")
     return _config_updates(value) if isinstance(value, Mapping) else {}
+
+
+def mask_preset_rows() -> list:
+    """``[(preset id, button text)]`` of the manga settings dialog's mask quick presets (shared
+    ``manga_settings_defaults.MASK_PRESETS``); empty without it."""
+    presets = core_attr("manga_settings_defaults", "MASK_PRESETS")
+    if not isinstance(presets, Mapping):
+        return []
+    return [(str(pid), str(entry[0])) for pid, entry in presets.items()
+            if isinstance(entry, (tuple, list)) and entry]
+
+
+def mask_preset_updates(preset: str) -> dict:
+    """Config writes of a mask preset (desktop ``_set_mask_preset`` + Save), shared helper."""
+    func = core_attr("manga_settings_defaults", "mask_preset_updates")
+    if not callable(func):
+        return {}
+    try:
+        return _config_updates(func(preset))
+    except Exception:
+        log.exception("mask_preset_updates(%s) failed", preset)
+        return {}
+
+
+def model_info_text(model_type: str) -> str:
+    """The desktop Model Information text of a local inpainting model (``manga_models.model_info``)."""
+    func = core_attr("manga_models", "model_info")
+    if callable(func):
+        try:
+            return str(func(model_type) or "")
+        except Exception:
+            log.exception("model_info(%s) failed", model_type)
+    return ""
 
 
 def test_image_edit_endpoint(config: Mapping[str, Any]) -> str:
@@ -760,7 +852,9 @@ def test_image_edit_endpoint(config: Mapping[str, Any]) -> str:
         raise RuntimeError("The endpoint test needs the shared manga module (manga_env)")
     result = func(dict(config or {}))
     if isinstance(result, tuple):
-        return str(result[-1])
+        # (ok, status label, message box text): the desktop shows both
+        parts = [str(part) for part in result[1:] if str(part or "").strip()]
+        return "\n".join(dict.fromkeys(parts))
     return str(result or "")
 
 
@@ -1944,6 +2038,33 @@ def borrow_azure_credentials(config: dict, *, mobile: Optional[bool] = None) -> 
     return filled
 
 
+#: FEATURE_MAP manga #52 / #65 "capped for phones": the most parallel panels / workers a mobile manga job runs
+#: (each panel loads its own detector / inpainter instances). A higher stored value (an imported desktop
+#: config, a typed number) is lowered in the job's config copy only and kept in config.json.
+MOBILE_MANGA_MAX_WORKERS = 2
+_WORKER_KEYS = ("panel_max_workers", "max_workers")
+
+
+def cap_workers(config: dict, cap: int = MOBILE_MANGA_MAX_WORKERS) -> list:
+    """Lower ``manga_settings.advanced.panel_max_workers`` / ``max_workers`` above ``cap`` (in place);
+    returns the job-log lines for the values it lowered."""
+    settings = config.get("manga_settings") if isinstance(config, dict) else None
+    advanced = settings.get("advanced") if isinstance(settings, dict) else None
+    if not isinstance(advanced, dict):
+        return []
+    notes: list = []
+    for key in _WORKER_KEYS:
+        try:
+            value = int(advanced.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > cap:
+            advanced[key] = cap
+            notes.append(f"ℹ️ {key} {value} → {cap} on this phone (each panel loads its own models; "
+                         "the stored value is kept)")
+    return notes
+
+
 def prepare_run(config: dict) -> list:
     """What a mobile MANGA / MANGA_STEP job does to its config snapshot (the HeadlessOwner's
     config) before any manga code reads it: the phone defaults (``apply_phone_defaults``), no
@@ -1953,6 +2074,7 @@ def prepare_run(config: dict) -> list:
     if not isinstance(config, dict) or not _is_mobile():
         return notes
     apply_phone_defaults(config)
+    notes.extend(cap_workers(config))
     config.pop("output_directory", None)
     filled = borrow_azure_credentials(config, mobile=True)
     if filled:

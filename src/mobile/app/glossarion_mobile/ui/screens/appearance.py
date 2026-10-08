@@ -18,8 +18,8 @@ from typing import Any, Mapping, Optional
 
 import flet as ft
 
-from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui import motion, tokens
+from glossarion_mobile.ui.components.reason_chip import unavailable_tile
 from glossarion_mobile.ui.screens.page_base import PageScreen, section
 from glossarion_mobile.ui.theme import Appearance, apply_theme
 
@@ -64,8 +64,12 @@ def normalize_appearance(value: Any) -> dict:
 
 
 def apply_appearance(page: Any, value: Any, *, state: Any = None, haptics: Any = None, update: bool = True) -> dict:
-    """Apply appearance prefs to the page / app state / haptics; returns the normalised prefs."""
+    """Apply appearance prefs to the page / app state / haptics; returns the normalised prefs.
+
+    Reduce motion switches the route transitions off here and sets ``ui.motion`` for every
+    other animation: shimmer and rotations become cross-fades (UI_SPEC §6.3)."""
     prefs = normalize_appearance(value)
+    motion.set_reduce_motion(prefs["reduce_motion"])
     if page is not None:
         apply_theme(page, Appearance(prefs["theme"]), seed=tokens.ACCENTS[prefs["accent"]], text_scale=prefs["text_scale"])
         if prefs["reduce_motion"]:
@@ -126,14 +130,12 @@ class AppearanceScreen(PageScreen):
                                        on_change=lambda e: self.set_value("reduce_motion", bool(e.control.value)))
         self.haptics_switch = ft.Switch(label="Haptic feedback", value=values["haptics"],
                                         on_change=lambda e: self.set_value("haptics", bool(e.control.value)))
-        dpi = ft.ListTile(
-            title=ft.Text("Auto DPI / GUI scale"),
-            subtitle=ft.Text("The phone scales the interface; Text size above replaces the desktop GUI scale.",
-                             theme_style=ft.TextThemeStyle.BODY_SMALL),
-            trailing=ReasonChip(reason="Not on mobile", detail="DPI scaling is handled by Android / iOS. The desktop "
-                                "auto_dpi_scale, gui_scale_factor and gui_font_scale values are kept untouched."),
-            disabled=True,
-            key="appearance-dpi",
+        dpi = unavailable_tile(  # an enabled row: a disabled ListTile would disable its ReasonChip too
+            "Auto DPI / GUI scale",
+            subtitle="The phone scales the interface; Text size above replaces the desktop GUI scale.",
+            reason="Not on mobile", detail="DPI scaling is handled by Android / iOS. The desktop "
+            "auto_dpi_scale, gui_scale_factor and gui_font_scale values are kept untouched.",
+            dense=False, key="appearance-dpi",
         )
         return self.scaffold([
             section("Theme", [self.theme_buttons], key="appearance-theme-card"),

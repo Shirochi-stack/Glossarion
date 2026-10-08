@@ -1001,8 +1001,28 @@ class LibraryService:
         finally:
             self.mark_dirty()
 
-    def plan_organize_blocking(self) -> dict:
-        return dict(self._shelf_for().plan_organize())
+    def plan_organize_blocking(self, books: Optional[Sequence[Mapping[str, Any]]] = None) -> dict:
+        """The shelf's Organize plan; ``books`` (U9 selection bar › "Organize selected", UI_SPEC §3.3): only
+        their moves, with the preview and the collisions recomputed by the shelf's own helpers."""
+        shelf = self._shelf_for()
+        plan = dict(shelf.plan_organize())
+        if books is None:
+            return plan
+        wanted = {self.bid_for(book) for book in books}
+        paths = {_norm(p) for book in books for p in (book.get("raw_source_path"), book.get("path")) if p}
+
+        def keep(move: Any) -> bool:
+            book, path = move
+            return _norm(path) in paths or self.bid_for(book) in wanted
+
+        plan["raw_moves"] = [m for m in plan.get("raw_moves") or () if keep(m)]
+        plan["translated_moves"] = [m for m in plan.get("translated_moves") or () if keep(m)]
+        plan["preview"] = type(shelf)._organize_preview_lines(plan)
+        raw_collisions, trans_collisions = type(shelf)._organize_collisions(plan)
+        plan["collisions"] = raw_collisions + trans_collisions
+        plan["raw_collisions"] = raw_collisions
+        plan["trans_collisions"] = trans_collisions
+        return plan
 
     def execute_organize_blocking(self, plan: Mapping[str, Any], policy: str = "keep_both") -> dict:
         try:
@@ -1181,8 +1201,11 @@ class LibraryService:
                        params=params, origin=self.origin_for(book))
 
     def translate_spec(self, books: Sequence[Mapping[str, Any]], *, review_glossary: bool = False,
-                       sources: Optional[Sequence[str]] = None) -> Any:
-        """A ``translate`` job over the raw sources (desktop "Load for translation" + Run)."""
+                       sources: Optional[Sequence[str]] = None,
+                       config_overrides: Optional[Mapping[str, Any]] = None) -> Any:
+        """A ``translate`` job over the raw sources (desktop "Load for translation" + Run).
+        ``config_overrides``: the TranslateSheet's "Only for this run" options (merged over the config
+        snapshot at job start)."""
         from glossarion_mobile.services.jobs import JobSpec
 
         resolved = list(sources) if sources is not None else [self.raw_source(b) for b in books]
@@ -1194,6 +1217,8 @@ class LibraryService:
         if len(inputs) > 1:
             title = f"{title} +{len(inputs) - 1}"
         params: dict = {"review_glossary": True} if review_glossary else {}
+        if config_overrides:
+            params["config_overrides"] = dict(config_overrides)
         origin = self.origin_for(first) if len(books) == 1 else {"type": "library", "label": "Library"}
         return JobSpec(kind="translate", title=title, inputs=inputs, params=params, origin=origin)
 

@@ -1501,82 +1501,10 @@ Text to analyze:
             return self.config.get(key, default)
                 
         # Boolean variables
-        bool_vars = [
-            ('rolling_summary_var', 'use_rolling_summary', False),
-            # Controls whether previous source text (user messages) are reused as memory
-            ('include_source_in_history_var', 'include_source_in_history', False),
-            ('translation_history_rolling_var', 'translation_history_rolling', True),
-            ('glossary_history_rolling_var', 'glossary_history_rolling', True),
-            ('disable_glossary_history_var', 'disable_glossary_history', True),
-            ('glossary_skip_title_header_only_var', 'glossary_skip_title_header_only', True),
-            ('glossary_add_minimal_pass_var', 'glossary_add_minimal_pass', False),
-            ('translate_book_title_var', 'translate_book_title', True),
-            ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
-            ('skip_pdf_title_translation_var', 'skip_pdf_title_translation', False),
-            ('include_book_title_glossary_var', 'include_book_title_glossary', False),
-            ('enable_auto_glossary_var', 'enable_auto_glossary', True),
-            ('append_glossary_var', 'append_glossary', True),
-            ('include_gender_context_var', 'include_gender_context', True),
-            ('enable_gender_nuance_var', 'enable_gender_nuance', True),
-            ('include_description_var', 'include_description', True),
-            ('retry_truncated_var', 'retry_truncated', True),
-            # Char-ratio truncation (silent truncation detector)
-            ('char_ratio_truncation_var', 'char_ratio_truncation_enabled', False),
-            ('retry_split_failed_var', 'retry_split_failed', True),
-            ('retry_duplicate_var', 'retry_duplicate_bodies', False),
-            ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
-            ('save_partial_results_var', 'save_partial_results', True),
-            ('save_prohibited_results_var', 'save_prohibited_results', False),
-            ('disable_empty_safety_heuristic_var', 'disable_empty_safety_heuristic', True),
-            ('unknown_finish_as_prohibited_var', 'missing_finish_as_prohibited', self.config.get('unknown_finish_as_prohibited', False)),
-            ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', True),
-            ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
-            ('disable_refusal_checks_var', 'disable_refusal_checks', True),
-            ('refusal_pattern_length_limit_var', 'refusal_pattern_length_limit', '1000'),
-            # NEW: QA scanning helpers
-            ('qa_auto_search_output_var', 'qa_auto_search_output', True),
-            ('scan_phase_enabled_var', 'scan_phase_enabled', True),
-            ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', False),
-            # Keep existing variables intact
-            ('enable_image_translation_var', 'enable_image_translation', False),
-            ('process_webnovel_images_var', 'process_webnovel_images', True),
-            # REMOVED: ('comprehensive_extraction_var', 'comprehensive_extraction', False),
-            ('hide_image_translation_label_var', 'hide_image_translation_label', True),
-            ('retry_timeout_var', 'retry_timeout', False),
-            ('batch_translation_var', 'batch_translation', True),
-            ('enable_chunk_progress_var', 'enable_chunk_progress', True),
-            ('disable_epub_gallery_var', 'disable_epub_gallery', True),
-            ('skip_non_spine_special_files_var', 'skip_non_spine_special_files', False),
-            ('skip_unreferenced_epub_images_var', 'skip_unreferenced_epub_images', False),
-            # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
-            ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', True),
-            ('disable_zero_detection_var', 'disable_zero_detection', True),
-            ('use_header_as_output_var', 'use_header_as_output', False),
-            ('emergency_restore_var', 'emergency_paragraph_restore', False),
-            ('emergency_image_restore_var', 'emergency_image_restore', False),
-            ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', False),
-            ('contextual_var', 'contextual', False),
-            ('enable_watermark_removal_var', 'enable_watermark_removal', True),
-            ('save_cleaned_images_var', 'save_cleaned_images', False),
-            ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
-            ('enable_decimal_chapters_var', 'enable_decimal_chapters', True),
-            ('disable_gemini_safety_var', 'disable_gemini_safety', True),
-            ('single_api_image_chunks_var', 'single_api_image_chunks', False),
-            ('vision_ocr_batch_translation_var', 'vision_ocr_batch_translation', True),
-            ('vision_ocr_skip_translation_var', 'vision_ocr_skip_translation', False),
-            ('vision_ocr_keep_images_var', 'vision_ocr_keep_images', False),
-            ('enable_image_output_mode_var', 'enable_image_output_mode', False),
-            ('enable_video_output_mode_var', 'enable_video_output_mode', False),
-            ('enable_audio_output_mode_var', 'enable_audio_output_mode', False),
-            ('enable_refinement_output_mode_var', 'enable_refinement_output_mode', False),
-            ('enable_streaming_var', 'enable_streaming', False),
-            # Preserve streaming logs during batch mode; must be initialized here so save_config
-            # keeps the user's choice even if the Other Settings dialog is never opened.
-            ('allow_batch_stream_logs_var', 'allow_batch_stream_logs', False),
-            ('stream_thinking_logs_var', 'stream_thinking_logs', False),
-            ('html2text_escape_snob_var', 'html2text_escape_snob', False),
-
-        ]
+        # U9 P5b: built by the settings schema, the single source of this table (the literal
+        # lives on, line for line, in src/mobile/tools/frozen_desktop_tables.py).
+        from settings_schema import desktop_bool_vars, desktop_str_vars
+        bool_vars = desktop_bool_vars(self)
         
         for var_name, key, default in bool_vars:
             setattr(self, var_name, create_var(bool, key, default))
@@ -1603,51 +1531,7 @@ Text to analyze:
         )
         
         # String variables
-        str_vars = [
-            ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', 'off'),
-            ('summary_role_var', 'summary_role', 'system'),
-            ('rolling_summary_exchanges_var', 'rolling_summary_exchanges', '5'),
-            ('rolling_summary_mode_var', 'rolling_summary_mode', 'replace'),
-            # New: how many summaries to retain in append mode
-            ('rolling_summary_max_entries_var', 'rolling_summary_max_entries', '5'),
-            # New: max tokens for rolling summary generation
-            # -1 means: use the main MAX_OUTPUT_TOKENS value
-            ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '-1'),
-
-            ('max_retry_tokens_var', 'max_retry_tokens', '-1'),
-            ('truncation_retry_attempts_var', 'truncation_retry_attempts', '3'),
-            # Char-ratio truncation (silent truncation detector)
-            ('char_ratio_truncation_percent_var', 'char_ratio_truncation_percent', '50'),
-            ('char_ratio_truncation_attempts_var', 'char_ratio_truncation_attempts', '1'),
-            ('char_ratio_min_output_chars_var', 'char_ratio_min_output_chars', '100'),
-            ('split_failed_retry_attempts_var', 'split_failed_retry_attempts', '1'),
-            ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
-            ('glossary_min_frequency_var', 'glossary_min_frequency', '2'),
-            ('glossary_max_names_var', 'glossary_max_names', '50'),
-            ('glossary_max_titles_var', 'glossary_max_titles', '30'),
-            ('context_window_size_var', 'context_window_size', '5'),
-            ('webnovel_min_height_var', 'webnovel_min_height', '1000'),
-            ('max_images_per_chapter_var', 'max_images_per_chapter_v2', '-1'),
-            ('image_chunk_height_var', 'image_chunk_height', '1500'),
-            ('image_output_resolution_var', 'image_output_resolution', '1K'),
-            ('nanogpt_video_duration_var', 'nanogpt_video_duration', '60'),
-            ('nanogpt_video_resolution_var', 'nanogpt_video_resolution', '720p'),
-            ('chunk_timeout_var', 'chunk_timeout', '1800'),
-            ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
-            ('batch_size_var', 'batch_size', '5'),
-            ('api_queue_var', 'api_queue', '4'),
-            ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '-1'),
-            ('batch_mode_var', 'batching_mode', 'aggressive'),
-            ('batch_group_size_var', 'batch_group_size', '3'),
-            ('chapter_number_offset_var', 'chapter_number_offset', '0'),
-            ('compression_factor_var', 'compression_factor', '3.0'),
-            # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
-            ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
-            ('break_split_count_var', 'break_split_count', ''),
-            ('auto_glossary_mode_var', 'auto_glossary_mode', 'balanced'),
-            ('emergency_glossary_compliance_mode_var', 'emergency_glossary_compliance_mode', 'characters'),
-            ('gemini_safety_threshold_var', 'gemini_safety_threshold', 'BLOCK_NONE'),
-        ]
+        str_vars = desktop_str_vars(self)
         
         for var_name, key, default in str_vars:
             setattr(self, var_name, create_var(str, key, str(default)))

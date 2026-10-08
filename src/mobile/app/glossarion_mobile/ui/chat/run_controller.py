@@ -266,9 +266,13 @@ class ChatRuns:
         overrides: Optional[Mapping[str, Any]] = None,
         manual_glossary: Optional[ManualGlossarySource] = None,
         user_index: Optional[int] = None,
+        config_extra: Optional[Mapping[str, Any]] = None,
     ) -> ChatRun:
         """Record the turn (unless ``user_index`` points at an already recorded one, e.g. a
-        Plan card), prepare the run off the loop and submit the ``direct_text`` job."""
+        Plan card), prepare the run off the loop and submit the ``direct_text`` job.
+
+        ``config_extra``: config keys for this run only (the Plan card's "Only for this run" Run
+        options), merged into the JobSpec ``config_overrides`` under the chat overrides."""
         cid = str(cid)
         text = str(text or "").strip()
         role = settings.attachment_prompt_role
@@ -299,6 +303,8 @@ class ChatRuns:
         self.store.set_running(cid, True)
         await self._io(self.store.flush)  # history on disk before the job starts (desktop saves at send)
         params = job_params(chat_id=self._chat_id_value(cid), user_index=user_index, run=run, settings=settings, overrides=overrides)
+        if config_extra:
+            params["config_overrides"] = {**dict(config_extra), **dict(params.get("config_overrides") or {})}
         # The job's DirectTextStream starts at the chat's next request number (the dialog's
         # _active_request_next_number) and counts tokens for the run's model.
         params["request_number"] = self.store.request_count(cid) + 1
@@ -681,16 +687,20 @@ class ChatRuns:
         self._emit(cid)
         return chat_run
 
-    async def compile(self, cid: Any, kind: str = "compile_epub") -> Any:
-        """Compile EPUB / PDF from the run's output folder (shared ``text_jobs`` compile runners).
+    async def compile(self, cid: Any, kind: str = "compile_epub", *, folder: Optional[str] = None) -> Any:
+        """Compile EPUB / PDF from a chat output folder (shared ``text_jobs`` compile runners).
 
-        The pipeline's folder in the run root while it exists (a stopped / failed run keeps it),
-        else the folder ``finish_run`` persisted the run into (an attachment's
-        ``Direct Text/<chat>/Attachments/<stem>`` tree; a finished run's root is cleaned).
+        ``folder``: the job card's own ``Direct Text/<chat>/Attachments/<stem>`` workspace (any
+        card, also after a relaunch). Without one: the chat's run in this session, i.e. the
+        pipeline's folder in the run root while it exists (a stopped / failed run keeps it), else
+        the folder ``finish_run`` persisted the run into (a finished run's root is cleaned).
         """
-        run = self.run_for(cid)
-        candidates = (run.output_dir, run.output_folder) if run is not None else ()
-        folder = next((str(c) for c in candidates if c and os.path.isdir(str(c))), "")
+        if folder and os.path.isdir(str(folder)):
+            folder = str(folder)
+        else:
+            run = self.run_for(cid)
+            candidates = (run.output_dir, run.output_folder) if run is not None else ()
+            folder = next((str(c) for c in candidates if c and os.path.isdir(str(c))), "")
         if not folder:
             return None
         title = os.path.basename(folder.rstrip("\\/")) or "Book"

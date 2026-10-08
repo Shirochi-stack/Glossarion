@@ -111,14 +111,16 @@ def _chat_max(size_class: SizeClass) -> Optional[int]:
     return SIZES["chat_max"]
 
 
-def chat_column_width(width: Optional[float]) -> float:
+def chat_column_width(width: Optional[float], *, side_panel: bool = False) -> float:
     """The chat column (the composer's width with its margins) for a window width: the window
-    minus the persistent sidebar on tablets, capped at the class's chat max. The SidePanel is not
-    subtracted: the layout does not know whether it is open."""
+    minus the persistent sidebar on tablets (and the 380 dp SidePanel while it is open,
+    ``side_panel``), capped at the class's chat max."""
     w = _width(width)
     size_class = size_class_for(w)
     if size_class.persistent_sidebar:
         w -= _sidebar_width(size_class)
+        if side_panel:
+            w -= SIZES["side_panel"]
     chat_max = _chat_max(size_class)
     return float(max(0.0, min(w, chat_max) if chat_max is not None else w))
 
@@ -213,16 +215,26 @@ class Layout:
     output_row: str
     compact_text: bool
     chat_width: float = 0.0  # the chat column (``chat_column_width``); ``output_row`` is picked for it
+    text_scale: float = 1.0  # the effective text scale the layout was computed for
+    side_panel: bool = False  # the tablet SidePanel was open (``chat_width`` excludes it)
 
     @property
     def persistent_sidebar(self) -> bool:
         return self.size_class.persistent_sidebar
 
+    @property
+    def wide(self) -> bool:
+        """Master-detail layouts (Settings, Book page, Manga; UI_SPEC §1.1)."""
+        return self.size_class is SizeClass.WIDE
 
-def layout_for(width: Optional[float], text_scale: float = 1.0) -> Layout:
+
+def layout_for(width: Optional[float], text_scale: float = 1.0, *, side_panel: bool = False) -> Layout:
+    """The layout for a window width and the effective text scale (app × system,
+    ``ui.text_scale``). ``side_panel``: the tablet SidePanel is open, so the chat column (and the
+    composer's output-mode style) is narrower; the size class never depends on it."""
     w = _width(width)
     size_class = size_class_for(w)
-    column = chat_column_width(w)
+    column = chat_column_width(w, side_panel=side_panel)
     return Layout(
         size_class=size_class,
         width=w,
@@ -234,4 +246,6 @@ def layout_for(width: Optional[float], text_scale: float = 1.0) -> Layout:
         output_row=output_row_style(column, text_scale),
         compact_text=text_scale >= COMPACT_TEXT_SCALE,
         chat_width=column,
+        text_scale=float(text_scale or 1.0),
+        side_panel=bool(side_panel and size_class.persistent_sidebar),
     )

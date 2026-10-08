@@ -1,10 +1,17 @@
 # Glossarion Mobile (Android + iOS): Flet 1.0.3 build, device smoke tests and release.
 #
-#   prepare ---------+-- android -- android-smoke --+
-#   wheels-android --+                              |
-#   wheels-ios ------+-- ios -----------------------+-- release (manual opt-in only, see below)
-#                    +-- ios-signed (Apple secrets) +
-#                    +-- ios-simulator-smoke (optional, non-blocking)
+#   prepare ---------+-- android -- android-smoke ----+
+#   wheels-android --+-- android-ui-tests (flet test) |
+#   wheels-ios ------+-- ios -------------------------+-- release (manual opt-in only, see below)
+#                    +-- ios-signed (Apple secrets) --+
+#                    +-- ios-simulator-smoke ---------+
+#
+# Optional device suites (policy lines in the workflow env below; README "Optional device suites"):
+#   ios-simulator-smoke  IOS_SIMULATOR_SMOKE_POLICY  self-test on an iPhone simulator (required since U9)
+#   android-ui-tests     ANDROID_UI_TESTS_POLICY     `flet test` UI tests (src/mobile/tests) on the emulator
+# 'optional' = runs only when its dispatch input says 'on', and never fails the run (continue-on-error).
+# 'required' = runs by default ('auto') for its platform, fails the run, and the release job needs it.
+# Promoting a suite once it has passed in CI is that one line.
 #
 # wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
 # mobile wheels (cryptography 50.0.2, Pillow 12.3.0; src/mobile/ci/wheels/wheelhouse.toml), which
@@ -25,14 +32,18 @@
 #
 # Publishing policy: this workflow never publishes on its own. It has no tag trigger, and
 # build-all.yml does not call it, so pushing a v* tag (by anyone holding a token) cannot ship the
-# mobile app. The release job runs only for a manual run on a tag with the publish_release input
-# ticked AND the repository variable MOBILE_RELEASE_ENABLED set to 'true' (not set by default).
-# The APK/IPA artifacts are kept for 7 days.
+# mobile app. The release job runs only for a manual run (workflow_dispatch; a workflow_call has no
+# publish_release input) on a tag with the publish_release input ticked AND the repository variable
+# MOBILE_RELEASE_ENABLED set to 'true' (not set by default). It creates the tag's release or appends
+# to the one the desktop tag workflows made, and refuses to replace any asset that is not a mobile
+# asset (src/mobile/ci/release_assets.py). The APK/IPA artifacts are kept for 7 days.
+# src/mobile/tests_host/test_ci_release.py pins all of this.
 #
 # Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
 # Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
-# mobile-backend-report, mobile-smoke-logs-android, mobile-smoke-logs-ios,
-# mobile-wheelhouse-android, mobile-wheelhouse-ios (+ mobile-wheels-logs-* on failure).
+# mobile-backend-report, mobile-apk-size-report, mobile-smoke-logs-android, mobile-smoke-logs-ios,
+# mobile-ui-test-logs, mobile-wheelhouse-android, mobile-wheelhouse-ios (+ mobile-wheels-logs-* on
+# failure).
 
 name: Build Mobile (Android + iOS)
 
@@ -49,7 +60,17 @@ on:
         type: boolean
         default: true
       ios_simulator_smoke:
-        description: iOS simulator smoke test (optional, non-blocking)
+        description: iOS simulator smoke test (auto = IOS_SIMULATOR_SMOKE_POLICY decides; optional suites never fail the run)
+        type: choice
+        options: [auto, 'on', 'off']
+        default: auto
+      ui_tests:
+        description: Android UI tests, flet test on the emulator (auto = ANDROID_UI_TESTS_POLICY decides)
+        type: choice
+        options: [auto, 'on', 'off']
+        default: auto
+      android_legacy_packaging:
+        description: APK size experiment - compressed native libraries (smaller APK, bigger install)
         type: boolean
         default: false
       publish_release:
@@ -57,6 +78,7 @@ on:
         type: boolean
         default: false
   workflow_call:
+    # No publish_release input here: a calling workflow can never reach the release job.
     inputs:
       targets:
         description: all, android or ios
@@ -69,10 +91,15 @@ on:
         required: false
         default: true
       ios_simulator_smoke:
-        description: iOS simulator smoke test (non-blocking)
-        type: boolean
+        description: iOS simulator smoke test (auto, on or off)
+        type: string
         required: false
-        default: false
+        default: auto
+      ui_tests:
+        description: Android UI tests (auto, on or off)
+        type: string
+        required: false
+        default: auto
     secrets:
       ANDROID_KEYSTORE_BASE64:
         required: false
@@ -110,6 +137,13 @@ env:
   FLET_CLI_NO_RICH_OUTPUT: '1'
   BUNDLED_PY: '3.13'
   APP_PACKAGE: com.glossarion.app
+  # Optional device suites: 'optional' (off unless asked, non-blocking) or 'required' (on by
+  # default, blocking, needed by the release job). Flip a line to 'required' once its suite has
+  # passed in CI (README "Optional device suites"). The iOS simulator smoke passed in Build Mobile
+  # run 37728461336 (96da1ec6) and is required since U9; the Android UI tests stay optional until
+  # `flet test android` has passed once in CI.
+  IOS_SIMULATOR_SMOKE_POLICY: required
+  ANDROID_UI_TESTS_POLICY: optional
 
 jobs:
   # ==========================================================================
@@ -129,6 +163,10 @@ jobs:
       run_ios: ${{ steps.opts.outputs.run_ios }}
       emulator_smoke: ${{ steps.opts.outputs.emulator_smoke }}
       ios_simulator_smoke: ${{ steps.opts.outputs.ios_simulator_smoke }}
+      ios_simulator_smoke_blocking: ${{ steps.opts.outputs.ios_simulator_smoke_blocking }}
+      ui_tests: ${{ steps.opts.outputs.ui_tests }}
+      ui_tests_blocking: ${{ steps.opts.outputs.ui_tests_blocking }}
+      android_legacy_packaging: ${{ steps.opts.outputs.android_legacy_packaging }}
       has_android_keystore: ${{ steps.probe.outputs.has_android_keystore }}
       has_ios_signing: ${{ steps.probe.outputs.has_ios_signing }}
     steps:
@@ -138,10 +176,12 @@ jobs:
       - name: Resolve run options
         id: opts
         env:
-          # Empty on tag pushes (no inputs), so every option falls back to its default.
+          # Empty when an input is absent, so every option falls back to its default.
           IN_TARGETS: ${{ inputs.targets }}
           IN_EMULATOR_SMOKE: ${{ inputs.emulator_smoke }}
           IN_IOS_SIMULATOR_SMOKE: ${{ inputs.ios_simulator_smoke }}
+          IN_UI_TESTS: ${{ inputs.ui_tests }}
+          IN_ANDROID_LEGACY_PACKAGING: ${{ inputs.android_legacy_packaging }}
         run: |
           targets="${IN_TARGETS:-all}"
           case "$targets" in
@@ -155,14 +195,42 @@ jobs:
           emulator_smoke=true
           if [ "${IN_EMULATOR_SMOKE:-true}" = false ]; then emulator_smoke=false; fi
           if [ "$run_android" = false ]; then emulator_smoke=false; fi
-          ios_simulator_smoke=false
-          if [ "${IN_IOS_SIMULATOR_SMOKE:-false}" = true ] && [ "$run_ios" = true ]; then ios_simulator_smoke=true; fi
+          # suite <name> <input: auto|on|off|true|false> <policy: optional|required> <platform built: true|false>
+          # -> "<run> <blocking>". 'auto' follows the policy; a required suite that runs is blocking.
+          suite() {
+            local name="$1" choice="${2:-auto}" policy="$3" built="$4" run=false
+            case "$policy" in
+              optional|required) ;;
+              *) echo "::error title=Invalid policy::$name policy must be optional or required (got '$policy')" >&2; return 1 ;;
+            esac
+            case "$choice" in
+              on|true) run=true ;;
+              off|false) run=false ;;
+              auto) if [ "$policy" = required ]; then run=true; fi ;;
+              *) echo "::error title=Invalid input::$name must be auto, on or off (got '$choice')" >&2; return 1 ;;
+            esac
+            if [ "$built" != true ]; then run=false; fi
+            local blocking=false
+            if [ "$run" = true ] && [ "$policy" = required ]; then blocking=true; fi
+            echo "$run $blocking"
+          }
+          read -r ios_simulator_smoke ios_simulator_smoke_blocking < <(
+            suite ios_simulator_smoke "$IN_IOS_SIMULATOR_SMOKE" "$IOS_SIMULATOR_SMOKE_POLICY" "$run_ios") || exit 1
+          read -r ui_tests ui_tests_blocking < <(
+            suite ui_tests "$IN_UI_TESTS" "$ANDROID_UI_TESTS_POLICY" "$run_android") || exit 1
+          if [ -z "$ios_simulator_smoke" ] || [ -z "$ui_tests" ]; then exit 1; fi
+          android_legacy_packaging=false
+          if [ "${IN_ANDROID_LEGACY_PACKAGING:-false}" = true ]; then android_legacy_packaging=true; fi
           {
             echo "targets=$targets"
             echo "run_android=$run_android"
             echo "run_ios=$run_ios"
             echo "emulator_smoke=$emulator_smoke"
             echo "ios_simulator_smoke=$ios_simulator_smoke"
+            echo "ios_simulator_smoke_blocking=$ios_simulator_smoke_blocking"
+            echo "ui_tests=$ui_tests"
+            echo "ui_tests_blocking=$ui_tests_blocking"
+            echo "android_legacy_packaging=$android_legacy_packaging"
           } | tee -a "$GITHUB_OUTPUT"
 
       - name: Set up uv (Python 3.13)
@@ -299,7 +367,7 @@ jobs:
 
       - name: Compile app, tools and CI scripts (Python 3.13 syntax)
         working-directory: src/mobile
-        run: uv run --no-project python -m compileall -q app tools ci tests_host extensions/flet_glossarion_native/src extensions/flet_glossarion_native/tests
+        run: uv run --no-project python -m compileall -q app tools ci tests_host tests extensions/flet_glossarion_native/src extensions/flet_glossarion_native/tests
 
       - name: Host import smoke (Android and iOS simulation)
         working-directory: src/mobile
@@ -480,7 +548,10 @@ jobs:
           bundled-python-version: ${{ env.BUNDLED_PY }}
           build-number: ${{ env.BUILD_NUMBER }}
           build-version: ${{ env.BUILD_VERSION }}
-          extra-args: --split-per-abi
+          # --android-legacy-packaging only for the size experiment input (README "APK size").
+          extra-args: >-
+            --split-per-abi
+            ${{ needs.prepare.outputs.android_legacy_packaging == 'true' && '--android-legacy-packaging' || '' }}
           archive-output: 'false'
 
       - name: Check the APK build installed the self-built wheels
@@ -506,6 +577,26 @@ jobs:
             cp "${matches[0]}" "dist/${ARTIFACT_PREFIX}_Android_${abi}${suffix}.apk"
           done
           ls -la dist
+
+      - name: APK size report (native libraries, Python zips, legacy-packaging estimate)
+        continue-on-error: true
+        env:
+          LEGACY_PACKAGING: ${{ needs.prepare.outputs.android_legacy_packaging }}
+        run: |
+          mkdir -p build
+          echo "android_legacy_packaging=$LEGACY_PACKAGING" > build/apk_size_build.txt
+          python3 src/mobile/ci/apk_size_report.py dist/*.apk --json build/apk_size.json --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK size report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-apk-size-report
+          path: |
+            build/apk_size.json
+            build/apk_size_build.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Build AAB
         id: aab
@@ -657,6 +748,129 @@ jobs:
         with:
           name: mobile-smoke-logs-android
           path: mobile-smoke-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ==========================================================================
+  # android-ui-tests: `flet test` UI tests (src/mobile/tests) on the x86_64 API 35 emulator.
+  # ANDROID_UI_TESTS_POLICY: optional = only with ui_tests 'on', non-blocking; required = by
+  # default and blocking. flet test builds its own debug test host (same pins and wheelhouse).
+  # ==========================================================================
+  android-ui-tests:
+    name: Android UI tests (flet test, ${{ needs.prepare.outputs.ui_tests_blocking == 'true' && 'required' || 'optional' }})
+    needs: [prepare, wheels-android]
+    if: needs.prepare.outputs.ui_tests == 'true'
+    continue-on-error: ${{ needs.prepare.outputs.ui_tests_blocking != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Download prepared bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: mobile-prepared
+          path: src/mobile/app
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: true
+          cache-dependency-glob: |
+            src/mobile/pyproject.toml
+            src/mobile/uv.lock
+          cache-suffix: mobile-ui-tests
+
+      - name: Verify the bundle is the host-tested one
+        working-directory: src/mobile
+        run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Self-built wheels (cryptography, Pillow) for the test host
+        uses: ./.github/actions/mobile-wheelhouse
+        with:
+          platform: android
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('src/mobile/pyproject.toml', 'src/mobile/extensions/**/build.gradle*', 'src/mobile/extensions/**/pubspec.yaml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Host environment for flet test (dev group)
+        working-directory: src/mobile
+        run: uv sync --locked --group dev
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        id: avd-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api35-x86_64-google_apis-ram4096-disk6144-v1
+
+      - name: Create AVD and snapshot for the cache
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disk-size: 6144M
+          force-avd-creation: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: UI tests (flet test android)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disk-size: 6144M
+          force-avd-creation: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          # The runner executes each script line separately with sh -c, so keep it to one line.
+          script: bash src/mobile/ci/android_ui_tests.sh "$GITHUB_WORKSPACE/mobile-ui-test-logs"
+
+      - name: Upload UI test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-ui-test-logs
+          path: mobile-ui-test-logs/
           if-no-files-found: warn
           retention-days: 14
 
@@ -919,13 +1133,14 @@ jobs:
           fi
 
   # ==========================================================================
-  # ios-simulator-smoke: optional and non-blocking until it is stable
+  # ios-simulator-smoke: IOS_SIMULATOR_SMOKE_POLICY (optional = only when asked, non-blocking;
+  # required = by default and blocking). The self-test starts from the launch environment.
   # ==========================================================================
   ios-simulator-smoke:
-    name: iOS simulator smoke (optional)
+    name: iOS simulator smoke (${{ needs.prepare.outputs.ios_simulator_smoke_blocking == 'true' && 'required' || 'optional' }})
     needs: [prepare, wheels-ios]
     if: needs.prepare.outputs.ios_simulator_smoke == 'true'
-    continue-on-error: true
+    continue-on-error: ${{ needs.prepare.outputs.ios_simulator_smoke_blocking != 'true' }}
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -1117,12 +1332,12 @@ jobs:
           retention-days: 14
 
   # ==========================================================================
-  # release: manual opt-in only (see the publishing policy at the top). Appends the mobile assets
-  # to the tag's GitHub release (softprops/action-gh-release, files + fail_on_unmatched_files).
+  # release: manual opt-in only (see the publishing policy at the top). Creates the tag's release
+  # or appends to it (softprops/action-gh-release); never replaces an asset it does not own.
   # ==========================================================================
   release:
     name: Publish mobile assets to the GitHub release
-    needs: [prepare, android, android-smoke, ios, ios-signed]
+    needs: [prepare, android, android-smoke, android-ui-tests, ios, ios-signed, ios-simulator-smoke]
     if: >-
       !cancelled()
       && github.event_name == 'workflow_dispatch'
@@ -1134,13 +1349,16 @@ jobs:
       && needs.ios.result == 'success'
       && (needs.android-smoke.result == 'success' || needs.android-smoke.result == 'skipped')
       && (needs.ios-signed.result == 'success' || needs.ios-signed.result == 'skipped')
+      && (needs.prepare.outputs.ios_simulator_smoke_blocking != 'true' || needs.ios-simulator-smoke.result == 'success')
+      && (needs.prepare.outputs.ui_tests_blocking != 'true' || needs.android-ui-tests.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
     # Serialises mobile publishes for a tag. The desktop tag workflows (build-linux.yml,
-    # build-macos.yml) publish to the same release; softprops/action-gh-release v3 resolves
-    # the shared-tag create race and existing-asset races across workflows.
+    # build-macos.yml) publish to the same release without this group: softprops/action-gh-release
+    # resolves the shared-tag create race, and release_assets.py check refuses any file that would
+    # replace a non-mobile asset, so the mobile job only creates the release or appends to it.
     concurrency:
       group: github-release-${{ github.ref }}
       cancel-in-progress: false
@@ -1150,6 +1368,14 @@ jobs:
       ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
+      - name: Checkout (release tools)
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            src/mobile/tools
+            src/mobile/ci
+            src/mobile/app/glossarion_mobile
+
       - name: Download Android artifacts
         uses: actions/download-artifact@v8
         with:
@@ -1170,70 +1396,49 @@ jobs:
           name: Z_Glossarion-iOS-Signed
           path: dist
 
-      - name: Write AltStore source and checksums
-        run: |
-          python3 - <<'PY'
-          import datetime, json, os, pathlib, plistlib, zipfile
+      - name: Write AltStore source (points at the unsigned IPA asset)
+        run: >-
+          python3 src/mobile/tools/altstore_source.py
+          --ipa "dist/${ARTIFACT_PREFIX}_iOS_unsigned.ipa" --tag "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY" --out dist/altstore-source.json
 
-          dist = pathlib.Path("dist")
-          prefix = os.environ["ARTIFACT_PREFIX"]
-          tag = os.environ["RELEASE_TAG"]
-          repo = os.environ["GITHUB_REPOSITORY"]
-          ipa = dist / f"{prefix}_iOS_unsigned.ipa"
-          with zipfile.ZipFile(ipa) as archive:
-              plist_name = next(
-                  name for name in archive.namelist()
-                  if name.startswith("Payload/") and name.endswith(".app/Info.plist") and name.count("/") == 2
-              )
-              info = plistlib.loads(archive.read(plist_name))
-          releases = f"https://github.com/{repo}/releases"
-          privacy = {key: value for key, value in info.items()
-                     if key.startswith("NS") and key.endswith("UsageDescription")}
-          source = {
-              "name": "Glossarion",
-              "identifier": f"{info['CFBundleIdentifier']}.source",
-              "sourceURL": f"{releases}/latest/download/altstore-source.json",
-              "website": f"https://github.com/{repo}",
-              "apps": [{
-                  "name": "Glossarion",
-                  "bundleIdentifier": info["CFBundleIdentifier"],
-                  "developerName": "Glossarion contributors",
-                  "subtitle": "AI novel and manga translator",
-                  "localizedDescription": "Translate novels, EPUBs, PDFs and manga with your own AI models.",
-                  "iconURL": f"https://raw.githubusercontent.com/{repo}/{tag}/src/mobile/app/assets/icon.png",
-                  "tintColor": "E18F98",
-                  "category": "utilities",
-                  "appPermissions": {"entitlements": [], "privacy": privacy},
-                  "versions": [{
-                      "version": info["CFBundleShortVersionString"],
-                      "buildVersion": str(info["CFBundleVersion"]),
-                      "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                      "localizedDescription": f"Glossarion {tag}",
-                      "downloadURL": f"{releases}/download/{tag}/{ipa.name}",
-                      "size": ipa.stat().st_size,
-                      "minOSVersion": str(info.get("MinimumOSVersion", "13.0")),
-                  }],
-              }],
-              "news": [],
-          }
-          (dist / "altstore-source.json").write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
-          PY
-          cd dist
-          files=(*)
-          sha256sum -- "${files[@]}" > "${ARTIFACT_PREFIX}_mobile_SHA256SUMS.txt"
-          cat "${ARTIFACT_PREFIX}_mobile_SHA256SUMS.txt"
+      - name: Checksums
+        run: python3 src/mobile/ci/release_assets.py checksums --dist dist --prefix "$ARTIFACT_PREFIX"
+
+      - name: Check the asset set and never clobber desktop assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_json="$RUNNER_TEMP/release.json"
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json" 2> "$RUNNER_TEMP/release.err"; then
+            if grep -q "HTTP 404" "$RUNNER_TEMP/release.err"; then
+              echo '{}' > "$release_json"  # no release yet: softprops creates it
+            else
+              cat "$RUNNER_TEMP/release.err"
+              exit 1
+            fi
+          fi
+          python3 src/mobile/ci/release_assets.py check --dist dist --prefix "$ARTIFACT_PREFIX" --release-json "$release_json"
           {
             echo "## Mobile release assets ($RELEASE_TAG)"
             echo
             echo '```'
-            ls -la
+            ls -la dist
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload to Release
+      - name: Upload to Release (create or append)
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
           files: dist/*
           fail_on_unmatched_files: true
+          # Only mobile-named files are uploaded (checked above), so this replaces at most our
+          # own assets from an earlier run for the same tag.
+          overwrite_files: true
+          # The name, body and prerelease flag of a release the desktop made stay as they are;
+          # 'legacy' lets GitHub pick the latest release by date and version, so publishing
+          # mobile files for an older tag never makes it the latest.
+          make_latest: legacy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

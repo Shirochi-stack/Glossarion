@@ -3,7 +3,9 @@
 The screen of ``manga_editor_core.MangaEditorSession`` (ImageRenderer's GUI-free editor, the
 same code the desktop preview runs):
 
-* **Page strip** of the Files selection; **Source / Translated** (side by side on tablets).
+* **Page strip** of the Files selection (skipped pages dimmed with ⏭️; long-press a thumbnail for
+  the desktop thumbnail menu's "⏭️ Skip Processing" / "▶️ Process This Image");
+  **Source / Translated** (side by side on tablets).
 * **Pan** mode: ``InteractiveViewer`` (pinch zoom, pan). **Edit** modes: ``Stack(Image,
   canvas.Canvas, GestureDetector(drag_interval=24))`` with Select/Move (drag a box, drag its
   bottom-right corner to resize), Box, Circle and Lasso; Delete and Exclude from Clean act on
@@ -46,7 +48,7 @@ __all__ = ["EditorTab", "Geometry", "TOOLS", "hit_test", "lasso_bounds", "normal
 
 log = logging.getLogger("glossarion.tools.manga")
 
-MASK_REASON = "Brush and eraser need the shared mask editor (experimental on desktop)"
+MASK_REASON = "Brush and eraser are desktop only (experimental mask painting there; not planned for mobile)"
 #: (tool id, label, icon, disabled reason)
 TOOLS = (
     ("pan", "Pan / zoom", "PAN_TOOL", None),
@@ -212,8 +214,12 @@ class EditorTab(MangaTab):
         self.delete_button = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Delete box", key="me-delete",
                                            size_constraints=HIT_TARGET,
                                            on_click=lambda e: self.ctx.spawn(self.delete_selected()))
+        self.clear_button = ft.IconButton(icon=ft.Icons.CLEAR_ALL, tooltip="Clear boxes", key="me-clear-boxes",
+                                          size_constraints=HIT_TARGET,
+                                          on_click=lambda e: self.ctx.spawn(self.clear_boxes()))
         self.toolbar = ft.Row([*tool_controls, ft.VerticalDivider(width=8), self.edit_button, self.exclude_button,
-                               self.delete_button], scroll=ft.ScrollMode.AUTO, spacing=0, key="me-toolbar")
+                               self.delete_button, self.clear_button], scroll=ft.ScrollMode.AUTO, spacing=0,
+                              key="me-toolbar")
         self.viewer_holder = ft.Container(expand=True, key="me-viewer-holder")
         self.step_buttons: dict = {}
         for step, label, icon in STEP_BUTTONS:
@@ -436,6 +442,7 @@ class EditorTab(MangaTab):
         box_selected = has_page and self.selected is not None and 0 <= self.selected < len(self.boxes)
         for button in (self.delete_button, self.exclude_button, self.edit_button):
             button.disabled = busy or not box_selected
+        self.clear_button.disabled = busy or not has_page or not self.boxes
         if has_page:
             self.viewer_holder.content = self._viewer()
         else:
@@ -447,12 +454,57 @@ class EditorTab(MangaTab):
 
     def _thumb(self, index: int, path: str) -> ft.Control:
         current = index == self.session.page_index
+        skipped = self.is_skipped(path)
+        image: ft.Control = ft.Image(src=path, width=52, height=68, fit=ft.BoxFit.COVER, cache_width=104,
+                                     border_radius=4, gapless_playback=True)
+        if skipped:  # the desktop skip marker (⏭️), dimmed like the Files tab row
+            image = ft.Stack([image, ft.Container(content=ft.Text("⏭️", size=12), right=1, top=1,
+                                                  bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.SURFACE),
+                                                  border_radius=4, padding=1)], width=52, height=68)
         return ft.Container(
-            content=ft.Image(src=path, width=52, height=68, fit=ft.BoxFit.COVER, cache_width=104, border_radius=4,
-                             gapless_playback=True),
+            content=image,
             border=ft.Border.all(3 if current else 1, ft.Colors.PRIMARY if current else ft.Colors.OUTLINE_VARIANT),
-            border_radius=6, on_click=lambda e, i=index: self.ctx.spawn(self.open_page(i)),
-            key=f"me-thumb-{self._gen}-{index}", tooltip=os.path.basename(path))
+            border_radius=6, opacity=0.5 if skipped else 1.0,
+            on_click=lambda e, i=index: self.ctx.spawn(self.open_page(i)),
+            on_long_press=lambda e, p=path: self.thumb_menu(p),
+            key=f"me-thumb-{self._gen}-{index}",
+            tooltip=os.path.basename(path) + (" · skipped" if skipped else ""))
+
+    def is_skipped(self, path: str) -> bool:
+        try:
+            return bool(self.session.files.is_skipped(path))
+        except Exception:
+            return False
+
+    def thumb_menu(self, path: str) -> Any:
+        """Long-press on a page thumbnail: the desktop preview's thumbnail menu "⏭️ Skip Processing" /
+        "▶️ Process This Image" (the Files tab's per-file switch, ``MangaFileList.toggle_skip``)."""
+        from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+
+        skipped = self.is_skipped(path)
+        label = "▶️ Process This Image" if skipped else "⏭️ Skip Processing"
+        items = [ActionItem(label, lambda p=path: self.ctx.spawn(self.toggle_skip(p)),
+                            icon="PLAY_ARROW" if skipped else "SKIP_NEXT", key="me-thumb-skip")]
+        sheet = ActionSheet(items, title=os.path.basename(path), tablet=bool(getattr(self.ctx, "tablet", False)))
+        self.ctx.extras["manga_thumb_sheet"] = sheet
+        if self.ctx.page is not None:
+            sheet.show(self.ctx.page)
+        return sheet
+
+    async def toggle_skip(self, path: str) -> Optional[bool]:
+        """Skip / process a page from the editor strip; both the Files tab and the strip re-render."""
+        files_tab = getattr(self.screen, "files_tab", None)
+        mutate = getattr(files_tab, "_mutate", None)
+        if callable(mutate):
+            result = await mutate(self.session.files.toggle_skip, path)
+        else:
+            try:
+                result = await self.ctx.io(self.session.files.toggle_skip, path)
+            except Exception as exc:
+                self.ctx.say(f"Could not update the list: {exc}")
+                result = None
+        self.refresh()
+        return result
 
     def _viewer(self) -> ft.Control:
         if getattr(self.ctx, "tablet", False):
@@ -779,6 +831,24 @@ class EditorTab(MangaTab):
             return False
         self.selected = None
         return await self._box_call(lambda: es.delete_box(index))
+
+    async def clear_boxes(self, *, confirm: bool = True) -> bool:
+        """Clear Boxes (desktop ``_on_clear_boxes_clicked``, shared through manga_editor_core): every box
+        of the page with its OCR text and translation, and the page's translated image."""
+        es = self.session.editor
+        if es is None or not self.image_path:
+            return False
+        if confirm:
+            from glossarion_mobile.ui.tools.common import ask
+
+            answer = await ask(self.ctx, "Clear boxes",
+                               "Remove every box on this page with its OCR text and translation? The page's "
+                               "translated image is deleted; the cleaned image stays.",
+                               (("no", "Cancel", "text"), ("yes", "Clear", "filled")), key="me-clear-confirm")
+            if answer != "yes":
+                return False
+        self.selected = None
+        return await self._box_call(lambda: es.clear_page())
 
     async def toggle_exclude(self) -> bool:
         index = self.selected

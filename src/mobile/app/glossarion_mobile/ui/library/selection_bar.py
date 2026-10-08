@@ -54,6 +54,8 @@ class SelectionTopBar:
                 content=ft.Row([ft.Text("Select"), ft.Icon(ft.Icons.ARROW_DROP_DOWN)], tight=True, spacing=0),
                 items=[ft.PopupMenuItem(content=label, on_click=lambda e, fn=fn: call_handler(fn))
                        for label, fn in select_menu],
+                tooltip="Select by status",
+                size_constraints=HIT_TARGET,
                 key="select-menu",
             ))
         self.control = ft.Container(

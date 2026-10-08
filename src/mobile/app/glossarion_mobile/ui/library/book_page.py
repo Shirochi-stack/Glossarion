@@ -15,6 +15,11 @@ Refresh: every 2 s while the page is on top and the app is in the foreground,
 compared on a worker thread; only a change reloads the rows (read-only), which
 the tabs apply in place by row key. Pull-to-refresh / ⟳ Refresh is a full
 reconcile (``read_only=False``).
+
+Wide screens (>= 1200 dp, UI_SPEC §1.1) lay the page out master-detail: the Overview stays
+in a left pane and the tab bar holds Chapters · Glossary · Output; ``set_tab("overview")``
+is then a no-op. The tab objects build their controls once; a size-class change
+(``apply_size_class``) only re-arranges them.
 """
 
 from __future__ import annotations
@@ -28,8 +33,10 @@ import flet as ft
 
 from glossarion_mobile.services.library import CoreMissing, Poller, book_identity
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
+from glossarion_mobile.ui.components.master_detail import MASTER_WIDTH
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import LibraryContext, icon_button, mode_badge
 from glossarion_mobile.ui.screens.base import Screen
@@ -39,6 +46,8 @@ __all__ = ["BOOK_TABS", "BookPageScreen", "job_for_book"]
 log = logging.getLogger("glossarion.library.ui")
 
 BOOK_TABS = ("overview", "chapters", "glossary", "output")
+#: Tabs beside the Overview pane on wide screens (master-detail).
+WIDE_TABS = BOOK_TABS[1:]
 _TAB_LABELS = {"overview": "Overview", "chapters": "Chapters", "glossary": "Glossary", "output": "Output"}
 
 
@@ -96,15 +105,21 @@ class BookPageScreen(Screen):
         self._full_refreshing = False
         self._progress_lock = None  # asyncio.Lock, created on the loop
         self.tabs_built: dict = {}
+        self.wide = False  # master-detail: the Overview in its own pane (``_arrange``)
+        self.tab_names: tuple = BOOK_TABS
+        self.layout_builds = 0
+        self.review_sheet: Any = None  # U9: the open glossary-review sheet (Library review gate)
+        self._review_question: Optional[str] = None
         self.poller = Poller(self._tick, interval=2.0, visible=lambda: self.ctx.is_top(self),
                              foreground=self.ctx.foreground, spawn=self.ctx.spawn, name="book")
-        from glossarion_mobile.ui.library.chapters_tab import ChaptersTab
+        from glossarion_mobile.ui.library.chapters_tab import ChaptersTab, take_range_request
         from glossarion_mobile.ui.library.glossary_tab import GlossaryTab
         from glossarion_mobile.ui.library.output_tab import OutputTab
         from glossarion_mobile.ui.library.overview_tab import OverviewTab
 
         self.overview = OverviewTab(self)
-        self.chapters = ChaptersTab(self, initial_filter=self.initial_filter)
+        self.chapters = ChaptersTab(self, initial_filter=self.initial_filter,
+                                    initial_range=take_range_request(self.bid))  # U9 /retranslate <range>
         self.glossary_tab = GlossaryTab(self)
         self.output = OutputTab(self)
 
@@ -126,15 +141,38 @@ class BookPageScreen(Screen):
                  not has_workspace),
             item("Compile PDF", lambda: self.ctx.spawn(self.compile("compile_pdf")), ft.Icons.PICTURE_AS_PDF,
                  not has_workspace),
-            item("Translate Metadata", lambda: self.ctx.spawn(self.translate_metadata()), ft.Icons.LABEL),
+            item("Translate Metadata", lambda: self.ctx.spawn(self.translate_metadata()), ft.Icons.LABEL,
+                 self.metadata_reason() is not None),
             item("QA scan", lambda: self.ctx.go("tools.qa", None, {"out": self.bid}), ft.Icons.FACT_CHECK),
             item("Edit metadata.json", lambda: self.ctx.go("library.book.metadata", {"bid": self.bid}),
                  ft.Icons.DATA_OBJECT, not has_workspace),
             item("Files", self.open_files, ft.Icons.FOLDER_OPEN, not has_workspace),
+            # U9 (UI_SPEC §3.12): reload every tab from disk (the Chapters ⋯ and the Glossary tab have it too)
+            item("⟳ Refresh", lambda: self.ctx.spawn(self.full_refresh()), ft.Icons.REFRESH),
             item("Clear saved raw link", lambda: self.ctx.spawn(self.clear_raw_link()), ft.Icons.LINK_OFF),
-            item("Add to Series", lambda: self.ctx.say("Series arrive in U9"), ft.Icons.COLLECTIONS_BOOKMARK, True),
+            item("Add to Series", self.add_to_series, ft.Icons.COLLECTIONS_BOOKMARK, self._series() is None),
             item("Delete", lambda: self.ctx.spawn(self.delete()), ft.Icons.DELETE_OUTLINE),
         ]
+
+    # ---- U9 Series --------------------------------------------------------------------------------
+
+    @staticmethod
+    def _series() -> Any:
+        """The SeriesFeature (UI_SPEC §2.15), when installed."""
+        try:
+            from glossarion_mobile.ui.chat.series_feature import current
+
+            return current()
+        except Exception:
+            return None
+
+    def add_to_series(self) -> Any:
+        """⋯ › Add to Series: link this book to a series (or a new one)."""
+        feature = self._series()
+        if feature is None:
+            self.ctx.say("Series are not available in this session")
+            return None
+        return feature.add_books_sheet([self.bid], self.title)
 
     # ---- body ---------------------------------------------------------------------------------------
 
@@ -148,8 +186,12 @@ class BookPageScreen(Screen):
         self.strip_mode = mode_badge(pm.mode_label("text"), key="strip-mode")
         self.strip_job_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, key="strip-job")
         self.strip_stop = icon_button("STOP_CIRCLE", "Stop", self._stop_job, key="strip-stop")
-        self.strip_job = ft.Row([ft.Icon(ft.Icons.HOURGLASS_TOP, size=16), self.strip_job_text, self.strip_stop],
-                                visible=False, spacing=4, tight=True, key="strip-job-row")
+        # U9: the review gate's question can be reopened from the strip after the sheet was dismissed
+        self.strip_review = ft.TextButton(content="Review glossary", icon=ft.Icons.RATE_REVIEW, visible=False,
+                                          on_click=lambda e: self.reopen_review(), key="strip-review")
+        self.strip_job = ft.Row([ft.Icon(ft.Icons.HOURGLASS_TOP, size=16), self.strip_job_text, self.strip_stop,
+                                 self.strip_review], visible=False, spacing=4, tight=True, wrap=True,
+                                key="strip-job-row")
         self.strip = ft.Container(
             content=ft.Column([
                 ft.Row([self.strip_title, self.strip_mode], spacing=8,
@@ -161,30 +203,73 @@ class BookPageScreen(Screen):
             padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             key="book-strip",
         )
-        self.tab_index = {name: i for i, name in enumerate(BOOK_TABS)}
+        self.overview.columns = self._overview_columns(surface.size_class(self.ctx.page))
+        self.tab_bodies = {"overview": self.overview.build(), "chapters": self.chapters.build(),
+                           "glossary": self.glossary_tab.build(), "output": self.output.build()}
+        self.layout_slot = ft.Container(expand=True, key="book-layout")
+        self._arrange(surface.is_wide(self.ctx.page), self.initial_tab)
+        return ft.Column([self.strip, self.layout_slot], spacing=0, expand=True)
+
+    def _arrange(self, wide: bool, tab: str) -> None:
+        """Tabs over the whole width (phone, tablet) or the Overview pane + the other tabs (wide)."""
+        self.wide = bool(wide)
+        self.layout_builds += 1
+        self.tab_names = WIDE_TABS if self.wide else BOOK_TABS
+        if tab not in self.tab_names:
+            tab = self.tab_names[0]
+        # The first build keeps the U5 keys; a re-arrangement gets fresh ones (Flet freezes a subtree
+        # re-rendered under the key of the one it replaces).
+        suffix = "" if self.layout_builds == 1 else f"-{self.layout_builds}"
+        self.tab_index = {name: i for i, name in enumerate(self.tab_names)}
         self.tabs = ft.Tabs(
-            length=len(BOOK_TABS),
-            selected_index=self.tab_index[self.initial_tab],
+            length=len(self.tab_names),
+            selected_index=self.tab_index[tab],
             on_change=self._on_tab,
             expand=True,
             content=ft.Column([
-                ft.TabBar(tabs=[ft.Tab(label=_TAB_LABELS[name]) for name in BOOK_TABS],
-                          scrollable=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="book-tabbar"),
-                ft.TabBarView(controls=[self.overview.build(), self.chapters.build(), self.glossary_tab.build(),
-                                        self.output.build()], expand=True, key="book-tabview"),
+                ft.TabBar(tabs=[ft.Tab(label=_TAB_LABELS[name]) for name in self.tab_names],
+                          scrollable=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key=f"book-tabbar{suffix}"),
+                ft.TabBarView(controls=[self.tab_bodies[name] for name in self.tab_names], expand=True,
+                              key=f"book-tabview{suffix}"),
             ], expand=True, spacing=0),
-            key="book-tabs",
+            key=f"book-tabs{suffix}",
         )
-        return ft.Column([self.strip, self.tabs], spacing=0, expand=True)
+        if self.wide:
+            overview = ft.Container(content=self.tab_bodies["overview"], width=MASTER_WIDTH + 40,
+                                    bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, key=f"book-overview-pane{suffix}")
+            self.layout_slot.content = ft.Row([overview, self.tabs], spacing=0, expand=True,
+                                              vertical_alignment=ft.CrossAxisAlignment.STRETCH)
+        else:
+            self.layout_slot.content = self.tabs
+
+    def _overview_columns(self, size_class: Any) -> bool:
+        from glossarion_mobile.ui.library.overview_tab import two_columns
+
+        page = self.ctx.page
+        return two_columns(size_class, getattr(page, "width", None), getattr(page, "height", None))
+
+    def apply_size_class(self, size_class: Any) -> None:
+        """Master-detail at >= 1200 dp; the tab on screen stays selected (the Overview tab when
+        leaving the wide layout from it). The Overview uses two columns on a large phone in landscape."""
+        if getattr(self, "layout_slot", None) is not None:
+            self.overview.apply_layout(size_class)
+        wide = getattr(size_class, "value", size_class) == "wide"
+        if getattr(self, "layout_slot", None) is None or wide == self.wide:
+            return
+        self._arrange(wide, self.current_tab)
+        self.ctx.push(self.layout_slot)
 
     @property
     def current_tab(self) -> str:
         tabs = getattr(self, "tabs", None)
+        names = self.tab_names
         index = getattr(tabs, "selected_index", 0) if tabs is not None else 0
-        return BOOK_TABS[index] if 0 <= index < len(BOOK_TABS) else "overview"
+        return names[index] if 0 <= index < len(names) else names[0]
 
     def set_tab(self, name: str, *, status_filter: Optional[str] = None) -> None:
         if name not in BOOK_TABS or getattr(self, "tabs", None) is None:
+            return
+        if name not in self.tab_index:  # the Overview has its own pane on wide screens
             return
         self.tabs.selected_index = self.tab_index[name]
         if name == "chapters" and status_filter is not None:
@@ -220,6 +305,8 @@ class BookPageScreen(Screen):
                     log.debug("subscribing to jobs failed", exc_info=True)
         self.poller.start()
         self.ctx.spawn(self.load())
+        if self.review_sheet is None:
+            self._maybe_review(self.job)  # a review left open for ✏️ Edit, or asked while away
 
     def handle_back(self) -> bool:
         """Android back leaves the Chapters / Glossary selection mode first (UI_SPEC §1.6 rule 2)."""
@@ -378,6 +465,12 @@ class BookPageScreen(Screen):
                 line += f" · {progress.completed}/{progress.total}"
             elif getattr(job, "state", None) is not None and str(getattr(job.state, "value", "")) == "QUEUED":
                 line += " · queued"
+            from glossarion_mobile.ui.chat.cards import glossary_question
+
+            waiting = glossary_question(job) is not None
+            if waiting:
+                line += " · glossary ready: review needed"
+            self.strip_review.visible = waiting
             self.strip_job_text.value = f"⏳ {line}"
             self.strip_job.visible = True
         else:
@@ -390,10 +483,79 @@ class BookPageScreen(Screen):
         finished = self.job is not None and job is None
         self.job = job
         self._render_strip()
+        self._maybe_review(job)
         if finished:
             self.ctx.spawn(self.reload_progress())
             if self.glossary is not None:  # a glossary extraction may have written its progress
                 self.ctx.spawn(self.reload_glossary())
+
+    # ---- U9: the Library glossary review gate (UI_SPEC §3.10, Appendix C) -------------------------------
+
+    def _maybe_review(self, job: Any) -> Optional[str]:
+        """The book's job waits for a glossary review: the approval sheet over the Book page, once per
+        question (the jobs.action notification and Jobs › job answer the same question)."""
+        from glossarion_mobile.ui.chat.cards import glossary_question
+
+        question = glossary_question(job)
+        if question is None:
+            self._review_question = None
+            sheet, self.review_sheet = self.review_sheet, None
+            if sheet is not None and sheet.answered is None:
+                sheet.close()  # answered elsewhere (Jobs, notification) or the job stopped
+            return None
+        question_id = str(question.get("id") or "")
+        if question_id == self._review_question:
+            return None
+        self._review_question = question_id
+        self.ctx.spawn(self.open_glossary_review(job, question))
+        return question_id
+
+    def reopen_review(self) -> Optional[str]:
+        """Strip › Review glossary: the pending question's sheet again."""
+        sheet, self.review_sheet = self.review_sheet, None
+        if sheet is not None and sheet.answered is None:
+            sheet.close()
+        self._review_question = None
+        return self._maybe_review(self.job)
+
+    async def open_glossary_review(self, job: Any, question: Mapping[str, Any]) -> Any:
+        from glossarion_mobile.ui.chat.cards import GlossaryReviewSheet, glossary_preview
+
+        path = str((question.get("data") or {}).get("path") or "")
+        info = await self.ctx.io(glossary_preview, path)
+        jobs = self.ctx.jobs
+        question_id = str(question.get("id") or "")
+
+        def answer(accepted: bool) -> None:
+            self.review_sheet = None
+            if jobs is not None:
+                jobs.answer(question_id, bool(accepted))
+            self.ctx.say("Translating with the reviewed glossary" if accepted else
+                         "Translation stopped: the glossary was not accepted")
+
+        def edit(file_path: str) -> None:
+            # ✏️ Edit: the Glossary editor on the generated file; the job keeps waiting and the sheet
+            # opens again when this page shows
+            sheet, self.review_sheet = self.review_sheet, None
+            if sheet is not None:
+                sheet.close()
+            self._review_question = None
+            hooks = getattr(self.service, "glossary_hooks", None)
+            if hooks is not None and hasattr(hooks, "open_editor_for_path"):
+                hooks.open_editor_for_path(file_path)
+            else:
+                from glossarion_mobile.ui.tools import text_editor
+
+                text_editor.open_text_editor(self.ctx, file_path)
+
+        sheet = GlossaryReviewSheet(path=path, info=info, on_answer=answer, on_edit=edit,
+                                    title=f"{getattr(job, 'title', '') or self.title} · glossary ready")
+        self.review_sheet = sheet
+        if self.ctx.page is not None and self.ctx.is_top(self):
+            sheet.show(self.ctx.page)
+        else:
+            self._review_question = None  # shown when this page is on top again
+        return sheet
 
     def _stop_job(self, e: Any = None) -> None:
         jobs = self.ctx.jobs
@@ -451,16 +613,18 @@ class BookPageScreen(Screen):
         return sheet
 
     async def translate_metadata(self) -> Optional[str]:
-        service = self.service
-        if not service.has_job_kind("metadata"):
-            self.ctx.say("Metadata translation is not available in this session")
-            return None
-        try:
-            spec = await self.ctx.io(service.metadata_spec, [self.book])
-            return await service.submit(spec)
-        except Exception as exc:
-            self.ctx.say(f"Could not start: {exc}")
-            return None
+        """Book ⋯ / Overview: ``LibraryContext.translate_metadata`` ("Metadata Already Exists" first)."""
+        return await self.ctx.translate_metadata([self.book])
+
+    def metadata_reason(self) -> Optional[str]:
+        """Why Translate Metadata cannot run for this book (the desktop offers it only when a raw EPUB
+        resolves), else None."""
+        raw = str(self.book.get("raw_source_path") or "")
+        if not (raw and not self.book.get("missing_raw_file") and raw.lower().endswith(".epub")):
+            return "Needs a raw EPUB"
+        if not self.service.has_job_kind("metadata"):
+            return "Metadata translation is not available in this session"
+        return None
 
     def open_files(self) -> None:
         folder = str(self.book.get("output_folder") or "")

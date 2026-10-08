@@ -370,9 +370,10 @@ def test_blocked_packages_merge_spec_list_and_manifest():
     assert spec <= set(android)
     assert "psutil" not in android and "psutil" in ios
     # From backend_manifest.toml: [gui].packages and [thirdparty.unavailable] via [thirdparty.map].
-    assert {"PyQt5", "gradio", "google.cloud.vision", "grpc", "huggingface_hub", "Crypto"} <= set(android)
-    # Packages the phone does ship are never blocked.
-    for shipped in ("onnxruntime", "fitz", "lxml", "tiktoken", "cryptography", "rapidfuzz", "google.genai"):
+    assert {"PyQt5", "gradio", "huggingface_hub", "Crypto"} <= set(android)
+    # Packages the phone does ship are never blocked (grpcio / google-cloud-vision: Tier B, U9).
+    for shipped in ("onnxruntime", "fitz", "lxml", "tiktoken", "cryptography", "rapidfuzz", "google.genai",
+                    "grpc", "google.cloud.vision"):
         assert shipped not in android
 
 

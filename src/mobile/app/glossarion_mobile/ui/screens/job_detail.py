@@ -6,7 +6,10 @@
   the error for failed jobs and the pending question ("Waiting for your
   glossary decision", answered on the chat's approval card).
 * Buttons: Stop (graceful, then force; same state words as Send) · Resume /
-  Retry · Files (output folder in the file browser) · Open origin.
+  Retry · Files (output folder in the file browser) · Progress (the output folder in the
+  Progress manager, U9) · Open origin; a finished translation with failed / QA-failed chapters
+  shows the chip "N QA failed" (Book › Chapters filtered on failures for a Library book, else
+  the Progress manager over the job's workspace).
 * Requests (N): request cards from the shared ``direct_text_stream`` request
   model fed by the job log (``JobService.request_segments``), in its order
   (spine order for attachments). A placeholder line until the build has it.
@@ -20,6 +23,7 @@ The screen only binds to ``JobService`` snapshots; it never derives a status.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import deque
@@ -33,6 +37,7 @@ from glossarion_mobile.services.jobs import (
     JobSnapshot,
     JobState,
     format_duration,
+    issue_label,
     kind_icon,
     progress_line,
     status_key,
@@ -48,6 +53,8 @@ from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
 __all__ = ["EtaEstimator", "JobDetailScreen", "RequestCardData", "origin_route", "request_card_data"]
+
+log = logging.getLogger("glossarion.jobs")
 
 MAX_REQUEST_CARDS = 60
 PREVIEW_CHARS = 280
@@ -145,8 +152,16 @@ class JobDetailScreen(Screen):
         file_ref: Optional[Callable[[str], str]] = None,
         tablet: bool = False,
         dark: bool = False,
+        open_progress: Optional[Callable[[str], Any]] = None,
+        roots: Optional[Callable[[], Mapping[str, str]]] = None,
+        chat_workspace: Optional[Callable[[Any], str]] = None,
     ) -> None:
         super().__init__(match)
+        self.open_progress = open_progress  # (output folder) -> the Progress manager over it
+        self.roots = roots  # () -> the file browser roots (JobsFeature.file_roots)
+        self.chat_workspace = chat_workspace  # (snapshot) -> a chat job's persisted Attachments/<stem> folder
+        self._files_key: Any = None
+        self._files_target: Optional[tuple] = None
         self.service = service
         self.files = files
         self.dispatcher = dispatcher
@@ -190,6 +205,17 @@ class JobDetailScreen(Screen):
                                              key="job-resume")
         self.files_button = ft.OutlinedButton(content="Files", icon=ft.Icons.FOLDER_OPEN, on_click=self._on_files,
                                               key="job-files")
+        self.progress_button = ft.OutlinedButton(content="Progress", icon=ft.Icons.TIMELINE, key="job-progress",
+                                                 on_click=lambda e: self._on_progress(), visible=False)
+        # U9: a book job's glossary review (the Library review gate) can be answered here too
+        self.review_button = ft.FilledTonalButton(content="Review glossary", icon=ft.Icons.RATE_REVIEW,
+                                                  on_click=lambda e: self.open_review(), visible=False,
+                                                  key="job-review")
+        self.review_sheet: Any = None
+        self.issue_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.HOURGLASS_TOP, size=16), visible=False,
+                                  key="job-issue")
+        self.qa_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
+                               on_click=lambda e: self._on_progress(failed=True), visible=False, key="job-qa-failed")
         header = SectionCard(
             title="Job",
             icon=kind_icon(self.snap.kind),
@@ -201,8 +227,10 @@ class JobDetailScreen(Screen):
                 self.time_text,
                 self.question_text,
                 self.error_text,
-                ft.Row([self.stop_button, self.resume_button, self.files_button], wrap=True, spacing=8,
-                       run_spacing=8),
+                self.issue_chip,
+                self.qa_chip,
+                ft.Row([self.review_button, self.stop_button, self.resume_button, self.files_button,
+                        self.progress_button], wrap=True, spacing=8, run_spacing=8),
             ],
             key="job-header",
         )
@@ -282,7 +310,13 @@ class JobDetailScreen(Screen):
         self.time_text.visible = bool(times)
         self.error_text.value = snap.error or ""
         self.error_text.visible = bool(snap.error) and snap.state is JobState.FAILED
-        self.question_text.value = "Waiting for your glossary decision — answer it in the chat" if snap.question else ""
+        from glossarion_mobile.services.notifications import chat_of
+        from glossarion_mobile.ui.chat.cards import glossary_question
+
+        reviewable = glossary_question(snap) is not None and chat_of(snap) is None
+        self.review_button.visible = reviewable
+        self.question_text.value = ("Waiting for your glossary decision — review it to continue" if reviewable else
+                                    "Waiting for your glossary decision — answer it in the chat") if snap.question else ""
         self.question_text.color = ft.Colors.TERTIARY
         self.question_text.visible = bool(snap.question)
         active = snap.is_active
@@ -299,7 +333,17 @@ class JobDetailScreen(Screen):
         self.resume_button.visible = can_resume
         self.resume_button.content = "Retry" if snap.state is JobState.FAILED else "Resume"
         folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
-        self.files_button.visible = bool(folder) and self.navigate is not None and self.file_ref is not None
+        self.files_button.visible = (self.navigate is not None and self.file_ref is not None
+                                     and self.files_target(snap) is not None)
+        library_bid = self._library_bid(snap)
+        self.progress_button.visible = bool(folder) and (self.open_progress is not None or library_bid is not None)
+        failed = int(getattr(snap.progress, "failed", 0) or 0)
+        self.qa_chip.visible = failed > 0 and not snap.is_active and (folder is not None or library_bid is not None)
+        self.qa_chip.label = ft.Text(f"{failed} QA failed")
+        active_issue = snap.active_issue() if hasattr(snap, "active_issue") else None
+        label = issue_label(active_issue) if active_issue else ""
+        self.issue_chip.label = ft.Text(label)
+        self.issue_chip.visible = bool(label)
         self.outputs_row.controls = [
             ft.Chip(label=ft.Text(os.path.basename(path)), leading=ft.Icon(ft.Icons.INSERT_DRIVE_FILE, size=16),
                     on_click=lambda e, p=path: self._on_output(p), key=f"job-output-{i}")
@@ -401,6 +445,42 @@ class JobDetailScreen(Screen):
         elif mode in ("force", "immediate"):
             self._notify("Force stopping…")
 
+    def open_review(self) -> Any:
+        """Review glossary: the approval sheet (✏️ Edit · ✓ Yes · ■ No) for the job's pending question."""
+        from glossarion_mobile.ui.chat.cards import GlossaryReviewSheet, glossary_preview, glossary_question
+
+        snap = self.service.snapshot(self.job_id) or self.snap
+        question = glossary_question(snap)
+        if question is None:
+            self._notify("The job is not waiting for a glossary decision")
+            return None
+        path = str((question.get("data") or {}).get("path") or "")
+        question_id = str(question.get("id") or "")
+
+        def answer(accepted: bool) -> None:
+            self.service.answer(question_id, bool(accepted))
+            self._notify("Translating with the reviewed glossary" if accepted else
+                         "Translation stopped: the glossary was not accepted")
+
+        def edit(file_path: str) -> None:
+            if self.review_sheet is not None:
+                self.review_sheet.close()
+            if self.navigate is not None and self.file_ref is not None:
+                from glossarion_mobile.ui.tools.text_editor import request_open
+
+                fid = self.file_ref(file_path)
+                request_open(fid)
+                self.navigate("tools.text", {"fid": fid})
+
+        try:
+            info = glossary_preview(path)
+        except Exception:
+            info = None
+        self.review_sheet = GlossaryReviewSheet(path=path, info=info, on_answer=answer,
+                                                on_edit=edit if self.file_ref is not None else None,
+                                                title=f"{snap.title} · glossary ready")
+        return self.review_sheet.show(self.page)
+
     def _on_resume(self, e: Any = None) -> None:
         snap = self.snap
         if snap is None:
@@ -413,13 +493,75 @@ class JobDetailScreen(Screen):
         if self.navigate is not None:
             self.navigate("jobs.detail", {"jid": new_id})
 
+    def files_target(self, snap: Optional[JobSnapshot]) -> Optional[tuple]:
+        """``(root, folder)`` the Files button opens: a chat job's persisted ``Direct Text/<chat>/Attachments/
+        <stem>`` workspace (its pipeline folder lives in the run root under the data folder, outside the
+        file browser's roots, and a finished run's root is deleted), else the job's output folder when a
+        root contains it; None hides the button."""
+        if snap is None:
+            return None
+        folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
+        key = (snap.id, folder, str(snap.state))
+        if key == self._files_key:
+            return self._files_target
+        target: Optional[tuple] = None
+        roots = None
+        if self.roots is not None:
+            try:
+                roots = dict(self.roots() or {})
+            except Exception:
+                roots = {}
+        from glossarion_mobile.ui.screens.files import root_for
+
+        origin = snap.spec.origin or {}
+        if origin.get("type") == "chat" and self.chat_workspace is not None:
+            try:
+                workspace = self.chat_workspace(snap) or ""
+            except Exception:
+                log.debug("chat workspace lookup failed", exc_info=True)
+                workspace = ""
+            if workspace:
+                root = root_for(workspace, roots, ("chats", "output")) if roots is not None else "chats"
+                if root:
+                    target = (root, workspace)
+        if target is None and folder:
+            root = root_for(str(folder), roots) if roots is not None else "output"
+            if root:
+                target = (root, str(folder))
+        self._files_key, self._files_target = key, target
+        return target
+
     def _on_files(self, e: Any = None) -> None:
         snap = self.snap
         if snap is None or self.navigate is None or self.file_ref is None:
             return
+        target = self.files_target(snap)
+        if target is not None:
+            self.navigate("tools.files.folder", {"root": target[0], "fid": self.file_ref(target[1])})
+
+    @staticmethod
+    def _library_bid(snap: JobSnapshot) -> Optional[str]:
+        origin = snap.spec.origin or {}
+        return str(origin["bid"]) if origin.get("type") == "library" and origin.get("bid") else None
+
+    def _on_progress(self, failed: bool = False) -> Any:
+        """Progress / "N QA failed": a Library book opens Book › Chapters (filtered on failures for the
+        chip, QA report's link), any other workspace the Progress manager over the output folder."""
+        snap = self.snap
+        if snap is None:
+            return None
+        bid = self._library_bid(snap)
+        if bid is not None and self.navigate is not None:
+            query = {"tab": "chapters", "filter": "failed"} if failed else {"tab": "chapters"}
+            try:
+                return self.navigate("library.book", {"bid": bid}, query)
+            except TypeError:
+                return self.navigate("library.book", {"bid": bid})
         folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
-        if folder:
-            self.navigate("tools.files.folder", {"root": "output", "fid": self.file_ref(folder)})
+        if folder and self.open_progress is not None:
+            return self.open_progress(str(folder))
+        self._notify("No output folder for this job")
+        return None
 
     def _open_origin(self, e: Any = None) -> None:
         if self.snap is None or self.navigate is None:

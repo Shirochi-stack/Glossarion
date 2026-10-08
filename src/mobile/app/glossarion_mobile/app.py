@@ -162,6 +162,15 @@ class GlossarionApp:
         self.glossary: Any = None
         self.glossary_feature: Any = None
         self.tools: Any = None
+        # U8: MangaFeature.install sets manga. U9: WebViewBridgeFeature sets webview_bridge (None
+        # where flet-webview does not run), UpdatesFeature sets updates_feature, SeriesFeature sets
+        # series, _install_keyboard sets keyboard (the Ctrl+= / - / 0 text-size shortcuts).
+        self.manga: Any = None
+        self.webview_bridge: Any = None
+        self.updates_feature: Any = None
+        self.series: Any = None
+        self.keyboard: Any = None
+        self.freeze_watchdog: Any = None
 
     @staticmethod
     def _make_secure_storage() -> Any:
@@ -247,6 +256,11 @@ class GlossarionApp:
         await self._install_glossary()  # Glossary Manager + the Library's glossary hooks (after the Library)
         await self._install_tools()  # Tools hub, QA Scanner, Converter, Headers & metadata (after Library + Reader)
         await self._install_manga()  # Tools › Manga (after Tools: it reuses its ToolsContext)
+        await self._install_webview_bridge()  # authnd/ + search/gemini through a hidden WebView (U9)
+        await self._install_updates()  # About › Updates + the startup check (U9)
+        await self._install_series()  # optional chat Series (U9; after the chat and the Library)
+        self._install_keyboard()  # Ctrl+= / Ctrl+- / Ctrl+0 text size on hardware keyboards (U9)
+        self._install_diagnostics()  # HTTP log / payload / memory switches, cache cap, freeze watchdog (U9)
         self.dispatcher.spawn(self._after_ready())
         match = await self.dispatch_route(page.route, source="initial")
         await self._maybe_welcome(match)
@@ -387,6 +401,80 @@ class GlossarionApp:
         except Exception:
             log.exception("manga feature unavailable; /tools/manga shows a placeholder")
 
+    async def _install_webview_bridge(self) -> None:
+        """The in-app browser driver for the keyless browser-backed routes (authnd/ hCaptcha
+        minting, search/gemini AI Mode): a hidden flet-webview registered as the backend's
+        ``browser_driver`` where flet-webview runs (Android, iOS, macOS). Elsewhere those
+        routes report that they need the in-app browser (U9)."""
+        try:
+            from glossarion_mobile.services.webview_bridge import WebViewBridgeFeature
+
+            await WebViewBridgeFeature.install(self)  # sets self.webview_bridge (None when unsupported)
+        except Exception:
+            log.exception("webview bridge unavailable; authnd/ and search/gemini report it")
+
+    async def _install_updates(self) -> None:
+        """About › Updates (Check now, Check on startup, skip version, release notes, APK /
+        AltStore links) over the GUI-free ``update_core`` (U9). The mobile app is not
+        published, so "no mobile asset" is a normal answer."""
+        try:
+            from glossarion_mobile.ui.screens.updates import UpdatesFeature
+
+            await UpdatesFeature.install(self)  # sets self.updates_feature; wraps shell.screen_factory
+        except Exception:
+            log.exception("updates feature unavailable; /settings/updates shows a placeholder")
+
+    async def _install_series(self) -> None:
+        """Series: the optional, mobile-only chat grouping (``direct_text_chats.mobile.json``
+        sidecar; drawer sections, Move to Series, series defaults; U9)."""
+        try:
+            from glossarion_mobile.ui.chat.series_feature import SeriesFeature
+
+            await SeriesFeature.install(self)  # sets self.series; wraps shell.screen_factory
+        except Exception:
+            log.exception("series feature unavailable; Series actions stay disabled")
+
+    def _install_diagnostics(self) -> None:
+        """Logs & diagnostics at launch (U9, ``services.logs``): re-apply the HTTP logging / Save payloads /
+        Memory stats switches from Prefs, cap the Payloads and http_requests folders at the desktop
+        400 MB (io pool), start the UI-loop freeze watchdog (``<logs>/freeze.log``) and say so when the
+        app crashed last time."""
+        try:
+            from glossarion_mobile.services import logs as dl
+
+            prefs = self.prefs
+            get = (lambda k, d: prefs.get(k, d)) if prefs is not None else (lambda k, d: d)
+            logs_dir = getattr(self.paths, "logs", None)
+            data_dir = getattr(self.paths, "data", None)
+            if get(dl.PREF_HTTP_LOG, False):
+                dl.apply_http_logging(True, logs_dir)
+            if not get(dl.PREF_SAVE_PAYLOAD, True):
+                dl.apply_save_payload(False)
+            if get(dl.PREF_MEMORY_STATS, False):
+                dl.apply_memory_stats(True)
+            if data_dir or logs_dir:
+                self.dispatcher.spawn(self.dispatcher.run_in_thread(
+                    lambda: dl.sweep_debug_caches(data_dir, logs_dir), name="gl-cache-sweep"))
+            if logs_dir and not os.environ.get("PYTEST_CURRENT_TEST"):
+                self.freeze_watchdog = dl.FreezeWatchdog(lambda fn: self.dispatcher.post(fn), logs_dir).start()
+            if getattr(self.boot, "previous_crash", False):
+                self.notify("Glossarion closed unexpectedly last time", "Logs",
+                            lambda e=None: self.navigate_to("settings.logs"))
+        except Exception:
+            log.exception("diagnostics start-up failed")
+
+    def _install_keyboard(self) -> None:
+        """Hardware keyboards (tablets, Chromebooks, desktop dev): Ctrl+= / Ctrl+- / Ctrl+0 change
+        the text size of the current chat (ChatView.apply_chat_text_scale) or of the open Reader
+        (its Aa font size), like the desktop zoom shortcuts (UI_SPEC §2.4)."""
+        try:
+            from glossarion_mobile.ui.keyboard import KeyboardShortcuts
+
+            self.keyboard = KeyboardShortcuts(self)
+            self.page.on_keyboard_event = self.keyboard.on_keyboard_event
+        except Exception:
+            log.exception("keyboard shortcuts unavailable")
+
     async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
         """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome
         flow, only when the app opened on the chat home (never over a deep link or the
@@ -466,6 +554,7 @@ class GlossarionApp:
 
     def make_screen(self, match: RouteMatch) -> Screen:
         if match.name == "settings.logs":
+            store = self.config_store
             return DiagnosticsScreen(
                 match,
                 page=self.page,
@@ -476,6 +565,12 @@ class GlossarionApp:
                 open_device_checks=self.open_device_checks,
                 copy_handler=self._copy_text,
                 dark=is_dark(self.page),
+                prefs=self.prefs,
+                paths=self.paths,
+                files=self.files,
+                config_snapshot=(store.snapshot if store is not None else None),
+                navigate=self.navigate_to,
+                notify=self.notify,
             )
         if match.name in _HUB_INTROS:
             return HubScreen(match, navigate=self.navigate_to, intro=_HUB_INTROS[match.name])
@@ -643,6 +738,13 @@ class GlossarionApp:
         name = getattr(state, "value", str(state))
         if name in ("inactive", "hide", "pause", "detach"):
             rb.flush_logs()
+        if name == "detach":
+            bridge = getattr(self, "webview_bridge", None)
+            if bridge is not None:
+                try:
+                    bridge.shutdown()  # unregister the browser driver, cancel its pages
+                except Exception:
+                    log.exception("shutting the webview bridge down failed")
         self.lifecycle.append(f"{time.strftime('%H:%M:%S')} {name}")
         del self.lifecycle[:-12]
         log.info("lifecycle: %s", name)
@@ -698,6 +800,20 @@ class GlossarionApp:
         sheet.show(self.page)
         return sheet
 
+    def _open_user_guide(self) -> Any:
+        """Help › User guide: the bundled ``assets/user_guide.md`` (the same sheet as About › Guides)."""
+        from glossarion_mobile.ui.screens.about import show_user_guide
+
+        run_io = None
+        dispatcher = getattr(self, "dispatcher", None)
+        if dispatcher is not None and getattr(dispatcher, "bound", False):
+            run_io = dispatcher.run_in_thread
+        coro = show_user_guide(self.page, getattr(self, "paths", None), run_io=run_io)
+        spawn = getattr(dispatcher, "spawn", None) if dispatcher is not None else None
+        if callable(spawn) and getattr(dispatcher, "bound", False):
+            return spawn(coro)
+        return asyncio.ensure_future(coro)
+
     def _on_status_chip(self, e: Any = None) -> None:
         block = self.state.send_block()
         if block is not None and block.fix_action == "sign_in_chatgpt":
@@ -708,7 +824,7 @@ class GlossarionApp:
     def _on_help(self, e: Any = None) -> ActionSheet:
         sheet = ActionSheet(
             [
-                ActionItem("User guide", disabled_reason="Arrives with the bundled user guide", icon="MENU_BOOK"),
+                ActionItem("User guide", self._open_user_guide, icon="MENU_BOOK"),
                 ActionItem("Logs & diagnostics", lambda: self._drawer_navigate("settings.logs"), icon="TERMINAL"),
                 ActionItem("About", lambda: self._drawer_navigate("settings.about"), icon="INFO_OUTLINE"),
             ],

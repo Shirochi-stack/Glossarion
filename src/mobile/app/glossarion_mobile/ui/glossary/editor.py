@@ -58,9 +58,10 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.windowed_list import WindowedList
+from glossarion_mobile.ui.foreground import poll_sleep
 from glossarion_mobile.ui.glossary.common import ask, chip
 from glossarion_mobile.ui.glossary.entry_sheet import EntrySheet, GenderSheet, field_label
-from glossarion_mobile.ui.glossary.windowed_list import WindowedList
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET
 
@@ -1368,10 +1369,11 @@ class EditorPane:
             task.cancel()
 
     async def _poll(self) -> None:
-        """Auto-reload: an external change reloads a clean document; an edited one shows the banner."""
+        """Auto-reload: an external change reloads a clean document; an edited one shows the banner.
+        No checks while the app is in the background (``foreground.poll_sleep``)."""
         try:
             while True:
-                await asyncio.sleep(POLL_SECONDS)
+                await poll_sleep(getattr(self.ctx, "page", None), POLL_SECONDS)
                 await self.check_disk()
         except asyncio.CancelledError:
             return

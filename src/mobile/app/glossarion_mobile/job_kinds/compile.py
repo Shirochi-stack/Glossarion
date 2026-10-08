@@ -165,7 +165,83 @@ def run_rename(ctx: Any) -> dict:
             else "Rename failed (see the log)."}
 
 
+def md_txt_message(kind: str, ok: int, fail: int) -> str:
+    """The desktop Generate MD / Generate TXT button result (``_start_retro_md_txt_gen._finish``)."""
+    return f"✅ {ok} done" if not fail else f"✅ {ok} / ⚠️ {fail}"
+
+
+def run_md_txt(ctx: Any) -> dict:
+    """Generate MD / Generate TXT (desktop Other Settings retroactive buttons): every root HTML file of the
+    output folder through ``md_txt_sidecar_writer.generate_md_txt_for_output_dir`` (thread pool,
+    existing sidecars overwritten), with the desktop log lines."""
+    folders = resolve_folders(ctx)
+    kind = str(ctx.params.get("format") or "md").lower()
+    if kind not in ("md", "txt"):
+        kind = "md"
+    ctx.phase(f"Generating {kind.upper()}")
+    from md_txt_sidecar_writer import generate_md_txt_for_output_dir
+
+    ok = fail = total = 0
+    for folder in folders:
+        ctx.log(f"📝 [{kind.upper()}] {folder}")
+        r_ok, r_fail, r_total = generate_md_txt_for_output_dir(
+            folder, do_md=kind == "md", do_txt=kind == "txt", max_workers=4, log=ctx.log,
+            should_stop=ctx.stop_requested)
+        ok += r_ok
+        fail += r_fail
+        total += r_total
+    ctx.log(f"✅ [{kind.upper()}] Generation complete: {ok} file(s)" + (f", {fail} failed" if fail else ""))
+    ctx.set_result(md_txt={"format": kind, "ok": ok, "failed": fail, "total": total,
+                           "message": md_txt_message(kind, ok, fail)})
+    if ctx.stop_requested():
+        return {"ok": None, "outputs": []}
+    return {"ok": True, "outputs": []}
+
+
+#: The desktop "Apply to Existing Outputs" confirmation (other_settings manual BR→P conversion).
+BR_CONFIRM_TITLE = "Confirm Manual BR→P Conversion"
+BR_CONFIRM_TEXT = ("This immediately replaces <br> boundaries inside paragraphs with separate <p> paragraphs in "
+                   "each selected input's output folder.\n\nExample:\n<p>First<br/>Second</p>  →  "
+                   "<p>First</p><p>Second</p>\n\nIt runs even when the checkbox is off and does not create an "
+                   "automatic backup.")
+
+
+def run_br_to_paragraphs(ctx: Any) -> dict:
+    """Apply <br> → <p> to existing outputs (``html_output_utils.convert_br_in_output_folder`` on each
+    folder's root HTML files; atomic replace, BOM kept); the audit goes to the result and the log
+    in the desktop "[BR→P]" form."""
+    folders = resolve_folders(ctx)
+    ctx.phase("Converting <br> to <p>")
+    from html_output_utils import convert_br_in_output_folder
+
+    audits: list = []
+    failed_inputs = 0
+    for folder in folders:
+        name = os.path.basename(folder.rstrip("/\\"))
+        try:
+            audit = convert_br_in_output_folder(folder)
+        except Exception as exc:
+            failed_inputs += 1
+            ctx.log(f"⚠️ [BR→P] {name}: {exc}")
+            continue
+        failed = int(audit.get("failed") or 0)
+        if failed:
+            failed_inputs += 1
+        ctx.log(f"{'⚠️' if failed else '✅'} [BR→P] {name}: {audit.get('changed', 0)} updated, "
+                f"{audit.get('unchanged', 0)} unchanged, {failed} failed ({audit.get('scanned', 0)} scanned)")
+        audits.append({key: audit.get(key) for key in ("output_dir", "scanned", "changed", "unchanged", "failed")})
+    ctx.set_result(br_audit=audits)
+    ok_count = len(audits) - sum(1 for a in audits if a.get("failed"))
+    ctx.set_result(br_message=f"✅ {ok_count} / ⚠️ {failed_inputs}" if failed_inputs else f"✅ {ok_count} done")
+    return {"ok": True if audits else False, "outputs": [],
+            "error": None if audits else "No output folder could be converted (see the log)."}
+
+
 KINDS = {
+    "md_txt_sidecars": {"verb": "Generating MD / TXT", "icon": "DESCRIPTION", "stop_kind": "translation",
+                        "run": run_md_txt, "resumable": False},
+    "br_to_paragraphs": {"verb": "Converting <br> to <p>", "icon": "FORMAT_PARAGRAPH", "stop_kind": "translation",
+                         "run": run_br_to_paragraphs, "resumable": False},
     "compile_epub": {"verb": "Compiling EPUB", "icon": "MENU_BOOK", "stop_kind": "translation", "run": run_epub},
     "compile_pdf": {"verb": "Compiling PDF", "icon": "PICTURE_AS_PDF", "stop_kind": "translation", "run": run_pdf},
     "validate_epub": {"verb": "Validating EPUB", "icon": "RULE", "stop_kind": "translation", "run": run_validate,

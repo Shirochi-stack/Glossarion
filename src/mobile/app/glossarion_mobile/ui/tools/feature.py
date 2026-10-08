@@ -25,6 +25,7 @@ import os
 from typing import Any, Callable, Optional
 
 from glossarion_mobile.ui.router import RouteMatch
+from glossarion_mobile.ui.text_scale import effective as effective_text_scale
 
 __all__ = ["IMPLEMENTED_ROUTES", "SCREEN_ROUTES", "ToolsFeature"]
 
@@ -109,7 +110,7 @@ class ToolsFeature:
         shell = getattr(app, "shell", None)
         state = getattr(app, "state", None)
         try:
-            scale = float(state.text_scale.value) if state is not None else 1.0
+            scale = effective_text_scale(state) if state is not None else 1.0  # app x system (U9)
         except Exception:
             scale = 1.0
         paths = getattr(app, "paths", None)

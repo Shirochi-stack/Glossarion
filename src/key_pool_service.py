@@ -65,6 +65,8 @@ __all__ = [
     "NEW_KEY_ENTRY_FIELDS", "DEFAULT_GOOGLE_REGION", "DEFAULT_AZURE_API_VERSION",
     "missing_model_error", "new_key_entry", "new_main_key_entry", "added_key_extra_info",
     "validate_entry", "find_duplicate_key",
+    # individual endpoint (U9: IndividualEndpointDialog._validate / its shortcut buttons)
+    "INDIVIDUAL_ENDPOINT_SHORTCUTS", "is_azure_endpoint", "individual_endpoint_error",
     # import / export
     "KEY_POOLS_FORMAT", "KEY_POOLS_VERSION", "INVALID_IMPORT_MESSAGE", "NO_VALID_KEYS_MESSAGE",
     "NO_POOLS_MESSAGE", "sanitize_imported_keys", "classify_key_import", "plan_pool_aware_import",
@@ -76,6 +78,9 @@ __all__ = [
     "model_needs_api_key", "api_key_test_timeout_seconds", "test_messages", "build_test_request",
     "configure_test_client", "send_test_request", "test_response_passed", "cancel_test_client",
     "reset_api_watchdog", "is_rate_limit_error", "run_key_test",
+    # key list status / live stats (U9)
+    "key_tree_status", "RUNTIME_POOL_ATTRS", "LIVE_STAT_FIELDS", "runtime_key_pool", "live_key_stats",
+    "merge_live_stats",
 ]
 
 
@@ -536,6 +541,40 @@ _NORMALIZED_FIELDS = ('individual_output_token_limit', 'individual_key_temperatu
                       'request_parameters', 'disabled_contexts')
 
 
+#: The Individual Endpoint dialog's shortcut buttons (``IndividualEndpointDialog._make_endpoint_shortcut``).
+INDIVIDUAL_ENDPOINT_SHORTCUTS = (
+    ("Ollama", "http://localhost:11434/v1"),
+    ("LM Studio", "http://localhost:1234/v1"),
+    ("TTS", "http://localhost:8000/audio/speech"),
+    ("TTS v1", "http://localhost:8000/v1/audio/speech"),
+)
+
+
+def is_azure_endpoint(url):
+    """Whether *url* is an Azure OpenAI endpoint (``IndividualEndpointDialog._is_azure_endpoint``)."""
+    if not url:
+        return False
+    url_l = url.lower()
+    return (".openai.azure.com" in url_l) or ("azure.com/openai" in url_l) or ("/openai/deployments/" in url_l)
+
+
+def individual_endpoint_error(enabled, url, api_version):
+    """``IndividualEndpointDialog._validate``'s rules: the dialog's "Validation Error" message, or
+    None when the per-key endpoint may be saved (off, or an http(s) URL with an API version for Azure)."""
+    if not enabled:
+        return None
+    url = str(url or "").strip()
+    if not url:
+        return "Endpoint Base URL is required when Enable is ON."
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return "Endpoint URL must start with http:// or https://"
+    if is_azure_endpoint(url):
+        ver = str(api_version or "").strip()
+        if not ver:
+            return "Azure API Version is required for Azure endpoints."
+    return None
+
+
 def validate_entry(entry, pool='main'):
     """``(normalized entry, None)`` or ``(None, error message)`` for a whole key entry.
 
@@ -549,6 +588,10 @@ def validate_entry(entry, pool='main'):
     data['api_key'] = str(data.get('api_key') or '').strip()
     data['model'] = str(data.get('model') or '').strip()
     error = missing_model_error(data['model'])
+    if error:
+        return None, error
+    error = individual_endpoint_error(data.get('use_individual_endpoint'), data.get('azure_endpoint'),
+                                      data.get('azure_api_version'))
     if error:
         return None, error
     try:
@@ -1095,3 +1138,316 @@ def run_key_test(entry, pool='main', *, timeout=None, client_cls=None, log=None)
                 'last_test_result': 'timeout'}
     status, ok, message = outcome['result']
     return {'ok': ok, 'status': status, 'message': message, 'last_test_result': status}
+
+
+# ---------------------------------------------------------------------------
+# Test API connections (other_settings.test_api_connections, moved in U9 so Glossarion Mobile's
+# Settings › Endpoints probes every configured endpoint the same way; the desktop dialog keeps its
+# progress / result boxes and calls these)
+# ---------------------------------------------------------------------------
+
+
+def collect_test_endpoints(owner):
+    """The endpoints Other Settings › Test Connections probes (moved verbatim from
+    ``other_settings.test_api_connections``; ``owner`` carries the desktop vars: use_custom_openai_endpoint_var,
+    openai_base_url_var, azure_api_version_var, model_var, groq_base_url_var, fireworks_base_url_var,
+    use_gemini_openai_endpoint_var, gemini_openai_endpoint_var). Returns the ``endpoints_to_test`` list of
+    ``(name, url, model[, kind])`` tuples (kind ``azure`` / ``grpc_gemini``)."""
+    # Collect all configured endpoints
+    endpoints_to_test = []
+
+    # OpenAI endpoint - only test if checkbox is enabled
+    if owner.use_custom_openai_endpoint_var:
+        openai_url = owner.openai_base_url_var
+        if openai_url:
+            # Check if it's Azure
+            if '.azure.com' in openai_url or '.cognitiveservices' in openai_url:
+                # Azure endpoint
+                deployment = owner.model_var if hasattr(owner, 'model_var') else "gpt-35-turbo"
+                api_version = owner.azure_api_version_var if hasattr(owner, 'azure_api_version_var') else "2024-08-01-preview"
+
+                # Format Azure URL
+                if '/openai/deployments/' not in openai_url:
+                    azure_url = f"{openai_url.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+                else:
+                    azure_url = openai_url
+
+                endpoints_to_test.append(("Azure OpenAI", azure_url, deployment, "azure"))
+            else:
+                # Regular custom endpoint
+                endpoints_to_test.append(("OpenAI (Custom)", openai_url, owner.model_var if hasattr(owner, 'model_var') else "gpt-3.5-turbo"))
+        else:
+            # Use default OpenAI endpoint if checkbox is on but no custom URL provided
+            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", owner.model_var if hasattr(owner, 'model_var') else "gpt-3.5-turbo"))
+
+    # Groq endpoint
+    if hasattr(owner, 'groq_base_url_var'):
+        groq_url = owner.groq_base_url_var
+        if groq_url:
+            # For Groq, we need a groq-prefixed model
+            current_model = owner.model_var if hasattr(owner, 'model_var') else "llama-3-70b"
+            groq_model = current_model if current_model.startswith('groq/') else current_model.replace('groq/', '')
+            endpoints_to_test.append(("Groq/Local", groq_url, groq_model))
+
+    # Fireworks endpoint
+    if hasattr(owner, 'fireworks_base_url_var'):
+        fireworks_url = owner.fireworks_base_url_var
+        if fireworks_url:
+            # For Fireworks, we need the accounts/ prefix
+            current_model = owner.model_var if hasattr(owner, 'model_var') else "llama-v3-70b-instruct"
+            fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
+            endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
+
+    # Gemini Custom Endpoint — detect gRPC vs OpenAI-compatible REST
+    if hasattr(owner, 'use_gemini_openai_endpoint_var') and owner.use_gemini_openai_endpoint_var:
+        gemini_url = owner.gemini_openai_endpoint_var
+        if gemini_url:
+            _ep = gemini_url.strip().lower()
+            _is_grpc = not ('/openai' in _ep or _ep.startswith('http://') or _ep.startswith('https://'))
+
+            current_model = owner.model_var if hasattr(owner, 'model_var') else "gemini-2.0-flash-exp"
+            gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
+
+            if _is_grpc:
+                # Bare hostname → gRPC (eRPC) endpoint
+                endpoints_to_test.append(("Gemini (gRPC)", gemini_url.strip(), gemini_model, "grpc_gemini"))
+            else:
+                # URL with /openai or http(s):// → OpenAI-compatible REST
+                if not gemini_url.endswith('/openai/'):
+                    if gemini_url.endswith('/'):
+                        gemini_url = gemini_url + 'openai/'
+                    else:
+                        gemini_url = gemini_url + '/openai/'
+                endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
+    return endpoints_to_test
+
+
+def run_endpoint_tests(endpoints_to_test, api_key, openai, cancel_event):
+    """Probe each endpoint (moved verbatim from ``other_settings.test_api_connections``'s worker):
+    gRPC Gemini through ``grpc_gemini_client``, Azure with ``api-key`` headers, any other endpoint with a
+    3 s reachability GET, then a 5-token chat completion through ``openai.OpenAI``; the common errors
+    are simplified. ``cancel_event`` (threading.Event) stops between endpoints. Returns the
+    ``✅ name: ...`` / ``❌ name: ...`` result lines."""
+    results = []
+    for endpoint_info in endpoints_to_test:
+        if cancel_event.is_set():
+            break
+        if len(endpoint_info) == 4 and endpoint_info[3] == "grpc_gemini":
+            # gRPC (eRPC) Gemini endpoint
+            name, grpc_host, model, _ = endpoint_info
+            try:
+                from grpc_gemini_client import GrpcGeminiClient, GRPC_AVAILABLE, GrpcGeminiError
+                if not GRPC_AVAILABLE:
+                    results.append(f"❌ {name}: gRPC dependencies not installed (pip install grpcio google-ai-generativelanguage)")
+                    continue
+                client = GrpcGeminiClient(api_key=api_key, endpoint=grpc_host)
+                try:
+                    resp = client.generate_content(
+                        model=model,
+                        messages=[{"role": "user", "content": "Hi"}],
+                        max_output_tokens=5
+                    )
+                    results.append(f"✅ {name}: Connected successfully! (Model: {model}, Endpoint: {grpc_host})")
+                finally:
+                    client.close()
+            except Exception as e:
+                error_msg = str(e)[:150]
+                if "UNAUTHENTICATED" in error_msg or "401" in error_msg or "403" in error_msg:
+                    error_msg = "Authentication failed. Check API key."
+                elif "UNAVAILABLE" in error_msg:
+                    error_msg = f"gRPC endpoint unreachable: {grpc_host}"
+                results.append(f"❌ {name}: {error_msg}")
+        elif len(endpoint_info) == 4 and endpoint_info[3] == "azure":
+            # Azure endpoint
+            name, base_url, model, endpoint_type = endpoint_info
+            try:
+                # Azure uses different headers
+                import requests
+                headers = {
+                    "api-key": api_key,
+                    "Content-Type": "application/json"
+                }
+
+                response = requests.post(
+                    base_url,
+                    headers=headers,
+                    json={
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "max_tokens": 5
+                    },
+                    timeout=5.0
+                )
+
+                if response.status_code == 200:
+                    results.append(f"✅ {name}: Connected successfully! (Deployment: {model})")
+                else:
+                    results.append(f"❌ {name}: {response.status_code} - {response.text[:100]}")
+
+            except Exception as e:
+                error_msg = str(e)[:100]
+                results.append(f"❌ {name}: {error_msg}")
+        else:
+            # Regular OpenAI-compatible endpoint
+            name, base_url, model = endpoint_info[:3]
+            try:
+                # Quick endpoint reachability probe (low timeout)
+                try:
+                    import httpx
+                    probe_timeout = 3.0
+                    probe_url = base_url.rstrip("/")  # tolerate missing path
+                    httpx.get(probe_url, timeout=probe_timeout)
+                except Exception as probe_err:
+                    results.append(f"❌ {name}: Endpoint unreachable ({probe_err})")
+                    continue
+                if cancel_event.is_set():
+                    break
+                # Create client for this endpoint
+                test_client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=5.0,  # Keep model test short to avoid UI freeze
+                    max_retries=0  # Fail fast on 404/connection errors
+                )
+
+                # Try a minimal completion
+                response = test_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Hi"}],
+                    max_tokens=5
+                )
+
+                results.append(f"✅ {name}: Connected successfully! (Model: {model})")
+            except Exception as e:
+                error_msg = str(e)
+                # Simplify common error messages
+                if "timed out" in error_msg.lower():
+                    error_msg = f"Connection timed out. The endpoint is running but the model '{model}' may be too slow to respond."
+                elif "404" in error_msg:
+                    error_msg = "404 - Endpoint not found. Check URL and model name."
+                elif "401" in error_msg or "403" in error_msg:
+                    error_msg = "Authentication failed. Check API key."
+                elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                    error_msg = f"Model '{model}' not found at this endpoint."
+
+                results.append(f"❌ {name}: {error_msg}")
+    return results
+
+
+# =============================================================================================
+# Key list status and live per-key stats (U9)
+# =============================================================================================
+
+def key_tree_status(key):
+    """The Multi-Key Manager key tree's Status column: ``(status, tags)``.
+
+    Moved verbatim from ``MultiAPIKeyDialog._refresh_key_list`` (the desktop tree calls it; the
+    mobile key cards read it). *key* is an ``APIKeyEntry`` or any object with its attributes
+    (``last_test_result``, ``last_test_message``, ``enabled``, ``is_cooling_down``,
+    ``last_error_time``, ``cooldown``); an expired cooldown clears ``is_cooling_down`` as on desktop.
+    """
+    import time
+
+    if key.last_test_result is None and hasattr(key, '_testing'):
+        status = "⏳ Testing..."
+        tags = ('testing',)
+    elif not key.enabled:
+        status = "Disabled"
+        tags = ('disabled',)
+    elif key.last_test_result == 'passed':
+        status = "✅ Passed"
+        tags = ('passed',)
+    elif key.last_test_result == 'failed':
+        status = "❌ Failed"
+        tags = ('failed',)
+    elif key.last_test_result == 'timeout':
+        status = "⏱️ Timed Out"
+        tags = ('timeout',)
+    elif key.last_test_result == 'rate_limited':
+        status = "⚠️ Rate Limited"
+        tags = ('ratelimited',)
+    elif key.last_test_result == 'error':
+        status = "❌ Error"
+        if key.last_test_message:
+            status += f": {key.last_test_message[:20]}..."
+        tags = ('error',)
+    elif key.is_cooling_down and key.last_error_time:
+        remaining = int(key.cooldown - (time.time() - key.last_error_time))
+        if remaining > 0:
+            status = f"Cooling ({remaining}s)"
+            tags = ('cooling',)
+        else:
+            key.is_cooling_down = False
+            status = "Active"
+            tags = ('active',)
+    else:
+        status = "Active"
+        tags = ('active',)
+    return status, tags
+
+
+#: ``UnifiedClient`` class attribute holding each pool's runtime ``APIKeyPool`` (the fallback
+#: pool has none: its keys are tried one by one per request).
+RUNTIME_POOL_ATTRS = {
+    "main": "_api_key_pool",
+    "glossary": "_glossary_key_pool",
+    "glossary_refinement": "_glossary_refinement_key_pool",
+    "qa_scan": "_qa_scan_key_pool",
+    "metadata": "_metadata_key_pool",
+    "ai_truncation_detection": "_ai_truncation_detection_key_pool",
+    "rolling_summary": "_rolling_summary_key_pool",
+    "truncation_retry": "_truncation_retry_key_pool",
+    "inpainter": "_inpainter_key_pool",
+    "tts": "_tts_key_pool",
+}
+
+#: The per-key runtime fields ``live_key_stats`` reports (``APIKeyEntry`` attributes).
+LIVE_STAT_FIELDS = ("success_count", "error_count", "times_used", "is_cooling_down", "last_error_time",
+                    "cooldown")
+
+
+def runtime_key_pool(pool_id):
+    """The running client's ``APIKeyPool`` of *pool_id*, or None. Never imports unified_api_client:
+    only a process that already runs (or ran) a job has the pools."""
+    import sys
+
+    module = sys.modules.get("unified_api_client")
+    client = getattr(module, "UnifiedClient", None) if module is not None else None
+    attr = RUNTIME_POOL_ATTRS.get(pool_id)
+    if client is None or not attr:
+        return None
+    return getattr(client, attr, None)
+
+
+def live_key_stats(pool_id):
+    """``[{api_key, model, success_count, error_count, times_used, is_cooling_down, last_error_time,
+    cooldown}, ...]`` of the running client's pool *pool_id* in pool order; [] when it has none."""
+    pool = runtime_key_pool(pool_id)
+    keys = list(getattr(pool, "keys", None) or ()) if pool is not None else []
+    out = []
+    for key in keys:
+        row = {"api_key": getattr(key, "api_key", None), "model": getattr(key, "model", None)}
+        for name in LIVE_STAT_FIELDS:
+            row[name] = getattr(key, name, None)
+        out.append(row)
+    return out
+
+
+def merge_live_stats(entries, live):
+    """Pair config *entries* with *live* rows (same api_key and model, first unused match): a list
+    of the live row (or None) per entry."""
+    used = set()
+    out = []
+    for entry in entries:
+        match = None
+        for index, row in enumerate(live or ()):
+            if index in used:
+                continue
+            if row.get("api_key") == entry.get("api_key") and row.get("model") == entry.get("model"):
+                match = index
+                break
+        if match is None:
+            out.append(None)
+        else:
+            used.add(match)
+            out.append(live[match])
+    return out

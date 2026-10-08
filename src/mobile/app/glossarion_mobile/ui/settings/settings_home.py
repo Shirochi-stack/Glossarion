@@ -13,6 +13,11 @@ pages of later milestones carry a ReasonChip). While a search or filter is
 active the results replace the list.
 
 It extends ``HubScreen`` (the U1 Settings hub), reusing its child-route list.
+
+Wide screens (>= 1200 dp, UI_SPEC §1.1) show it master-detail: this list on the left and the
+chosen schema section (``SectionPage``, also a search hit with its key) on the right; the
+other Settings pages still open as screens. ``apply_size_class`` swaps between one and two
+panes.
 """
 
 from __future__ import annotations
@@ -23,18 +28,52 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components import surface
+from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.master_detail import MasterDetail
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.section_card import SectionCard
-from glossarion_mobile.ui.router import ROUTES_BY_NAME, RouteError, RouteMatch, RouteSpec, build_route
-from glossarion_mobile.ui.screens.base import HubScreen
+from glossarion_mobile.ui.router import ROUTES_BY_NAME, RouteError, RouteMatch, RouteSpec, build_route, parse_route
+from glossarion_mobile.ui.screens.base import HubScreen, unavailable_reason
 from glossarion_mobile.ui.settings.banners import JobBanner, notice
 from glossarion_mobile.ui.settings.model import ordered_groups
 from glossarion_mobile.ui.settings.schema_access import SearchHit, SectionInfo
 from glossarion_mobile.ui.settings.search import SettingsSearch
 from glossarion_mobile.ui.theme import icon_data
 
-__all__ = ["PROFILES_REASON", "ROUTE_GROUPS", "SettingsHome"]
+__all__ = ["PROFILES_REASON", "ROUTE_GROUPS", "ROUTE_SECTIONS", "SettingsHome", "section_screen_for"]
+
+#: U9: Settings pages that show a schema section on a dedicated screen (the home lists the section once, as
+#: the section; it opens the screen through ``section_screen_for``): route slug -> section id.
+ROUTE_SECTIONS = {"endpoints": "other.endpoints"}
+
+
+def section_screen_for(ctx: Any, match: Any) -> Any:
+    """A feature's own screen for a ``settings.section`` route, else None (a plain SectionPage).
+
+    ``ctx.extras['section_screens']`` maps a section id to the screen factory of the feature that owns its
+    page (Glossary › General / Balanced / Minimal / Refinement / Unified: GlossaryFeature; Custom API
+    Endpoints: the Endpoints screen of ModelsKeysFeature); ``ctx.extras['section_screen']`` is the single
+    hook of earlier builds."""
+    extras = getattr(ctx, "extras", None) or {}
+    section = str((getattr(match, "params", None) or {}).get("section") or "")
+    registry = extras.get("section_screens")
+    hooks = [registry.get(section)] if isinstance(registry, dict) else []
+    hooks.append(extras.get("section_screen"))
+    for hook in hooks:
+        if not callable(hook):
+            continue
+        try:
+            screen = hook(match)
+        except Exception:
+            import logging
+
+            logging.getLogger("glossarion.settings").exception("section screen hook failed")
+            continue
+        if screen is not None:
+            return screen
+    return None
 
 # Static Settings pages (route table) and the home group each belongs to.
 ROUTE_GROUPS = {
@@ -93,6 +132,9 @@ class SettingsHome(HubScreen):
         self.banner = JobBanner(ctx)
         self._unsubs: list[Callable[[], None]] = []
         self.search = SettingsSearch(ctx, on_open=self.open_hit, on_change=self._search_changed)
+        self.md: Optional[MasterDetail] = None  # wide screens: sections | section page
+        self.detail_page: Any = None
+        self.selected_section: Optional[str] = None
 
     # ---- routes --------------------------------------------------------------------------
 
@@ -121,7 +163,7 @@ class SettingsHome(HubScreen):
                                    padding=ft.Padding.only(left=12, right=12, bottom=16, top=4))
         self.refresh(push=False)
         gutter = ft.Padding.symmetric(horizontal=12)
-        return ft.Column(
+        master = ft.Column(
             [
                 ft.Container(padding=ft.Padding.only(left=12, right=12, top=8), content=self.search.field),
                 ft.Container(padding=gutter, content=self.search.filter_row),
@@ -134,6 +176,14 @@ class SettingsHome(HubScreen):
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,  # full-width search field
         )
+        self.md = MasterDetail(
+            master,
+            placeholder=EmptyState(icon="TUNE", title="Settings",
+                                   body="Choose a section on the left to edit it here.", key="settings-detail-empty"),
+            two_pane=surface.is_wide(self.ctx.page),
+            key="settings-md",
+        )
+        return self.md.control
 
     def _notice_controls(self) -> list[ft.Control]:
         store = self.ctx.store
@@ -189,6 +239,7 @@ class SettingsHome(HubScreen):
             subtitle=ft.Text(subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
             trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if routable else ReasonChip(reason="Unsupported section id"),
             disabled=not routable,
+            selected=section.id == self.selected_section,
             min_height=tokens.SIZES["hit_target"],
             dense=True,
             on_click=lambda e, sid=section.id: self.open_section(sid),
@@ -202,7 +253,7 @@ class SettingsHome(HubScreen):
         tile = ft.ListTile(
             title=ft.Text(spec.title, theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=ft.Colors.ON_SURFACE),
             leading=ft.Icon(icon_data(_ROUTE_ICONS.get(spec.name, "CHEVRON_RIGHT")), size=20),
-            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if shipped else ReasonChip(reason=f"Arrives in {spec.milestone}"),
+            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if shipped else ReasonChip(reason=unavailable_reason(spec)),
             min_height=tokens.SIZES["hit_target"],
             dense=True,
             on_click=lambda e, name=spec.name: self.navigate(name),
@@ -225,7 +276,7 @@ class SettingsHome(HubScreen):
                 names.append(group)
         for spec in self.children():
             slug = spec.pattern.rsplit("/", 1)[-1]
-            if slug in section_ids:  # a schema section already covers this page
+            if slug in section_ids or ROUTE_SECTIONS.get(slug) in section_ids:  # a schema section covers it
                 continue
             group = self.route_group(spec)
             groups.setdefault(group, []).append(self._route_tile(spec))
@@ -252,6 +303,18 @@ class SettingsHome(HubScreen):
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        if self.md is not None:
+            self.md.dispose()  # the section page in the detail pane
+
+    def apply_size_class(self, size_class: Any) -> None:
+        """Two panes at >= 1200 dp; narrower, the list alone (a shown section is closed)."""
+        if self.md is None:
+            return
+        wide = getattr(size_class, "value", size_class) == "wide"
+        if not wide:
+            self.md.clear_detail()
+            self._select(None)
+        self.md.set_two_pane(wide)
 
     def _on_config_change(self) -> None:
         if not self.search.active:
@@ -271,10 +334,55 @@ class SettingsHome(HubScreen):
     # ---- navigation / actions ---------------------------------------------------------------
 
     def open_section(self, section_id: str) -> Optional[str]:
+        if self._show_section(section_id):
+            return build_route("settings.section", {"section": section_id})
         return self.ctx.go("settings.section", {"section": section_id})
 
     def open_hit(self, hit: SearchHit) -> Optional[str]:
+        if self._show_section(hit.section_id, hit.key):
+            return build_route("settings.section", {"section": hit.section_id}, fragment=hit.key)
         return self.ctx.open_setting(hit.section_id, hit.key)
+
+    def _show_section(self, section_id: str, key: Optional[str] = None) -> bool:
+        """Wide screens: the section page in the detail pane (False: navigate instead)."""
+        md = self.md
+        if md is None or not md.two_pane:
+            return False
+        try:
+            match = parse_route(build_route("settings.section", {"section": section_id}, fragment=key))
+        except RouteError:
+            return False
+        if match is None:
+            return False
+        page = self._section_screen(match)
+        if page is None:
+            from glossarion_mobile.ui.settings.section_page import SectionPage
+
+            page = SectionPage(match, self.ctx)
+        body = page.get_body()
+        if not md.show_detail(page.title, body, actions=page.actions(), owner=page, on_close=page.dispose):
+            return False
+        self.detail_page = page
+        self._select(section_id)
+        page.did_show()
+        return True
+
+    def _section_screen(self, match: RouteMatch) -> Any:
+        """A feature's own screen for this section (``section_screen_for``: the Glossary Manager tabs with
+        their mode row / profile bars / links, the Endpoints page), else None (a plain SectionPage)."""
+        return section_screen_for(self.ctx, match)
+
+    def _select(self, section_id: Optional[str]) -> None:
+        """Highlight the section shown in the detail pane."""
+        self.selected_section = section_id
+        changed = []
+        for sid, tile in self.section_tiles.items():
+            selected = sid == section_id
+            if bool(tile.selected) != selected:
+                tile.selected = selected
+                changed.append(tile)
+        if changed:
+            self.ctx.push(*changed)
 
     async def _on_save_now(self, e: Any = None) -> bool:
         wrote = await self.ctx.run_io(self.ctx.store.flush)

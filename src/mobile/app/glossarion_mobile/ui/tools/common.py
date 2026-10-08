@@ -27,8 +27,8 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library.common import LibraryContext
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
-__all__ = ["ChoiceDialog", "JobWatch", "ToolsContext", "action_button", "ask", "card", "hint_text", "kv_line",
-           "schema_tiles", "section_header"]
+__all__ = ["ChoiceDialog", "JobWatch", "ToolsContext", "action_button", "ask", "card", "failed_job_card", "hint_text",
+           "job_failed", "kv_line", "schema_tiles", "section_header"]
 
 log = logging.getLogger("glossarion.tools")
 
@@ -433,6 +433,32 @@ class ChoiceDialog:
         if self._future is None:
             return self.choice
         return await self._future
+
+
+def job_failed(snap: Any) -> bool:
+    """A finished job that failed (``JobState.FAILED``)."""
+    state = getattr(snap, "state", None)
+    return str(getattr(state, "value", state) or "").lower() == "failed"
+
+
+def failed_job_card(ctx: Any, snap: Any, *, on_retry: Optional[Callable[[], Any]] = None,
+                    key: Optional[str] = None) -> ft.Control:
+    """UI_SPEC §7.4: a Tools job that failed shows an ErrorCard: Retry (resubmit, ``on_retry``) · Copy
+    error · View log (``jobs.detail`` of the job)."""
+    from glossarion_mobile.ui.components.error_card import ErrorCard
+
+    job_id = str(getattr(snap, "id", "") or "")
+    title = str(getattr(snap, "title", "") or "")
+    message = str(getattr(snap, "error", "") or getattr(snap, "state_label", "") or "Failed")
+    copy = getattr(ctx, "copy_text", None)
+    return ErrorCard(
+        title=f"Failed: {title}" if title else "The job failed",
+        message=message,
+        on_retry=on_retry,
+        on_copy=copy if callable(copy) else None,
+        on_view_log=(lambda: ctx.go("jobs.detail", {"jid": job_id})) if job_id else None,
+        key=key,
+    )
 
 
 async def ask(ctx: Any, title: str, body: str, options: Sequence[tuple], *, key: str = "choice") -> Optional[str]:

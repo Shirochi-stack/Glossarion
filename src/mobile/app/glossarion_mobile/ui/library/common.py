@@ -53,6 +53,7 @@ class LibraryContext:
     intents: Any = None
     copy_text: Optional[Callable[[str], Any]] = None
     reader: Optional[Callable[[], Any]] = None  # -> the ReaderFeature (``open_book``), when installed
+    glossary: Optional[Callable[[], Any]] = None  # -> the GlossaryFeature (TranslateSheet glossary chip, U9)
     push_overlay: Optional[Callable[[Any], Any]] = None
     pop_overlay: Optional[Callable[[], Any]] = None
     foreground: Callable[[], bool] = lambda: True
@@ -98,6 +99,40 @@ class LibraryContext:
             return notify(message, action_label, on_action)
         except TypeError:
             return notify(message)
+
+    async def translate_metadata(self, books: Any) -> Optional[str]:
+        """Translate Metadata for Library books (bulk "Metadata", card ⋯, Book ⋯, Book › Overview): the
+        desktop Library's ``_translate_metadata_for_books`` asks "Metadata Already Exists" (Cancel / Yes)
+        when an output folder already has a metadata.json (a regeneration replaces edited or translated
+        fields; ``headers_model.existing_metadata_warning``, the copy Tools › Headers & metadata uses),
+        then submits the ``metadata`` job. Returns the job id, or None."""
+        from glossarion_mobile.ui.tools import headers_model as hm
+        from glossarion_mobile.ui.tools.common import ask
+
+        service = self.service
+        books = [dict(book) for book in books or ()]
+        if not books:
+            return None
+        if not service.has_job_kind("metadata"):
+            self.say("Metadata translation is not available in this session")
+            return None
+        folders = [str(book.get("output_folder") or "") for book in books]
+        try:
+            warning = await self.io(hm.existing_metadata_warning, folders)
+        except Exception:
+            log.debug("metadata.json check failed", exc_info=True)
+            warning = None
+        if warning:
+            answer = await ask(self, "Metadata Already Exists", warning,
+                               [("cancel", "Cancel", "text"), ("yes", "Yes", "filled")], key="lib-meta-exists")
+            if answer != "yes":
+                return None
+        try:
+            spec = await self.io(service.metadata_spec, books)
+            return await service.submit(spec)
+        except Exception as exc:
+            self.say(f"Could not start: {exc}")
+            return None
 
     def go(self, name: str, params: Optional[dict] = None, query: Optional[dict] = None) -> None:
         navigate = self.navigate

@@ -94,7 +94,10 @@ __all__ = [
     "STATE_LABELS",
     "TERMINAL_STATES",
     "ACTIVE_STATES",
+    "ISSUE_LABELS",
+    "classify_issue",
     "format_duration",
+    "issue_label",
     "progress_line",
     "status_key",
     "strip_model_for",
@@ -114,14 +117,46 @@ JOB_MESSAGES_KEPT = 4000  # whole log messages a job keeps for listeners that at
 LAST_LINE_CHARS = 240
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
 
-#: Lines ``authgpt_auth`` prints when a job has no usable ChatGPT login and falls back to the
-#: interactive browser login (``get_valid_access_token`` / ``recover_from_unauthorized``, or the
-#: headless refusal). The first one in a job sends a ``sign_in_required`` event (UI_SPEC §1.9).
-SIGN_IN_MARKERS = (
-    "AuthGPT: No valid token found",
-    "AuthGPT: Session expired",
-    "AuthGPT: Browser-based OAuth login is not available",
+#: Lines the auth modules print when a job has no usable login and falls back to the interactive
+#: browser login (``get_valid_access_token`` / ``recover_from_unauthorized``), refuses it (the
+#: headless refusal) or, on mobile, sends the user to the Accounts screen (AuthGrok / the AuthCD CLI
+#: fallback): marker -> provider. The first one in a job sends a ``sign_in_required`` event with the
+#: provider and the slot the job's model uses (UI_SPEC §1.9 "Sign-in required for Claude #2").
+SIGN_IN_PROVIDER_MARKERS = (
+    ("AuthGPT: No valid token found", "authgpt"),
+    ("AuthGPT: Session expired", "authgpt"),
+    ("AuthGPT: Browser-based OAuth login is not available", "authgpt"),
+    ("AuthCD: No valid token found", "authcd"),
+    ("AuthCD: Browser-based OAuth login is not available", "authcd"),
+    ("AuthCD: the Claude Code CLI is not available on Glossarion Mobile", "authcd"),
+    ("AuthGem: No valid token found", "authgem"),
+    ("AuthGem: Browser-based OAuth login is not available", "authgem"),
+    ("AuthGrok has no valid token", "authgrok"),
+    ("AuthGrok browser login is unavailable", "authgrok"),
+    ("AuthGrok: sign in to Grok from Glossarion's Accounts screen", "authgrok"),
 )
+SIGN_IN_MARKERS = tuple(marker for marker, _provider in SIGN_IN_PROVIDER_MARKERS)
+
+
+def sign_in_provider(line: str) -> Optional[str]:
+    """The provider whose login a job log line says is missing (``SIGN_IN_PROVIDER_MARKERS``)."""
+    for marker, provider in SIGN_IN_PROVIDER_MARKERS:
+        if marker in line:
+            return provider
+    return None
+
+
+def sign_in_event(job_model: Optional[str], provider: str, line: str = "") -> dict:
+    """``sign_in_required`` data: the provider and the slot the job's model targets
+    (``authcd2/`` -> 2; a pool route or another provider's model -> slot #0)."""
+    account_id = 0
+    try:
+        from glossarion_mobile.services.oauth import sign_in_slot
+
+        account_id = int(sign_in_slot(job_model, provider) or 0)
+    except Exception:
+        account_id = 0
+    return {"provider": provider, "account_id": account_id, "line": str(line or "")[:200]}
 
 
 class JobKind(str, enum.Enum):
@@ -153,6 +188,9 @@ class JobKind(str, enum.Enum):
     # U8
     MANGA = "manga"
     MANGA_STEP = "manga_step"
+    # U9
+    MD_TXT_SIDECARS = "md_txt_sidecars"
+    BR_TO_PARAGRAPHS = "br_to_paragraphs"
 
 
 class JobState(str, enum.Enum):
@@ -346,6 +384,21 @@ class JobSnapshot:
     resolution: Optional[str] = None  # interrupted jobs: "resumed" | "discarded"
     restore_pending: bool = False  # recovered; its progress rows are not restored yet
     result: Mapping[str, Any] = field(default_factory=dict)  # what the kind adapter recorded (JobContext.set_result)
+    # U9: the request wait the API client last logged (rate limit / key cooldown / network):
+    # {"kind", "seconds", "since", "until", "line"}; transient (never persisted), see ``active_issue``.
+    issue: Optional[Mapping[str, Any]] = None
+
+    def active_issue(self, now: Optional[float] = None) -> Optional[dict]:
+        """The issue chip state while the job runs and the wait has not expired, else None."""
+        issue = self.issue
+        if not issue or not self.is_active:
+            return None
+        current = now if now is not None else time.time()
+        try:
+            until = float(issue.get("until") or 0.0)
+        except (TypeError, ValueError):
+            until = 0.0
+        return dict(issue) if until > current else None
 
     @property
     def kind(self) -> str:
@@ -508,6 +561,7 @@ class _Job:
     messages: Any = field(default_factory=lambda: collections.deque(maxlen=JOB_MESSAGES_KEPT))
     message_listeners: list = field(default_factory=list)
     message_lock: threading.RLock = field(default_factory=threading.RLock)
+    issue: Optional[dict] = None  # U9: the last request wait (direct_text_stream.classify_request_issue)
 
     def snapshot(self) -> JobSnapshot:
         return JobSnapshot(
@@ -534,7 +588,48 @@ class _Job:
             log_path=self.log_path,
             question=dict(self.question) if self.question else None,
             result=dict(self.result),
+            issue=dict(self.issue) if self.issue else None,
         )
+
+
+#: How long an issue chip stays after its line when the line names no wait (seconds).
+ISSUE_DEFAULT_SECONDS = 45.0
+#: Labels of the running card's issue chips (UI_SPEC §2.12.3).
+ISSUE_LABELS = {"rate_limited": "Rate limited", "key_cooling": "Key cooling", "network_wait": "Waiting for network…"}
+
+
+def classify_issue(line: str) -> Optional[tuple]:
+    """The shared API-wait classifier (``direct_text_stream.classify_request_issue``); None without it.
+    A provider safety block (``is_safety_block_line``) is ``("safety_block", None)``."""
+    try:
+        from direct_text_stream import classify_request_issue, is_safety_block_line
+    except Exception:
+        return None
+    try:
+        if is_safety_block_line(line):
+            return "safety_block", None
+        return classify_request_issue(line)
+    except Exception:
+        return None
+
+
+def issue_label(issue: Optional[Mapping[str, Any]], now: Optional[float] = None, *, cooling_keys: int = 0) -> str:
+    """"Rate limited · retrying in 30 s" / "Key cooling (2)" / "Waiting for network…" ("" for none)."""
+    if not issue:
+        return ""
+    kind = str(issue.get("kind") or "")
+    label = ISSUE_LABELS.get(kind, kind.replace("_", " ").capitalize())
+    if kind == "key_cooling" and cooling_keys:
+        return f"{label} ({cooling_keys})"
+    if kind == "rate_limited" and issue.get("seconds"):
+        current = now if now is not None else time.time()
+        try:
+            remaining = int(round(float(issue.get("until") or 0.0) - current))
+        except (TypeError, ValueError):
+            remaining = 0
+        if remaining > 0:
+            return f"{label} · retrying in {remaining} s"
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +727,9 @@ def strip_model_for(snap: Optional[JobSnapshot], queued: int = 0, now: Optional[
 
     origin = snap.spec.origin or {}
     owner_chat = str(origin.get("cid")) if origin.get("type") == "chat" and origin.get("cid") is not None else None
+    # The chat's own Job card is the progress UI only for its RunController runs (params["chat_id"]).
+    params = snap.spec.params if isinstance(snap.spec.params, Mapping) else {}
+    chat_card = owner_chat is not None and params.get("chat_id") is not None and str(params.get("chat_id")) == owner_chat
     if snap.is_terminal:
         if snap.state is JobState.FAILED:
             title, state = f"Failed · {snap.title}", "failed"
@@ -642,7 +740,8 @@ def strip_model_for(snap: Optional[JobSnapshot], queued: int = 0, now: Optional[
         progress = snap.progress
         subtitle = f"{progress.completed}/{progress.total} chapters" if progress.total else (snap.error or "")
         return JobStripModel(title=title, subtitle=subtitle[:160], progress=1.0 if state == "done" else None,
-                             kind_icon=kind_icon(snap.kind), queued=queued, state=state, owner_chat=owner_chat)
+                             kind_icon=kind_icon(snap.kind), queued=queued, state=state, owner_chat=owner_chat,
+                             chat_card=chat_card)
     if snap.state is JobState.STOPPING:
         state = "finishing"
     elif snap.state is JobState.FORCE_STOPPING:
@@ -658,6 +757,7 @@ def strip_model_for(snap: Optional[JobSnapshot], queued: int = 0, now: Optional[
         state=state,
         warning=bool(snap.question),
         owner_chat=owner_chat,
+        chat_card=chat_card,
     )
 
 
@@ -1010,6 +1110,11 @@ class JobContext:
 
     def ask(self, kind: str, **data: Any) -> Any:
         return self.host.ask(kind, **data)
+
+    def request_stop(self, reason: str = "") -> Optional[str]:
+        """The job stops itself (U9: a declined glossary review): the same Stop protocol as a user's
+        Stop (never escalated to a force stop); the run ends Stopped and can be resumed."""
+        return self.service.request_stop(self._job.id, escalate=False, reason=reason)
 
 
 # ---------------------------------------------------------------------------
@@ -1888,15 +1993,47 @@ class JobService:
             if not line.strip():
                 continue
             self._write_log_file(job, line)
-            if not job.sign_in_flagged and any(marker in line for marker in SIGN_IN_MARKERS):
+            provider = sign_in_provider(line) if not job.sign_in_flagged else None
+            if provider is not None:
                 job.sign_in_flagged = True
-                self._post(self._deliver_event, job.id, "sign_in_required", {"provider": "authgpt", "line": line[:200]})
+                self._post(self._deliver_event, job.id, "sign_in_required",
+                           sign_in_event(self._job_model(job), provider, line))
             if suppress:
                 continue
             buffer = job.buffer
             if buffer is not None:
                 buffer.append(line, kind)
             job.last_line = line[:LAST_LINE_CHARS]
+            self._note_issue(job, line)
+
+    @staticmethod
+    def _job_model(job: _Job) -> Optional[str]:
+        """The model the job runs (its owner's config, else the spec's overrides)."""
+        config = getattr(job.owner, "config", None)
+        if isinstance(config, Mapping) and config.get("model"):
+            return str(config.get("model"))
+        params = job.spec.params or {}
+        model = params.get("model") or (params.get("config_overrides") or {}).get("model")
+        return str(model) if model else None
+
+    def _note_issue(self, job: _Job, line: str) -> None:
+        """A rate-limit / key-cooldown / network wait line sets the job's issue chip (UI_SPEC §2.12.3)."""
+        found = classify_issue(line)
+        if found is None:
+            return
+        issue_kind, seconds = found
+        now = self.clock()
+        if issue_kind == "safety_block":
+            # kept on the job's result (persisted): the chat shows the "Blocked by the provider's
+            # safety filter" ErrorCard after the run (UI_SPEC §2.13)
+            with self._lock:
+                job.result.setdefault("safety_block", line[:300])
+            return
+        wait = float(seconds) if seconds else ISSUE_DEFAULT_SECONDS
+        with self._lock:
+            job.issue = {"kind": issue_kind, "seconds": seconds, "since": now, "until": now + max(5.0, wait),
+                         "line": line[:200]}
+        self._changed()
 
     @staticmethod
     def _deliver_message(job: _Job, raw: str) -> None:

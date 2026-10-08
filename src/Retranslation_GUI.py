@@ -10375,17 +10375,11 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 if isinstance(progress_data, dict)
                 else output_dir
             )
-            untranslated_entries = []
-            for entry in current_spine_chapters:
-                if not isinstance(entry, dict):
-                    continue
-                if self._progress_display_status(entry, status_data) not in {
-                    'not_translated', 'pending',
-                }:
-                    continue
-                manual_entry = dict(entry)
-                manual_entry['status'] = 'not_translated'
-                untranslated_entries.append(manual_entry)
+            # progress_core.untranslated_manual_entries (moved in U9; Glossarion Mobile's Manual editing)
+            from progress_core import untranslated_manual_entries
+            untranslated_entries = untranslated_manual_entries(
+                self, current_spine_chapters, status_data
+            )
             return untranslated_entries
 
         manual_generation_state = {
@@ -15973,59 +15967,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 search_term = None
                 _line_num = 1
                 if qa_issues:
-                    # Extract a meaningful search term from the QA issue strings
-                    # Try all common delimiter styles in order
-                    _QUOTE_PATTERNS = [
-                        r"'([^']+)'",                    # single quotes: 'text'
-                        r'"([^"]+)"',                   # double quotes: "text"
-                        r"\u201c([^\u201d]+)\u201d",    # curly double quotes: “text”
-                        r"\u2018([^\u2019]+)\u2019",    # curly single quotes: ‘text’
-                        r"\u300c([^\u300d]+)\u300d",    # Japanese corner brackets: 「text」
-                        r"\u300e([^\u300f]+)\u300f",    # Japanese white corner brackets: 『text』
-                        r"\uff62([^\uff63]+)\uff63",    # Halfwidth corner brackets
-                        r"\[([^\]]+)\]",              # square brackets: [text]
-                        r"\(([^)]+)\)",               # parentheses: (text)
-                    ]
-                    for _issue in qa_issues:
-                        _s = str(_issue)
-                        for _pat in _QUOTE_PATTERNS:
-                            _m = re.search(_pat, _s)
-                            if _m and _m.group(1).strip():
-                                search_term = _m.group(1)
-                                break
-                        if search_term:
-                            break
-                    # Fallback: scan file for any non-ASCII sequence
-                    if not search_term:
-                        try:
-                            with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
-                                _content = _f.read()
-                            _m = re.search(r'[^\x00-\x7f]{1,30}', _content)
-                            if _m:
-                                search_term = _m.group(0)
-                        except Exception:
-                            pass
-                    # Find line number of search term in file
-                    # Try progressively shorter prefixes in case the QA term is truncated
-                    if search_term and os.path.exists(qa_file_path):
-                        try:
-                            with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
-                                _lines = _f.readlines()
-                            # Strip surrounding quote/bracket chars so we search raw content
-                            _STRIP_QUOTES = '\'"「」『』“”‘’｢｣《》〈〉（）'
-                            _bare = search_term.strip(_STRIP_QUOTES)
-                            _base = _bare if _bare else search_term
-                            # Build candidates: full bare term, then shrinking prefixes (min 1 char)
-                            _candidates = [_base[:_l] for _l in range(len(_base), 0, -1)]
-                            for _cand in _candidates:
-                                for _i, _ln in enumerate(_lines, 1):
-                                    if _cand in _ln:
-                                        _line_num = _i
-                                        break
-                                if _line_num > 1:
-                                    break
-                        except Exception:
-                            pass
+                    # The search term and its line (progress_actions.qa_issue_search_target, moved in U9)
+                    from progress_actions import qa_issue_search_target
+                    search_term, _line_num = qa_issue_search_target(qa_file_path, qa_issues)
                     # Copy search term to clipboard
                     if search_term:
                         from PySide6.QtWidgets import QApplication

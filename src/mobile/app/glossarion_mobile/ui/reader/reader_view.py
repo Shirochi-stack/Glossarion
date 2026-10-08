@@ -3,7 +3,8 @@
 Layers (a ``Stack``): the page (``flet_webview.WebView`` loading the document
 from ``ReaderServer``, or the native ``FallbackPage``), the chrome bars, the
 floating selection chips and a loading / error overlay. The chapters drawer
-is the View's ``end_drawer``.
+is the View's ``end_drawer`` on phones; on a tablet (>= 900 dp, UI_SPEC §3.11) ☰ toggles the same
+drawer content as a persistent 320 dp side panel to the right of the page instead.
 
 Flow: resolve the route id (``LibraryService.book_for_bid`` or a file opened
 from Open-with) → ``session.plan_open`` → ``ReaderSession.load`` on the io
@@ -35,11 +36,12 @@ import flet as ft
 from glossarion_mobile.services.library import CoreMissing
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
+from glossarion_mobile.ui.foreground import poll_sleep
 from glossarion_mobile.ui.reader import bridge
 from glossarion_mobile.ui.reader import model as rm
 from glossarion_mobile.ui.reader.aa_sheet import SCOPE_ALL, SCOPE_BOOK, AaSheet
 from glossarion_mobile.ui.reader.chrome import ReaderChrome, SelectionChipRow
-from glossarion_mobile.ui.reader.document import DocumentBuilder, build_native_blocks
+from glossarion_mobile.ui.reader.document import EMPTY_CHAPTER_TEXT, DocumentBuilder, blocks_empty, build_native_blocks
 from glossarion_mobile.ui.reader.fallback_view import FallbackPage
 from glossarion_mobile.ui.reader.live import (
     RETRANSLATE_TITLE,
@@ -74,6 +76,9 @@ STYLE_SAVE_DELAY = 0.4
 WEB_ERROR_GRACE = 4.0  # seconds the page has to report in after a WebView resource error
 LIVE_FINAL_DRAIN = 0.3  # seconds for the dispatcher to deliver a finished job's last log lines
 CHROME_AUTO_HIDE = 2.5  # seconds the chrome stays up after the first chapter appears
+TOC_PANEL_WIDTH = 320  # UI_SPEC §3.11: the chapters list as a side panel on tablet
+TOC_PANEL_MIN_WIDTH = 900  # the shell's tablet class (persistent sidebar)
+TEXT_SIZE_HINT = "Text size in Aa: the page follows the Reader's own size, not the system text size"
 BOOK_SETTINGS_PREF = "reader_book_settings"
 MOBILE_PREFS_KEY = "reader_prefs"
 SPECIAL_FILES_KEY = "epub_details_show_special_files"
@@ -203,6 +208,10 @@ class ReaderScreen(Screen):
         self.console_ok = False
         self.http_off_doc = ""  # the page whose fetch fallback was switched off
         self.view: Optional[ft.View] = None
+        self.panel_open = False  # tablet: the chapters side panel is shown
+        self.custom_families: list = []  # Aa › Text: fonts imported with Converter › Load Font…
+        self.font_faces: dict = {}  # imported family -> URL served by ReaderServer (@font-face)
+        self.scale_hint_shown = False  # UI_SPEC §7.5 "Text size in Aa" (once per Reader)
         self.webview: Any = None
         self.live: Optional[LiveRun] = None
         self.disposed = False
@@ -341,9 +350,48 @@ class ReaderScreen(Screen):
             expand=True,
             key="reader-stack",
         )
+        # tablet: the chapters list as a persistent side panel (``toggle_side_panel``)
+        self.side_panel = ft.Container(width=TOC_PANEL_WIDTH, visible=False, bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+                                       border=ft.Border.only(left=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+                                       key="reader-toc-panel")
+        self.body_row = ft.Row([ft.Container(content=self.stack, expand=True), self.side_panel], spacing=0,
+                               expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH, key="reader-body")
 
     def build_body(self) -> ft.Control:
-        return ft.Container(content=self.stack, expand=True, bgcolor=self.theme.get("bg"))
+        return ft.Container(content=self.body_row, expand=True, bgcolor=self.theme.get("bg"))
+
+    # ---- tablet chapters panel (UI_SPEC §3.11) -----------------------------------------------------------
+
+    def tablet_layout(self) -> bool:
+        """The chapters list is a persistent side panel at >= 900 dp (the shell's tablet / wide classes)."""
+        return self._size()[0] >= TOC_PANEL_MIN_WIDTH
+
+    def toggle_side_panel(self, show: Optional[bool] = None) -> bool:
+        """☰ on a tablet: show / hide the side panel (the drawer's content moves into it). Returns the state."""
+        wanted = (not self.panel_open) if show is None else bool(show)
+        self.panel_open = bool(wanted and self.tablet_layout())
+        self._apply_side_panel()
+        return self.panel_open
+
+    def _apply_side_panel(self) -> None:
+        box = self.toc.box
+        if self.panel_open:
+            if self.toc.drawer.controls:
+                self.toc.drawer.controls = []
+            self.side_panel.content = box
+            self.side_panel.visible = True
+        else:
+            self.side_panel.content = None
+            self.side_panel.visible = False
+            if box not in (self.toc.drawer.controls or []):
+                self.toc.drawer.controls = [box]
+        width, height = self._size()
+        self.fallback.set_size(width - (TOC_PANEL_WIDTH if self.panel_open else 0), height)
+        for control in (self.body_row, self.toc.drawer):
+            try:
+                control.update()
+            except Exception:
+                pass
 
     def build_view(self, route: str) -> ft.View:
         """The full-screen View (no app bar; ``base.build_screen_view`` uses this when present)."""
@@ -588,6 +636,9 @@ class ReaderScreen(Screen):
         self._hold_position = offer is not None and not explicit
         self.state = "ready"
         self._refresh_toc()
+        custom_family = self.settings.font_family not in rm.FONT_FAMILIES
+        if custom_family:  # the saved Aa family is an imported font: its @font-face goes into this page
+            await self.load_custom_fonts()
         await self.render(start, hint=hint)
         if self.disposed:
             # Back while the first chapter was still loading: no wakelock, resume offer or job
@@ -595,6 +646,9 @@ class ReaderScreen(Screen):
             return
         self._set_loading(None)
         self._set_wakelock(self.settings.keep_screen_on)
+        self.text_size_hint()
+        if not custom_family:
+            self._spawn(self.load_custom_fonts())  # the Aa list, off the first render's path
         self._spawn(self._auto_hide_chrome())
         if offer is not None:
             self.offer_resume(offer)
@@ -699,6 +753,7 @@ class ReaderScreen(Screen):
             if self.builder is None or self.builder.session is not session:
                 self.builder = DocumentBuilder(session, server.register_image)
             builder = self.builder
+            builder.font_faces = dict(self.font_faces)
             settings, layout, theme = self.settings, self.layout, self.theme
             try:
                 built = await self._io(lambda: builder.build(
@@ -740,6 +795,17 @@ class ReaderScreen(Screen):
             if generation != self.render_generation or self.disposed:
                 return
             self.deduper.set_document("", None if self.layout == rm.LAYOUT_ALL else index)
+            if blocks_empty(blocks):
+                # UI_SPEC §7.4 Reader Empty state (not a blank page); the chrome stays for ◀ ▶ / Chapters
+                from glossarion_mobile.ui.components.empty_state import EmptyState
+
+                self.page_slot.content = EmptyState(icon="AUTO_STORIES", title=EMPTY_CHAPTER_TEXT,
+                                                    body="Use ◀ ▶ or Chapters to move on.", key=f"reader-empty-{index}")
+                self.page_slot.bgcolor = self.theme.get("bg")
+                self._update(self.page_slot)
+                self.toc.set_current(index)
+                self.schedule_position_save()
+                return
             if self.page_slot.content is not self.fallback.control:
                 self.page_slot.content = self.fallback.control
             self.fallback.set_size(*self._size())
@@ -814,6 +880,9 @@ class ReaderScreen(Screen):
 
     async def open_chapters(self) -> None:
         self._refresh_toc()
+        if self.tablet_layout():  # ☰ toggles the persistent panel on a tablet
+            self.toggle_side_panel()
+            return
         view = self.view
         if view is not None:
             try:
@@ -822,6 +891,8 @@ class ReaderScreen(Screen):
                 log.debug("show_end_drawer failed", exc_info=True)
 
     async def _close_drawer(self) -> None:
+        if self.panel_open:  # the tablet panel stays open while reading
+            return
         view = self.view
         if view is not None:
             try:
@@ -1115,6 +1186,16 @@ class ReaderScreen(Screen):
     def _on_pinch_end(self) -> None:
         self._schedule_style_save({"font_size": self.settings.font_size}, self._default_scope())
 
+    def keyboard_font_size(self, step: int) -> int:
+        """Hardware keyboard Ctrl+= / Ctrl+- / Ctrl+0 (``ui.keyboard``): one Aa size step, or the
+        default size for 0; applied and saved like Aa (same scope rule). Returns the new size."""
+        size = rm.clamp_font_size(rm.DEFAULTS["font_size"] if step == 0 else self.settings.font_size + step)
+        if size != self.settings.font_size:
+            self._apply_settings({"font_size": size}, self._default_scope())
+            if self.aa_sheet is not None:
+                self.aa_sheet.apply_settings(self.settings)
+        return size
+
     def _default_scope(self) -> str:
         return SCOPE_BOOK if self.settings.overridden else SCOPE_ALL
 
@@ -1123,9 +1204,56 @@ class ReaderScreen(Screen):
         sheet = AaSheet(self.settings, self.themes, scope=self._default_scope(),
                         double_allowed=rm.double_page_allowed(width, height),
                         on_change=lambda changes, scope: self._apply_settings(changes, scope),
-                        on_scope=self._on_scope, height=height)
+                        on_scope=self._on_scope, height=height,
+                        extra_families=[family for family, _path in self.custom_families])
         self.aa_sheet = sheet
         sheet.show(self.page)
+
+    async def load_custom_fonts(self) -> list:
+        """Aa › Text families from the Converter's "Load Font…" folder (``compile_model.custom_fonts_dir``,
+        the folder the EPUB compiler mirrors fonts from), served by ReaderServer as ``@font-face``."""
+        def scan() -> list:
+            from glossarion_mobile.ui.tools.compile_model import custom_fonts_dir
+
+            return rm.custom_font_families(custom_fonts_dir())
+
+        try:
+            families = await self._io(scan)
+        except Exception:
+            log.debug("custom font scan failed", exc_info=True)
+            families = []
+        self.custom_families = list(families or [])
+        server = self.deps.server
+        faces: dict = {}
+        register = getattr(server, "register_font", None) if server is not None else None
+        if callable(register):
+            for family, path in self.custom_families:
+                try:
+                    faces[family] = register(path)
+                except Exception:
+                    log.debug("registering font %s failed", family, exc_info=True)
+        self.font_faces = faces
+        return self.custom_families
+
+    def text_size_hint(self) -> bool:
+        """UI_SPEC §7.5: at >= 160 % effective text size, say once that page text follows Aa (the OS
+        text scale does not resize the page)."""
+        if self.scale_hint_shown:
+            return False
+        from glossarion_mobile.ui import tokens as ui_tokens
+        from glossarion_mobile.ui.text_scale import effective
+
+        state = (self.deps.extras or {}).get("state")
+        if effective(state) < ui_tokens.COMPACT_TEXT_SCALE:
+            return False
+        self.scale_hint_shown = True
+        notify = self.deps.notify
+        if notify is not None:
+            try:
+                notify(TEXT_SIZE_HINT, "Aa", self.open_aa)
+            except TypeError:
+                notify(TEXT_SIZE_HINT)
+        return True
 
     def _on_scope(self, scope: str) -> None:
         self._pending_scope = scope
@@ -1170,7 +1298,8 @@ class ReaderScreen(Screen):
             if self.webview is not None:
                 self.webview.bgcolor = self.theme.get("bg")
             self._spawn(self._js(bridge.js_call("applyStyle", rm.override_css(self.theme, self.settings,
-                                                                               layout=self.layout))))
+                                                                               layout=self.layout,
+                                                                               font_faces=self.font_faces))))
         else:
             self._spawn(self.render(self.index, hint={"fraction": self.fraction}))
         self._refresh_chrome()
@@ -1279,6 +1408,11 @@ class ReaderScreen(Screen):
         width, height = self._size()
         self.fallback.set_size(width, height)
         self.toc.set_height(height)
+        if self.panel_open and not self.tablet_layout():  # back to a phone width: the end drawer again
+            self.panel_open = False
+            self._apply_side_panel()
+        elif self.panel_open:
+            self.fallback.set_size(width - TOC_PANEL_WIDTH, height)
         if layout != self.layout:
             self.layout = layout
             self._spawn(self.render(self.index, hint=self._current_hint()))
@@ -1614,7 +1748,7 @@ class ReaderScreen(Screen):
     async def _poll_loop(self) -> None:
         try:
             while not self.disposed:
-                await asyncio.sleep(OVERLAY_POLL_SECONDS)
+                await poll_sleep(self.page, OVERLAY_POLL_SECONDS)  # parks while the app is hidden
                 if not self._visible() or self.session is None:
                     continue
                 await self.refresh_overlay()

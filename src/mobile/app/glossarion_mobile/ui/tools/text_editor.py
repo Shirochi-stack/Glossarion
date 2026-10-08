@@ -238,9 +238,9 @@ class TextEditorScreen(Screen):
 
     def actions(self) -> list:
         self.save_action = ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save", disabled=True, on_click=self._on_save,
-                                         key="text-save")
+                                         key="text-save", size_constraints=HIT_TARGET)
         self.share_action = ft.IconButton(icon=ft.Icons.IOS_SHARE, tooltip="Share", on_click=self._on_share,
-                                          disabled=self.files is None or self.error is not None, key="text-share")
+                                          disabled=self.files is None or self.error is not None, key="text-share", size_constraints=HIT_TARGET)
         return [self.share_action, self.save_action]
 
     def build_body(self) -> ft.Control:

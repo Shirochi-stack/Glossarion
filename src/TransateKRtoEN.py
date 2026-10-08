@@ -8342,6 +8342,18 @@ class ContentProcessor:
         return analysis
 
 
+def _glossarion_library_dir():
+    """The Library folder: ``library_core.library_root_path()`` (honours ``GLOSSARION_LIBRARY_DIR``;
+    Glossarion Mobile keeps its Library in app storage), else ``~/Documents/Glossarion/Library``
+    exactly as before (U9 seam gap, like ``output_naming._library_dir``)."""
+    try:
+        from library_core import library_root_path
+        return library_root_path()
+    except Exception:
+        return os.path.join(
+            os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+
+
 def _library_origins_raw_epubs_for_stem(folder_stem):
     """Raw source EPUB paths in library_origins.txt matching *folder_stem*.
 
@@ -8351,8 +8363,7 @@ def _library_origins_raw_epubs_for_stem(folder_stem):
     """
     if not folder_stem:
         return []
-    library_dir = os.path.join(
-        os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+    library_dir = _glossarion_library_dir()
     origins_path = os.path.join(library_dir, "library_origins.txt")
     try:
         with open(origins_path, "r", encoding="utf-8") as f:
@@ -8391,8 +8402,7 @@ def _library_raw_inputs_epubs_for_stem(folder_stem):
     if not folder_stem:
         return []
     stem_key = os.path.normcase(folder_stem)
-    lib_dir = os.path.join(
-        os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+    lib_dir = _glossarion_library_dir()
     matches = []
     seen = set()
     for reg_path in (os.path.join(lib_dir, "library_raw_inputs.txt"),

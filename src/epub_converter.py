@@ -116,7 +116,14 @@ def _norm_abs_path(path: str) -> str:
 
 
 def _glossarion_library_dir() -> str:
-    return os.path.join(os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+    """The Library folder: ``library_core.library_root_path()`` (honours ``GLOSSARION_LIBRARY_DIR``
+    like the Library itself; Glossarion Mobile keeps its Library in app storage), else
+    ``~/Documents/Glossarion/Library`` exactly as before (U9 seam gap, like ``output_naming``)."""
+    try:
+        from library_core import library_root_path
+        return library_root_path()
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), "Documents", "Glossarion", "Library")
 
 
 def _load_library_origins_for_compile() -> dict:

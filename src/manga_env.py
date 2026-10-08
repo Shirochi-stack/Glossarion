@@ -3069,7 +3069,115 @@ def font_preset_updates(preset, config=None):
             written.update(key for key, value in result.items() if reference.get(key, missing) != value)
     return {key: _copy.deepcopy(pressed[preset][key]) for key in sorted(written) if key in pressed[preset]}
 
+# ---------------------------------------------------------------------------
+# U9: Rendering › Reset to Defaults and the custom image-edit endpoint test (shared with mobile)
+# ---------------------------------------------------------------------------
+
+
+def rendering_reset_updates(config=None):
+    """The config entries Rendering › Reset to Defaults writes (``_reset_rendering_to_defaults``:
+    ``manga_settings_defaults.RENDERING_RESET_VALUES`` on the tab, then ``_save_rendering_settings``).
+
+    Measured like :func:`font_preset_updates`, on scratch headless tabs over a deep copy of *config*
+    (nothing is saved): the entries the save writes from the reset attributes are the ones that
+    change when those attributes change (each value shifted: flags flipped, numbers moved, strings
+    suffixed), listed with their reset values. The process environment the scratch tabs touch is
+    put back."""
+    import copy as _copy
+    import types
+
+    from manga_settings_defaults import RENDERING_RESET_VALUES
+
+    def shifted(value):
+        if isinstance(value, bool):
+            return not value
+        if isinstance(value, int):
+            return value + 1
+        if isinstance(value, float):
+            return value + 0.5
+        if value is None:
+            return "u9-shifted"
+        return f"{value}-shifted"
+
+    def run(base, values):
+        owner = types.SimpleNamespace(config=_copy.deepcopy(base))
+        state = HeadlessMangaState(owner, host=types.SimpleNamespace(log=lambda *_a, **_k: None))
+        for attr, value in values.items():
+            setattr(state, attr, value)
+        state._save_rendering_settings()
+        return _flatten_manga_config(owner.config)
+
+    before_env = dict(os.environ)
+    try:
+        base = _copy.deepcopy(dict(config or {}))
+        reset = run(base, dict(RENDERING_RESET_VALUES))
+        moved = run(base, {attr: shifted(value) for attr, value in RENDERING_RESET_VALUES.items()})
+    finally:
+        for key in set(os.environ) - set(before_env):
+            os.environ.pop(key, None)
+        for key, value in before_env.items():
+            if os.environ.get(key) != value:
+                os.environ[key] = value
+    missing = object()
+    written = {key for key in set(reset) | set(moved) if reset.get(key, missing) != moved.get(key, missing)}
+    return {key: _copy.deepcopy(reset[key]) for key in sorted(written) if key in reset}
+
+
+#: The Blank-URL notice of the custom image-edit endpoint test (desktop QMessageBox text).
+CUSTOM_IMAGE_EDIT_BLANK_MESSAGE = (
+    "Blank URL uses the current main image provider/model. There is no separate custom endpoint URL to test."
+)
+
+
+def normalize_custom_image_edit_url(url):
+    """The endpoint URL the test probes (moved from ``_test_custom_image_edit_endpoint``): a bare host
+    gets ``http://`` (local hosts) or ``https://``, no trailing slash."""
+    if not url.startswith(('http://', 'https://')):
+        lower = url.lower()
+        url = ('http://' if lower.startswith(('localhost', '127.', '0.0.0.0', '[')) else 'https://') + url
+    url = url.rstrip('/')
+    return url
+
+
+def probe_custom_image_edit_endpoint(url, config, http_get=None):
+    """``GET {url}/models`` with the desktop key order (CUSTOM_IMAGE_EDIT_API_KEY, OPENAI_API_KEY, the
+    config ``api_key``, ``sk-local``); returns ``(box, status_text, colour, title, message)`` with the
+    desktop status label / message box texts (moved from ``_test_custom_image_edit_endpoint``)."""
+    if http_get is None:
+        import requests
+        http_get = requests.get
+    headers = {
+        'Authorization': f"Bearer {os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY') or os.environ.get('OPENAI_API_KEY') or config.get('api_key', '') or 'sk-local'}"
+    }
+    resp = http_get(f"{url}/models", headers=headers, timeout=10)
+    if resp.status_code in (200, 201):
+        return ("information", "Image edit endpoint reachable", "green", "Image Edit Endpoint",
+                f"Endpoint is reachable:\n{url}")
+    elif resp.status_code in (401, 403):
+        return ("warning", "Endpoint reached, but authentication failed", "orange", "Custom Image Edit Endpoint",
+                f"Endpoint responded with authentication error ({resp.status_code}).")
+    return ("information", f"Endpoint responded: HTTP {resp.status_code}", "orange", "Custom Image Edit Endpoint",
+            f"Endpoint responded with HTTP {resp.status_code}.")
+
+
+def test_custom_image_edit_endpoint(config, http_get=None):
+    """Glossarion Mobile's Inpainting › custom image edit › Test: ``(ok, status_text, message)`` with the
+    desktop texts (blank URL / reachable / auth error / HTTP status / "Test failed")."""
+    config = config if isinstance(config, dict) else dict(config or {})
+    url = str(config.get('custom_image_edit_endpoint') or '').strip()
+    enabled = bool(config.get('use_custom_image_edit_endpoint', False))
+    if not enabled or not url:
+        return True, "Using current image provider/model", CUSTOM_IMAGE_EDIT_BLANK_MESSAGE
+    try:
+        url = normalize_custom_image_edit_url(url)
+        _box, status, color, _title, message = probe_custom_image_edit_endpoint(url, config, http_get=http_get)
+    except Exception as e:
+        return False, "Custom Image Edit Endpoint test failed", f"Test failed:\n{e}"
+    return color == "green", status, message
+
+
 __all__ = [
+    "CUSTOM_IMAGE_EDIT_BLANK_MESSAGE",
     "FONT_PRESETS",
     "HeadlessMangaState",
     "MangaEnvMixin",
@@ -3087,6 +3195,10 @@ __all__ = [
     "default_manga_ocr_prompt",
     "font_preset_updates",
     "import_ocr_session",
+    "normalize_custom_image_edit_url",
+    "probe_custom_image_edit_endpoint",
+    "rendering_reset_updates",
+    "test_custom_image_edit_endpoint",
     "migrate_legacy_manga_ocr_prompt",
     "prepare_manga_glossary_env",
     "restore_manga_glossary_env",

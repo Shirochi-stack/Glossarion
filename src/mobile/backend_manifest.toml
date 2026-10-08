@@ -176,7 +176,7 @@ gptqmodel = "torch stack"
 optimum = "torch stack"
 diffusers = "torch stack"
 safetensors = "torch weight loading (torch-only inpainting/detection paths)"
-sentence-transformers = "torch stack (silent-truncation embeddings disabled)"
+sentence-transformers = "torch stack, hf-xet (no Android/iOS wheels, U9 check): silent-truncation embeddings disabled"
 scikit-learn = "only used with sentence-transformers"
 easyocr = "torch OCR"
 paddleocr = "Paddle OCR"
@@ -198,18 +198,12 @@ pypdf2 = "legacy; pypdf is pinned"
 jellyfish = "no wheel; RapidFuzz Jaro-Winkler fallback (P26)"
 cohere = "fastavro has no wheel; HTTP fallback in unified_api_client"
 mistralai = "httpx2 + opentelemetry; HTTP fallback in unified_api_client"
-vertexai = "gRPC SDK; Vertex via REST + google-auth"
-google-cloud-aiplatform = "gRPC SDK; Vertex via REST + google-auth"
+vertexai = "ships with google-cloud-aiplatform (not installable, see below); Vertex routes run through google-genai / AnthropicVertex (U9)"
+google-cloud-aiplatform = "every release requires protobuf<7, the app pins protobuf==7.35.0 (U9 check); Vertex Gemini runs through google-genai (vertexai=True) and Vertex Claude through anthropic.AnthropicVertex, REST + google-auth, and unified_api_client skips the unused aiplatform / vertexai imports on mobile"
 google-generativeai = "deprecated SDK (google-genai is pinned)"
-google-ai-generativelanguage = "gRPC SDK (Tier B)"
-google-api-core = "Tier B: pinned with grpcio 1.81 when a google-cloud-* route is enabled"
-google-cloud-vision = "gRPC SDK (Tier B); manga_translator / the editor use google_vision_rest when it is missing (U8)"
-google-cloud-translate = "Tier B (paid Google Translate route)"
-google-cloud-texttospeech = "Tier B (TTS milestone)"
-grpcio = "Tier B (grpcio==1.81.0 + grpcio-status==1.81.0 resolver trap)"
-azure-ai-formrecognizer = "Azure Document Intelligence SDK; ocr_manager uses azure_document_intelligence_rest on mobile (U8)"
-azure-ai-documentintelligence = "Azure Document Intelligence SDK; ocr_manager uses azure_document_intelligence_rest on mobile (U8)"
-argostranslate = "ctranslate2 has no mobile wheel (offline MT disabled)"
+azure-ai-formrecognizer = "Azure Document Intelligence SDK; ocr_manager uses azure_document_intelligence_rest on mobile (U8). It resolves for every target (U9 check) but stays out: the REST client covers the provider"
+azure-ai-documentintelligence = "nothing imports it (ocr_manager imports azure.ai.formrecognizer); ocr_manager uses azure_document_intelligence_rest on mobile (U8)"
+argostranslate = "ctranslate2 + sentencepiece (and stanza -> torch) have no Android/iOS wheels (U9 check): offline MT disabled"
 datasketch = "scipy; guarded MinHash fallback"
 poe-api-wrapper = "desktop-only Poe client"
 pycryptodome = "AES fallback only; cryptography (Fernet) is pinned"
@@ -256,8 +250,8 @@ files = []
 # count = number of distinct unguarded import lines; it may only go down.
 [baseline.lazy_gui_edges]
 "ai_hunter_enhanced->PySide6" = { count = 2, reason = "AIHunterConfigGUI settings dialog; the detection code is GUI-free" }
-"authnd_auth->PySide6" = { count = 3, reason = "_mint_captcha_token_qt: QtWebEngine hCaptcha (authnd/ via WebViewBridge in U9)" }
-"gemini_free->PySide6" = { count = 10, reason = "QtWebEngine helpers for search/gemini (WebViewBridge in U9)" }
+"authnd_auth->PySide6" = { count = 3, reason = "_mint_captcha_token_qt: desktop QtWebEngine hCaptcha; mobile mints through the registered browser_driver (WebViewBridge, U9)" }
+"gemini_free->PySide6" = { count = 10, reason = "desktop QtWebEngine helpers for search/gemini; mobile searches through the registered browser_driver (WebViewBridge, U9)" }
 "metadata_batch_translator->PySide6" = { count = 5, reason = "MetadataBatchTranslatorUI dialogs; mobile uses metadata_defaults (U1)" }
 "multi_api_key_manager->PySide6" = { count = 10, reason = "MultiAPIKeyDialog / RefusalPatternsDialog; mobile uses key_pool_service (U4)" }
 "multi_api_key_manager->ollama_settings_dialog" = { count = 1, reason = "MultiAPIKeyDialog._wrap_model_with_ollama_settings (desktop dialog)" }
@@ -283,10 +277,8 @@ files = []
 "authcd_auth:_load_claude_code_keychain_json" = { apis = ["subprocess.run"], count = 1, reason = "macOS `security` for Claude Code credential import (excluded on mobile)" }
 "authcd_auth:claude_cli_auth_status" = { apis = ["subprocess.run"], count = 1, reason = "Claude Code CLI status (excluded on mobile)" }
 "authcd_auth:run_claude_cli_login" = { apis = ["subprocess.Popen"], count = 1, reason = "Claude Code CLI login (excluded on mobile)" }
-"authnd_auth:_mint_captcha_token_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "QtWebEngine captcha helper process (authnd/ WebViewBridge in U9)" }
 "chapter_extraction_manager:ChapterExtractionManager._run_extraction_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "gated in the caller: TransateKRtoEN use_async_extraction requires processes_available() (P2)" }
 "epub_converter:EPUBCompiler._compress_images" = { apis = ["subprocess.Popen"], count = 1, reason = "P16: `_sp.Popen` alias in a loop of `num_workers if subprocesses_available() else 0` workers -> sequential in-process fallback" }
-"gemini_free:_run_search_subprocess_once" = { apis = ["subprocess.Popen"], count = 1, reason = "QtWebEngine search helper process (search/gemini WebViewBridge in U9)" }
 "local_inpainter:<module>" = { apis = ["multiprocessing.Process"], count = 1, reason = "class _LocalInpainterWorker(mp.Process); only started by _start_worker (P17)" }
 "local_inpainter:LocalInpainter._start_worker" = { apis = ["multiprocessing.get_context"], count = 1, reason = "P17: only called when self._mp_enabled, which requires processes_available()" }
 "pdf_extractor:extract_pdf_with_formatting" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P9: _pdf_extraction_worker_count() is 1 without processes -> sequential branch" }

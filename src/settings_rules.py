@@ -68,13 +68,18 @@ __all__ = [
     "authgpt_pool_route_requested", "authgrok_pool_route_requested", "authgem_vertex_control_model",
     "collect_auth_account_ids_from_pools", "model_account_ids",
     "google_credentials_route", "google_creds_ready_text", "google_creds_missing_text", "google_creds_status",
+    "INVALID_GOOGLE_CREDENTIALS", "google_credentials_error", "google_credentials_load_error",
+    "is_google_service_account",
     "authgpt_login_needed", "authgrok_login_needed", "authcd_login_needed", "authgem_login_needed",
     "excluded_route_reason", "route_controls",
     # chunk size / compression
     "parse_chunk_size_text", "factor_for_chunk_size", "record_chunk_size", "remember_manual_chunk_size",
     "held_manual_chunk_size", "chunk_budget_margin", "auto_compression_factor", "apply_auto_compression_factor",
     "chunk_budget", "chunk_budget_for_config", "chunk_size_display", "apply_chunk_size", "set_chunk_size_text",
-    "hold_manual_chunk_size",
+    "hold_manual_chunk_size", "COMPRESSION_LOCK_REASON", "compression_lock",
+    # Glossary Manager auto compression factor
+    "GLOSSARY_COMPRESSION_LOCK_REASON", "glossary_output_limit", "glossary_auto_compression_factor",
+    "apply_glossary_auto_compression", "glossary_compression_lock",
     # context mode / batching
     "BATCHING_RADIOS", "ChoiceState", "ContextBatching", "context_mode", "apply_context_mode",
     "enforce_context_batching", "context_batching_controls",
@@ -100,6 +105,8 @@ __all__ = [
     # rule ids (settings_schema visible_if / locked_if) and setting changes
     "LOCK_RULE_PREFIX", "lock_rule_id", "lock_keys", "register_visibility_rule", "visibility_rules",
     "is_visible", "evaluate", "evaluate_rule", "apply_change",
+    # U9: the Text Extraction Method the desktop shows (extraction:standard / extraction:enhanced rules)
+    "text_extraction_method",
 ]
 
 
@@ -485,6 +492,38 @@ def google_credentials_route(model, config=None, *, pools_need_creds=None, pools
         needs_google_creds = True
         vertex_location = False  # Hide location selector for Google Translate
     return needs_google_creds, vertex_location
+
+
+#: The desktop Google credential pickers' refusal (translator_gui.select_google_credentials,
+#: multi_api_key_manager._browse_google_credentials and its fallback / glossary variants).
+INVALID_GOOGLE_CREDENTIALS = "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+
+
+def is_google_service_account(creds_data):
+    """The desktop pickers' acceptance test of the picked JSON: ``'type'`` and ``'project_id'`` present (a
+    scalar raises TypeError, which the pickers report like a read failure)."""
+    return 'type' in creds_data and 'project_id' in creds_data
+
+
+def google_credentials_load_error(exc):
+    """The pickers' message when reading the file (or using it) raised ``exc``."""
+    return f"Failed to load credentials: {str(exc)}"
+
+
+def google_credentials_error(creds_path):
+    """The desktop pickers' check of a picked credentials file: None for a service-account JSON
+    (``is_google_service_account``), else the message they show (``INVALID_GOOGLE_CREDENTIALS``, or
+    ``google_credentials_load_error`` when the file cannot be read as JSON). The desktop pickers use
+    the same rule and messages; U9: Glossarion Mobile's KeyEditor and Settings › Google Cloud
+    credentials refuse the same files."""
+    try:
+        with open(creds_path, 'r') as f:
+            creds_data = json.load(f)
+            if is_google_service_account(creds_data):
+                return None
+            return INVALID_GOOGLE_CREDENTIALS
+    except Exception as e:
+        return google_credentials_load_error(e)
 
 
 def google_creds_ready_text(model, creds_path):
@@ -1030,6 +1069,91 @@ def hold_manual_chunk_size(config, max_output_tokens=None):
     if chunk_size is not None:
         return apply_chunk_size(config, chunk_size, max_output_tokens)
     return None
+
+
+#: Why the manual compression factor is locked while Auto Compression Factor is on (the Other
+#: Settings ``_on_auto_compression_toggle`` disables the field; the main window recomputes it from
+#: the output token limit, ConfigStateMixin._update_auto_compression_factor).
+COMPRESSION_LOCK_REASON = ("Auto compression factor is on: the factor follows the output token limit "
+                           "(<16379: 1.5 | <32769: 2.0 | <65536: 2.5 | ≥65536: 3.0).")
+
+
+def compression_lock(config):
+    """``{'compression_factor': LockInfo}``: locked while ``auto_compression_factor`` is on."""
+    if _flag(config, 'auto_compression_factor'):
+        return {'compression_factor': LockInfo(locked=True, reason=COMPRESSION_LOCK_REASON)}
+    return {'compression_factor': LockInfo(locked=False)}
+
+
+# Glossary Manager › Balanced/Full Extraction Settings: "Compression Factor" + "Auto" (the
+# ``_update_glossary_compression`` closure of GlossaryManager_GUI._setup_manual_glossary_tab,
+# split in two so the closure keeps its widget work in the same order).
+
+#: Why the glossary compression factor is locked while its Auto box is ticked.
+GLOSSARY_COMPRESSION_LOCK_REASON = ("Auto is on: the glossary compression factor follows the glossary output "
+                                    "token limit (-1 = the main output limit): <16379: 1.0 | <32769: 1.2 | "
+                                    "<65536: 1.4 | ≥65536: 1.5.")
+
+
+def glossary_output_limit(limit_text, max_output_tokens=65536):
+    """``(actual_limit, helper_text)`` for the Glossary output token limit field's text.
+
+    Text that is not an integer counts as 65536; -1 resolves to the main output token limit
+    (*max_output_tokens*) and the helper label reads "(Auto: N)", otherwise it is empty.
+    """
+    # Update helper label for token limit
+    try:
+        limit_val = int(limit_text)
+    except ValueError:
+        limit_val = 65536
+
+    # Resolve -1 to actual max_output_tokens
+    if limit_val == -1:
+        actual_limit = max_output_tokens
+        return actual_limit, f"(Auto: {actual_limit})"
+    actual_limit = limit_val
+    return actual_limit, ""
+
+
+def glossary_auto_compression_factor(actual_limit):
+    """The Auto glossary compression factor for a resolved glossary output limit."""
+    # Logic: 1.0 | 1.2 | 1.4 | 1.5
+    if actual_limit < 16379:
+        factor = 1.0
+    elif actual_limit < 32769:
+        factor = 1.2
+    elif actual_limit < 65536:
+        factor = 1.4
+    else:
+        factor = 1.5
+    return factor
+
+
+def apply_glossary_auto_compression(config, max_output_tokens=None):
+    """With ``glossary_auto_compression`` on (default True), set ``config['glossary_compression_factor']``
+    from ``glossary_max_output_tokens`` (-1: the main output limit) like the Glossary Manager's Auto
+    box (its save stores ``float(entry.text())``). Returns the factor, or None when Auto is off
+    (*config* untouched)."""
+    if not _flag(config, 'glossary_auto_compression'):  # default on (the Auto box starts ticked)
+        return None
+    if max_output_tokens is None:
+        max_output_tokens = _config_var(config, 'max_output_tokens')
+    try:
+        max_output_tokens = int(max_output_tokens)
+    except (TypeError, ValueError):
+        max_output_tokens = 65536
+    actual_limit, _helper = glossary_output_limit(str(config.get('glossary_max_output_tokens', -1)),
+                                                  max_output_tokens)
+    factor = float(str(glossary_auto_compression_factor(actual_limit)))
+    config['glossary_compression_factor'] = factor
+    return factor
+
+
+def glossary_compression_lock(config):
+    """``{'glossary_compression_factor': LockInfo}``: locked while the glossary Auto box is on."""
+    if _flag(config, 'glossary_auto_compression'):
+        return {'glossary_compression_factor': LockInfo(locked=True, reason=GLOSSARY_COMPRESSION_LOCK_REASON)}
+    return {'glossary_compression_factor': LockInfo(locked=False)}
 
 
 # =============================================================================================
@@ -1721,10 +1845,54 @@ def _change_glossary_mode(config, value):
     return {}
 
 
+def _change_target_language(config, value):
+    # the main-window Target Language combo (ConfigStateMixin.update_target_language)
+    return fan_out_target_language(config, value)
+
+
+def _change_max_output_tokens(config, value):
+    # the main-window Output Token Limit dialog: a manual chunk size stays fixed across limit
+    # changes (captured first for settings saved before Chunk Size existed), then the auto
+    # compression factor follows the new limit; the Glossary Manager's Auto glossary factor
+    # resolves its -1 limit to the same value (mobile has no open dialog to refresh it later)
+    if 'manual_chunk_size' not in config:
+        remember_manual_chunk_size(config, lambda: chunk_budget_for_config(config))
+    config['max_output_tokens'] = value
+    hold_manual_chunk_size(config, value)
+    apply_auto_compression_factor(config, value)
+    apply_glossary_auto_compression(config, value)
+    return {}
+
+
+def _change_auto_compression(config, value):
+    # other_settings _on_auto_compression_toggle: on recomputes the factor, off records the
+    # current budget as the manual chunk size to hold
+    config['auto_compression_factor'] = bool(value)
+    if value:
+        apply_auto_compression_factor(config)
+    else:
+        remember_manual_chunk_size(config, lambda: chunk_budget_for_config(config))
+    return {}
+
+
+def _change_glossary_compression_input(key):
+    # the Glossary Manager's Auto box and output token limit field run _update_glossary_compression
+    def change(config, value):
+        config[key] = value
+        apply_glossary_auto_compression(config)
+        return {}
+    return change
+
+
 _CHANGE_RULES.update({
     'stream_thinking_logs': _change_stream_thinking,
     'output_mode': _change_output_mode,
     'auto_glossary_mode': _change_glossary_mode,
+    'output_language': _change_target_language,
+    'max_output_tokens': _change_max_output_tokens,
+    'auto_compression_factor': _change_auto_compression,
+    'glossary_auto_compression': _change_glossary_compression_input('glossary_auto_compression'),
+    'glossary_max_output_tokens': _change_glossary_compression_input('glossary_max_output_tokens'),
 })
 
 
@@ -1732,9 +1900,13 @@ def apply_change(config, key, value):
     """Set *key* to *value* on *config* with the desktop side effects of that control.
 
     stream_thinking_logs locks / releases Enable thoughts; output_mode writes the legacy mode
-    flags; auto_glossary_mode runs the main-window shortcut handler. Other keys are plain
-    writes. Returns ``(changed {key: value}, env exports)``; the env is never written (a job
-    exports its own from its config snapshot).
+    flags; auto_glossary_mode runs the main-window shortcut handler; output_language fans the
+    target language out like the main-window combo (glossary, manga manual edit, AI Hunter);
+    max_output_tokens holds a manual chunk size and recomputes the auto compression factors;
+    auto_compression_factor recomputes (on) or records the manual chunk size (off);
+    glossary_auto_compression / glossary_max_output_tokens recompute the Auto glossary factor.
+    Other keys are plain writes. Returns ``(changed {key: value}, env exports)``; the env is
+    never written (a job exports its own from its config snapshot).
     """
     before = copy.deepcopy(dict(config))
     rule = _CHANGE_RULES.get(key)
@@ -1783,6 +1955,25 @@ def _glossary_targeted(config):
     return glossary_mode_targeted_extraction(glossary_manager_mode(config))
 
 
+def text_extraction_method(config):
+    """The Text Extraction Method radio (Standard / Enhanced) the desktop shows for *config*
+    (owner_state.initialize_extraction_variables: ``extraction_mode == 'enhanced'`` wins, else
+    ``text_extraction_method``, default 'standard')."""
+    from owner_state import initialize_extraction_variables
+
+    owner = types.SimpleNamespace(config=config)
+    initialize_extraction_variables(owner)
+    return owner.text_extraction_method_var
+
+
+def _extraction_method_rule(method):
+    # other_settings.on_extraction_method_change: the html2text (Enhanced) options frame shows only for
+    # Enhanced, the BeautifulSoup options (Fix Stray p&gt;) only for Standard
+    def predicate(config):
+        return text_extraction_method(config) == method
+    return predicate
+
+
 def _glossary_append_prompt(config):
     # update_append_prompt_state: the append format prompt follows the Append Glossary toggle
     return _flag(config, 'append_glossary')
@@ -1800,11 +1991,15 @@ for _rule_id, _predicate in (
         ('output_mode:vision', _output_mode_rule('vision_only')),
         ('glossary:extraction_prompt', _glossary_extracts),
         ('glossary:targeted_extraction', _glossary_targeted),
-        ('glossary:append_prompt', _glossary_append_prompt)):
+        ('glossary:append_prompt', _glossary_append_prompt),
+        ('extraction:standard', _extraction_method_rule('standard')),
+        ('extraction:enhanced', _extraction_method_rule('enhanced'))):
     register_visibility_rule(_rule_id, _predicate)
 del _rule_id, _predicate
 
 
 register_lock_rule('thoughts', THOUGHTS_LOCK_KEYS, thoughts_lock)
+register_lock_rule('auto_compression', ('compression_factor',), compression_lock)
+register_lock_rule('glossary_auto_compression', ('glossary_compression_factor',), glossary_compression_lock)
 register_lock_rule('glossary_mode', tuple(GLOSSARY_MODE_TOGGLES) + ('fuzzy_auto_mapping_threshold',),
                    lambda config: glossary_mode_locks(glossary_manager_mode(config)))

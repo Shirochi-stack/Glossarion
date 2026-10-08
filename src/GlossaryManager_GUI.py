@@ -2265,12 +2265,7 @@ class GlossaryManagerMixin:
             'locations': {'enabled': True, 'has_gender': False},
             'nicknames': {'enabled': True, 'has_gender': True}
         })
-        # Normalize legacy key "term" -> "terms"
-        if 'term' in self.custom_entry_types and 'terms' not in self.custom_entry_types:
-            self.custom_entry_types['terms'] = self.custom_entry_types.pop('term')
-        # If both exist, prefer "terms" and drop legacy duplicate
-        if 'term' in self.custom_entry_types and 'terms' in self.custom_entry_types:
-            self.custom_entry_types.pop('term', None)
+        glossary_document.normalize_legacy_entry_types(self.custom_entry_types)
         
         # Main container with grid for better control
         type_main_grid = QGridLayout()
@@ -2311,9 +2306,7 @@ class GlossaryManagerMixin:
                 if item.widget():
                     item.widget().deleteLater()
             
-            # Sort types: built-in first, then custom alphabetically
-            sorted_types = sorted(self.custom_entry_types.items(),
-                                key=lambda x: (x[0] not in ['character', 'terms'], x[0]))
+            sorted_types = glossary_document.sorted_entry_types(self.custom_entry_types)
             
             # Create checkboxes for each type
             for type_name, type_config in sorted_types:
@@ -2383,21 +2376,12 @@ class GlossaryManagerMixin:
         type_control_layout.addWidget(has_gender_checkbox)
         
         def add_custom_type():
-            type_name = new_type_entry.text().strip().lower()
-            if not type_name:
-                QMessageBox.warning(parent, "Invalid Input", "Please enter a type name")
+            type_name, warning = glossary_document.add_entry_type(
+                self.custom_entry_types, new_type_entry.text(), has_gender_checkbox.isChecked())
+            if warning:
+                QMessageBox.warning(parent, *warning)
                 return
-            
-            if type_name in self.custom_entry_types:
-                QMessageBox.warning(parent, "Duplicate Type", f"Type '{type_name}' already exists")
-                return
-            
-            # Add the new type
-            self.custom_entry_types[type_name] = {
-                'enabled': True,
-                'has_gender': has_gender_checkbox.isChecked()
-            }
-            
+
             # Clear inputs
             new_type_entry.clear()
             has_gender_checkbox.setChecked(False)
@@ -2413,8 +2397,9 @@ class GlossaryManagerMixin:
             self.append_log(f"✅ Added custom type: {type_name}")
         
         def remove_type(type_name):
-            if type_name in ['character', 'term']:
-                QMessageBox.warning(parent, "Cannot Remove", "Built-in types cannot be removed")
+            warning = glossary_document.entry_type_remove_warning(type_name)
+            if warning:
+                QMessageBox.warning(parent, *warning)
                 return
             
             reply = QMessageBox.question(parent, "Confirm Removal", f"Remove type '{type_name}'?",
@@ -2575,10 +2560,10 @@ class GlossaryManagerMixin:
                 self.custom_glossary_fields.append(field)
                 self.custom_fields_listbox.addItem(field)
                 self.custom_field_entry.clear()
-                
-                # If user manually adds "description" back, clear the removal flag
-                if field.lower() == 'description':
-                    self.config['custom_field_description_removed'] = False
+
+                flag = glossary_document.description_removed_flag('add', field)
+                if flag is not None:
+                    self.config['custom_field_description_removed'] = flag
                     self.save_config(show_message=False)
         
         def remove_custom_field():
@@ -2588,10 +2573,10 @@ class GlossaryManagerMixin:
                 field = item.text()
                 self.custom_glossary_fields.remove(field)
                 self.custom_fields_listbox.takeItem(current_row)
-                
-                # If user manually removes "description", set flag to prevent re-adding
-                if field.lower() == 'description':
-                    self.config['custom_field_description_removed'] = True
+
+                flag = glossary_document.description_removed_flag('remove', field)
+                if flag is not None:
+                    self.config['custom_field_description_removed'] = flag
                     self.save_config(show_message=False)
         
         # Use screen ratio for button widths: ~8% of screen width
@@ -3399,36 +3384,22 @@ class GlossaryManagerMixin:
         # Logic for Auto Compression Factor
         def _update_glossary_compression():
             try:
-                # Update helper label for token limit
-                try:
-                    limit_val = int(self.glossary_output_token_limit_entry.text())
-                except ValueError:
-                    limit_val = 65536
-                
-                # Resolve -1 to actual max_output_tokens
-                if limit_val == -1:
-                    actual_limit = getattr(self, 'max_output_tokens', 65536)
-                    self.token_limit_helper.setText(f"(Auto: {actual_limit})")
-                else:
-                    actual_limit = limit_val
-                    self.token_limit_helper.setText("")
-                
+                # Update helper label for token limit (-1 resolves to max_output_tokens);
+                # the rule is shared with the mobile app (settings_rules, U9)
+                actual_limit, helper_text = settings_rules.glossary_output_limit(
+                    self.glossary_output_token_limit_entry.text(),
+                    getattr(self, 'max_output_tokens', 65536))
+                self.token_limit_helper.setText(helper_text)
+
                 if not self.glossary_auto_compression_checkbox.isChecked():
                     self.glossary_compression_factor_entry.setEnabled(True)
                     return
 
                 self.glossary_compression_factor_entry.setEnabled(False)
-                
+
                 # Logic: 1.0 | 1.2 | 1.4 | 1.5
-                if actual_limit < 16379:
-                    factor = 1.0
-                elif actual_limit < 32769:
-                    factor = 1.2
-                elif actual_limit < 65536:
-                    factor = 1.4
-                else:
-                    factor = 1.5
-                    
+                factor = settings_rules.glossary_auto_compression_factor(actual_limit)
+
                 self.glossary_compression_factor_entry.setText(str(factor))
             except Exception as e:
                 print(f"Error updating glossary compression: {e}")

@@ -2476,60 +2476,15 @@ class MangaImagePreviewWidget(QWidget):
                         pass
                     # Delete translated output image file
                     try:
-                        if self.current_image_path:
-                            # Get OUTPUT_DIRECTORY override if set
-                            override_dir = None
-                            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
-                                override_dir = self.main_gui.config.get('output_directory', '')
-                            if not override_dir:
-                                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
-                            
-                            source_dir = os.path.dirname(self.current_image_path)
-                            source_filename = os.path.basename(self.current_image_path)
-                            source_name_no_ext = os.path.splitext(source_filename)[0]
-                            
-                            # Build list of directories to check (override dir first, then source dir)
-                            search_dirs = []
-                            if override_dir:
-                                search_dirs.append(override_dir)
-                                print(f"[CLEAR] Checking OUTPUT_DIRECTORY override: {override_dir}")
-                            search_dirs.append(source_dir)
-                            
-                            # Check each directory for translated folder
-                            for check_dir in search_dirs:
-                                translated_folder = os.path.join(check_dir, f"{source_name_no_ext}_translated")
-                                
-                                # Delete translated output file (non-cleaned file) from isolated folder
-                                if os.path.exists(translated_folder):
-                                    image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-                                    for filename in os.listdir(translated_folder):
-                                        name_lower = filename.lower()
-                                        # Find and delete files that match the source name but NOT cleaned files
-                                        if (name_lower.startswith(source_name_no_ext.lower()) and 
-                                            name_lower.endswith(image_extensions) and
-                                            '_cleaned' not in name_lower):
-                                            translated_path = os.path.join(translated_folder, filename)
-                                            try:
-                                                os.remove(translated_path)
-                                                print(f"[CLEAR] Deleted translated output: {os.path.basename(translated_path)}")
-                                            except Exception as e:
-                                                print(f"[CLEAR] Failed to delete translated output: {e}")
+                        # The output files are found by manga_editor_core (shared with the mobile editor's Clear boxes, U9)
+                        import manga_editor_core
+                        manga_editor_core._delete_translated_outputs(self)
                     except Exception as e:
                         print(f"[CLEAR] Error deleting translated output: {e}")
                     try:
-                        if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and self.current_image_path:
-                            st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
-                            # Clear ALL saved state data - OCR, translations, overlays, etc.
-                            st.pop('overlay_offsets', None)
-                            st.pop('last_render_positions', None)
-                            st.pop('translated_texts', None)
-                            st.pop('recognized_texts', None)  # Clear OCR data
-                            st.pop('detection_regions', None)  # Clear detection data
-                            st.pop('viewer_rectangles', None)  # Clear rectangle data
-                            self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
-                            # Force immediate flush to disk to ensure deletion persists
-                            self.manga_integration.image_state_manager.flush()
-                            print(f"[CLEAR] Flushed cleared state to disk for {os.path.basename(self.current_image_path)}")
+                        # Saved page state cleared by manga_editor_core (shared with the mobile editor's Clear boxes, U9)
+                        import manga_editor_core
+                        manga_editor_core._clear_saved_page_state(self)
                     except Exception:
                         pass
             except Exception:

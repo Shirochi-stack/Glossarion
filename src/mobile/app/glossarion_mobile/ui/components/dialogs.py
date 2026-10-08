@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
 
 __all__ = ["ConfirmDialog", "close_dialog", "show_snackbar"]
@@ -29,7 +30,12 @@ def close_dialog(page: Any, dialog: Any) -> bool:
     and the same key was added again on every tap. Turning ``open`` off closes exactly this
     dialog's route (Flet 1.0.3 ``bottom_sheet.dart`` closes the route it pushed, as does
     ``alert_dialog.dart``); the client then sends ``dismiss`` and the page drops it.
+
+    A sheet a tablet shows in the SidePanel (``components.surface.present_sheet``) closes the
+    panel instead, so the sheet's own Save / Cancel paths work on every size class.
     """
+    if dialog is not None and surface.dismiss(page, dialog):
+        return True
     if dialog is None or not getattr(dialog, "open", False):
         return False
     if hasattr(dialog, "_frozen"):

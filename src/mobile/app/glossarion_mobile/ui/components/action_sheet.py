@@ -62,6 +62,7 @@ class ActionSheet:
         self.on_cancel = on_cancel
         self._cancelled = False
         self.selected: Optional[ActionItem] = None
+        self.explained: Optional[ActionItem] = None  # the last unavailable item tapped (its reason shown)
         self._page: Any = None
         self.tiles: list[ft.ListTile] = [self._tile(item) for item in self.items]
         self.cancel_tile = ft.ListTile(
@@ -105,12 +106,14 @@ class ActionSheet:
             self.dialog.on_dismiss = self._on_dismiss
 
     def _tile(self, item: ActionItem) -> ft.ListTile:
-        color = ft.Colors.ERROR if item.destructive else None
+        # A disabled item keeps an enabled row (Flet disables every child of a disabled ListTile, so its
+        # ReasonChip would never open): muted label, and a tap shows the reason instead of selecting.
+        unavailable = item.disabled_reason is not None
+        color = ft.Colors.ON_SURFACE_VARIANT if unavailable else (ft.Colors.ERROR if item.destructive else None)
         return ft.ListTile(
             title=ft.Text(item.label, color=color),
             leading=ft.Icon(icon_data(item.icon), color=color) if item.icon is not None else None,
             trailing=ReasonChip(reason=item.disabled_reason) if item.disabled_reason else None,
-            disabled=item.disabled_reason is not None,
             on_click=lambda e, it=item: self._on_select(e, it),
             min_height=tokens.SIZES["hit_target"],
             key=item.key or item.label,
@@ -156,10 +159,21 @@ class ActionSheet:
 
     def _on_select(self, e: Any, item: ActionItem) -> None:
         if item.disabled_reason is not None:
+            self.explain(item)
             return
         self.selected = item
         self.close()
         call_handler(item.on_select)
+
+    def explain(self, item: ActionItem) -> Any:
+        """Tap on an unavailable item: its reason (the InfoSheet the ReasonChip opens)."""
+        from glossarion_mobile.ui.components.info_sheet import InfoSheet
+
+        self.explained = item
+        sheet = InfoSheet(title=item.label, body=str(item.disabled_reason or ""))
+        if self._page is not None:
+            sheet.show(self._page)
+        return sheet
 
     def item(self, label: str) -> ActionItem:
         for candidate in self.items:

@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QPixmap, QTransform, QGuiApplication
 from spinning import create_icon_label, animate_icon
 from typing import Callable
+import key_pool_service
 from request_parameters import (
     RESERVED_REQUEST_PARAMETERS, display_parameter_value,
     normalize_request_parameters, parse_parameter_value,
@@ -507,26 +508,17 @@ class IndividualEndpointDialog(QDialog):
         self.api_version_label.setStyleSheet(f"color: {label_color};")
 
     def _is_azure_endpoint(self, url: str) -> bool:
-        if not url:
-            return False
-        url_l = url.lower()
-        return (".openai.azure.com" in url_l) or ("azure.com/openai" in url_l) or ("/openai/deployments/" in url_l)
+        # U9: the rule lives in key_pool_service (shared with Glossarion Mobile's KeyEditor)
+        return key_pool_service.is_azure_endpoint(url)
 
     def _validate(self) -> bool:
-        if not self.enable_checkbox.isChecked():
-            return True
-        url = self.endpoint_entry.text().strip()
-        if not url:
-            QMessageBox.critical(self, "Validation Error", "Endpoint Base URL is required when Enable is ON.")
+        # U9: key_pool_service.individual_endpoint_error holds the rules and messages (shared with mobile)
+        error = key_pool_service.individual_endpoint_error(
+            self.enable_checkbox.isChecked(), self.endpoint_entry.text(), self.api_version_combo.currentText()
+        )
+        if error:
+            QMessageBox.critical(self, "Validation Error", error)
             return False
-        if not (url.startswith("http://") or url.startswith("https://")):
-            QMessageBox.critical(self, "Validation Error", "Endpoint URL must start with http:// or https://")
-            return False
-        if self._is_azure_endpoint(url):
-            ver = self.api_version_combo.currentText().strip()
-            if not ver:
-                QMessageBox.critical(self, "Validation Error", "Azure API Version is required for Azure endpoints.")
-                return False
         return True
 
     def _persist_to_config_if_possible(self):

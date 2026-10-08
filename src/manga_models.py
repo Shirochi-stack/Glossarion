@@ -107,6 +107,9 @@ __all__ = [
     "apply_mobile_defaults",
     "apply_mobile_top_level_defaults",
     "apply_mobile_run_defaults",
+    "MOBILE_DEFAULT_FONTS",
+    "MOBILE_CJK_FONTS",
+    "mobile_default_font",
 ]
 
 KIND_DETECTOR = "detector"
@@ -273,6 +276,82 @@ MOBILE_INPAINTER_KEY = "aot_onnx"
 ModelRef = Union[str, ModelSpec]
 
 
+# The Model Information texts of the manga tab's local inpainting models (moved verbatim from
+# MangaTranslationTab._show_model_info in U9; the mobile Model manager's ⓘ shows the same text).
+MODEL_INFO = {
+    'aot': "AOT GAN Model:\n\n"
+           "• Auto-downloads from HuggingFace\n"
+           "• Traced PyTorch JIT model\n"
+           "• Good for general inpainting\n"
+           "• Fast processing speed\n"
+           "• File size: ~100MB",
+
+    'aot_onnx': "AOT ONNX Model:\n\n"
+                "• Optimized ONNX version\n"
+                "• Auto-downloads from HuggingFace\n"
+                "• 2-3x faster than PyTorch version\n"
+                "• Great for batch processing\n"
+                "• Lower memory usage\n"
+                "• File size: ~100MB",
+
+    'lama': "LaMa Model:\n\n"
+            "• Auto-downloads anime-optimized version\n"
+            "• Best quality for manga/anime\n"
+            "• Large model (~200MB)\n"
+            "• Excellent at removing text from bubbles\n"
+            "• Preserves art style well",
+
+    'anime': "Anime-Specific Model:\n\n"
+             "• Same as LaMa anime version\n"
+             "• Optimized for manga/anime art\n"
+             "• Auto-downloads from GitHub\n"
+             "• Recommended for manga translation\n"
+             "• Preserves screen tones and patterns",
+
+    'anime_onnx': "Anime ONNX Model:\n\n"
+                  "• Optimized ONNX version for speed\n"
+                  "• Auto-downloads from HuggingFace\n"
+                  "• 2-3x faster than PyTorch version\n"
+                  "• Perfect for batch processing\n"
+                  "• Same quality as anime model\n"
+                  "• File size: ~190MB\n"
+                  "• DEFAULT for inpainting",
+
+    'custom-image-edit': "Custom Image Edit Endpoint:\n\n"
+                         "- Select a local .gguf model file\n"
+                         "- Sends masked manga cleanup requests to the Custom Image Edit Endpoint\n"
+                         "- Uses the OpenAI-compatible /images/edits API\n"
+                         "- Text requests keep using your normal LLM endpoint\n"
+                         "- Best for running a local image-edit model beside a separate cloud/text LLM",
+
+    'mat': "MAT Model:\n\n"
+           "• Manual download required\n"
+           "• Get from: github.com/fenglinglwb/MAT\n"
+           "• Good for high-resolution images\n"
+           "• Slower but high quality\n"
+           "• File size: ~500MB",
+
+    'ollama': "Ollama:\n\n"
+              "• Uses local Ollama server\n"
+              "• No model download needed here\n"
+              "• Run: ollama pull llava\n"
+              "• Context-aware inpainting\n"
+              "• Requires Ollama running locally",
+
+    'sd_local': "Stable Diffusion:\n\n"
+                "• Manual download required\n"
+                "• Get from HuggingFace\n"
+                "• Requires significant VRAM (4-8GB)\n"
+                "• Best quality but slowest\n"
+                "• Can use custom prompts"
+}
+
+
+def model_info(model_type: str) -> str:
+    """The ⓘ text of a local inpainting model type (the desktop fallback for unknown types)."""
+    return MODEL_INFO.get(model_type, "Please select a model type first")
+
+
 def get_spec(model: ModelRef) -> ModelSpec:
     """The ModelSpec for a registry key (or the spec itself). KeyError when unknown."""
     if isinstance(model, ModelSpec):
@@ -411,6 +490,42 @@ def _fill_unset(target: Dict[str, Any], defaults: Dict[str, Any]) -> None:
             target[key] = copy.deepcopy(value)
 
 
+#: Scalable system fonts a mobile manga run renders with when no font is selected (Rendering ›
+#: Font "Default"): manga_translator._find_font only probes Windows / macOS / Linux paths, so on a
+#: phone every render path fell back to ``ImageFont.load_default()`` (a fixed 10 px bitmap-sized
+#: font without CJK glyphs; font size modes had no effect). First existing file wins.
+MOBILE_DEFAULT_FONTS = (
+    "/system/fonts/Roboto-Regular.ttf",                      # Android
+    "/system/fonts/NotoSans-Regular.ttf",
+    "/system/fonts/DroidSans.ttf",
+    "/System/Library/Fonts/Core/Helvetica.ttc",              # iOS
+    "/System/Library/Fonts/Core/HelveticaNeue.ttc",
+    "/System/Library/Fonts/Helvetica.ttc",
+)
+#: Targets whose scripts Roboto lacks: the CJK system fonts first.
+MOBILE_CJK_FONTS = (
+    "/system/fonts/NotoSansCJK-Regular.ttc",                 # Android
+    "/system/fonts/NotoSansSC-Regular.otf",
+    "/system/fonts/DroidSansFallback.ttf",
+    "/System/Library/Fonts/Core/PingFang.ttc",               # iOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Core/AppleSDGothicNeo.ttc",
+)
+_CJK_TARGETS = ("chinese", "japanese", "korean", "zh", "ja", "ko", "cantonese", "traditional", "simplified")
+
+
+def mobile_default_font(target_language: Any = None, *, candidates: Optional[Iterable[str]] = None) -> Optional[str]:
+    """The scalable system font a phone run renders with for ``target_language`` (None: none found)."""
+    if candidates is None:
+        target = str(target_language or "").strip().lower()
+        cjk = any(word in target for word in _CJK_TARGETS)
+        candidates = (MOBILE_CJK_FONTS + MOBILE_DEFAULT_FONTS) if cjk else (MOBILE_DEFAULT_FONTS + MOBILE_CJK_FONTS)
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def apply_mobile_run_defaults(config: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
     """Put the phone defaults into the config a manga run starts from (in place; returns it).
 
@@ -445,6 +560,10 @@ def apply_mobile_run_defaults(config: Dict[str, Any], *, force: bool = False) ->
         config[top_key] = nested
     _fill_unset(manga, MOBILE_MANGA_SETTINGS_OVERRIDES)
     _fill_unset(config, MOBILE_TOP_LEVEL_OVERRIDES)
+    if _unset(config.get("manga_font_path")):  # Rendering › Font "Default": a scalable system font
+        font = mobile_default_font(config.get("output_language"))
+        if font:
+            config["manga_font_path"] = font
     return config
 
 

@@ -33,6 +33,7 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 """
 
 import os
+import re
 import shutil
 import threading
 from collections import deque
@@ -47,11 +48,70 @@ __all__ = [
     "attachment_action_card",
     "attachment_action_data",
     "attachment_extraction_report",
+    "classify_request_issue",
+    "is_safety_block_line",
     "count_tokens",
     "extraction_report_card",
     "make_stream",
     "request_segment_message",
 ]
+
+#: Wait states the API client logs while a request cannot proceed (first match wins): every key
+#: of a multi-key pool cooling down, a provider rate limit (HTTP 429 / quota) and a lost network.
+#: Glossarion Mobile turns them into the running card's issue chips (UI_SPEC §2.12.3); the
+#: desktop log is unchanged.
+_REQUEST_ISSUE_PATTERNS = (
+    ("key_cooling", re.compile(
+        r"all keys (?:are )?rate-limited|waiting for (?:key )?cooldown|keys? (?:on|in) cooldown|"
+        r"cooling down|cooldown remaining", re.IGNORECASE)),
+    ("rate_limited", re.compile(
+        r"rate[- ]?limit|\b429\b|quota exhausted|too many requests|resource[_ ]exhausted", re.IGNORECASE)),
+    ("network_wait", re.compile(
+        r"waiting for network|network (?:is )?unreachable|no internet|internet connection|"
+        r"connection (?:error|reset|refused|aborted)|failed to establish a new connection|"
+        r"name resolution|getaddrinfo failed|temporary failure in name resolution", re.IGNORECASE)),
+)
+_ISSUE_WAIT_SECONDS = re.compile(
+    r"(?:retrying in|retry in|waiting|sleeping|wait(?:ing)? for|retry-after:?)\s*([0-9]+(?:\.[0-9]+)?)\s*s?\b",
+    re.IGNORECASE)
+
+
+def classify_request_issue(line):
+    """``(kind, seconds)`` for an API-client wait line, else None.
+
+    ``kind`` is ``"key_cooling"``, ``"rate_limited"`` or ``"network_wait"``; ``seconds`` is the wait
+    the line announces ("waiting 30.0s", "retrying in 12s", "retry-after: 20") or None. Lines that
+    report a failure the client does not wait on still match (the caller expires the state)."""
+    text = str(line or "")
+    if not text.strip():
+        return None
+    for kind, pattern in _REQUEST_ISSUE_PATTERNS:
+        if pattern.search(text):
+            seconds = None
+            match = _ISSUE_WAIT_SECONDS.search(text)
+            if match:
+                try:
+                    seconds = float(match.group(1))
+                except ValueError:
+                    seconds = None
+            return kind, seconds
+    return None
+
+
+#: Lines the client and the translator log when a provider's safety filter blocked a request:
+#: ``UnifiedClientError(error_type="prohibited_content")`` ("Content blocked: Google Generative AI
+#: Prohibited Use policy", gemini_policy), a ``prohibited_content`` / ``content_filter`` finish
+#: reason, TransateKRtoEN's "hit content filter/prohibited".
+_SAFETY_BLOCK_PATTERN = re.compile(
+    r"content blocked|prohibited[ _]use policy|prohibited[_ ]content|hit content filter|"
+    r"finish[_ ]reason\W{0,3}(?:safety|content_filter|prohibited)|blocked by (?:the )?(?:provider'?s? )?safety",
+    re.IGNORECASE)
+
+
+def is_safety_block_line(line):
+    """True for a log line that reports a provider safety / prohibited-use block."""
+    return bool(_SAFETY_BLOCK_PATTERN.search(str(line or "")))
+
 
 #: Dialog hooks the moved code calls (implemented by _InputOutputDialog and DirectTextStream).
 STREAM_HOOKS = (

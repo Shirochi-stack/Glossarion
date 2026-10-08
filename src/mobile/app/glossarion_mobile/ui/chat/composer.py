@@ -18,6 +18,11 @@ U3: one attachment chip per turn (desktop parity; × removes it, the hint switch
 to "Add optional instructions for the attached file…"), draft autosave through
 ``on_draft_changed`` (the store debounces the save by 450 ms), option pills that
 differ from the defaults (tap -> sheet, × -> reset) and the token hint.
+
+U9: slash commands (§2.7, ``slash``): "/" at the start of the field shows the command popover
+(``self.slash.control``, which the chat view places directly above the composer card); a tap
+inserts a command that takes an argument, or runs it (``on_slash``), and Send / Enter on a
+complete command runs it instead of sending the text.
 """
 
 from __future__ import annotations
@@ -29,10 +34,11 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 from glossarion_mobile.state.store import Signal
-from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.chat.direct_text_rules import attachment_icon, attachment_kind_label, format_attachment_size
 from glossarion_mobile.ui.chat.output_mode_row import OutputModeRow
 from glossarion_mobile.ui.chat.send_button import SendStopButton
+from glossarion_mobile.ui.chat.slash import SlashCommand, SlashPopover, completion, parse_command
 from glossarion_mobile.ui.chat.send_state import BlockReason, SendAction, SendInputs, SendState
 from glossarion_mobile.ui.responsive import ACTION_ROW_GAP
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
@@ -197,15 +203,18 @@ class Composer(ft.Container):
     on_attachment_open: Optional[Callable[[dict], Any]] = field(default=None, metadata={"skip": True})
     on_pill: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
     on_pill_reset: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
+    on_slash: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
 
     def init(self) -> None:
         super().init()
         self._previous_text = ""
         self._compact_text = False
+        self.pills: list = []  # [(id, label)] of the options that differ from the defaults
         self.has_attachment = False
         self.attachment: Optional[dict] = None
         self.attachment_chip: Optional[AttachmentChip] = None
         self.chips_row = ft.Row([], scroll=ft.ScrollMode.AUTO, spacing=6, visible=False)
+        self.slash = SlashPopover(on_pick=self._on_slash_pick)
         self.text_field = ft.TextField(
             multiline=True,
             min_lines=1,
@@ -242,7 +251,7 @@ class Composer(ft.Container):
             on_long_press=self._on_plus_long,
             size_constraints=HIT_TARGET,
             rotate=ft.Rotate(angle=0),
-            animate_rotation=tokens.MOTION["sheet_ms"],
+            animate_rotation=motion.rotation_animation(tokens.MOTION["sheet_ms"]),
         )
         self.pills_row = ft.Row([], spacing=6, scroll=ft.ScrollMode.AUTO, visible=False)
         self.token_hint = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, visible=False, no_wrap=True)
@@ -309,6 +318,7 @@ class Composer(ft.Container):
         self._previous_text = value
         self.text_field.value = value
         self.expand_button.visible = self._line_estimate(value) >= EXPAND_ICON_LINES
+        self._update_slash(value)
         if self.on_draft_changed is not None:
             self.on_draft_changed(value)
         self._content_changed()
@@ -340,6 +350,7 @@ class Composer(ft.Container):
         self._previous_text = value or ""
         self.text_field.value = value or ""
         self.expand_button.visible = self._line_estimate(self._previous_text) >= EXPAND_ICON_LINES
+        self._update_slash(self._previous_text)
         self._content_changed()
 
     # ---- attachment (one per turn) ------------------------------------------------------
@@ -370,16 +381,35 @@ class Composer(ft.Container):
     # ---- option pills and token hint -----------------------------------------------------
 
     def set_pills(self, pills: list) -> None:
-        """``[(id, label)]`` of options that differ from the defaults (§2.3 action row)."""
-        self.pills_row.controls = [
-            ft.Chip(
-                label=ft.Text(label),
-                on_click=lambda e, p=pill_id: self.on_pill(p) if self.on_pill else None,
-                on_delete=lambda e, p=pill_id: self.on_pill_reset(p) if self.on_pill_reset else None,
-                key=f"pill-{pill_id}",
-            )
-            for pill_id, label in pills
-        ]
+        """``[(id, label)]`` of options that differ from the defaults (§2.3 action row). At >= 160 %
+        text they collapse into one "Options (n)" chip that opens Chat settings (§2.3, §7.5)."""
+        self.pills = list(pills)
+        self._render_pills()
+
+    def _render_pills(self) -> None:
+        pills = self.pills
+        if self._compact_text and pills:
+            count = len(pills)
+            self.pills_row.controls = [
+                ft.Chip(
+                    label=ft.Text(f"Options ({count})", theme_style=ft.TextThemeStyle.LABEL_MEDIUM),
+                    leading=ft.Icon(ft.Icons.TUNE, size=16),
+                    visual_density=ft.VisualDensity.COMPACT,
+                    tooltip=", ".join(label for _pill_id, label in pills),
+                    on_click=lambda e: self.on_pill("options") if self.on_pill else None,
+                    key="pill-options",
+                )
+            ]
+        else:
+            self.pills_row.controls = [
+                ft.Chip(
+                    label=ft.Text(label),
+                    on_click=lambda e, p=pill_id: self.on_pill(p) if self.on_pill else None,
+                    on_delete=lambda e, p=pill_id: self.on_pill_reset(p) if self.on_pill_reset else None,
+                    key=f"pill-{pill_id}",
+                )
+                for pill_id, label in pills
+            ]
         self.pills_row.visible = bool(pills)
 
     def set_token_hint(self, text: str) -> None:
@@ -390,6 +420,7 @@ class Composer(ft.Container):
     def clear(self) -> None:
         self.text_field.value = ""
         self._previous_text = ""
+        self.slash.hide()
         self.chips_row.controls.clear()
         self.chips_row.visible = False
         self.expand_button.visible = False
@@ -422,14 +453,28 @@ class Composer(ft.Container):
         self.row_style = style_name
         return changed
 
+    def set_text_scale(self, scale: float) -> None:
+        """The field's own size (an explicit 15 sp style, so the theme's scale does not reach it):
+        Appearance text size × the chat's Text size (UI_SPEC §2.14)."""
+        try:
+            value = max(0.5, float(scale or 1.0))
+        except (TypeError, ValueError):
+            value = 1.0
+        self.text_field.text_style = ft.TextStyle(size=round(tokens.TYPE_SCALE["body_large"].size * value, 2))
+
     def set_compact_text(self, compact: bool) -> None:
-        """>= 160% text scale: max 4 lines and no token hint (§7.5)."""
+        """>= 160% text scale: max 4 lines, no token hint, the pills as "Options (n)" (§7.5)."""
+        changed = bool(compact) != self._compact_text
         self._compact_text = bool(compact)
         self.text_field.max_lines = 4 if compact else 6
         self.set_token_hint(self.token_hint.value or "")
+        if changed:
+            self._render_pills()
 
     def set_plus_open(self, is_open: bool) -> None:
-        """＋ rotates 45° into × while the ＋ sheet is open."""
+        """＋ rotates 45° into × while the ＋ sheet is open; under reduce motion it turns at once
+        (no rotation animation, UI_SPEC §6.3)."""
+        self.plus_button.animate_rotation = motion.rotation_animation(tokens.MOTION["sheet_ms"])
         self.plus_button.rotate = ft.Rotate(angle=math.pi / 4 if is_open else 0)
         self.plus_button.tooltip = "Close" if is_open else "Attach, output mode and tools"
         self._push()
@@ -446,8 +491,48 @@ class Composer(ft.Container):
     # ---- events ---------------------------------------------------------------------
 
     def _on_send_action(self, action: SendAction) -> None:
+        if action in (SendAction.SEND, SendAction.QUEUE) and self.run_slash_text():
+            return
         if self.on_send_action is not None:
             self.on_send_action(action)
+
+    # ---- slash commands (UI_SPEC §2.7) ---------------------------------------------------------
+
+    def _slash_eligible(self) -> bool:
+        return self.on_slash is not None and not self.pasted_chips
+
+    def _update_slash(self, value: str) -> None:
+        if self._slash_eligible():
+            self.slash.update_for(value)
+        elif self.slash.visible:
+            self.slash.hide()
+
+    def run_slash_text(self) -> bool:
+        """Run the field's text as a command when it is a complete one (Send / Enter); False otherwise."""
+        if not self._slash_eligible() or parse_command(self.text) is None:
+            return False
+        text = self.text.strip()
+        self.set_text("")
+        if self.on_draft_changed is not None:
+            self.on_draft_changed("")
+        self.on_slash(text)
+        return True
+
+    def _on_slash_pick(self, command: SlashCommand) -> None:
+        """A popover tap: a command that takes an argument goes into the field (with the typed
+        argument kept); one without runs."""
+        parsed = parse_command(self.text)
+        has_arg = parsed is not None and parsed[0] == command and bool(parsed[1])
+        if command.arg and not has_arg:
+            self.set_text(completion(command))
+            try:
+                self.text_field.focus()
+            except Exception:
+                pass
+            return
+        if not has_arg:
+            self.set_text(f"/{command.name}")
+        self.run_slash_text()
 
     def _on_submit(self, e: Any = None) -> None:
         # Hardware Enter (shift_enter=True): same as tapping the button.

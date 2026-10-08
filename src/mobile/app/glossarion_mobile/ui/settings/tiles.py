@@ -27,10 +27,27 @@ from typing import Any, Iterator, Optional
 import flet as ft
 
 from glossarion_mobile.state.config_store import MISSING, MobileConfigStore
+from glossarion_mobile.state.setting_writes import (
+    CONTEXT_MODE_KEY,
+    CONTEXT_MODE_WRITES,
+    PROFILE_KEY,
+    RULE_KEYS,
+    context_mode_of,
+    write_setting,
+)
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
-from glossarion_mobile.ui.settings.editors import JsonEditor, ListEditor, PathEditor, PromptEditor, SecretEditor
+from glossarion_mobile.ui.settings.editors import (
+    EntryTypePickerEditor,
+    EntryTypesEditor,
+    JsonEditor,
+    ListEditor,
+    MultiplierEditor,
+    PathEditor,
+    PromptEditor,
+    SecretEditor,
+)
 from glossarion_mobile.ui.settings.model import (
     choice_options,
     config_path,
@@ -49,8 +66,11 @@ from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 __all__ = [
     "DropdownTile",
     "EffectiveConfig",
+    "IMPLIED_WRITES",
     "JsonTile",
     "ListSettingTile",
+    "MIRRORS",
+    "MultiplierGridTile",
     "NumberTile",
     "PathTile",
     "PromptTile",
@@ -107,6 +127,53 @@ def _parse_number(raw: Any, kind: str) -> Any:
         raise ValueError("Enter a whole number" if kind == "int" else "Enter a number") from None
 
 
+_POOL_SLUGS: dict = {}
+
+#: Keys the desktop writes together with another one (other_settings ``_on_use_toc_ncx_toggle``:
+#: translate_toc_ncx always mirrors use_toc_ncx; ``_on_skip_title_tag_toggle`` keeps the inverse
+#: legacy ``use_title``). key -> ((mirror key, transform), ...); the mirrors are read-only tiles.
+MIRRORS: dict = {
+    "use_toc_ncx": (("translate_toc_ncx", bool),),
+    "skip_title_tag_translation": (("use_title", lambda value: not bool(value)),),
+}
+
+
+def _tts_endpoint_follows(value: Any) -> dict:
+    """other_settings ``_on_openai_url_changed``: an Override API Endpoint ending in ``/audio/speech`` is
+    also the TTS endpoint (OPENAI_TTS_ENDPOINT, which run_env prefers for TTS)."""
+    text = str(value or "")
+    return {"openai_tts_endpoint": text} if text.rstrip("/").endswith("/audio/speech") else {}
+
+
+#: Keys whose desktop control conditionally writes another key with the value: key -> fn(value) ->
+#: ``{other key: value}`` (written in the same store write; ``SettingTile.implied_writes``).
+IMPLIED_WRITES: dict = {
+    "openai_base_url": _tts_endpoint_follows,
+}
+
+
+def pool_slug_for(key: str) -> Optional[str]:
+    """Route slug of the API-key pool stored under config ``key`` (``key_pool_service`` POOL_SPECS:
+    multi_api_keys, fallback_keys, glossary_keys, ...), else None. Those lists hold keys: their
+    tiles never show or edit them as raw JSON / plain strings (the Multi-Key Manager masks and
+    validates them)."""
+    mapping = _POOL_SLUGS.get("map")
+    if mapping is None:
+        mapping = {}
+        try:
+            from glossarion_mobile.ui.screens.keys import KeyBackend
+
+            for spec in KeyBackend().pool_specs():
+                config_key = str(getattr(spec, "config_key", "") or "")
+                if config_key:
+                    mapping[config_key] = spec.slug
+        except Exception:
+            log.debug("key pool lookup failed", exc_info=True)
+        if mapping:  # cached once the shared pool list is known (retried otherwise)
+            _POOL_SLUGS["map"] = mapping
+    return mapping.get(str(key or ""))
+
+
 class SettingTile:
     kind = "text"
 
@@ -119,6 +186,8 @@ class SettingTile:
         self.help = help_line(spec)
         self.config = config if config is not None else EffectiveConfig(ctx.store)
         self.available, self.unavailable_reason = ctx.schema.availability(self.key)
+        partial = getattr(ctx.schema, "partial_reason", None)
+        self.partial_reason: Optional[str] = partial(self.key) if callable(partial) else None
         self.readonly_reason: Optional[str] = self.readonly()
         self.lock_reason: Optional[str] = None
         self.hidden_reason: Optional[str] = None
@@ -129,7 +198,14 @@ class SettingTile:
         self.refresh(push=False)
 
     def readonly(self) -> Optional[str]:
-        """Reason this tile only displays its value (edited on a dedicated screen)."""
+        """Reason this tile only displays its value: the schema's ``readonly`` (a store another
+        surface edits, a mirror the backend derives), an API-key pool (Settings › API keys), or a
+        stored value whose type this tile cannot write back (a dict under a text tile)."""
+        reason = str(spec_attr(self.spec, "readonly", "") or "")
+        if reason:
+            return reason
+        if pool_slug_for(self.key):
+            return "Edited in API keys"
         return None
 
     # ---- value -------------------------------------------------------------------------
@@ -241,6 +317,9 @@ class SettingTile:
             )
         if self.readonly_reason and self.available:
             out.append(ReasonChip(reason=self.readonly_reason))
+        if self.partial_reason and self.available:
+            out.append(ReasonChip(reason=self.partial_reason,
+                                  detail=f"{self.label}: {self.partial_reason}. The desktop value is kept untouched."))
         if self.hidden_reason and self.available:
             out.append(ReasonChip(reason=self.hidden_reason))
         return out
@@ -297,12 +376,30 @@ class SettingTile:
         if self.error:
             self.set_error(None)
         try:
-            self.store.set(self.path, value)
+            extra = self.implied_writes(value)
+            if extra:  # keys the desktop control writes together with this one, in one store write
+                self.store.set_many({self.path: value, **extra})
+            elif len(self.path) == 1 and (self.key in RULE_KEYS or self.key == PROFILE_KEY):
+                # the desktop control's side effects (output-mode flags, glossary-mode toggles,
+                # thoughts lock, target-language fan-out, profile extraction method)
+                write_setting(self.store, self.key, value)
+            else:
+                self.store.set(self.path, value)
         except ValueError as exc:  # e.g. the parent of a nested setting is not an object
             self.set_error(str(exc))
             return False
+        for mirror, transform in MIRRORS.get(self.key, ()):
+            try:
+                self.store.set((mirror,), transform(value))
+            except Exception:
+                log.debug("mirroring %s -> %s failed", self.key, mirror, exc_info=True)
         self.refresh()
         return True
+
+    def implied_writes(self, value: Any) -> dict:
+        """Other config keys this tile's control writes with ``value`` (``IMPLIED_WRITES``; none by default)."""
+        rule = IMPLIED_WRITES.get(self.key) if len(self.path) == 1 else None
+        return dict(rule(value) or {}) if rule is not None else {}
 
     def save_from_editor(self, value: Any) -> Optional[str]:
         return None if self.apply(value) else (self.error or "Invalid value")
@@ -579,8 +676,70 @@ class DropdownTile(_ChoiceTile):
             self.choose(int(value))
 
 
+class ContextModeTile(DropdownTile):
+    """U9: the desktop Context Mode combo (Off · Contextual History · Rolling Summary (Replace) · Rolling
+    Summary (Append)): not a config key - it shows ``settings_rules.context_mode`` of the stored flags and
+    writes them through ``setting_writes`` (``apply_context_mode``: the three flags as one choice plus the
+    batching constraint). The flags' own tiles are read-only ("Follows Context mode")."""
+
+    kind = "dropdown"
+
+    def readonly(self) -> Optional[str]:
+        return None
+
+    def _snapshot(self) -> dict:
+        snapshot = getattr(self.store, "snapshot", None)
+        try:
+            return dict(snapshot() or {}) if callable(snapshot) else {}
+        except Exception:
+            return {}
+
+    def value(self) -> Any:
+        return context_mode_of(self._snapshot())
+
+    def default(self) -> Any:
+        return "off"
+
+    @property
+    def stored(self) -> bool:
+        return any(self.store.has(key) for key in ("contextual", "use_rolling_summary"))
+
+    def apply(self, raw: Any) -> bool:
+        if not self.editable:
+            return False
+        if self.error:
+            self.set_error(None)
+        write_setting(self.store, CONTEXT_MODE_KEY, raw)
+        self.refresh()
+        return True
+
+    def reset(self) -> bool:
+        """Long-press / Reset: the flags back to their defaults (the combo then shows what they represent)."""
+        if not self.editable or not self.stored:
+            return False
+        for key in CONTEXT_MODE_WRITES[:3]:
+            if self.store.has(key):
+                self.store.unset(key)
+        self.refresh()
+        return True
+
+
+def _foreign_value_reason(tile: "SettingTile") -> Optional[str]:
+    """A text / prompt tile over a stored value that is not text (a dict the profile bar wrote, a
+    number a spin box stored): writing the field back would replace it with a string."""
+    stored = tile.store.get(tile.path, MISSING) if tile.store.has(tile.path) else MISSING
+    if stored is MISSING or stored is None or isinstance(stored, str):
+        return None
+    kind = "a list" if isinstance(stored, (list, tuple)) else "an object" if isinstance(stored, dict) else (
+        "a switch value" if isinstance(stored, bool) else "a number")
+    return f"Stored as {kind}; edited on its own screen"
+
+
 class TextTile(SettingTile):
     kind = "text"
+
+    def readonly(self) -> Optional[str]:
+        return super().readonly() or _foreign_value_reason(self)
 
     def build_editor_row(self) -> Optional[ft.Control]:
         self.field = ft.TextField(color=ft.Colors.ON_SURFACE, value="", dense=True, expand=True,
@@ -603,6 +762,9 @@ class TextTile(SettingTile):
 class PromptTile(SettingTile):
     kind = "prompt"
 
+    def readonly(self) -> Optional[str]:
+        return super().readonly() or _foreign_value_reason(self)
+
     def activate(self) -> PromptEditor:
         default = self.default()
         self.editor = PromptEditor(
@@ -623,15 +785,36 @@ class SecretTile(SettingTile):
         return self.editor
 
 
+def _google_credentials_problem(path: str) -> Optional[str]:
+    from glossarion_mobile.ui.screens.key_editor import google_credentials_problem
+
+    return google_credentials_problem(path)
+
+
+#: Path settings whose file the desktop picker checks before storing it: key -> problem(path) -> message.
+PATH_CHECKS = {"google_cloud_credentials": _google_credentials_problem}
+
+
 class PathTile(SettingTile):
     kind = "path"
 
     def activate(self) -> PathEditor:
         self.editor = PathEditor(
-            self.ctx, title=self.label, subtitle=self.key, value=self.value() or "", on_save=self.save_from_editor,
+            self.ctx, title=self.label, subtitle=self.key, value=self.value() or "", on_save=self.save_path,
             import_dir=self.ctx.extras.get("import_dir"),
         ).show()
         return self.editor
+
+    def save_path(self, value: Any) -> Optional[str]:
+        """The editor's save: the desktop picker's file check first (U9: Google Cloud credentials must be a
+        service-account JSON), then the plain store write."""
+        check = PATH_CHECKS.get(self.key)
+        path = str(value or "").strip()
+        if check is not None and path:
+            problem = check(path)
+            if problem:
+                return problem
+        return self.save_from_editor(value)
 
 
 class ListSettingTile(SettingTile):
@@ -645,17 +828,84 @@ class ListSettingTile(SettingTile):
         return self.editor
 
 
+class CustomFieldsTile(ListSettingTile):
+    """Glossary › Custom Fields (``custom_glossary_fields``): removing "description" sets
+    ``custom_field_description_removed`` and adding it back clears it (the desktop Add / Remove
+    buttons, ``glossary_document.description_removed_flag``), in the same store write."""
+
+    def implied_writes(self, value: Any) -> dict:
+        try:
+            import glossary_document
+
+            return dict(glossary_document.custom_fields_flag_updates(self.value() or [], value or []))
+        except Exception:
+            log.debug("custom fields flag rule unavailable", exc_info=True)
+            return {}
+
+
+def configured_entry_type_names(store: Any) -> list:
+    """The configured entry types in the desktop list order (``custom_entry_types``, legacy names
+    normalised, built-in first)."""
+    value = store.effective("custom_entry_types") if store is not None else None
+    types = dict(value) if isinstance(value, Mapping) else {}
+    try:
+        import glossary_document
+
+        glossary_document.normalize_legacy_entry_types(types)
+        return [name for name, _config in glossary_document.sorted_entry_types(types)]
+    except Exception:
+        return sorted(types)
+
+
+class EntryTypesTile(SettingTile):
+    """``custom_entry_types``: the Entry Type Configuration editor instead of raw JSON."""
+
+    kind = "json"
+
+    def summary(self) -> str:
+        value = self.value()
+        if not isinstance(value, Mapping) or not value:
+            return "No entry types"
+        enabled = sum(1 for config in value.values() if not isinstance(config, Mapping) or config.get("enabled", True))
+        return f"{len(value)} types · {enabled} enabled"
+
+    def activate(self) -> EntryTypesEditor:
+        self.editor = EntryTypesEditor(self.ctx, title=self.label, subtitle=self.key, value=self.value(),
+                                       on_save=self.save_from_editor).show()
+        return self.editor
+
+
+class EntryTypePickerTile(ListSettingTile):
+    """A list of entry types (Emergency Glossary Compliance / Strict Precise Matching "Configure…",
+    Refinement "Selected Entry Types"): a checkbox per configured entry type, not free text."""
+
+    def activate(self) -> EntryTypePickerEditor:
+        value = self.value()
+        self.editor = EntryTypePickerEditor(
+            self.ctx, title=self.label, subtitle=self.key, value=list(value) if isinstance(value, (list, tuple)) else [],
+            options=configured_entry_type_names(self.store), on_save=self.save_from_editor,
+            prompt="Select the entry types this applies to.").show()
+        return self.editor
+
+
+#: Settings with a dedicated editor (picked by key in ``make_tile``).
+ENTRY_TYPES_KEY = "custom_entry_types"
+ENTRY_TYPE_PICKER_KEYS = frozenset({"glossary_refinement_selected_types", "emergency_glossary_compliance_custom_types",
+                                    "compress_glossary_strict_matching_custom_types"})
+CUSTOM_FIELDS_KEY = "custom_glossary_fields"
+
+
 class JsonTile(SettingTile):
     kind = "json"
 
     def readonly(self) -> Optional[str]:
-        # Key-pool lists (typed "secret") hold API keys: never shown or edited as raw JSON here.
+        # Key-pool lists hold API keys: never shown or edited as raw JSON here.
         if spec_type(self.spec) in ("secret", "password"):
             return "Edited in API keys"
-        return None
+        return super().readonly()
 
     def summary(self) -> str:
-        if spec_type(self.spec) in ("secret", "password"):
+        if spec_type(self.spec) in ("secret", "password") or self.pool_slug():
             value = self.value()
             count = len(value) if isinstance(value, (list, dict)) else 0
             return f"{count} key{'s' if count != 1 else ''}" if count else "No keys"
@@ -663,17 +913,7 @@ class JsonTile(SettingTile):
 
     def pool_slug(self) -> Optional[str]:
         """Route slug of the API-key pool stored under this key (``key_pool_service.POOL_SPECS``)."""
-        if spec_type(self.spec) not in ("secret", "password"):
-            return None
-        try:
-            from glossarion_mobile.ui.screens.keys import KeyBackend
-
-            for spec in KeyBackend().pool_specs():
-                if spec.config_key == self.key:
-                    return spec.slug
-        except Exception:
-            log.debug("key pool lookup for %s failed", self.key, exc_info=True)
-        return None
+        return pool_slug_for(self.key)
 
     def _on_tap(self, e: Any = None) -> Any:
         slug = self.pool_slug()
@@ -694,6 +934,38 @@ class JsonTile(SettingTile):
         return self.editor
 
 
+#: Settings that are a per-language multiplier grid on the desktop (QA Scanner › Word count).
+MULTIPLIER_KEYS = frozenset({"qa_scanner_settings.word_count_multipliers"})
+
+
+def _factory_multipliers() -> dict:
+    try:
+        from qa_scan_runtime import CANONICAL_WORD_COUNT_MULTIPLIERS
+
+        return dict(CANONICAL_WORD_COUNT_MULTIPLIERS)
+    except Exception:
+        log.debug("qa_scan_runtime unavailable for the multiplier grid", exc_info=True)
+        return {"english": 1.0}
+
+
+class MultiplierGridTile(SettingTile):
+    """The desktop word-count multiplier grid: one number per language (factory values from the shared
+    ``qa_scan_runtime.CANONICAL_WORD_COUNT_MULTIPLIERS``, the stored dict merged over them)."""
+
+    kind = "json"  # a JSON dict setting with its own editor (make_tile picks it by key)
+
+    def summary(self) -> str:
+        value = self.value()
+        if isinstance(value, dict) and value:
+            return f"{len(value)} language{'s' if len(value) != 1 else ''} customised"
+        return "Recommended multipliers (factory values)"
+
+    def activate(self) -> MultiplierEditor:
+        self.editor = MultiplierEditor(self.ctx, title=self.label, subtitle=self.key, value=self.value(),
+                                       defaults=_factory_multipliers(), on_save=self.save_from_editor).show()
+        return self.editor
+
+
 TILE_CLASSES: dict[str, type] = {
     "switch": SwitchTile,
     "number": NumberTile,
@@ -710,5 +982,19 @@ TILE_CLASSES: dict[str, type] = {
 
 
 def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> SettingTile:
-    cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
+    key = str(spec_attr(spec, "key", ""))
+    if key in MULTIPLIER_KEYS:
+        cls: type = MultiplierGridTile
+    elif key == ENTRY_TYPES_KEY:
+        cls = EntryTypesTile
+    elif key in ENTRY_TYPE_PICKER_KEYS:
+        cls = EntryTypePickerTile
+    elif key == CUSTOM_FIELDS_KEY:
+        cls = CustomFieldsTile
+    elif pool_slug_for(key):  # an API-key pool: count + tap opens Settings › API keys › <pool>
+        cls = JsonTile
+    elif key == CONTEXT_MODE_KEY and getattr(spec, "virtual", "") == "context_mode":
+        cls = ContextModeTile
+    else:
+        cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
     return cls(spec, ctx, config=config)

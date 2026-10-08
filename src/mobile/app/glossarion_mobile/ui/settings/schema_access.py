@@ -30,6 +30,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from glossarion_mobile.ui.settings.model import (
+    CURATED_REMNANT_GROUPS,
+    CURATED_SECTIONS,
+    CURATED_SOURCE_PREFIXES,
+    SECTION_ORDER,
+    SECTION_TITLES,
+    VIRTUAL_SPECS,
     config_path,
     env_names,
     group_title,
@@ -39,7 +45,7 @@ from glossarion_mobile.ui.settings.model import (
     spec_attr,
 )
 
-__all__ = ["SchemaAccess", "SearchHit", "SectionInfo", "UNAVAILABLE_REASON"]
+__all__ = ["SchemaAccess", "SearchHit", "SectionInfo", "UNAVAILABLE_REASON", "curate_sections"]
 
 log = logging.getLogger("glossarion.settings")
 
@@ -55,6 +61,77 @@ class SectionInfo:
     title: str
     keys: tuple[str, ...]
     group: str = "Settings"
+    # curated sections (U9): ((key, sub-heading), ...) in display order; empty = the desktop group boxes
+    headings: tuple = ()
+
+
+def curate_sections(sections: list) -> tuple[list, dict]:
+    """The UI_SPEC §4.15 curated sections over the desktop schema sections (``model.CURATED_SECTIONS``).
+
+    Returns ``(sections, aliases)``: the listed keys move into their curated section (with its
+    sub-headings), the other keys stay where the desktop dialog has them (some sections get their
+    mobile title, ``SECTION_TITLES``), emptied desktop sections are dropped and resolve through
+    ``aliases`` (``{desktop id: curated id}``) to the curated section that took most of their keys.
+    The order follows ``SECTION_ORDER``, then the schema order."""
+    if not sections:
+        return list(sections), {}
+    home = {}
+    for section in sections:
+        if not section.id.startswith(CURATED_SOURCE_PREFIXES):
+            continue  # only the desktop dialog sections are regrouped
+        for key in section.keys:
+            home.setdefault(key, section.id)
+    if not home:
+        return list(sections), {}
+    taken: dict[str, str] = {}
+    listed: dict[str, list[tuple[str, str]]] = {}
+    for section_id, _title, _group, groups in CURATED_SECTIONS:  # pass 1: the listed keys
+        rows = listed.setdefault(section_id, [])
+        for heading, names in groups:
+            for key in names:
+                if key in VIRTUAL_SPECS and key not in taken:  # a control without a config key of its own
+                    if any(name in home for name in names):
+                        taken[key] = section_id
+                        rows.append((key, heading))
+                    continue
+                if key in home and key not in taken:
+                    taken[key] = section_id
+                    rows.append((key, heading))
+    by_id = {s.id: s for s in sections}
+    curated: dict[str, SectionInfo] = {}
+    for section_id, title, group, _groups in CURATED_SECTIONS:  # pass 2: a regrouped desktop section
+        rows = listed.get(section_id, [])                         # keeps its unlisted keys
+        if section_id in by_id and section_id.startswith(CURATED_SOURCE_PREFIXES):
+            for key in by_id[section_id].keys:
+                if key not in taken:
+                    taken[key] = section_id
+                    rows.append((key, "Other settings"))
+        if rows:
+            curated[section_id] = SectionInfo(id=section_id, title=title, keys=tuple(k for k, _h in rows),
+                                              group=group, headings=tuple(rows))
+    out: list[SectionInfo] = []
+    moved_from: dict[str, dict[str, int]] = {}
+    for section in sections:
+        if section.id in curated:
+            continue
+        keys = tuple(key for key in section.keys if taken.get(key, section.id) == section.id)
+        for key in section.keys:
+            if taken.get(key, section.id) != section.id:
+                counts = moved_from.setdefault(section.id, {})
+                counts[taken[key]] = counts.get(taken[key], 0) + 1
+        if keys:
+            reduced = len(keys) < len(section.keys)
+            group = CURATED_REMNANT_GROUPS.get(section.id, section.group) if reduced else section.group
+            out.append(SectionInfo(id=section.id, title=SECTION_TITLES.get(section.id, section.title), keys=keys,
+                                   group=group))
+    out.extend(curated.values())
+    present = {s.id for s in out}
+    aliases = {sid: max(counts, key=lambda target: counts[target])
+               for sid, counts in moved_from.items() if sid not in present and counts}
+    position = {sid: index for index, sid in enumerate(SECTION_ORDER)}
+    schema_order = {s.id: index for index, s in enumerate(sections)}
+    out.sort(key=lambda s: (position.get(s.id, len(position)), schema_order.get(s.id, len(schema_order))))
+    return out, aliases
 
 
 @dataclass(frozen=True)
@@ -98,6 +175,7 @@ class SchemaAccess:
         self._sections: Optional[list[SectionInfo]] = None
         self._section_by_id: dict[str, SectionInfo] = {}
         self._section_by_key: dict[str, SectionInfo] = {}
+        self._aliases: dict[str, str] = {}
         self._defaults: dict[str, Any] = {}
         self._defaults_lock = threading.Lock()
         self.pending_defaults: set[str] = set()
@@ -157,6 +235,7 @@ class SchemaAccess:
                     group=group_title(section_id, _field(item, "group", "")),
                 )
             )
+        out, self._aliases = curate_sections(out)
         self._sections = out
         self._section_by_id = {s.id: s for s in out}
         self._section_by_key = {}
@@ -171,8 +250,23 @@ class SchemaAccess:
         return [(group, [s for s in sections if s.group == group]) for group in order]
 
     def section(self, section_id: str) -> Optional[SectionInfo]:
+        """The section ``section_id``; a desktop id the curated map emptied (``main.run``) resolves to
+        the curated section that took its keys."""
         self.sections()
-        return self._section_by_id.get(section_id)
+        found = self._section_by_id.get(section_id)
+        if found is None and section_id in self._aliases:
+            found = self._section_by_id.get(self._aliases[section_id])
+        return found
+
+    def resolve_section_id(self, section_id: str, key: Optional[str] = None) -> str:
+        """Where ``key`` (else ``section_id``) is shown: callers that name a desktop section for a key
+        the curated map moved (``other.processing.extraction`` › ``disable_gemini_safety``) land on it."""
+        if key:
+            found = self.section_for_key(key)
+            if found is not None:
+                return found.id
+        section = self.section(section_id)
+        return section.id if section is not None else section_id
 
     def section_for_key(self, key: str) -> Optional[SectionInfo]:
         self.sections()
@@ -192,7 +286,7 @@ class SchemaAccess:
         try:
             return module.spec(key)
         except Exception:
-            return None
+            return VIRTUAL_SPECS.get(key)  # U9: a control without a config key (the Context mode combo)
 
     def all_specs(self) -> list[Any]:
         module = self.module
@@ -317,6 +411,16 @@ class SchemaAccess:
         if platforms and self.platform not in platforms:
             return False, UNAVAILABLE_REASON
         return True, None
+
+    def partial_reason(self, key: str) -> Optional[str]:
+        """Short ReasonChip text of a setting that works on mobile for only part of what its desktop label
+        names (``settings_schema.MOBILE_PARTIAL_REASONS``: e.g. routes excluded on mobile), else None."""
+        module = self.module
+        reasons = getattr(module, "MOBILE_PARTIAL_REASONS", None) if module is not None else None
+        if not isinstance(reasons, Mapping):
+            return None
+        reason = reasons.get(str(key))
+        return str(reason) if reason else None
 
     def value_availability(self, key: str, value: Any) -> tuple[bool, Optional[str]]:
         """(ok, reason) for one option of a choice setting (``settings_schema.is_value_available``:

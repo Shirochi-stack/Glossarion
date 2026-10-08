@@ -134,6 +134,7 @@ class TranscriptItem:
     requests: list = field(default_factory=list)  # job: assistant indices of request cards
     report: Optional[int] = None  # job: index of the "Extraction report" card
     actions: Optional[int] = None  # job: index of the "Attachment actions" card
+    library: Optional[int] = None  # job: index of the "Library job" card (Plan "Save to: Library", U9)
 
     @property
     def key(self) -> str:
@@ -185,6 +186,8 @@ def build_items(messages: Sequence, start: int = 0, end: Optional[int] = None) -
                 job.report = i
             elif label == ACTIONS_LABEL:
                 job.actions = i
+            elif label == LIBRARY_LABEL:
+                job.library = i
             else:
                 job.requests.append(i)
     return items

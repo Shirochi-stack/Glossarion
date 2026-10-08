@@ -23,12 +23,21 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import ROUTES, ROUTES_BY_NAME, RouteMatch, RouteSpec
 
 __all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "ROUTE_ICONS", "build_screen_view",
-           "intercepts_back"]
+           "intercepts_back", "NOT_IN_BUILD", "unavailable_reason"]
 
 log = logging.getLogger("glossarion.ui")
 
 # Milestones whose surfaces exist in this build.
-SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8"})
+SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8", "U9"})
+#: Reason for a route of a shipped milestone that nothing implements (its feature failed to install;
+#: the app's ``_install_*`` wrapper logged why).
+NOT_IN_BUILD = "Not available in this build"
+
+
+def unavailable_reason(spec: RouteSpec) -> str:
+    """ReasonChip text for a route without a screen: its milestone while that has not shipped,
+    otherwise ``NOT_IN_BUILD`` (every milestone U0-U9 has shipped, so nothing "arrives" any more)."""
+    return NOT_IN_BUILD if spec.milestone in SHIPPED_MILESTONES else f"Arrives in {spec.milestone}"
 
 ROUTE_ICONS = {
     "library": "LOCAL_LIBRARY",
@@ -81,6 +90,11 @@ class Screen:
     def dispose(self) -> None:
         """Called when the screen leaves the stack."""
 
+    def apply_size_class(self, size_class: Any) -> None:
+        """The window changed size class while the screen is open (``responsive.SizeClass``).
+        Master-detail screens (Settings, Book page, Manga: two panes at >= 1200 dp, UI_SPEC §1.1)
+        re-arrange their body here; the default keeps it."""
+
     def handle_back(self) -> bool:
         """Android back on this screen: True when the screen consumed it (UI_SPEC §1.6 rule 2:
         back leaves selection mode before it leaves the screen). A screen that overrides this
@@ -123,7 +137,10 @@ class PlaceholderScreen(Screen):
         return EmptyState(
             icon=_route_icon(self.spec),
             title=self.spec.title,
-            body=f"This screen arrives in {self.spec.milestone}. Its settings and data are kept untouched until then.",
+            body=(f"This screen arrives in {self.spec.milestone}. Its settings and data are kept untouched until then."
+                  if self.spec.milestone not in SHIPPED_MILESTONES else
+                  "This screen is not available in this build (its feature did not load; Settings › Logs & "
+                  "diagnostics has the details). Its settings and data are kept untouched."),
             key=f"placeholder-{self.spec.name}",
         )
 

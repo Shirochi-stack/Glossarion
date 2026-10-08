@@ -6027,6 +6027,24 @@ _PROGRESS_OWNER_VARS = (
 )
 
 
+def untranslated_manual_entries(owner, spine_chapters, status_data):
+    """Manual editing: the rows that get source-only SDLXLIFF sidecars (moved verbatim from the Progress
+    Manager's ``_progress_manager_untranslated_entries`` closure in Retranslation_GUI): every spine chapter
+    whose ``_progress_display_status`` is Not Translated / Pending, copied with status ``not_translated``."""
+    untranslated_entries = []
+    for entry in spine_chapters:
+        if not isinstance(entry, dict):
+            continue
+        if owner._progress_display_status(entry, status_data) not in {
+            'not_translated', 'pending',
+        }:
+            continue
+        manual_entry = dict(entry)
+        manual_entry['status'] = 'not_translated'
+        untranslated_entries.append(manual_entry)
+    return untranslated_entries
+
+
 class ProgressOwner(ProgressViewMixin):
     """GUI-free owner of the Progress Manager methods.
 
@@ -7308,5 +7326,6 @@ __all__ = [
     'set_view_toggles',
     'snapshot_output_dir',
     'snapshot_signature',
+    'untranslated_manual_entries',
     'write_progress_atomic',
 ]

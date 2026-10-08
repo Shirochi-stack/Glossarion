@@ -258,6 +258,20 @@ _MOVE_EDITS = {
     "_apply_forced_streaming_environment": [("_InputOutputDialog._FORCED_STREAM_ENV_KEYS", "FORCED_STREAM_ENV_KEYS")],
     "_sanitize_config_prompts": [("_atomic_json_write", None)],
     "_on_context_mode_changed": [("self.frame.addWidget", None)],
+    # U9 P5b: settings_schema builds the bool_vars / str_vars tables (desktop_bool_vars /
+    # desktop_str_vars). The old fragments come from the frozen copy of the literals, so this
+    # entry also pins src/mobile/tools/frozen_desktop_tables.py to the BASE_SHA tables.
+    "_init_variables": [
+        (ast.unparse(node), {
+            "bool_vars": "from settings_schema import desktop_bool_vars, desktop_str_vars\n"
+                         "    bool_vars = desktop_bool_vars(self)",
+            "str_vars": "str_vars = desktop_str_vars(self)",
+        }[node.targets[0].id])
+        for node in ast.walk(ast.parse(
+            (SRC / "mobile" / "tools" / "frozen_desktop_tables.py").read_text(encoding="utf-8")))
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in ("bool_vars", "str_vars")
+    ],
 }
 
 

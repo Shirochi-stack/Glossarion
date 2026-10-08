@@ -40,8 +40,8 @@ import flet as ft
 from glossarion_mobile.services.glossary import CoreMissing
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+from glossarion_mobile.ui.components.windowed_list import WindowedList
 from glossarion_mobile.ui.glossary.common import ask, prompt_text
-from glossarion_mobile.ui.glossary.windowed_list import WindowedList
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET
@@ -244,7 +244,9 @@ class ParallelPairScreen(Screen):
             self.placeholder_chips,
             self.wrapper,
             ft.Text("4. Accept", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY),
-            ft.Row([self.accept_button], wrap=True),
+            ft.Row([self.accept_button,
+                    ft.TextButton(content="Glossary progress", icon=ft.Icons.PLAYLIST_ADD_CHECK, key="pp-progress",
+                                  on_click=lambda e: self.open_progress())], wrap=True),
         ], spacing=8, padding=ft.Padding.symmetric(horizontal=12, vertical=8), expand=True, key="parallel-pair")
         return self.root
 
@@ -715,6 +717,41 @@ class ParallelPairScreen(Screen):
             return None
         self.ctx.say("Extracting the pair glossary…", "Jobs", lambda: self.ctx.go("jobs"))
         return self.job_id
+
+    def progress_context(self) -> Optional[dict]:
+        """The desktop ``_parallel_epub_progress_manager_context`` of this pair (raw EPUB, the working EPUB
+        name the extraction used, the mapped raw filenames, the cache key)."""
+        if not self.raw_path or not self.translated_path:
+            return None
+        core = self._core()
+        naming = getattr(core, "parallel_epub_working_filename", None) if core is not None else None
+        name = naming(self.raw_path) if callable(naming) else os.path.basename(self.raw_path)
+        generated = os.path.join(os.path.dirname(os.path.abspath(self.raw_path)), "_parallel_pair", name)
+        mapping = getattr(self, "mapping", None)
+        pairs = mapping.pairs() if mapping is not None else []
+        return {
+            "raw_path": self.raw_path,
+            "generated_path": generated,
+            "raw_filenames": [str(p.get("raw_filename") or "") for p in pairs if isinstance(p, dict)],
+            "cache_key": ("parallel-epub::"
+                          f"{os.path.normcase(os.path.abspath(self.raw_path))}::"
+                          f"{os.path.normcase(os.path.abspath(generated))}"),
+        }
+
+    def open_progress(self) -> Optional[str]:
+        """Glossary progress of the pair: the raw book's Glossary progress with the pair's context."""
+        context = self.progress_context()
+        library = getattr(self.ctx, "library", None)
+        if context is None or library is None or not hasattr(library, "bid_for"):
+            self.ctx.say("Load both EPUBs first")
+            return None
+        from glossarion_mobile.ui.library import progress_model as pm
+
+        pm.set_parallel_context(context)
+        stem = os.path.splitext(os.path.basename(self.raw_path))[0]
+        bid = library.bid_for({"name": stem, "path": self.raw_path, "raw_source_path": self.raw_path})
+        self.ctx.go("tools.progress.glossary", None, {"out": bid})
+        return bid
 
     def handle_back(self) -> bool:
         if self.selecting:

@@ -32,6 +32,8 @@ from glossarion_mobile.services.library import Poller, ScanSnapshot, book_key
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
+from glossarion_mobile.ui.components.pull_to_refresh import PullToRefresh
+from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.library.book_card import BookCard, BookListRow, LIST_ROW_HEIGHT
 from glossarion_mobile.ui.library.common import LibraryContext, icon_button
 from glossarion_mobile.ui.library.delete_confirm import DeleteFlow
@@ -52,6 +54,7 @@ from glossarion_mobile.ui.library.organize import clear_raw_link_flow, organize_
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.library.translate_sheet import open_translate_sheet
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = [
     "EMPTY_COMPLETED",
@@ -73,7 +76,7 @@ PREF_VIEW = "library_view"
 PREF_SHOW_LANGUAGE = "library_show_language"
 PREF_SHOW_PROGRESS = "library_show_progress"
 GLOSSARY_FILES_REASON = "The Glossary Manager is not available in this session"
-SERIES_REASON = "Arrives in U9"
+SERIES_REASON = "Series are not available in this session"  # U9: the optional SeriesFeature is not installed
 RAW_IMPORT_EXTENSIONS = ["epub", "txt", "pdf", "html", "htm"]
 SCROLL_APPEND_PX = 600
 
@@ -90,6 +93,42 @@ def _opens_in_another_app(book: Mapping[str, Any]) -> bool:
     return kind == "txt" or (kind == "pdf" and not book.get("output_folder"))
 
 
+def _has_reader_workspace(book: Mapping[str, Any]) -> bool:
+    """desktop ``_card_has_reader_workspace``: the card's output folder holds translation_progress.json."""
+    folder = str(book.get("output_folder") or "")
+    return bool(folder and os.path.isdir(folder) and os.path.isfile(os.path.join(folder, "translation_progress.json")))
+
+
+def reader_actions(book: Mapping[str, Any]) -> list:
+    """The card menu's Reader items, by the desktop ``_show_context_menu`` rules (epub_library):
+    ``[(label, how, path)]`` with ``how`` "book" (the card itself: a raw EPUB, or a PDF's workspace in
+    the EPUB reader) or "translated" (a compiled EPUB, path given).
+
+    * In progress: "📖 Open in Reader" for a raw EPUB on disk, "📖 Open Translated EPUB" for the
+      compiled EPUB (``output_epub_path`` / ``compiled_output_path``) on disk, "📖 Open in EPUB
+      reader" for a raw PDF with a translation workspace;
+    * EPUB: "📖 Open in Reader"; a PDF with a workspace: "📖 Open in EPUB reader";
+    * anything else (TXT, a PDF without a workspace) opens in another app: no Reader item."""
+    kind = str(book.get("type") or "")
+    raw = str(book.get("raw_source_path") or "")
+    out: list = []
+    if kind == "in_progress":
+        if raw.lower().endswith(".epub") and os.path.isfile(raw):
+            out.append(("\U0001f4d6 Open in Reader", "book", raw))
+        for key in ("output_epub_path", "compiled_output_path"):
+            compiled = str(book.get(key) or "")
+            if compiled.lower().endswith(".epub") and os.path.isfile(compiled):
+                out.append(("\U0001f4d6 Open Translated EPUB", "translated", compiled))
+                break
+        if raw.lower().endswith(".pdf") and os.path.isfile(raw) and _has_reader_workspace(book):
+            out.append(("\U0001f4d6 Open in EPUB reader", "book", raw))
+    elif kind == "epub":
+        out.append(("\U0001f4d6 Open in Reader", "book", str(book.get("path") or raw)))
+    elif kind == "pdf" and (book.get("output_folder") or _has_reader_workspace(book)):
+        out.append(("\U0001f4d6 Open in EPUB reader", "book", str(book.get("path") or raw)))
+    return out
+
+
 class LibraryScreen(Screen):
     title = "Library"
 
@@ -103,6 +142,7 @@ class LibraryScreen(Screen):
         self.shelf = query_shelf if query_shelf in SHELVES else _shelf_from_tab(cfg("epub_library_tab", 0))
         self.filter = FilterState(fmt=str(cfg("epub_library_format_filter", "all") or "all"),
                                   sort=str(cfg("epub_library_sort", "date") or "date"))
+        self.series_filter: Optional[str] = None  # U9 Series: show only the books linked to this series
         self.view_mode = str(self._pref(PREF_VIEW, "grid"))
         density = str(cfg("epub_library_card_size", DEFAULT_DENSITY) or DEFAULT_DENSITY)
         self.density = density if density in DENSITY_ORDER else DEFAULT_DENSITY
@@ -125,6 +165,8 @@ class LibraryScreen(Screen):
         self._unsub: Any = None
         self._refresh_pending = False
         self._header_sig: Any = None  # what the shelf header last showed (_refresh_header)
+        # one full rescan per pull (UI_SPEC §3.12); the scan shows its own "Scanning library…" bar
+        self.pull = PullToRefresh(self._pull_refresh, spawn=self.ctx.spawn, haptic=self.ctx.haptic)
         self._shown_error: Optional[str] = None  # the scan error the banner shows
         self.sheet: Any = None
         self.delete_flow: Optional[DeleteFlow] = None
@@ -215,7 +257,7 @@ class LibraryScreen(Screen):
         self.search_field = ft.TextField(
             hint_text="Filter title or tag…", prefix_icon=ft.Icons.SEARCH, dense=True,
             on_change=self._on_query, value=self.filter.query, visible=self.searching,
-            suffix=ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Clear search", on_click=self._clear_search),
+            suffix=ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Clear search", on_click=self._clear_search, size_constraints=HIT_TARGET),
             key="lib-search-field",
         )
         self.count_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
@@ -357,6 +399,9 @@ class LibraryScreen(Screen):
         books = list(self.snapshot.shelf(self.shelf))
         ordered = visible_books(books, self.filter, matches=service.matches_query, format_of=service.format_of,
                                 sort=lambda bs, mode, rev: service.sort_books(bs, mode, reverse=rev))
+        series_books = self._series_books()
+        if series_books is not None:
+            ordered = [b for b in ordered if service.bid_for(b) in series_books]
         self.books_by_key = {book_key(b): dict(b) for b in ordered}
         return [book_key(b) for b in ordered]
 
@@ -431,9 +476,11 @@ class LibraryScreen(Screen):
             else:
                 title, _, body = text.partition("\n")
                 body = body.strip()
-            self.list_holder.content = EmptyState(
-                icon="LOCAL_LIBRARY", title="Scanning library…" if scanning else title,
-                body=None if scanning else body, key="lib-empty")
+            if scanning:  # the first scan: skeleton cards (UI_SPEC §7.4)
+                self.list_holder.content = Skeleton("cards" if self.view_mode == "grid" else "rows", count=6,
+                                                    label="Scanning library…", key="lib-skeleton").control
+            else:
+                self.list_holder.content = EmptyState(icon="LOCAL_LIBRARY", title=title, body=body, key="lib-empty")
             self._update_counts()
             return
         self.scroller = self._grid() if self.view_mode == "grid" else self._list()
@@ -499,15 +546,7 @@ class LibraryScreen(Screen):
     # ---- scrolling ---------------------------------------------------------------------------------
 
     def _on_scroll(self, e: Any) -> None:
-        event_type = str(getattr(getattr(e, "event_type", None), "value", getattr(e, "event_type", "")))
-        if event_type == "overscroll":
-            overscroll = getattr(e, "overscroll", 0) or 0
-            pixels = getattr(e, "pixels", 0) or 0
-            minimum = getattr(e, "min_scroll_extent", 0) or 0
-            if overscroll < 0 and pixels <= minimum + 1 and not self._refresh_pending:
-                self._refresh_pending = True
-                self.ctx.haptic("selection_click")
-                self.ctx.spawn(self._pull_refresh())
+        if self.pull.handle(e):  # a pull at the top: one full rescan (PullToRefresh)
             return
         pixels = getattr(e, "pixels", None)
         maximum = getattr(e, "max_scroll_extent", None)
@@ -518,6 +557,7 @@ class LibraryScreen(Screen):
                 self.ctx.push(self.scroller)
 
     async def _pull_refresh(self) -> None:
+        self._refresh_pending = True
         try:
             await self.full_refresh()
         finally:
@@ -566,7 +606,8 @@ class LibraryScreen(Screen):
         sheet = FilterSheet(self.filter, view_mode=self.view_mode, density=self.density, raw_titles=self.raw_titles,
                             show_language=self.show_language, show_progress=self.show_progress,
                             page_size=str(self.page_size_raw).lower(), on_change=self.apply_filter_change,
-                            initial_tab=tab if isinstance(tab, int) else 0)
+                            initial_tab=tab if isinstance(tab, int) else 0,
+                            series=self._series_choices(), series_selected=self.series_filter)
         self.sheet = sheet
         if self.ctx.page is not None:
             sheet.show(self.ctx.page)
@@ -584,6 +625,8 @@ class LibraryScreen(Screen):
             self.filter.reverse = bool(value)
         elif name == "states":
             self.filter.states = dict(value or {})
+        elif name == "series":
+            self.series_filter = str(value) if value else None
         elif name == "view":
             self.view_mode = "list" if value == "list" else "grid"
             self._set_pref(PREF_VIEW, self.view_mode)
@@ -753,12 +796,49 @@ class LibraryScreen(Screen):
             BulkAction("clear_raw", f"Clear saved raw link (for {count} item{'s' if count != 1 else ''})",
                        "LINK_OFF", lambda: self.ctx.spawn(clear_raw_link_flow(self.ctx, books))),
             BulkAction("share", "Share", "IOS_SHARE", lambda: self.ctx.spawn(self.share_books(books))),
-            BulkAction("series", "Add to Series", "COLLECTIONS_BOOKMARK", disabled_reason=SERIES_REASON),
+            # UI_SPEC §3.3: Organize (n) narrowed to the selection (the shelf's plan, only these books' files)
+            BulkAction("organize", "Organize selected", "DRIVE_FILE_MOVE",
+                       lambda: self.ctx.spawn(organize_flow(self.ctx, books))),
+            BulkAction("series", "Add to Series", "COLLECTIONS_BOOKMARK", lambda: self.add_to_series(books),
+                       None if self._series() is not None else SERIES_REASON),
         ]
         if count == 1:
             more.insert(0, BulkAction("card", "Book actions…", "MORE_HORIZ",
                                       lambda: self.ctx.show(self.card_actions(books[0]))))
         return primary, more
+
+    # ---- U9 Series ---------------------------------------------------------------------------------------
+
+    @staticmethod
+    def _series() -> Any:
+        """The SeriesFeature (UI_SPEC §2.15), when installed."""
+        try:
+            from glossarion_mobile.ui.chat.series_feature import current
+
+            return current()
+        except Exception:
+            return None
+
+    def _series_choices(self) -> list:
+        feature = self._series()
+        return feature.choices() if feature is not None else []
+
+    def _series_books(self) -> Optional[frozenset]:
+        feature = self._series()
+        if feature is None or not self.series_filter:
+            return None
+        return feature.book_ids(self.series_filter)
+
+    def add_to_series(self, books: Sequence[Mapping[str, Any]]) -> Any:
+        """Selection › More › Add to Series: link the selected books to a series (or a new one)."""
+        feature = self._series()
+        if feature is None:
+            self.ctx.say(SERIES_REASON)
+            return None
+        bids = [self.service.bid_for(b) for b in books]
+        sheet = feature.add_books_sheet(bids)
+        self.exit_selection()
+        return sheet
 
     # ---- actions ---------------------------------------------------------------------------------------
 
@@ -769,22 +849,26 @@ class LibraryScreen(Screen):
         raw = str(book.get("raw_source_path") or "")
         has_raw = bool(raw) and not book.get("missing_raw_file")
         folder = str(book.get("output_folder") or "")
-        kind = str(book.get("type") or "")
         has_progress = bool(book.get("progress_file")) or bool(folder and os.path.isfile(
             os.path.join(folder, "translation_progress.json")))
-        is_epub = kind == "epub" or raw.lower().endswith(".epub")
-        if not (is_epub or kind == "pdf"):
-            reader_reason: Optional[str] = "The Reader opens EPUB and PDF books"
-        elif _opens_in_another_app(book):
-            # The card tap shares it; the desktop menu offers no Reader item for it either.
-            reader_reason = "A PDF without a translation workspace opens in another app (↗ Share)"
-        else:
-            reader_reason = None
+        readers = reader_actions(book)
         items = [
             ActionItem("\U0001f4d1 Open Book Details", lambda: self.ctx.go("library.book", {"bid": bid}),
                        icon="MENU_BOOK"),
-            ActionItem("\U0001f4d6 Open in Reader", lambda: self.ctx.open_reader(book, bid=bid), icon="AUTO_STORIES",
-                       disabled_reason=reader_reason),
+        ]
+        for label, how, path in readers:
+            if how == "translated":
+                items.append(ActionItem(label, lambda p=path: self.ctx.open_reader(path=p, mode="translated"),
+                                        icon="AUTO_STORIES"))
+            else:
+                items.append(ActionItem(label, lambda: self.ctx.open_reader(book, bid=bid), icon="AUTO_STORIES"))
+        if not readers:
+            # TXT / a PDF without a workspace: the desktop "Open File" (here ↗ Share) instead of a Reader item
+            reason = ("A PDF without a translation workspace opens in another app (↗ Share)"
+                      if _opens_in_another_app(book) else "No EPUB or PDF workspace to read yet")
+            items.append(ActionItem("\U0001f4d6 Open in Reader", lambda: None, icon="AUTO_STORIES",
+                                    disabled_reason=reason))
+        items += [
             ActionItem("\U0001f501 Load for translation",
                        lambda: self.ctx.spawn(open_translate_sheet(self.ctx, [book])), icon="TRANSLATE",
                        disabled_reason=None if has_raw else "The raw source file can't be found"),
@@ -891,16 +975,8 @@ class LibraryScreen(Screen):
         return started
 
     async def translate_metadata(self, books: Sequence[Mapping[str, Any]]) -> Optional[str]:
-        service = self.service
-        if not service.has_job_kind("metadata"):
-            self.ctx.say("Metadata translation is not available in this session")
-            return None
-        try:
-            spec = await self.ctx.io(service.metadata_spec, list(books))
-            return await service.submit(spec)
-        except Exception as exc:
-            self.ctx.say(f"Could not start: {exc}")
-            return None
+        """Bulk "Metadata" / card ⋯: ``LibraryContext.translate_metadata`` ("Metadata Already Exists" first)."""
+        return await self.ctx.translate_metadata(list(books))
 
     async def share_books(self, books: Sequence[Mapping[str, Any]]) -> bool:
         files = self.ctx.files

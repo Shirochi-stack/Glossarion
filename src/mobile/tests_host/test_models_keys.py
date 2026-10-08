@@ -1272,7 +1272,15 @@ def test_keys_screen_pools_cards_bulk_actions_and_import_export(tmp_path):
         screen.toggle_select(1)
         screen.toggle_select(0)
         assert screen.copy_selected("glossary", move=True) == 1 and keys.count("glossary") == 1
-        # tests: live per-key results, summary
+        # tests: live per-key results, summary. U9: the Translation pool tests only its enabled keys
+        # (desktop _test_all "Only test enabled keys" / "No enabled keys to test")
+        main_keys = keys.keys("main")
+        keys.set_keys_enabled("main", range(len(main_keys)), False)
+        assert await screen.test_all() == [] and notes[-1][0] == "No enabled keys to test"
+        keys.set_keys_enabled("main", [0], True)
+        results = await screen.test_all()
+        assert notes[-1][0].startswith("Test complete:") and [i for i, _r in results] == [0]
+        keys.set_keys_enabled("main", range(len(main_keys)), True)
         results = await screen.test_all()
         assert notes[-1][0].startswith("Test complete:") and len(results) == 2
         # export: plain-text warning, then the FileBridge option; the temp file is removed
@@ -1337,8 +1345,15 @@ def test_key_editor_validates_and_round_trips_unknown_fields(tmp_path):
         editor.endpoint_switch.value = True
         editor.endpoint_field.value = "https://res.openai.azure.com"
         creds = editor.open_credentials()
-        creds.field.value = "/data/imports/sa.json"
-        assert creds.save() and editor.creds_field.value == "/data/imports/sa.json"
+        # U9: the desktop pickers' check (settings_rules.google_credentials_error): a service-account JSON
+        bad = tmp_path / "not_sa.json"
+        bad.write_text('{"hello": 1}', encoding="utf-8")
+        creds.field.value = str(bad)
+        assert not creds.save() and creds.error_text.value.startswith("Invalid Google Cloud credentials file")
+        good = tmp_path / "sa.json"
+        good.write_text('{"type": "service_account", "project_id": "p"}', encoding="utf-8")
+        creds.field.value = str(good)
+        assert creds.save() and editor.creds_field.value == str(good)
         assert editor.save()
         out = saved[-1]
         assert out["api_key"] == "ENC:abc" and out["times_used"] == 7 and out["future_field"] == "x"
@@ -1346,7 +1361,7 @@ def test_key_editor_validates_and_round_trips_unknown_fields(tmp_path):
         assert out["individual_output_token_limit"] is None and out["api_call_delay"] == 0.0
         assert out["disabled_contexts"] == ["legacy_ctx"] and out["request_parameters"] == {"top_p": 0.9}
         assert out["use_individual_endpoint"] and out["azure_endpoint"] == "https://res.openai.azure.com"
-        assert out["google_credentials"] == "/data/imports/sa.json"
+        assert out["google_credentials"] == str(tmp_path / "sa.json")
         blank = KeyEditor(ctx, entry={"api_key": "", "model": ""}, new=True, on_save=lambda e: None).show()
         assert not blank.save() and blank.error_text.value == "Please enter a model name"
         # dedicated pools keep the dict shape of their desktop "Add key" button
@@ -1586,6 +1601,132 @@ def test_feature_on_the_real_app_shell(app_env, monkeypatch):
             assert "authgpt/gpt-6-luna" in sheet.rows
             sheet.close()
             page.update()
+        finally:
+            ms.install_sheet_env(None)
+            mc.set_default_service(None)
+            await app.dispatcher.stop()
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_endpoints_focus_scrolls_to_a_tile_of_a_lower_section(tmp_path):
+    """A search hit / ``open_setting`` for a key far down the page (Text-to-speech): every card is built
+    (``build_controls_on_demand=False``, like SectionPage), so ``scroll_to(scroll_key=…)`` reaches it."""
+    from flet.messaging.protocol import MessageAction
+
+    from glossarion_mobile.ui.screens.endpoints import EndpointsScreen
+
+    async def scenario():
+        conn, session = _fake_session("android")
+        page = session.page
+        store = _store(tmp_path, {"model": "gpt-6"})
+        screen = EndpointsScreen(parse_route("/settings/s/other.endpoints#openai_tts_endpoint"), _settings_ctx(store, page),
+                                 run_io=lambda fn, *a: asyncio.to_thread(fn, *a))
+        page.views[0].controls.append(screen.get_body())
+        page.update()
+        list_view = screen.list_view
+        assert list_view.build_controls_on_demand is False and list_view.auto_scroll is False
+        keys = [getattr(c, "key", None) for c in list_view.controls]
+        assert keys.index("endpoints-Text-to-speech") >= len(keys) // 2  # one of the lower cards
+        assert screen.focus_target == "openai_tts_endpoint"
+        conn.messages.clear()
+        assert await screen.focus_key("openai_tts_endpoint", highlight_seconds=0)
+        scrolls = [(m.body.args or {}).get("scroll_key") for m in conn.messages
+                   if m.action == MessageAction.INVOKE_METHOD and m.body.name == "scroll_to"]
+        assert [getattr(k, "value", None) for k in scrolls] == ["openai_tts_endpoint"]
+        screen.dispose()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_keys_screen_ticker_runs_only_while_shown_and_back_leaves_selection(app_env, monkeypatch):
+    """Settings › API keys › <pool> on the real app shell: the live-stats ticker (a cooling key repaints
+    every tick) parks while the app is in the background (UI_SPEC §7.3) and skips while another screen
+    or an overlay covers it, with one refresh when shown again; Android back leaves selection mode
+    before it leaves the screen (UI_SPEC §1.6 rule 2)."""
+    from flet.messaging.protocol import MessageAction
+
+    from glossarion_mobile.ui.screens import keys as keys_module
+    from glossarion_mobile.ui.screens import model_manager as mm
+    from glossarion_mobile.ui.sheets import model_sheet as ms
+
+    monkeypatch.setattr(mm, "ModelCatalogService",
+                        lambda s, **kw: mc.ModelCatalogService(s, options=FakeOptions(), is_mobile=False, **kw))
+    real_backend = keys_module.KeyBackend
+    monkeypatch.setattr(keys_module, "KeyBackend", lambda *a, **k: real_backend(_fake_key_service()))
+    monkeypatch.setattr(keys_module, "LIVE_REFRESH_SECONDS", 0.05)
+
+    async def settle(predicate, timeout=3.0):
+        for _ in range(int(timeout / 0.05)):
+            if predicate():
+                return True
+            await asyncio.sleep(0.05)
+        return predicate()
+
+    def confirm_pops(conn):
+        return [(m.body.args or {}).get("should_pop") for m in conn.messages
+                if m.action == MessageAction.INVOKE_METHOD and m.body.name == "confirm_pop"]
+
+    async def scenario():
+        main_module = _TB._load_main_module()
+        conn, session = _fake_session("android")
+        page = session.page
+        await main_module.main(page)
+        await session.after_event(page)
+        app = page.data
+        try:
+            feature = getattr(app, "models_keys", None) or await mm.ModelsKeysFeature.install(app)
+            app.config_store.set_many({"use_multi_api_keys": True, "multi_api_keys": [
+                {"api_key": "sk-aaaaaaaaaaaa1111", "model": "gpt-6"}, {"api_key": "sk-bbbbbbbbbbbb2222", "model": "gpt-6"}]})
+            await _TB._route(session, "/settings/keys/translation")
+            screen = app.shell.top_screen
+            assert isinstance(screen, keys_module.KeysScreen) and screen.pool == "main"
+            # a running job's pool: a key cooling down (key_pool_service.live_key_stats rows)
+            screen.controller.live_stats = lambda pool: [{"is_cooling_down": True, "success_count": 1,
+                                                          "error_count": 0, "times_used": 1}, None]
+            renders: list = []
+            original = screen._external_refresh
+            screen._external_refresh = lambda: (renders.append(1), original())
+            # shown: every tick (LIVE_REFRESH_SECONDS, 0.05 s here) repaints the countdown
+            assert await settle(lambda: len(renders) >= 3, timeout=1.5)
+            await session.dispatch_event(page._i, "app_lifecycle_state_change", {"state": "hide"})
+            assert page.app_visible is False
+            await asyncio.sleep(0.15)
+            renders.clear()
+            await asyncio.sleep(0.4)
+            assert renders == []  # backgrounded: parked
+            await session.dispatch_event(page._i, "app_lifecycle_state_change", {"state": "resume"})
+            assert await settle(lambda: len(renders) >= 1)  # resumed: refreshed again
+            await _TB._route(session, "/settings/accounts")
+            assert app.shell.top_screen is not screen and any(e.screen is screen for e in app.shell.stack)
+            await asyncio.sleep(0.15)
+            renders.clear()
+            await asyncio.sleep(0.4)
+            assert renders == []  # covered by another screen: no repaints
+            app.shell.pop()
+            assert app.shell.top_screen is screen and await settle(lambda: len(renders) >= 1)
+            feature.open_refusal_patterns()  # an overlay View above the keys screen
+            assert app.shell.overlays
+            await asyncio.sleep(0.15)
+            renders.clear()
+            await asyncio.sleep(0.4)
+            assert renders == []
+            app.shell.pop()
+            assert not app.shell.overlays and await settle(lambda: len(renders) >= 1)
+            # Android back in selection mode: the selection goes, the screen stays
+            screen.toggle_select(0)
+            entry = next(e for e in app.shell.stack if e.screen is screen)
+            assert entry.view.can_pop is False and callable(entry.view.on_confirm_pop)
+            conn.messages.clear()
+            await entry.view.on_confirm_pop(None)
+            assert not screen.selected and app.shell.top_screen is screen and confirm_pops(conn) == [False]
+            conn.messages.clear()
+            await entry.view.on_confirm_pop(None)  # nothing selected: the View may pop
+            assert confirm_pops(conn) == [True]
         finally:
             ms.install_sheet_env(None)
             mc.set_default_service(None)

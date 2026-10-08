@@ -26,6 +26,8 @@ from glossarion_mobile.services.glossary import GlossaryFile
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
+from glossarion_mobile.ui.components.error_card import ErrorCard
+from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.glossary.common import ago, kind_icon, kind_label
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
@@ -49,6 +51,7 @@ class GlossariesScreen(Screen):
         self.kind = "all"
         self.query = ""
         self.loaded = False
+        self.error: Optional[BaseException] = None  # the last listing failure (ErrorCard + Retry)
         self.rows: dict = {}
         self._counting: Any = None
 
@@ -65,6 +68,7 @@ class GlossariesScreen(Screen):
             item("Parallel EPUB pair", lambda: self.ctx.go("glossary.parallel_pair"), ft.Icons.COMPARE_ARROWS),
             item("Unified glossary", lambda: self.ctx.go("glossary.unified"), ft.Icons.MERGE_TYPE),
             item("Glossary progress", lambda: self.ctx.go("tools.progress.glossary"), ft.Icons.PLAYLIST_ADD_CHECK),
+            item("Glossary settings", self.open_settings, ft.Icons.TUNE),
             item("Refresh", lambda: self.ctx.spawn(self.refresh()), ft.Icons.REFRESH),
         ])
         return [self.menu]
@@ -74,6 +78,15 @@ class GlossariesScreen(Screen):
     def build_body(self) -> ft.Control:
         self.mode_chip = ft.Chip(label=ft.Text(self._mode_text()), leading=ft.Icon(ft.Icons.RULE, size=16),
                                  on_click=lambda e: self.open_mode_sheet(), key="gh-mode")
+        # the desktop main-window loaded-glossary label + ✕ (manual_glossary_path)
+        self.loaded_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, expand=True, max_lines=1,
+                                   overflow=ft.TextOverflow.ELLIPSIS, key="gh-loaded-text")
+        self.loaded_row = ft.Row([
+            ft.Icon(ft.Icons.DESCRIPTION, size=16), self.loaded_text,
+            ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Clear Glossary", size_constraints=HIT_TARGET,
+                          on_click=lambda e: self.ctx.spawn(self.clear_loaded()), key="gh-loaded-clear"),
+        ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="gh-loaded")
+        self._render_loaded()
         self.search = ft.TextField(hint_text="Filter glossaries…", prefix_icon=ft.Icons.SEARCH, dense=True,
                                    on_change=lambda e: self._on_search(), key="gh-search")
         self.kind_buttons = ft.SegmentedButton(
@@ -83,12 +96,16 @@ class GlossariesScreen(Screen):
         self.loading = ft.ProgressBar(visible=True, key="gh-loading")
         self.list_view = ft.ListView(spacing=4, padding=ft.Padding.only(left=8, right=8, bottom=96), expand=True,
                                      build_controls_on_demand=True, key="gh-list")
-        self.list_holder = ft.Container(content=self.list_view, expand=True, key="gh-list-holder")
+        # skeleton rows until the first listing arrives (UI_SPEC §7.4)
+        self.list_holder = ft.Container(content=Skeleton("rows", count=6, label="Loading glossaries…",
+                                                         key="gh-skeleton").control if not self.loaded
+                                        else self.list_view, expand=True, key="gh-list-holder")
         self.fab = ft.FloatingActionButton(icon=ft.Icons.FILE_UPLOAD, content="Import glossary",
                                            on_click=lambda e: self.ctx.spawn(self.import_glossary()), key="gh-fab")
         self.root = ft.Column([
             ft.Container(content=ft.Column([
                 ft.Row([self.mode_chip], wrap=True),
+                self.loaded_row,
                 self.search,
                 ft.Row([self.kind_buttons], scroll=ft.ScrollMode.AUTO),
                 self.count_text,
@@ -101,7 +118,34 @@ class GlossariesScreen(Screen):
     def _mode_text(self) -> str:
         return f"Glossary mode: {self.service.mode_label()} ▾"
 
+    def _render_loaded(self) -> None:
+        cfg = getattr(self.service, "cfg", None)
+        try:
+            loaded = str(cfg("manual_glossary_path", "") or "") if callable(cfg) else ""
+        except Exception:
+            loaded = ""
+        self.loaded_text.value = f"Loaded: {os.path.basename(loaded)}" if loaded else ""
+        self.loaded_row.visible = bool(loaded)
+
+    async def clear_loaded(self) -> bool:
+        """Desktop ✕ "Clear Glossary" (GlossaryFeature.clear_manual_glossary)."""
+        feature = self.ctx.feature
+        cleared = bool(await feature.clear_manual_glossary()) if feature is not None else False
+        self._render_loaded()
+        self.ctx.push(self.loaded_row)
+        return cleared
+
+    def open_settings(self) -> Any:
+        """⋯ Glossary settings: Settings › Glossary › General (the Glossary Manager tabs, no file needed)."""
+        settings = getattr(self.ctx, "settings", None)
+        if settings is not None and hasattr(settings, "open_setting"):
+            return settings.open_setting("glossary.general")
+        return self.ctx.go("settings")
+
     def did_show(self) -> None:
+        if hasattr(self, "loaded_row"):
+            self._render_loaded()
+            self.ctx.push(self.loaded_row)
         self.ctx.spawn(self.refresh())
 
     def dispose(self) -> None:
@@ -114,9 +158,11 @@ class GlossariesScreen(Screen):
     async def refresh(self) -> list:
         try:
             files = await self.ctx.io(self.service.list_glossaries)
+            self.error = None
         except Exception as exc:
             log.exception("listing glossaries failed")
             self.ctx.say(f"Could not list the glossaries: {exc}")
+            self.error = exc
             files = []
         self.files = list(files)
         self.loaded = True
@@ -178,7 +224,10 @@ class GlossariesScreen(Screen):
         rows = self.visible_files()
         self.count_text.value = f"{len(rows)} glossar{'ies' if len(rows) != 1 else 'y'}" if self.loaded else ""
         self.rows = {}
-        if self.loaded and not self.files:
+        if self.loaded and self.error is not None and not self.files:
+            self.list_holder.content = ErrorCard(title="Could not list the glossaries", message=self.error,
+                                                 on_retry=self.refresh, key="gh-error")
+        elif self.loaded and not self.files:
             feature = self.ctx.feature
             self.list_holder.content = EmptyState(
                 icon="SPELLCHECK", title="No glossaries yet",
@@ -188,6 +237,8 @@ class GlossariesScreen(Screen):
         elif self.loaded and not rows:
             self.list_holder.content = EmptyState(icon="FILTER_LIST_OFF", title="No glossaries match",
                                                   body="Change the search or the kind filter.", key="gh-nomatch")
+        elif not self.loaded:
+            pass  # the first listing is still running: the skeleton stays
         else:
             controls = []
             for row in rows:

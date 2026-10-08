@@ -34,14 +34,17 @@ from glossarion_mobile.services.library import CoreMissing, first_value
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
+from glossarion_mobile.ui.components.pull_to_refresh import PullToRefresh
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.windowed_list import WindowedList
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.colors import GP_STATUS_PALETTE_KEY
 from glossarion_mobile.ui.library.common import stat_chip, status_avatar
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
 
-__all__ = ["DELETED_BANNER", "EMPTY_BODY", "GlossaryTab", "empty_title"]
+__all__ = ["DELETED_BANNER", "EMPTY_BODY", "GlossaryTab", "empty_title", "glossary_file_summary",
+           "summary_line"]
 
 log = logging.getLogger("glossarion.library.ui")
 
@@ -51,12 +54,62 @@ GLOSSARY_TOOLS_REASON = "The Glossary Manager is not available in this session"
 REFINE_REASON = "Glossary refinement is not available in this session"
 
 
+#: More changed rows than this rebuild the mounted window once instead of row-by-row replacements.
+REPLACE_LIMIT = 40
+
+
 def empty_title(book_title: str) -> str:
     return f"No glossary extraction progress found for: {book_title}"
 
 
 def _palette(status: str) -> str:
     return GP_STATUS_PALETTE_KEY.get(status, "not_translated")
+
+
+def glossary_file_summary(path: str) -> dict:
+    """Blocking: ``{entries, types: [(type, count)], mtime, size}`` of a glossary file (UI_SPEC §3.8 file
+    card), parsed with the shared ``glossary_usage.parse_glossary_file`` (CSV, JSON and the
+    token-efficient format the extractor writes; the parser ``cards.glossary_preview`` uses).
+    ``entries`` is None when the file cannot be parsed."""
+    out: dict = {"entries": None, "types": [], "mtime": None, "size": None}
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        stat = os.stat(path)
+        out["mtime"], out["size"] = stat.st_mtime, stat.st_size
+    except OSError:
+        return out
+    try:
+        from glossary_usage import parse_glossary_file
+
+        entries = parse_glossary_file(path)
+    except Exception:
+        log.debug("glossary file summary failed for %s", path, exc_info=True)
+        return out
+    counts: dict = {}
+    for entry in entries:
+        kind = str((entry or {}).get("type") or "terms").strip() or "terms"
+        counts[kind] = counts.get(kind, 0) + 1
+    out["entries"] = len(entries)
+    out["types"] = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return out
+
+
+def summary_line(summary: dict) -> str:
+    """"N entries · character 12 · term 30 … · modified 2026-10-08 14:02" ('' without a file)."""
+    import time
+
+    parts: list = []
+    entries = summary.get("entries")
+    if entries is not None:
+        parts.append(f"{entries} entr{'y' if entries == 1 else 'ies'}")
+        types = list(summary.get("types") or ())
+        parts.extend(f"{name} {count}" for name, count in types[:4])
+        if len(types) > 4:
+            parts.append("…")
+    if summary.get("mtime"):
+        parts.append("modified " + time.strftime("%Y-%m-%d %H:%M", time.localtime(summary["mtime"])))
+    return " · ".join(parts)
 
 
 class GlossaryTab:
@@ -69,7 +122,15 @@ class GlossaryTab:
         self.selecting = False
         self.jump_cursor: dict = {}
         self.list_view: Optional[ft.ListView] = None
+        # U9 (UI_SPEC §7.3): the rows live in a WindowedList (1,500-row windows, built in steps) and are
+        # replaced in place by key on a poll change or a selection tap; pulling the list down refreshes it
+        self.rows_list: Optional[WindowedList] = None
+        self.pull: Optional[PullToRefresh] = None
+        self._row_keys: list = []
+        self.renders = 0  # full list (re)builds (tests: a poll change / tap replaces rows instead)
         self.last_result: Any = None
+        self.file_summary: dict = {}
+        self._summary_key: Any = None
 
     # ---- build -----------------------------------------------------------------------------------
 
@@ -103,6 +164,8 @@ class GlossaryTab:
         self.file_card = ft.Container(
             content=ft.Column([
                 ft.Text("", key="gp-file-name", theme_style=ft.TextThemeStyle.BODY_MEDIUM),
+                ft.Text("", key="gp-file-summary", theme_style=ft.TextThemeStyle.BODY_SMALL,
+                        color=ft.Colors.ON_SURFACE_VARIANT, visible=False),
                 ft.Row(tools, wrap=True, spacing=6, run_spacing=4),
             ], spacing=4, tight=True),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, border_radius=tokens.RADII["card"], padding=10,
@@ -118,11 +181,22 @@ class GlossaryTab:
             ft.TextButton(content="✏️ Open Glossary", disabled=hooks is None,
                           tooltip=None if hooks is not None else GLOSSARY_TOOLS_REASON,
                           on_click=lambda e: self.ctx.spawn(self.open_editor()), key="gp-open-glossary"),
+            # desktop Glossary Progress "Refresh": reload and rebuild the panel from disk
+            ft.TextButton(content="⟳ Refresh", tooltip="Reload the glossary progress from disk",
+                          on_click=lambda e: self.ctx.spawn(self.page.full_refresh()), key="gp-refresh"),
         ], wrap=True, spacing=0)
         self.selection_bar = SelectionTopBar(on_close=self.exit_selection, on_select_all=self.select_all,
                                              key="gp-selection")
         self.loading = ft.ProgressBar(visible=True, key="gp-loading")
-        self.list_holder = ft.Container(expand=True, key="gp-list-holder")
+        self.pull = PullToRefresh(self.page.full_refresh, spawn=self.ctx.spawn,
+                                  haptic=getattr(self.ctx, "haptic", None), key="gp-pull")
+        self.notice = ft.Column([], spacing=4, tight=True, visible=False, key="gp-notice")
+        self.rows_list = WindowedList(build_row=lambda row, _i: self._row_control(row), key_of=lambda row: row.key,
+                                      key="gp", on_scroll_extra=self.pull.handle)
+        self.list_view = self.rows_list.list_view
+        self.list_holder = ft.Container(
+            content=ft.Column([self.pull.bar, self.notice, self.rows_list.control], spacing=0, expand=True),
+            expand=True, key="gp-list-holder")
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="gp-bulk")
         self.root = ft.Column([
@@ -160,6 +234,7 @@ class GlossaryTab:
     # ---- data -------------------------------------------------------------------------------------
 
     def apply(self, view: pm.GlossaryView) -> None:
+        previous = {r.key: r for r in (self.view.rows if self.view is not None else ())}
         self.view = view
         if getattr(self, "root", None) is None:
             return
@@ -172,11 +247,39 @@ class GlossaryTab:
         self.file_chip.label = ft.Text(f"\U0001f4c1 {name}")
         file_name = self.file_card.content.controls[0]
         file_name.value = os.path.basename(view.glossary_file) if view.glossary_file else "No glossary file yet"
+        self.ctx.spawn(self.reload_file_summary(view.glossary_file or ""))
         self.extract_button.content = "Continue extraction" if view.path else "Extract glossary"
         self._render_chips()
         self.total_text.value = view.total_text
-        self._render_rows()
+        self._update_rows(previous)
         self.ctx.push(self.root)
+
+    async def reload_file_summary(self, path: str) -> dict:
+        """The file card's entry count, per-type breakdown and modification time, parsed on the io pool
+        (again only when the file's mtime / size changed)."""
+        def load() -> tuple:
+            try:
+                stat = os.stat(path) if path else None
+            except OSError:
+                stat = None
+            key = (path, stat.st_mtime, stat.st_size) if stat is not None else (path, None, None)
+            if key == self._summary_key:
+                return key, self.file_summary
+            return key, glossary_file_summary(path)
+
+        try:
+            key, summary = await self.ctx.io(load)
+        except Exception:
+            log.debug("glossary file summary failed", exc_info=True)
+            return self.file_summary
+        self._summary_key, self.file_summary = key, summary
+        label = self.file_card.content.controls[1] if getattr(self, "file_card", None) is not None else None
+        if label is not None:
+            line = summary_line(summary) if path else ""
+            label.value = line
+            label.visible = bool(line)
+            self.ctx.push(label)
+        return summary
 
     def _render_chips(self) -> None:
         view = self.view
@@ -207,15 +310,13 @@ class GlossaryTab:
             rows = [r for r in rows if r.status in members]
         return rows
 
-    def _render_rows(self) -> None:
+    def _render_notice(self) -> None:
+        """The error line and the empty state above the rows."""
         view = self.view
-        if view is None:
-            return
-        rows = self.visible_rows()
         controls: list[ft.Control] = []
-        if view.error:
+        if view is not None and view.error:
             controls.append(ft.Text(view.error, color=ft.Colors.ERROR, key="gp-error"))
-        if view.empty or (not view.path and not view.deleted):
+        if view is not None and (view.empty or (not view.path and not view.deleted)):
             controls.append(ft.Container(content=ft.Column([
                 ft.Text("\U0001f4ca", size=40),
                 ft.Text(empty_title(view.book_title or str(self.page.book.get("name") or "")),
@@ -223,11 +324,46 @@ class GlossaryTab:
                 ft.Text(EMPTY_BODY, text_align=ft.TextAlign.CENTER, color=ft.Colors.ON_SURFACE_VARIANT),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, tight=True, spacing=6), padding=16,
                 alignment=ft.Alignment.CENTER, key="gp-empty"))
+        self.notice.controls = controls
+        self.notice.visible = bool(controls)
+
+    def _render_rows(self, *, keep: bool = False) -> None:
+        """(Re)build the windowed rows (``keep``: the current window and as many rows as were mounted)."""
+        if self.view is None or self.rows_list is None:
+            return
+        self._render_notice()
+        rows = self.visible_rows()
+        self._row_keys = [r.key for r in rows]
+        self.rows_list.set_items(rows, keep_window=keep, keep_rendered=keep)
+        self.renders += 1
+
+    def _update_rows(self, previous: dict) -> None:
+        """A new view: rows replaced in place by key when the visible keys are unchanged (a 2 s poll while an
+        extraction writes its progress), else the window rebuilt where it was."""
+        if self.rows_list is None:
+            return
+        rows = self.visible_rows()
+        if [r.key for r in rows] != self._row_keys or not self._row_keys:
+            self._render_rows(keep=bool(self._row_keys))
+            return
+        self._render_notice()
         for row in rows:
-            controls.append(self._row_control(row))
-        self.list_view = ft.ListView(controls, spacing=4, padding=ft.Padding.only(left=8, right=8, bottom=96),
-                                     expand=True, build_controls_on_demand=False, key="gp-list")
-        self.list_holder.content = self.list_view
+            if previous.get(row.key) != row:
+                self.rows_list.replace(row)
+
+    def _replace_keys(self, keys: Any) -> None:
+        """Re-render the mounted rows of ``keys`` (a selection tap) without rebuilding the list; many rows at
+        once (Select All, leaving selection) rebuild the mounted window in one pass, where it is."""
+        rows_list = self.rows_list
+        if rows_list is None:
+            return
+        wanted = set(keys)
+        mounted = [row for row in self.visible_rows() if row.key in wanted and row.key in rows_list.controls]
+        if len(mounted) > REPLACE_LIMIT:
+            self._render_rows(keep=True)
+            return
+        for row in mounted:
+            rows_list.replace(row)
 
     def _row_control(self, row: pm.GlossaryRowVM) -> ft.Control:
         dark = self.ctx.dark
@@ -275,10 +411,8 @@ class GlossaryTab:
                 self.jump_cursor[group] = index
                 self.ctx.haptic("selection_click")
                 if self.list_view is not None:
-                    try:
-                        await self.list_view.scroll_to(scroll_key=rows[index].key, duration=250)
-                    except Exception:
-                        log.debug("scroll_to failed", exc_info=True)
+                    if self.rows_list is not None:  # re-centres the window on the row first
+                        await self.rows_list.jump_to(rows[index].key)
                 return rows[index].key
         self.ctx.say("No row with that status")
         return None
@@ -305,20 +439,21 @@ class GlossaryTab:
             self.selected.discard(key)
         if not self.selected:
             self.selecting = False
-        self._render_rows()
+        self._replace_keys((key,))
         self._sync_selection()
 
     def select_all(self) -> None:
         self.selecting = True
+        before = set(self.selected)
         self.selected = {r.key for r in self.visible_rows()}
-        self._render_rows()
+        self._replace_keys(self.selected ^ before)
         self._sync_selection()
 
     def exit_selection(self) -> None:
         self.selecting = False
-        self.selected = set()
+        before, self.selected = set(self.selected), set()
         if self.view is not None:
-            self._render_rows()
+            self._replace_keys(before)
         self._sync_selection()
 
     def selected_rows(self) -> list:

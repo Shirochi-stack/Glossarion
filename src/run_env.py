@@ -784,6 +784,31 @@ class RunEnvMixin:
             )
         return default_output
 
+    def _rename_input_for_existing_workspace_collision(self, input_file: str) -> str:
+        """Rename a selected EPUB/PDF/TXT whose workspace has another type."""
+        from output_workspace import (
+            rename_input_for_workspace_collision,
+            source_format_label,
+            workspace_source_format,
+        )
+
+        incoming_format = source_format_label(input_file)
+        if not incoming_format:
+            return input_file
+
+        # Resolve the unsuffixed workspace before changing the input stem. The
+        # renamed path then goes through the ordinary output-folder logic.
+        workspace = self._resolve_translation_output_dir(input_file)
+        existing_format = workspace_source_format(workspace)
+        renamed = rename_input_for_workspace_collision(input_file, workspace)
+        if renamed != input_file:
+            self.append_log(
+                f"📁 Renamed input to avoid {existing_format}/{incoming_format} "
+                f"workspace collision: {os.path.basename(input_file)} → "
+                f"{os.path.basename(renamed)}"
+            )
+        return renamed
+
     def _active_translation_output_mode(self) -> str:
         override = getattr(self, '_translation_run_output_mode_override', None)
         if override:

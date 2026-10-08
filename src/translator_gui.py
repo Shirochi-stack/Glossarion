@@ -221,198 +221,17 @@ def _preempt_temp_dir_warning():
     return
 
 
-def _fmt_bytes(n: int) -> str:
-    """Pretty-print a byte count for log lines (KB/MB/GB)."""
-    try:
-        n = float(n)
-    except Exception:
-        return f"{n} B"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024.0:
-            return f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} PB"
-
-
-def _sweep_size_capped_dir(folder: str, max_bytes: int, label: str = "") -> tuple:
-    """Cap a debug/cache directory's total size by deleting oldest files first.
-
-    Walks ``folder`` recursively, sums the size of every file, and if the
-    total exceeds ``max_bytes`` deletes files in ascending mtime order until
-    we're back under the cap. Then removes any empty subdirectories left
-    behind so the tree doesn't turn into a forest of empty folders.
-
-    Prints a single ``[CLEANUP]`` summary line to stdout whenever anything
-    is actually deleted (or when the folder is already at/over cap but we
-    couldn't free any files because they were all in use).
-
-    Best-effort: silently skips anything we can't stat or remove (files
-    held open by another running instance, permission errors, etc.).
-
-    Returns ``(removed_count, bytes_freed, total_before, total_after)``
-    so callers can produce higher-level summaries.
-    """
-    try:
-        if not folder or not os.path.isdir(folder):
-            return (0, 0, 0, 0)
-
-        entries = []  # list[(mtime, size, path)]
-        total = 0
-        for root, _dirs, files in os.walk(folder, followlinks=False):
-            for fn in files:
-                fp = os.path.join(root, fn)
-                try:
-                    st = os.stat(fp)
-                except Exception:
-                    continue
-                entries.append((st.st_mtime, st.st_size, fp))
-                total += st.st_size
-
-        total_before = total
-        tag = label or folder
-
-        if total <= max_bytes:
-            # Nothing to do; don't spam the console for under-cap folders.
-            return (0, 0, total_before, total)
-
-        # Oldest first — delete until we're back under the cap.
-        entries.sort(key=lambda e: e[0])
-        removed = 0
-        freed = 0
-        skipped = 0
-        for _mtime, size, path in entries:
-            if total <= max_bytes:
-                break
-            try:
-                os.remove(path)
-                total -= size
-                freed += size
-                removed += 1
-            except Exception:
-                skipped += 1
-                # File held open, permission issue, etc. Skip.
-                pass
-
-        # Prune empty subdirectories (bottom-up), keep the root itself.
-        pruned = 0
-        for root, dirs, files in os.walk(folder, topdown=False, followlinks=False):
-            if os.path.abspath(root) == os.path.abspath(folder):
-                continue
-            try:
-                if not os.listdir(root):
-                    os.rmdir(root)
-                    pruned += 1
-            except Exception:
-                pass
-
-        try:
-            msg = (
-                f"[CLEANUP] {tag}: removed {removed} file(s), freed "
-                f"{_fmt_bytes(freed)} ({_fmt_bytes(total_before)} → {_fmt_bytes(total)}, "
-                f"cap {_fmt_bytes(max_bytes)})"
-            )
-            if skipped:
-                msg += f"; {skipped} file(s) in use"
-            if pruned:
-                msg += f"; pruned {pruned} empty dir(s)"
-            print(msg)
-        except Exception:
-            pass
-
-        return (removed, freed, total_before, total)
-    except Exception:
-        return (0, 0, 0, 0)
+from shutdown_utils import fmt_bytes as _fmt_bytes  # noqa: E402  (moved in U9, see below)
+from shutdown_utils import sweep_size_capped_dir as _sweep_size_capped_dir  # noqa: E402
 
 
 def _sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup") -> None:
-    """Enforce a per-folder size cap on app-local debug caches.
+    """Enforce a per-folder size cap on app-local debug caches (Payloads/, http_requests/).
 
-    Targets:
-      * ``Payloads/`` — API request/response dumps written by
-        ``unified_api_client._payloads_dir`` (resolved against CWD with a
-        temp-dir fallback).
-      * ``http_requests/`` — raw HTTP traces written by
-        ``http_logger.enable_detailed_http_logging`` (resolved against the
-        script/exe directory).
-
-    Each folder is independently capped at ``max_bytes`` (default 400 MB)
-    by deleting oldest files first. These folders grow without bound
-    otherwise because the debug dumps are append-only.
-
-    Resolution is best-effort: we check both CWD and the executable/script
-    directory and dedupe by absolute path, since the resolution logic in
-    the writers above depends on which one happens to be writable at the
-    moment the first dump is saved.
-
-    ``phase`` is just a label for log output (``startup`` or ``exit``).
-    When anything is actually deleted, each folder produces a
-    ``[CLEANUP] <folder>: removed N file(s), freed X MB (...)`` line and
-    a final ``[CLEANUP] <phase>: total removed ... freed ...`` summary.
-    """
-    try:
-        # Candidate roots: exe dir (frozen), script dir (dev), and CWD.
-        roots = []
-        try:
-            if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
-                roots.append(os.path.dirname(os.path.abspath(sys.executable)))
-        except Exception:
-            pass
-        try:
-            roots.append(os.path.dirname(os.path.abspath(__file__)))
-        except Exception:
-            pass
-        try:
-            roots.append(os.path.abspath(os.getcwd()))
-        except Exception:
-            pass
-
-        # Also check the tempdir fallback used by _payloads_dir() in
-        # unified_api_client.py when CWD isn't writable.
-        fallback_payloads = None
-        try:
-            import tempfile
-            fallback_payloads = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
-        except Exception:
-            pass
-
-        seen = set()
-        targets = []  # list[(label, path)]
-        for r in roots:
-            if not r:
-                continue
-            for sub in ("Payloads", "http_requests"):
-                p = os.path.abspath(os.path.join(r, sub))
-                key = os.path.normcase(p)
-                if key in seen:
-                    continue
-                seen.add(key)
-                targets.append((sub, p))
-        if fallback_payloads:
-            key = os.path.normcase(os.path.abspath(fallback_payloads))
-            if key not in seen:
-                seen.add(key)
-                targets.append(("Payloads (tmp fallback)", fallback_payloads))
-
-        total_removed = 0
-        total_freed = 0
-        for label, t in targets:
-            try:
-                removed, freed, _before, _after = _sweep_size_capped_dir(t, max_bytes, label=label)
-                total_removed += removed
-                total_freed += freed
-            except Exception:
-                pass
-
-        if total_removed:
-            try:
-                print(
-                    f"[CLEANUP] {phase}: total removed {total_removed} file(s), "
-                    f"freed {_fmt_bytes(total_freed)} across {len(targets)} folder(s)"
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass
+    Moved to ``shutdown_utils.sweep_large_caches`` (U9, shared with Glossarion Mobile); this
+    script's folder stays one of the roots, exactly as before."""
+    from shutdown_utils import sweep_large_caches
+    sweep_large_caches(max_bytes, phase, script_file=__file__)
 
 
 def _log_mei_cleanup_on_exit():
@@ -12250,11 +12069,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         )
         
         if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
             try:
                 # Validate it's a valid Google Cloud credentials file
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
+                    if is_google_service_account(creds_data):
                         # Save to config
                         self.config['google_cloud_credentials'] = filename
                         self.save_config()
@@ -12273,10 +12094,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         QMessageBox.critical(
                             self,
                             "Error", 
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                            INVALID_GOOGLE_CREDENTIALS
                         )
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
 
     def on_model_change(self, index=None):
         """Handle model selection change from dropdown or manual input"""
@@ -14608,210 +14429,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _show_model_info_dialog(self):
         """Show information dialog about API provider shortcuts"""
-        info_text = """<h3>API Provider Shortcuts</h3>
-        <p>You can use prefixes to access models from different API providers:</p>
-        
-        <h4>OpenRouter (or/)</h4>
-        <p>Access models through OpenRouter API</p>
-        <ul>
-            <li><b>or/google/gemini-2.5-flash</b> - Gemini 2.5 Flash via OpenRouter</li>
-            <li><b>or/openai/gpt-5</b> - GPT-5 via OpenRouter</li>
-            <li><b>or/deepseek/deepseek-chat-v3.1:free</b> - DeepSeek Chat (free tier)</li>
-        </ul>
+        from model_options import provider_info_html  # the text moved to the shared module (U9)
 
-        <h4>LiteRouter (lr/)</h4>
-        <p>Access free and full-context routes through LiteRouter API</p>
-        <ul>
-            <li><b>lr/deepseek-v3.2:free</b> - DeepSeek V3.2 free route</li>
-            <li><b>lr/gpt-oss-120b:free</b> - GPT OSS 120B free route</li>
-            <li><b>lr/openrouter:free:full-context</b> - OpenRouter full-context route</li>
-        </ul>
-        
-        <h4>ElectronHub (eh/)</h4>
-        <p>Access models through ElectronHub API</p>
-        <ul>
-            <li><b>eh/claude-sonnet-4-5-20250929</b> - Claude Sonnet 4.5</li>
-            <li><b>eh/gemini-2.5-flash</b> - Gemini 2.5 Flash</li>
-            <li><b>eh/gpt-5-chat-latest</b> - Latest GPT-5 Chat</li>
-        </ul>
-        
-        <h4>Chute AI (chutes/)</h4>
-        <p>Access models through Chute AI platform</p>
-        <ul>
-            <li><b>chutes/deepseek-ai/DeepSeek-V3.1</b> - DeepSeek V3.1</li>
-            <li><b>chutes/openai/gpt-oss-120b</b> - GPT OSS 120B</li>
-        </ul>
-        
-        <h4>Vertex AI (vertex/ or @)</h4>
-        <p>Access Google Vertex AI models (requires Google Cloud credentials)</p>
-        <ul>
-            <li><b>vertex/gemini-2.5-flash</b> - Gemini via Vertex AI</li>
-            <li><b>vertex/claude-4-sonnet@20250514</b> - Claude via Vertex AI</li>
-            <li><b>claude-3-7-sonnet@20250219</b> - Models with @ use Vertex AI</li>
-        </ul>
-        
-        <h4>Groq (groq/)</h4>
-        <p>Access fast inference models through Groq API</p>
-        <ul>
-            <li><b>groq/llama-3.1-8b-instant</b> - Llama 3.1 8B (fast inference)</li>
-            <li><b>groq/llama-3.3-70b-versatile</b> - Llama 3.3 70B</li>
-            <li><b>groq/openai/gpt-oss-120b</b> - GPT OSS 120B via Groq</li>
-        </ul>
-        
-        <h4>NanoGPT (nan/)</h4>
-        <p>Access high-quality models and generative AI through NanoGPT</p>
-        <ul>
-            <li><b>nan/gpt-image-2</b> - GPT Image Generative Model</li>
-            <li><b>nan/deepseek/deepseek-v4-flash</b> - DeepSeek V4 Flash via NanoGPT</li>
-            <li><b>nan/openai/gpt-latest</b> - GPT Latest via NanoGPT</li>
-        </ul>
-        
-        <h4>SambaNova Cloud (sam/)</h4>
-        <p>Access models through SambaNova Cloud API (OpenAI-compatible)</p>
-        <ul>
-            <li><b>sam/DeepSeek-V3.2</b> - DeepSeek V3.2 via SambaNova</li>
-            <li><b>sam/Meta-Llama-3.3-70B-Instruct</b> - Llama 3.3 70B</li>
-            <li><b>sam/Llama-4-Maverick-17B-128E-Instruct</b> - Llama 4 Maverick</li>
-            <li><b>sam/gpt-oss-120b</b> - GPT OSS 120B via SambaNova</li>
-        </ul>
-
-        <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
-        <p>Use models running on your computer without an API key or custom endpoint toggle.</p>
-        <ul>
-            <li><b>ollamapull/llama3.2</b> - Install Ollama and download the model as needed</li>
-            <li><b>ollama/llama3.2</b> - Connect to Ollama at <code>http://localhost:11434/v1</code></li>
-            <li><b>lmstudio/model-id</b> - Connect to LM Studio at <code>http://localhost:1234/v1</code></li>
-        </ul>
-        <p>Start the local server and load the model first when using <code>ollama/</code> or <code>lmstudio/</code>.
-           The <b>🦙 Download Ollama</b> button is available for <code>ollamapull/</code>.</p>
-        
-        <h4>ChatGPT Subscription (authgpt/)</h4>
-        <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
-        <ul>
-            <li><b>authgpt/gpt-5.4</b> - GPT-5.4 via ChatGPT subscription</li>
-            <li><b>authgpt/gpt-5.2-pro</b> - GPT-5.2 Pro (Pro subscribers)</li>
-            <li><b>authgpt/gpt-5.2-codex</b> - Codex via ChatGPT subscription</li>
-        </ul>
-        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
-        </p>
-
-        <h4>Arena Proxy (autharena/)</h4>
-        <p>Use your Arena account — no API key needed. Supports real-time streaming and parallel batch requests.</p>
-        <ul>
-            <li><b>autharena/deepseek-v4-pro-low</b> - DeepSeek V4 Pro (low reasoning)</li>
-            <li><b>autharena/kimi-k3</b> - Kimi K3</li>
-            <li><b>autharena/gpt-5.6-sol-medium</b> - GPT-5.6 Sol (medium reasoning)</li>
-        </ul>
-        <p><code>autharena/</code> selects account #0; <code>autharena0/</code> rotates all saved accounts.
-            Numbered prefixes such as <code>autharena1/</code> select the matching account number (#1).</p>
-        <p style="color: #34d399; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Click <b>Arena Login</b> next to the model dropdown or in the multi API key manager.
-            Setup is automatic; complete sign-in in the browser. Saved sessions are encrypted.
-        </p>
-
-        <h4>Grok Account (authgrok/)</h4>
-        <p>Use Grok through an xAI account OAuth session — no API key needed</p>
-        <ul>
-            <li><b>authgrok0/grok-4.5</b> - Rotate the pool of saved Grok accounts</li>
-            <li><b>authgrok/grok-4.5</b> - Current flagship and offline fallback</li>
-            <li><b>authgrok1/grok-4.5</b> - Pin numbered account slot #1</li>
-            <li><b>authgrok/grok-4.3</b> - OAuth-compatible route when entitled</li>
-            <li><b>authgrok/grok-build</b> - Coding model when available to the account</li>
-        </ul>
-        <p style="color: #9ca3af; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Click <b>🔐 Grok Login</b>; xAI's login page lets you choose Google sign-in.
-            Numbered routes request a fresh login so you can select a different email. The exact model catalog depends on the signed-in account.
-        </p>
-
-        <h4>Claude Subscription (authcd/)</h4>
-        <p>Use your Claude Pro/Max subscription directly — no API key needed</p>
-        <ul>
-            <li><b>authcd/claude-sonnet-4-6</b> - Claude Sonnet 4.6 via subscription</li>
-            <li><b>authcd/claude-haiku-4-5-20251001</b> - Claude Haiku 4.5</li>
-            <li><b>authcd/claude-4-opus</b> - Claude 4 Opus (Max subscribers)</li>
-        </ul>
-        <p style="color: #d97706; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Click the <b>🔐 Claude Login</b> button to authenticate.
-            Requires Claude Code CLI (<code>npm install -g @anthropic-ai/claude-code</code>).
-        </p>
-
-        <h4>Gemini Vertex AI (authgem-vertex/)</h4>
-        <p>Use Gemini via Vertex AI — requires GCP project with billing</p>
-        <ul>
-            <li><b>authgem-vertex/gemini-2.5-flash</b> - Vertex AI endpoint</li>
-            <li><b>authgem-vertex/gemini-2.5-pro</b> - Vertex AI endpoint</li>
-        </ul>
-        <p style="color: #4385f4; padding: 2px; font-size: 11px;">
-            <b>ℹ️</b> Click the <b>🔐 Gemini Login</b> button to authenticate.
-            Select a GCP project with billing enabled from the dropdown.
-        </p>
-
-        <h4>Antigravity Proxy (antigravity/)</h4>
-        <p>Free access to Claude &amp; Gemini via Google Cloud Code — no API key needed</p>
-        <ul>
-            <li><b>antigravity/gemini-3-flash</b> - Gemini 3 Flash (fastest)</li>
-            <li><b>antigravity/gemini-3.1-pro-low</b> - Gemini 3.1 Pro (low quota)</li>
-        </ul>
-        <p style="color: #d9534f; padding: 4px; font-size: 11px;">
-            <b>⚠️ Warning:</b> This feature uses a proxy to access Google Cloud Code.
-            Using it may violate Google's Terms of Service. Use at your own risk.
-        </p>
-          <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
-             <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:3000.
-              Glossarion will auto-update and launch it when Node/npm or Bun is available.
-          </p>
-
-        <h4>OpenCode Paid (oc/)</h4>
-        <p>Access the full OpenCode model catalog with a subscription API key</p>
-        <ul>
-            <li><b>oc/gpt-6-luna</b> - GPT-6 Luna</li>
-            <li><b>oc/kimi-k3</b> - Kimi K3</li>
-            <li><b>oc/deepseek-v4-pro</b> - DeepSeek V4 Pro</li>
-            <li><b>oc/qwen3.8-flash</b> - Qwen 3.8 Flash</li>
-        </ul>
-        <p style="color: #38bdf8; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Set <b>OPENCODE_API_KEY</b> in the multi API key manager.
-            The catalog is auto-polled from OpenCode's Go endpoint.
-        </p>
-
-        <h4>OpenCode Free (ocz/)</h4>
-        <p>Free-tier models — requires the genuine OpenCode desktop app</p>
-        <ul>
-            <li><b>ocz/deepseek-v4-flash-free</b> - DeepSeek V4 Flash (free)</li>
-            <li><b>ocz/mimo-v2.6-flash-free</b> - MiMo V2.6 Flash (free)</li>
-            <li><b>ocz/nemotron-3-ultra-free</b> - Nemotron 3 Ultra (free)</li>
-        </ul>
-        <p style="color: #f59e0b; padding: 4px; font-size: 11px;">
-            <b>⚠️ Note:</b> Free-tier models can only be used from the official OpenCode app.
-            For third-party access, use <code>oc/</code> with an API key instead.
-        </p>
-
-        <h4>Zhipu AI International (za/)</h4>
-        <p>Route to the GLM international endpoint (https://api.z.ai/api/paas/v4) instead of the Chinese endpoint</p>
-        <ul>
-            <li><b>za/glm-4-plus</b> - GLM-4 Plus via international endpoint</li>
-            <li><b>za/glm-4</b> - GLM-4 via international endpoint</li>
-        </ul>
-        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
-            <b>&#x2139;&#xfe0f; Tip:</b> Without the za/ prefix, GLM models route to the Chinese endpoint.
-            Use za/ to access the international API. Requires a Zhipu API key.
-        </p>
-
-        <h4>NVIDIA (nd/ and authnd/)</h4>
-        <p>Access models through NVIDIA Integrate API with <code>nd/</code>, or through NVIDIA Build browser-backed routing with <code>authnd/</code>.</p>
-        <ul>
-            <li><b>nd/meta/llama-4-maverick-17b-128e-instruct</b></li>
-            <li><b>nd/deepseek-ai/deep-r1</b></li>
-            <li><b>authnd/deepseek-ai/deepseek-v4-flash</b></li>
-            <li><b>authnd/openai/gpt-oss-120b</b></li>
-        </ul>
-
-        <h4>Custom Prefix Routes</h4>
-        <p>User-defined prefixes can route models to custom OpenAI-compatible endpoints from Model Manager.</p>
-        
-        <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
-        """
+        info_text = provider_info_html()
         
         dialog = QDialog(self)
         dialog.setWindowTitle("Model Provider Information")
@@ -19781,31 +19401,6 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         mode_name = "user message" if self.system_prompt_to_user_var else "system message"
         self.append_log(f"🔀 System prompt will be sent as {mode_name}")
     
-    def _rename_input_for_existing_workspace_collision(self, input_file: str) -> str:
-        """Rename a selected EPUB/PDF/TXT whose workspace has another type."""
-        from output_workspace import (
-            rename_input_for_workspace_collision,
-            source_format_label,
-            workspace_source_format,
-        )
-
-        incoming_format = source_format_label(input_file)
-        if not incoming_format:
-            return input_file
-
-        # Resolve the unsuffixed workspace before changing the input stem. The
-        # renamed path then goes through the ordinary output-folder logic.
-        workspace = self._resolve_translation_output_dir(input_file)
-        existing_format = workspace_source_format(workspace)
-        renamed = rename_input_for_workspace_collision(input_file, workspace)
-        if renamed != input_file:
-            self.append_log(
-                f"📁 Renamed input to avoid {existing_format}/{incoming_format} "
-                f"workspace collision: {os.path.basename(input_file)} → "
-                f"{os.path.basename(renamed)}"
-            )
-        return renamed
-
     def _resolve_open_output_folder_for_file(self, file_path: str) -> str:
         """Return the output folder path used by the Open Output Folder button."""
         ext = os.path.splitext(file_path)[1].lower()
@@ -23370,64 +22965,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
         dlg.activateWindow()
         # Keep a reference so it doesn't get garbage collected
         self._preview_dialog = dlg
-
-    def _get_pdf_range_entries_for_preview(self, pdf_path, start, end):
-        """Return the exact bookmark sections (or page fallback) for a PDF range."""
-        results = []
-        use_toc = bool(getattr(self, 'pdf_use_toc_sections_var', True))
-        render_mode = str(
-            getattr(self, 'pdf_render_mode_var', 'fast_semantic') or ''
-        ).strip().lower()
-        plan = []
-
-        if use_toc and render_mode != 'image':
-            try:
-                from pdf_extractor import extract_pdf_toc_section_plan
-
-                plan = extract_pdf_toc_section_plan(pdf_path)
-            except Exception as exc:
-                print(f"⚠️ Could not preview PDF bookmark range: {exc}")
-
-        if plan:
-            for section in plan:
-                try:
-                    section_num = int(section.get('num'))
-                    start_page = int(section.get('start_page'))
-                    end_page = int(section.get('end_page'))
-                except (TypeError, ValueError):
-                    continue
-                if not (start <= section_num <= end):
-                    continue
-                title = " ".join(
-                    str(section.get('title') or f"Section {section_num}").split()
-                )
-                page_label = (
-                    f"Page {start_page}"
-                    if start_page == end_page
-                    else f"Pages {start_page}–{end_page}"
-                )
-                results.append((
-                    f"[{section_num:03d}]",
-                    f"{title}  •  {page_label}",
-                    False,
-                ))
-            return results, 'bookmark', len(plan)
-
-        page_count = 0
-        try:
-            import fitz
-
-            with fitz.open(pdf_path) as document:
-                page_count = len(document)
-        except Exception as exc:
-            print(f"⚠️ Could not preview PDF page range: {exc}")
-            return results, 'page', page_count
-
-        first_page = max(1, int(start))
-        last_page = min(int(end), page_count)
-        for page_num in range(first_page, last_page + 1):
-            results.append((f"[{page_num:03d}]", f"Page {page_num}", False))
-        return results, 'page', page_count
 
     def _create_parallel_epub_glossary_only_notice(self):
         """Build the centered, single-action notice for paired EPUB sources."""

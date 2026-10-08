@@ -80,17 +80,35 @@ dependencies = [
   "protobuf==7.35.0",
   "flatbuffers",
   "packaging",
+
+  # Tier B (U9, plan dependency rule; check_mobile_wheels.py passes for all five Android/iOS
+  # targets). grpcio 1.81.0 is the newest Android/iOS cp313 build on pypi.flet.dev, so
+  # grpcio-status (>= 1.84 needs grpcio >= 1.84) and google-api-core (it pulls grpcio-status
+  # through its [grpc] extra) are pinned with it. Only grpcio is native; the rest are py3 wheels.
+  # grpcio < 1.83 has no post-quantum (PQC) TLS: google-api-core warns (FutureWarning) on import
+  # and Google raises its minimum to grpcio >= 1.83 in April 2027, so move this pin (and the two
+  # below) once pypi.flet.dev has 1.83+ builds. runtime_bootstrap.KNOWN_WARNINGS silences that
+  # warning, and unified_api_client imports its two gRPC SDKs on first use on mobile.
+  "grpcio==1.81.0",
+  "grpcio-status==1.81.0",
+  "google-api-core==2.41.0",
+  "google-ai-generativelanguage==0.12.1",  # Gemini gRPC transport (grpc_gemini_client)
+  "google-cloud-translate==3.28.0",        # paid google-translate route (translate_v2 client, REST)
+  "google-cloud-texttospeech==2.38.0",     # Audio output mode: Google Cloud TTS voices
+  "google-cloud-vision==3.16.0",           # manga OCR (google_vision_rest stays the no-SDK fallback)
 ]
-# Tier B (added in the milestone that enables the route; check_mobile_wheels.py must pass):
-#   "grpcio==1.81.0", "grpcio-status==1.81.0", "google-cloud-translate", "google-cloud-vision",
-#   "google-cloud-texttospeech", "azure-ai-documentintelligence"
-# U8 (manga cloud OCR) leaves them out on purpose: manga_translator and the editor fall back to
-# google_vision_rest when `from google.cloud import vision` fails, and ocr_manager's Azure Document
-# Intelligence provider (it imports azure.ai.formrecognizer, mapped to azure-ai-formrecognizer in
-# backend_manifest.toml) uses azure_document_intelligence_rest on mobile. check_mobile_wheels.py
-# resolves grpcio==1.81.0 + grpcio-status==1.81.0 + google-cloud-vision 3.16.0 and
-# azure-ai-documentintelligence 1.0.2 for every Android/iOS target (2026-10-08), so they can be
-# pinned later without new wheels.
+# Tier B outcomes that add no pin (U9; details in tests_host/test_tier_b.py):
+# * google-cloud-aiplatform / vertexai: every release requires protobuf<7, which conflicts with
+#   protobuf==7.35.0 (the only Android/iOS protobuf build). Vertex routes run without them:
+#   Gemini through google-genai (vertexai=True) and Claude through anthropic.AnthropicVertex,
+#   both REST with google-auth service-account tokens; unified_api_client skips the unused
+#   aiplatform / vertexai imports on mobile only.
+# * Azure Document Intelligence: azure-ai-documentintelligence 1.0.2 (and azure-ai-formrecognizer
+#   3.3.3) resolve, but ocr_manager imports azure.ai.formrecognizer, never documentintelligence
+#   (DISCREPANCIES "U8 Integrate", OCR providers, desktop bug 3), so the REST client
+#   azure_document_intelligence_rest (U8) stays the mobile path and neither SDK is shipped.
+# * sentence-transformers (torch, hf-xet) and argostranslate (ctranslate2, sentencepiece, stanza ->
+#   torch) have no Android/iOS wheels: disabled with a reason (settings_schema UNAVAILABLE rules).
 
 [dependency-groups]
 dev = ["flet[all]==1.0.3", "pytest>=8", "pytest-asyncio>=0.24"]
@@ -120,8 +138,18 @@ module = "main"
 app = true
 packages = true
 
+# Extra cleanup on top of serious_python's own junk globs (*.c/*.h/*.pyx/*.pxd/*.a/*.pdb,
+# __pycache__, bin/, and the .py sources of compiled packages). The U9 additions are trees nothing
+# imports at run time: onnxruntime's per-model transformer optimisers (quantization, which
+# bubble_detector / local_inpainter try, imports only transformers/onnx_utils + tools), numpy's
+# f2py (numpy imports it lazily on `np.f2py`) and PyMuPDF's build-time headers/libs. Stored
+# (uncompressed) in the APK's sitepackages.zip, every file costs its full size; see README "APK size"
+# and tests_host/test_ci_release.py::test_pyproject_cleanup_keeps_runtime_files.
 [tool.flet.cleanup]
-package_files = ["**/tests/**", "**/test/**", "**/*.pyi", "cv2/data/**"]
+package_files = [
+  "**/tests/**", "**/test/**", "**/*.pyi", "cv2/data/**",
+  "onnxruntime/transformers/models/**", "numpy/f2py/**", "pymupdf/mupdf-devel/**",
+]
 
 [tool.flet.deep_linking]          # desktop/web targets only
 scheme = "glossarion"
@@ -217,6 +245,7 @@ CFBundleDocumentTypes = [
   { CFBundleTypeName = "Subtitles", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.glossarion.app.srt", "com.glossarion.app.vtt", "com.glossarion.app.ass"] },
   { CFBundleTypeName = "XLIFF", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.glossarion.app.sdlxliff", "com.glossarion.app.xliff"] },
   { CFBundleTypeName = "Glossary", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.json", "public.comma-separated-values-text"] },
+  { CFBundleTypeName = "Image", CFBundleTypeRole = "Viewer", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.image"] },
 ]
 UTImportedTypeDeclarations = [
   { UTTypeIdentifier = "com.glossarion.app.cbz", UTTypeConformsTo = ["public.zip-archive"], UTTypeDescription = "Comic Book Archive", UTTypeTagSpecification = { "public.filename-extension" = ["cbz"] } },

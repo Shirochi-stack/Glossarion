@@ -35,6 +35,7 @@ still works on the plain model list the caller passes (U3 behaviour).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass, field
@@ -54,7 +55,7 @@ from glossarion_mobile.services.model_catalog import (
     excluded_route,
 )
 from glossarion_mobile.services.oauth import sign_in_satisfied, slot_key
-from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
@@ -87,17 +88,76 @@ RECENTS_PREF = "model_recents"
 LANG_RECENTS_PREF = "language_recents"
 _SIGN_IN_ROUTES = ("authgpt", "authgem", "authgem-vertex", "authcd", "authgrok")
 
-PROVIDER_INFO = (
-    "Glossarion picks the API from the model name. Bare names go to their own provider "
-    "(gpt-* → OpenAI, gemini-* → Google, claude-* → Anthropic, deepseek-* → DeepSeek, grok-* → xAI). "
-    "Prefixes route elsewhere: or/ OpenRouter · nd/ NVIDIA NIM · groq/ · fireworks/ · together/ · "
-    "chutes/ · eh/ ElectronHub · nan/ NanoGPT · sam/ SambaNova · za/ Z.AI key · poe/ Poe (cookie) · "
-    "vertex/ Vertex AI · ollama/ and lmstudio/ local servers. Sign-in routes use your account instead of "
-    "a key: authgpt/ ChatGPT, authgem/ Gemini, authcd/ Claude, authgrok/ Grok (authgpt2/ … pick an "
-    "account slot; authgpt0/ rotates all slots). Custom prefixes (Model Manager) send any prefix to "
-    "an OpenAI-compatible base URL. Routes that need a desktop program (antigravity/, ocagy/, ocz/, "
-    "authza/, autharena/, search/opera, ollamapull/) are listed but disabled on mobile."
-)
+#: Mobile footnote under the desktop provider text (routes the phone cannot run).
+PROVIDER_INFO_MOBILE_NOTE = ("On mobile, routes that need a desktop program (antigravity/, ocagy/, ocz/, authza/, "
+                             "autharena/, search/opera, ollamapull/) are listed but disabled.")
+_PROVIDER_INFO_CACHE: dict = {}
+
+
+def provider_info_markdown() -> str:
+    """The desktop "Model Provider Information" text (``model_options.provider_info_html``, moved out of
+    TranslatorGUI._show_model_info_dialog) as Markdown for the ⓘ sheet, plus the mobile note."""
+    cached = _PROVIDER_INFO_CACHE.get("md")
+    if cached is not None:
+        return cached
+    try:
+        import model_options
+
+        html = model_options.provider_info_html()
+    except Exception as exc:  # backend not importable (host tests without src/)
+        log.debug("provider info unavailable: %s", exc)
+        return PROVIDER_INFO_MOBILE_NOTE
+    try:
+        import html2text
+
+        converter = html2text.HTML2Text()
+        converter.body_width = 0
+        converter.ignore_images = True
+        text = converter.handle(html).strip()
+    except Exception:
+        import re as _re
+
+        text = _re.sub(r"<[^>]+>", "", html).strip()
+    text = f"{text}\n\n*{PROVIDER_INFO_MOBILE_NOTE}*"
+    _PROVIDER_INFO_CACHE["md"] = text
+    return text
+
+
+#: Routes whose client needs a package this build does not ship (plan dependency rule; the stored
+#: key / cookie is kept): route prefix -> (import name, ReasonChip, detail)
+DEPENDENCY_ROUTES = {
+    "poe/": ("poe_api_wrapper", "Needs poe-api-wrapper · not in this build",
+             "The Poe client (poe-api-wrapper) has no Android / iOS build (backend_manifest: desktop-only Poe "
+             "client), so poe/ models cannot run on mobile. The saved p-b cookie is kept for the desktop."),
+}
+#: Browser-backed keyless routes (they run in the hidden in-app browser, services.webview_bridge).
+WEBVIEW_ROUTES = ("authnd/", "search/gemini")
+
+
+def dependency_reason(model: str) -> Optional[tuple]:
+    """(ReasonChip, detail) when the model's route cannot run in this build, else None."""
+    lowered = str(model or "").strip().lower()
+    for prefix, (module, chip, detail) in DEPENDENCY_ROUTES.items():
+        if lowered.startswith(prefix):
+            import importlib.util
+
+            try:
+                found = importlib.util.find_spec(module) is not None
+            except (ImportError, ValueError):
+                found = False
+            return None if found else (chip, detail)
+    if lowered.startswith(WEBVIEW_ROUTES):
+        try:
+            from glossarion_mobile.services import webview_bridge
+
+            available, reason = webview_bridge.availability()
+        except Exception:
+            available, reason = False, ""
+        if not available:
+            from glossarion_mobile.ui.screens.accounts import NEEDS_WEBVIEW_CHIP
+
+            return NEEDS_WEBVIEW_CHIP, reason or "The in-app browser is not available in this session."
+    return None
 
 
 # ---- U3 compatibility helpers (model_sheet_min) ------------------------------------------------------
@@ -149,6 +209,14 @@ class SheetEnv:
     signed_in_keys: Optional[Callable[[], Any]] = None  # -> set of "authgpt", "authgpt2", ...
     test_key: Optional[Callable[..., Any]] = None  # async (api_key, model) -> result dict
     tablet: Callable[[], bool] = field(default=lambda: False)
+    # U9: (route) -> the next free account slot ("+ Add account": OAuthBridge.next_slot)
+    next_slot: Optional[Callable[[str], int]] = None
+    # U9: (account id) -> shows the 📊 Gemini status sheet (OAuthBridge.gemini_status; desktop authgem
+    # status button next to the Gemini login)
+    gemini_status: Optional[Callable[[int], Any]] = None
+    # U9: (model) -> an ``accounts.GcpProjectPicker`` for the route row of authgem-vertex/ models (the Accounts
+    # project dropdown: billing marks, desktop selection rule, authgem_auth project cache)
+    gcp_project_picker: Optional[Callable[[str], Any]] = None
 
 
 _SHEET_ENV: Optional[SheetEnv] = None
@@ -265,6 +333,7 @@ class ModelSheet:
         )
         self.search = ft.TextField(hint_text="Search models", prefix_icon=ft.Icons.SEARCH, dense=True,
                                    on_change=lambda e: self.set_query(e.control.value or ""),
+                                   on_submit=self.submit_query,
                                    border_radius=tokens.RADII["field"])
         self.chips: dict = {}
         for chip_id, label in PROVIDER_CHIPS:
@@ -418,6 +487,8 @@ class ModelSheet:
         """(state, action label or None): ready · sign_in · add_key · excluded."""
         if excluded_route(model):
             return "excluded", None
+        if dependency_reason(model) is not None:
+            return "unavailable", None
         route, _account = mc.login_route(model)
         if route in _SIGN_IN_ROUTES:
             if not self.signed_in(model):
@@ -445,6 +516,10 @@ class ModelSheet:
         if state == "excluded":
             dot = _dot(ft.Colors.OUTLINE, "Not available on mobile")
             trailing: Any = ReasonChip(reason="Not available on mobile", detail=excluded_detail(model) or excluded_route(model))
+        elif state == "unavailable":
+            chip, detail = dependency_reason(model) or ("Not available", "")
+            dot = _dot(ft.Colors.OUTLINE, chip)
+            trailing = ReasonChip(reason=chip, detail=detail)
         elif state == "sign_in":
             dot = _dot(semantic("warning"), "Needs sign-in")
             trailing = ft.TextButton(content=action, on_click=lambda e, m=model: self._sign_in(m))
@@ -469,7 +544,7 @@ class ModelSheet:
             selected=selected,
             dense=True,
             min_height=56,
-            on_click=None if state == "excluded" else (lambda e, m=model: self.select("model", m)),
+            on_click=None if state in ("excluded", "unavailable") else (lambda e, m=model: self.select("model", m)),
             on_long_press=lambda e, m=model: self.open_row_actions(m),
             key=f"model-{section}-{model}",  # unique per section (a model can be listed twice)
         )
@@ -487,6 +562,8 @@ class ModelSheet:
                                           disabled=polling or mc.provider_excluded(provider),
                                           size_constraints=HIT_TARGET, icon_size=18, key=f"refresh-{provider}"))
         status = self.snapshot.statuses.get(provider) if provider else None
+        if status and provider is not None and mc.provider_excluded(provider):
+            status = mc.EXCLUDED_STATUS  # never a poll error for a route that cannot run here
         body: ft.Control = ft.Row(controls, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         if status and provider is not None:
             body = ft.Column([body, ft.Text(str(status), theme_style=ft.TextThemeStyle.BODY_SMALL,
@@ -494,8 +571,8 @@ class ModelSheet:
         header: ft.Control = ft.Container(content=body, padding=ft.Padding.only(left=12, right=4, top=6),
                                           key=f"group-{provider or title}")
         if polling:
-            header = ft.Shimmer(content=header, base_color=ft.Colors.PRIMARY_CONTAINER,
-                                highlight_color=ft.Colors.SURFACE)
+            # a static tint under reduce motion (UI_SPEC §6.3)
+            header = motion.shimmer(header, base_color=ft.Colors.PRIMARY_CONTAINER, highlight_color=ft.Colors.SURFACE)
         if provider is not None:
             self.group_headers[provider] = header
         return header
@@ -531,7 +608,11 @@ class ModelSheet:
         models = self.visible_models()
         if self.query.strip():
             ranked = filter_models(models, self.query, limit=MAX_ROWS)
-            return [self._model_row(m, "search") for m in ranked]
+            rows = [self._model_row(m, "search") for m in ranked]
+            typed = self.free_text_row()
+            if typed is not None:
+                rows.insert(0, typed)
+            return rows
         out: list = []
         current = self.current["model"]
         if current and current not in models and (self.chip == "all"):
@@ -546,6 +627,10 @@ class ModelSheet:
         if recents:
             out.append(self._section_header("Recent"))
             out.extend(self._model_row(m, "recent") for m in recents)
+        aliases = self.account_aliases()
+        if aliases:
+            out.append(self._section_header("Account aliases"))
+            out.extend(self._model_row(m, "aliases") for m in aliases)
         routes = list(self.snapshot.custom_routes)
         groups = mc.group_models(models, routes, polled=self.is_polled)
         budget = MAX_ROWS
@@ -561,6 +646,102 @@ class ModelSheet:
                 "Loading the model list…"
             out.append(ft.Container(content=ft.Text(message, color=ft.Colors.ON_SURFACE_VARIANT),
                                     padding=ft.Padding.all(12), key="models-empty"))
+        return out
+
+    def typed_model(self) -> str:
+        """The search text as a model id when no listed model is exactly that (the desktop model box is an
+        editable combo: any typed or pasted id is used as is), else ''."""
+        needle = self.query.strip()
+        if not needle:
+            return ""
+        listed = set(self.snapshot.visible_models()) | {str(self.current.get("model") or "")}
+        return "" if needle in listed else needle
+
+    def free_text_row(self) -> Optional[ft.Control]:
+        """``Use “<typed id>”`` at the top of the search results (like the Language tab's free-text row);
+        an excluded route is shown disabled with its reason."""
+        needle = self.typed_model()
+        if not needle:
+            return None
+        reason = excluded_route(needle)
+        return ft.ListTile(
+            title=ft.Text(f"Use “{needle}”", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(reason or "Not in the model list · used exactly as typed",
+                             theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+            leading=ft.Icon(ft.Icons.EDIT), dense=True, disabled=bool(reason),
+            on_click=None if reason else (lambda e, v=needle: self.select("model", v)),
+            key="model-free-text",
+        )
+
+    def submit_query(self, e: Any = None) -> None:
+        """Search field Enter: the typed id (Model tab) / language (Language tab) like its free-text row,
+        else the single remaining match."""
+        needle = self.query.strip()
+        if not needle:
+            return
+        if self.tab == "model":
+            typed = self.typed_model()
+            if typed and not excluded_route(typed):
+                self.select("model", typed)
+                return
+            ranked = filter_models(self.visible_models(), needle, limit=2)
+            if len(ranked) == 1 or (ranked and ranked[0] == needle):
+                self.select("model", ranked[0])
+        elif self.tab == "language":
+            names = list(self.languages)
+            exact = next((v for v in names if v.casefold() == needle.casefold()), None)
+            self.select("language", exact or needle)
+
+    def signed_in_slots(self, route: str) -> list:
+        """Signed-in account slots of a sign-in route (from ``signed_in_keys``: authgpt, authgpt2, …)."""
+        getter = self.env.signed_in_keys
+        if getter is None or not route:
+            return []
+        try:
+            keys = set(getter() or ())
+        except Exception:
+            return []
+        slots: set = set()
+        for key in keys:
+            text = str(key)
+            if text == route:
+                slots.add(0)
+            elif text.startswith(route) and text[len(route):].isdigit():
+                slots.add(int(text[len(route):]))
+        return sorted(slots)
+
+    def account_aliases(self) -> list:
+        """UI_SPEC §2.2 "Account aliases": the current sign-in model under every signed-in slot
+        (``model_options.numbered_model_completion_values`` renders ``authgpt2/…`` from the canonical
+        route), plus the rotating pool alias (``authgpt0/…``) when more than one slot is signed in."""
+        current = str(self.current.get("model") or "")
+        route, account = mc.login_route(current)
+        if not route:
+            return []
+        slots = self.signed_in_slots(route)
+        if not slots:
+            return []
+        rest = current.split("/", 1)[1] if "/" in current else ""
+        canonical = f"{route}/{rest}"
+        try:
+            import model_options
+
+            render = model_options.numbered_model_completion_values
+        except Exception:
+            render = None
+        out: list = []
+        wanted = [n for n in slots if n] + ([0] if len(slots) > 1 and route in ("authgpt", "authgrok", "authgem-vertex")
+                                           else [])
+        for slot in wanted:
+            if render is not None:
+                values = render([canonical], f"{route}{slot}/")
+                alias = values[0] if values else f"{route}{slot}/{rest}"
+            else:
+                alias = f"{route}{slot}/{rest}"
+            if alias != current and alias not in out:
+                out.append(alias)
+        if account and canonical != current and 0 in slots:
+            out.insert(0, canonical)
         return out
 
     def refresh(self) -> None:
@@ -727,6 +908,17 @@ class ModelSheet:
                                     ReasonChip(reason="Not available on mobile", detail=info.excluded_detail)],
                                    key="route-excluded"))
             return controls
+        missing = dependency_reason(info.model)
+        if missing is not None:
+            chip, detail = missing
+            controls.append(ft.Row([ft.Text(detail, color=ft.Colors.ON_SURFACE_VARIANT, expand=True,
+                                            theme_style=ft.TextThemeStyle.BODY_SMALL),
+                                    ReasonChip(reason=chip, detail=detail)], key="route-dependency"))
+            if info.poe:
+                controls.append(ft.Row([ft.FilledTonalButton(content="Poe setup", icon=ft.Icons.COOKIE_OUTLINED,
+                                                             disabled=True, key="route-poe"),
+                                        ReasonChip(reason=chip, detail=detail)], wrap=True))
+            return controls
         if info.logins:
             own_route, _own_account = mc.login_route(info.model)
             chips: list = []
@@ -740,6 +932,11 @@ class ModelSheet:
                 chips.append(ft.Chip(label=ft.Text(label), leading=ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED, size=18),
                                      on_click=lambda e, r=login, a=account: self._sign_in_route(r, a),
                                      key=f"route-login-{login}"))
+                chips.append(self._slot_menu(login, account))
+                if login == "authgem" and signed and self.env.gemini_status is not None:
+                    chips.append(ft.IconButton(icon=ft.Icons.INSIGHTS, tooltip="📊 Gemini status (quota, verification)",
+                                               on_click=lambda e, a=account: self._gemini_status(a),
+                                               size_constraints=HIT_TARGET, key="route-authgem-status"))
             controls.append(ft.Row([*chips, ft.TextButton(content="Accounts", on_click=lambda e: self._accounts())],
                                    wrap=True, spacing=6))
         if info.needs_key and self.env.store is not None:
@@ -770,7 +967,11 @@ class ModelSheet:
         if info.vertex_location:
             tile_keys.append("vertex_ai_location")
         if info.gcp_project:
-            tile_keys.append("authgem_project")
+            picker = self._gcp_picker(info.model)
+            if picker is not None:
+                controls.append(picker)
+            else:  # no OAuthBridge in this session: the plain project id tile
+                tile_keys.append("authgem_project")
         for key in tile_keys:
             tile = self._schema_tile(key)
             if tile is not None:
@@ -779,6 +980,24 @@ class ModelSheet:
                 controls.append(ft.TextButton(content=f"Set {key} in Settings",
                                               on_click=lambda e: self._nav("settings")))
         return controls
+
+    def _gcp_picker(self, model: str) -> Any:
+        """The GCP project picker control for ``model`` (built once per sheet and model), else None."""
+        factory = self.env.gcp_project_picker
+        if factory is None:
+            return None
+        cached = getattr(self, "_gcp_picker_cache", None)
+        if cached is not None and cached[0] == model:
+            return cached[1]
+        try:
+            picker = factory(model)
+            control = picker.build() if picker is not None else None
+        except Exception:
+            log.exception("building the GCP project picker failed")
+            return None
+        self.gcp_picker = picker
+        self._gcp_picker_cache = (model, control)
+        return control
 
     def _schema_tile(self, key: str) -> Any:
         """The shared settings tile for ``key``, built once per sheet (tiles mutate in place)."""
@@ -823,7 +1042,7 @@ class ModelSheet:
                 controls.append(tile.control)
         if not controls:
             controls.append(ft.TextButton(content="Open Settings › Thinking & reasoning",
-                                          on_click=lambda e: self._nav("settings")))
+                                          on_click=lambda e: self._nav("settings.section", {"section": "thinking"})))
         controls.append(ft.Text("Thinking values are global settings (Chat settings › Disable all thinking turns "
                                 "them off for one chat).", theme_style=ft.TextThemeStyle.BODY_SMALL,
                                 color=ft.Colors.ON_SURFACE_VARIANT))
@@ -855,6 +1074,34 @@ class ModelSheet:
         if self.on_select is not None:
             self.on_select(field_name, value, chat_scope)
 
+    def _slot_menu(self, route: str, account: int) -> ft.Control:
+        """Appendix A LoginChip slot menu "#1 ▾": the signed-in slots (use that account's model alias)
+        and "+ Add account" (the next free slot's LoginSheet)."""
+        items: list = []
+        current = str(self.current.get("model") or "")
+        rest = current.split("/", 1)[1] if "/" in current else ""
+        for slot in self.signed_in_slots(route):
+            alias = f"{route}{slot}/{rest}" if slot else f"{route}/{rest}"
+            items.append(ft.PopupMenuItem(content=f"#{slot or 1} · {alias}" + (" ✓" if slot == account else ""),
+                                          on_click=lambda e, m=alias: self.select("model", m)))
+        items.append(ft.PopupMenuItem(content="+ Add account", icon=ft.Icons.PERSON_ADD_ALT,
+                                      on_click=lambda e, r=route: self._add_account(r)))
+        return ft.PopupMenuButton(icon=ft.Icons.ARROW_DROP_DOWN, tooltip="Account slots", items=items,
+                                  key=f"route-slots-{route}")
+
+    def _add_account(self, route: str) -> None:
+        slot = 1
+        next_slot = self.env.next_slot
+        if next_slot is not None:
+            try:
+                slot = int(next_slot(route))
+            except Exception:
+                log.debug("next account slot failed for %s", route, exc_info=True)
+        else:
+            known = self.signed_in_slots(route)
+            slot = (max(known) + 1) if known else 1
+        self._sign_in_route(route, slot)
+
     def _sign_in(self, model: str) -> None:
         route, account = mc.login_route(model)
         self._sign_in_route(route or "authgpt", account)
@@ -875,11 +1122,25 @@ class ModelSheet:
         else:
             self._nav("settings.accounts")
 
-    def _nav(self, route_name: str) -> None:
+    def _gemini_status(self, account_id: int) -> Any:
+        """The route row's 📊: the same Gemini status sheet as Accounts › slot ⋯ › 📊 Status."""
+        handler = self.env.gemini_status
+        if handler is None:
+            return None
+        result = handler(int(account_id or 0))
+        if asyncio.iscoroutine(result):
+            spawn = self.env.spawn
+            return spawn(result) if spawn is not None else asyncio.ensure_future(result)
+        return result
+
+    def _nav(self, route_name: str, params: Optional[dict] = None) -> None:
         self.close()
         navigate = self.env.navigate
         if navigate is not None:
-            navigate(route_name)
+            if params:
+                navigate(route_name, params)
+            else:
+                navigate(route_name)
 
     def _say(self, message: str) -> None:
         if self.env.notify is not None:
@@ -962,12 +1223,13 @@ class ModelSheet:
         return None
 
     def open_provider_info(self, e: Any = None, *, provider: Optional[str] = None) -> InfoSheet:
-        title = "Model providers" if provider is None else mc.provider_label(provider)
-        body = PROVIDER_INFO
+        """ⓘ: the desktop "Model Provider Information" (shared text) with the provider's catalog status."""
+        title = "Model Provider Information" if provider is None else mc.provider_label(provider)
+        body = provider_info_markdown()
         if provider is not None:
             status = self.snapshot.statuses.get(provider)
-            body = (f"Catalog status: {status}\n\n" if status else "") + PROVIDER_INFO
-        sheet = InfoSheet(title=title, body=body)
+            body = (f"**Catalog status:** {status}\n\n" if status else "") + body
+        sheet = InfoSheet(title=title, body=body, markdown=True)
         if self._page is not None:
             sheet.show(self._page)
         return sheet
@@ -1129,8 +1391,13 @@ class PoeSetupSheet:
                               on_test=(lambda value: self.env.test_key(self.api_key_for(value), self.model))
                               if self.env.test_key is not None else None,
                               read_clipboard=self.env.read_clipboard, copy_text=self.env.copy_text, key="poe-cookie")
+        missing = dependency_reason("poe/")
+        self.missing = missing
+        if missing is not None:  # dependency rule: shown, disabled, the cookie kept
+            self.field.disabled = True
         controls: list = [
             ft.Text("POE Cookie Authentication", theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
+            *([ft.Row([ReasonChip(reason=missing[0], detail=missing[1])], key="poe-missing")] if missing else []),
             ft.Row([ft.Icon(ft.Icons.WARNING_AMBER, color=semantic("warning")),
                     ft.Text("The poe/ route is deprecated and may stop working.", expand=True)]),
             ft.Text("⚠️ POE uses HttpOnly cookies that cannot be accessed by JavaScript", color=ft.Colors.ERROR,

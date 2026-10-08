@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1-U7 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1-U7 and U9 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -370,6 +370,16 @@ U8_MANGA_MODULES = (
     "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
     "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
 )
+# U9: authnd_auth and gemini_free import the browser-driver seam (the mobile WebViewBridge registers
+# a driver; the desktop keeps its QtWebEngine helpers) and update_manager.UpdateManager inherits the
+# GUI-free release check (update_core), all at module level, so every tier ships them.
+U9_SHARED_MODULES = ("browser_driver", "update_core")
+#: Desktop or shared module -> the U9 cores it imports at module level.
+U9_IMPORTERS = {
+    "authnd_auth": ("browser_driver",),
+    "gemini_free": ("browser_driver",),
+    "update_manager": ("update_core",),
+}
 MANGA_FULL_SPECS = ("translator_Heavy.spec", "translator_NoCuda.spec", "translator_linux_NoCuda.spec")
 MANGA_FILES_ONLY_SPECS = ("translator_lite_mac_NoCuda.spec", "translator_lite_mac_intel_NoCuda.spec")
 #: Manga module -> the U8 cores it imports at module level.
@@ -395,7 +405,7 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
         for name in (U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES + U4_SHARED_MODULES
-                     + U5_SHARED_MODULES + U6_SHARED_MODULES + U7_SHARED_MODULES):
+                     + U5_SHARED_MODULES + U6_SHARED_MODULES + U7_SHARED_MODULES + U9_SHARED_MODULES):
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")
@@ -493,4 +503,16 @@ def test_u8_modules_are_imported_by_the_manga_stack_and_stay_gui_free():
     gui = {"PySide6", "translator_gui", "dpi_setup", "manga_integration", "manga_settings_dialog",
            "manga_image_preview", "ImageRenderer", "epub_library"}
     for name in U8_MANGA_MODULES:
+        assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)
+
+
+def test_u9_modules_are_imported_by_the_desktop_and_stay_gui_free():
+    """The U9 cores are module-level imports of their desktop / shared callers (hence every spec,
+    including the Lite tiers) and never import Qt, the GUI modules they serve or the manga stack."""
+    for importer, cores in U9_IMPORTERS.items():
+        for core in cores:
+            assert core in _top_level_imports(importer), (importer, core)
+    gui = {"PySide6", "translator_gui", "dpi_setup", "update_manager", "authnd_auth", "gemini_free",
+           "epub_library", "manga_integration", "manga_translator"}
+    for name in U9_SHARED_MODULES:
         assert not _top_level_imports(name) & gui, (name, _top_level_imports(name) & gui)

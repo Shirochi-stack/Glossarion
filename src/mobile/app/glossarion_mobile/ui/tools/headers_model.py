@@ -46,6 +46,7 @@ __all__ = [
     "headers_spec",
     "metadata_spec",
     "plan_artifact_delete",
+    "reset_prompt_changes",
     "saved_selection",
 ]
 
@@ -136,7 +137,23 @@ PROMPT_GROUPS = (
     ("Book Title", ("book_title_system_prompt", "book_title_prompt")),
     ("Chapter Headers", ("batch_header_system_prompt", "batch_header_prompt", "batch_header_prepend_number_pattern")),
     ("Metadata Fields", ("metadata_system_prompt", "metadata_batch_prompt", "metadata_field_prompts")),
+    # the dialog's ⚙️ Advanced tab: Language Detection radios + "Language to use", Output Language
+    ("Advanced", ("lang_prompt_behavior", "forced_source_lang", "output_language")),
 )
+
+
+def reset_prompt_changes(config: Mapping[str, Any]) -> tuple:
+    """``(keys to remove, {key: value} to write)`` for "Reset all prompts to defaults" on ``config``
+    (``metadata_defaults.reset_metadata_prompts``: the desktop ``_reset_all_prompts_to_defaults`` key
+    list, ``book_title_prompt`` blanked, the default prompts re-seeded)."""
+    from metadata_defaults import reset_metadata_prompts
+
+    before = dict(config)
+    after = dict(config)
+    reset_metadata_prompts(after)
+    removed = tuple(key for key in before if key not in after)
+    written = {key: value for key, value in after.items() if key not in before or before[key] != value}
+    return removed, written
 
 
 def detect_fields(epub_path: str, log: Callable[[str], Any] = lambda _m: None) -> dict:

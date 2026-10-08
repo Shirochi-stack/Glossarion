@@ -21,6 +21,7 @@ import copy
 
 from language_options import TARGET_LANGUAGES
 from manga_settings_defaults import default_manga_settings
+from manga_settings_defaults import MASK_PRESETS  # U9: shared with mobile
 
 # Use the same logging infrastructure initialized by translator_gui
 logger = logging.getLogger(__name__)
@@ -1589,7 +1590,7 @@ class MangaSettingsDialog(QDialog):
                 background-color: #2a6c95;
             }
         """)
-        bw_manga_btn.clicked.connect(lambda: self._set_mask_preset(15, False, 2, 2, 3, 0))
+        bw_manga_btn.clicked.connect(lambda: self._set_mask_preset(*MASK_PRESETS['bw_manga'][1]))
         preset_layout.addWidget(bw_manga_btn)
         
         colored_btn = QPushButton("Colored")
@@ -1609,7 +1610,7 @@ class MangaSettingsDialog(QDialog):
                 background-color: #2a6c95;
             }
         """)
-        colored_btn.clicked.connect(lambda: self._set_mask_preset(15, False, 2, 2, 3, 3))
+        colored_btn.clicked.connect(lambda: self._set_mask_preset(*MASK_PRESETS['colored'][1]))
         preset_layout.addWidget(colored_btn)
         
         uniform_btn = QPushButton("Uniform")
@@ -1629,7 +1630,7 @@ class MangaSettingsDialog(QDialog):
                 background-color: #2a6c95;
             }
         """)
-        uniform_btn.clicked.connect(lambda: self._set_mask_preset(0, True, 2, 2, 2, 0))
+        uniform_btn.clicked.connect(lambda: self._set_mask_preset(*MASK_PRESETS['uniform'][1]))
         preset_layout.addWidget(uniform_btn)
         
         preset_layout.addStretch()

@@ -909,7 +909,8 @@ def test_translate_sheet_submits_a_library_translate_job(tmp_path):
         sheet.show(session.page)
         texts = _texts(sheet.sheet.content)
         assert "Model: authgpt/gpt-6-luna" in texts and "→ English" in texts
-        assert sheet.review_switch.disabled and sheet.start_reason is None
+        # U9: the translate job honours "Review glossary before translating" (job_kinds.translate gate)
+        assert not sheet.review_switch.disabled and sheet.start_reason is None
         job = await sheet.start()
         assert job == "job1" and submitted[0].kind == "translate" and submitted[0].inputs == (str(raw),)
         assert submitted[0].origin["type"] == "library" and len(submitted[0].origin["bid"]) == 12
@@ -1674,12 +1675,13 @@ def test_pdf_without_a_workspace_is_not_offered_to_the_reader(tmp_path):
         ctx = _ctx(session.page, service)
         screen = LibraryScreen(parse_route("/library"), ctx)
 
-        def reader_item(book):
-            return next(i for i in screen.card_actions(book).items if "Open in Reader" in i.label)
+        def reader_item(book):  # the 📖 Reader item (U9: the desktop per-type labels)
+            return next(i for i in screen.card_actions(book).items if i.label.startswith("📖"))
 
         assert "another app" in (reader_item(row).disabled_reason or "")
         workspace = dict(row, output_folder=str(tmp_path / "Output" / "Manual"))
         assert reader_item(workspace).disabled_reason is None
+        assert reader_item(workspace).label.endswith("Open in EPUB reader")
         epub = rows[1][0]  # the completed Done.epub
         assert reader_item(epub).disabled_reason is None
         screen.dispose()

@@ -46,7 +46,7 @@ __all__ = ["ChatFeature", "FLUSH_LIFECYCLE_STATES", "SCREEN_ROUTES"]
 log = logging.getLogger("glossarion.chat")
 
 FLUSH_LIFECYCLE_STATES = ("inactive", "hide", "pause", "detach")
-SCREEN_ROUTES = ("settings.accounts", "welcome", "chat.message.edit", "chat.attachments")
+SCREEN_ROUTES = ("settings.accounts", "welcome", "chat.message.edit", "chat.attachments", "chat.compose")
 WELCOME_PREF = "welcome_completed"
 
 
@@ -144,6 +144,8 @@ class ChatFeature:
         self._share: Any = None
         self._unsubs: list = []
         self.welcome_shown = False
+        #: Extra long-press sheet rows after Pin (U9 Series' "Move to Series…"): ``chat -> [ActionItem]``.
+        self.chat_action_providers: list = []
 
     # ---- threading -------------------------------------------------------------------------
 
@@ -201,6 +203,9 @@ class ChatFeature:
             open_output=self.open_output,
             open_reader=self.open_reader,
             pick_files=self.pick_files,
+            pick_folder=self.pick_folder,
+            open_tool_with_source=self.open_tool_with_source,
+            tools_context=self.tools_context,
             import_file=self.import_file,
             push_overlay=self.push_overlay,
             pop_overlay=self.pop_overlay,
@@ -236,6 +241,11 @@ class ChatFeature:
         chat_view = getattr(app, "chat_view", None)
         if chat_view is not None:
             chat_view.bind(self.env)
+            extras = getattr(getattr(getattr(app, "settings", None), "ctx", None), "extras", None)
+            if isinstance(extras, dict):
+                # Settings › Direct Text › "Edit in Chat settings › All chats…" (section_page STATIC_LINKS)
+                extras.setdefault("actions", {})["chat_settings_global"] = (
+                    lambda: chat_view.open_chat_settings(scope="global"))
         self.runs.attach()
         shell = getattr(app, "shell", None)
         if shell is not None and self._fallback_factory is None:
@@ -374,6 +384,15 @@ class ChatFeature:
             if chat_view.cid != cid:
                 chat_view.load_chat(cid)
             return chat_view.attachments_screen(match)
+        if match.name == "chat.compose":
+            chat_view = getattr(self.app, "chat_view", None)
+            if chat_view is None:
+                return None
+            cid = str(match.params.get("cid"))
+            if chat_view.bound and self.chats.session(cid) is not None and chat_view.cid != cid:
+                self._select_chat(cid)
+                chat_view.load_chat(cid)
+            return chat_view.compose_screen(match, on_close=lambda: getattr(self.app, "back", lambda: None)())
         if match.name == "chat.message.edit":
             from glossarion_mobile.ui.screens.output_editor import OutputEditorScreen
 
@@ -428,7 +447,13 @@ class ChatFeature:
 
         def done(updates: dict) -> None:
             if env is not None:
-                env.config_set_many(updates)
+                updates = dict(updates)
+                language = updates.pop("output_language", None)
+                env.config_set_many(updates)  # the desktop welcome's glossary-page writes
+                if language:  # the main-window Target Language combo's fan-out
+                    from glossarion_mobile.state.setting_writes import write_setting
+
+                    write_setting(env.store, "output_language", language)
             prefs = getattr(self.app, "prefs", None)
             if prefs is not None:
                 try:
@@ -513,6 +538,52 @@ class ChatFeature:
             log.warning("file picker failed: %s", exc)
             return []
         return [f.path for f in (picked or []) if getattr(f, "path", None)]
+
+    async def pick_folder(self) -> Optional[str]:
+        """FileBridge.pick_folder: the folder copied into the Inbox (``FolderPickUnavailable`` propagates)."""
+        files_service = getattr(self.app, "files", None)
+        picker = getattr(files_service, "pick_folder", None)
+        if not callable(picker):
+            from glossarion_mobile.services.files import FolderPickUnavailable
+
+            raise FolderPickUnavailable("Folder picking is not available in this session")
+        folder = await picker(dialog_title="Select Folder Containing Files to Translate")
+        return str(getattr(folder, "path", folder) or "") or None
+
+    def tools_context(self) -> Any:
+        """The Tools feature's ToolsContext (installed after the chat), else None."""
+        tools = getattr(self.app, "tools", None)
+        context = getattr(tools, "context", None)
+        if not callable(context):
+            return None
+        try:
+            return context()
+        except Exception:
+            log.exception("building the tools context failed")
+            return None
+
+    def open_tool_with_source(self, route_name: str, path: str) -> Optional[str]:
+        """Open a tool screen with ``path`` preselected as its source (Tools › Async batch: the Plan card's
+        "Run as async batch"): the tool's per-session state gets a chat-origin ToolTarget."""
+        tools = getattr(self.app, "tools", None)
+        state = getattr(tools, "tool_state", None)
+        if not isinstance(state, dict) or not path:
+            return None
+        try:
+            from glossarion_mobile.ui.tools.targets import ToolTarget
+
+            ext = os.path.splitext(path)[1].lower().lstrip(".")
+            target = ToolTarget(title=os.path.basename(path), source=path, origin="chat",
+                                kind=ext if ext in ("epub", "pdf", "txt") else "other")
+        except Exception:
+            log.exception("building the tool target failed")
+            return None
+        tool = route_name.rsplit(".", 1)[-1]
+        state.setdefault(tool, {})["target"] = target
+        navigate = getattr(self.app, "navigate_to", None)
+        if callable(navigate):
+            navigate(route_name)
+        return route_name
 
     def import_file(self, path: str) -> str:
         """Blocking: an app-owned copy of a picked file (FileBridge Inbox) when the bridge exists."""
@@ -608,9 +679,10 @@ class ChatFeature:
             return reader.open_book(found["book"])
         return reader.open_book(path=found["path"])
 
-    async def open_progress(self, folder: str, source: str = "") -> Optional[str]:
+    async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None) -> Optional[str]:
         """A chat workspace in the Progress manager (``/tools/progress?out=<bid>``, Chapters tab): the
-        Book page over that output folder, where Retranslate / Resolve QA run (U7). Returns the route id."""
+        Book page over that output folder, where Retranslate / Resolve QA run (U7). Returns the route id.
+        ``select`` (U9 ``/retranslate <range>``): ``(start, end)`` chapters selected when the list loads."""
         app = self.app
         library = getattr(app, "library", None)
         navigate = getattr(app, "navigate_to", None)
@@ -639,6 +711,10 @@ class ChatFeature:
                 notify("No translation progress in this chat's workspace yet")
             return None
         bid = library.bid_for(book)
+        if select:
+            from glossarion_mobile.ui.library.chapters_tab import request_range_selection
+
+            request_range_selection(bid, *select)
         navigate("tools.progress", None, {"out": bid})
         return bid
 
@@ -698,14 +774,68 @@ class ChatFeature:
         if chat_view is not None:
             chat_view.header.set_attachments(chat_view._attachment_count(chat_view.cid))
 
-    def open_output(self, folder: str) -> None:
-        opener = getattr(getattr(self.app, "files", None), "open_folder", None)
-        if callable(opener):
-            opener(folder)
-            return
+    def job_workspace(self, snap: Any) -> str:
+        """A chat job's persisted ``Direct Text/<chat>/Attachments/<stem>`` workspace (Jobs › job › Files): the
+        folder of the responses of the job's user turn (``params['user_index']``, ``chat_ops.turn_workspace``),
+        else the chat's attachment folder named after the attachment; '' when there is none."""
+        from glossarion_mobile.ui.chat.chat_ops import turn_span, turn_workspace
+
+        env = self.env
+        chats = getattr(env, "chats", None) if env is not None else None
+        spec = getattr(snap, "spec", None)
+        origin = dict(getattr(spec, "origin", None) or {})
+        params = dict(getattr(spec, "params", None) or {})
+        cid = origin.get("cid")
+        if chats is None or cid is None:
+            return ""
+        try:
+            messages = list(chats.messages(cid) or [])
+        except Exception:
+            return ""
+        try:
+            user_index = int(params.get("user_index"))
+        except (TypeError, ValueError):
+            user_index = -1
+        span = turn_span(messages, user_index) if 0 <= user_index < len(messages) else []
+        folder = turn_workspace(messages, span[1:])
+        if folder:
+            return folder
+        if span:
+            message = messages[user_index]
+            if len(message) > 2 and str(message[0]) == "user_file":
+                stem = os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower()
+                try:
+                    folders = list(chats.attachment_folders(cid) or [])
+                except Exception:
+                    folders = []
+                for candidate in folders:
+                    if stem and os.path.basename(os.path.normpath(candidate)).lower() == stem:
+                        return str(candidate)
+        return ""
+
+    def open_output(self, folder: str) -> Optional[str]:
+        """A chat output folder in Files (``tools.files.folder`` with the folder's file ref, like Jobs ›
+        Files and the Book page): under the "chats" root (``Output/Direct Text``) when it lies there,
+        else the "output" root; the root itself when the folder is outside both. Returns the route."""
         navigate = getattr(self.app, "navigate_to", None)
-        if navigate is not None:
-            navigate("tools.files", {"root": "output"})
+        if navigate is None:
+            return None
+        jobs = getattr(self.app, "jobs", None)
+        roots_fn = getattr(jobs, "file_roots", None)
+        try:
+            roots = dict(roots_fn() or {}) if callable(roots_fn) else {}
+        except Exception:
+            roots = {}
+        prefs = getattr(self.app, "prefs", None)
+        folder = str(folder or "")
+        from glossarion_mobile.ui.screens.files import root_for
+
+        root = root_for(folder, roots, ("chats", "output")) if folder else None
+        if root is None or prefs is None or not hasattr(prefs, "file_ref"):
+            navigate("tools.files", {"root": root or "output"})
+            return "tools.files"
+        navigate("tools.files.folder", {"root": root, "fid": prefs.file_ref(folder)})
+        return "tools.files.folder"
 
     def push_overlay(self, view: Any) -> None:
         shell = getattr(self.app, "shell", None)
@@ -727,6 +857,15 @@ class ChatFeature:
             pass
 
     # ---- drawer row actions -------------------------------------------------------------------
+
+    def _extra_chat_actions(self, chat: Any) -> list:
+        items: list = []
+        for provider in list(self.chat_action_providers):
+            try:
+                items.extend(provider(chat) or ())
+            except Exception:
+                log.exception("chat action provider failed")
+        return items
 
     def chat_actions(self, chat: Any) -> Any:
         from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
@@ -768,6 +907,8 @@ class ChatFeature:
             items += [
                 ActionItem("Unpin" if chat.pinned else "Pin", lambda: self.chats.set_pinned(chat.cid, not chat.pinned),
                            icon="PUSH_PIN"),
+                # U9 Series: "Move to Series…" (SeriesFeature; none without it)
+                *self._extra_chat_actions(chat),
                 ActionItem(f"Attachments ({chat.attachments})", attachments, icon="ATTACH_FILE"),
                 ActionItem("Export chat", export, icon="IOS_SHARE", disabled_reason=no_view),
                 ActionItem("Duplicate as scratch",

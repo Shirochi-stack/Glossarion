@@ -3,8 +3,9 @@
 * drift: re-running src/mobile/tools/schema_extract.py reproduces the committed data;
 * every save_config settings_map key has a spec, in source order;
 * tier C: settings_schema.coerce == the desktop settings_map lambda on fuzz inputs
-  (the lambdas are compiled from the current source, wherever the shared-core move put
-  settings_map: translator_gui.save_config or settings_persistence);
+  (the lambdas are compiled from the frozen copy src/mobile/tools/frozen_desktop_tables.py
+  since U9 P5b built the desktop table from the schema; a literal still in an owner module
+  would be found after it);
 * sections cover every key exactly once; search; platform availability reasons;
 * recorded default discrepancies; fresh-install defaults vs the U0 oracle golden
   (skipped when tests/parity/golden is not captured on this machine);
@@ -66,7 +67,8 @@ def test_generated_data_is_fresh(generated):
 # --------------------------------------------------------------------------- settings_map
 def _owner_modules():
     out = []
-    for name in se.OWNER_MODULES:
+    # U9 P5b: the desktop builds settings_map from the schema; the literal is the frozen copy
+    for name in (se.FROZEN_TABLES,) + se.OWNER_MODULES:
         path = SRC / name
         if path.is_file():
             source = se.read_source(path)
@@ -78,7 +80,8 @@ def _find_settings_map():
     for name, source, tree in _owner_modules():
         for node in ast.walk(tree):
             if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "settings_map"):
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "settings_map"
+                    and isinstance(node.value, ast.List)):
                 return name, source, node.value
     raise AssertionError("settings_map not found")
 
@@ -266,8 +269,7 @@ def test_search():
     ("tor_proxy_enabled", "Tor"),
     ("auto_dpi_scale", "DPI"),
     ("authza_use_general_api", "AuthZA"),
-    ("authnd_token_concurrency", "U9"),
-    ("gemini_free_adaptive_split", "U9"),
+    ("authnd_token_subprocess_concurrency", "subprocess"),
     ("model_mousewheel_locked", "touch"),
     ("enable_gui_yield", "GUI"),
     ("multi_api_key_tree_font_size", "Key-tree"),

@@ -5,8 +5,11 @@ its account slots ("#N · email · ✓ status · token refreshes in 2 h") with �
 Log out (/ 📊 Status for Gemini), a "＋ Add account" row that takes the next free slot,
 and the rotation note (``authgpt0/`` / ``authgrok0/`` / ``authgem-vertex0/`` use every
 slot). Gemini also has the GCP project picker for ``authgem-vertex/`` (config
-``authgem_project``, desktop ``authgem_project_combo``). Experimental browser-token
-routes (AuthND, Gemini Free) and the "Unavailable on mobile" routes are always listed,
+``authgem_project``, desktop ``authgem_project_combo``). The Experimental browser-backed
+routes (AuthND, Gemini Free; no sign-in, run in hidden in-app browser pages by
+``services.webview_bridge``) are listed with an "Experimental" chip and open a sheet with
+how they work and their limitations; where flet-webview does not run (Windows/Linux dev)
+they are disabled with a ReasonChip. The "Unavailable on mobile" routes are always listed,
 disabled, with a ReasonChip.
 
 ``LoginPanel`` is the LoginSheet body shared by this screen, the Welcome flow and the
@@ -26,19 +29,21 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
+from glossarion_mobile.services import webview_bridge
 from glossarion_mobile.services.oauth import PROVIDER_INFO, PROVIDERS, OAuthBridge, SignInState, provider_for_model
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
-from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip
+from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
 __all__ = [
     "AccountsScreen",
     "EXPERIMENTAL_ACCOUNTS",
+    "GcpProjectPicker",
     "LoginPanel",
     "LoginSheet",
     "UNAVAILABLE_ACCOUNTS",
@@ -62,11 +67,21 @@ UNAVAILABLE_ACCOUNTS = (
     ("Grok CLI import", "Reads the desktop CLI credential store"),
 )
 
-#: UI_SPEC §4.13 "Experimental (U9, best effort)": browser-token routes through the WebViewBridge.
+#: UI_SPEC §4.13 Experimental (best effort): the browser-backed routes, run in hidden in-app
+#: browser pages by services.webview_bridge. (label, route, how it works).
 EXPERIMENTAL_ACCOUNTS = (
-    ("AuthND (NVIDIA Build)", "authnd/", "Experimental · arrives in U9 (off-screen WebView token bridge)"),
-    ("Gemini Free (search/gemini)", "search/gemini", "Experimental · arrives in U9 (off-screen WebView token bridge)"),
+    ("AuthND (NVIDIA Build)", "authnd/",
+     "No sign-in. For each request a hidden in-app browser opens the model's NVIDIA Build page to "
+     "get its hCaptcha token; the app then sends the request itself. Pick an "
+     "authnd/<publisher>/<model> model (Models › Poll providers lists NVIDIA Build's free models)."),
+    ("Gemini Free (search/gemini)", "search/gemini",
+     "No sign-in. A hidden in-app browser asks Google Search AI Mode and reads its answer; long "
+     "prompts are split into browser sub-chunks (Settings › Response handling › Gemini Free "
+     "browser chunking). Pick the search/gemini model."),
 )
+EXPERIMENTAL_CHIP = "Experimental"
+#: ReasonChip of the Experimental rows where the hidden in-app browser cannot run.
+NEEDS_WEBVIEW_CHIP = "Needs the in-app browser"
 
 PASTE_HINT = PROVIDER_INFO["authgpt"].paste_hint  # U3 name
 
@@ -123,6 +138,50 @@ def _sign_in_title(state: SignInState) -> str:
     info = PROVIDER_INFO.get(state.provider)
     label = info.label if info is not None else str(state.provider)
     return f"{label} #{state.account_id}" if state.account_id else label
+
+
+def gemini_status_sheet(oauth: Any, status: dict, account_id: int) -> InfoSheet:
+    """The 📊 Gemini status sheet (desktop authgem status button): verification, plan, credits, quota."""
+    suffix = f" #{account_id}" if account_id else ""
+    lines: list[str] = []
+    actions: list[ft.Control] = []
+    if status.get("error"):
+        lines.append(f"❌ Gemini{suffix} status: {status['error']}")
+    elif not status.get("verified", True):
+        lines.append(f"⚠️ Gemini{suffix}: {status.get('verification_message') or 'Account verification required'}")
+        url = status.get("verification_url") or ""
+        if url:
+            actions.append(ft.FilledTonalButton(content="Open verification page",
+                                                on_click=lambda e, u=url: oauth.open_url(u)))
+        lines.append("💡 After completing verification, check the status again to confirm.")
+    else:
+        lines.append(f"✅ Gemini{suffix}: Account verified")
+        lines.append(f"📊 {status.get('sub_label', '')} | Credits: {status.get('credit_label', '')}")
+        if status.get("project"):
+            lines.append(f"Project: {status['project']}")
+        quota = list(status.get("quota_lines") or [])
+        if quota:
+            lines.append("⚠️ Daily Quota: EXHAUSTED" if status.get("quota_exhausted") else "📊 Daily Quota:")
+            lines.extend(str(q) for q in quota)
+        else:
+            lines.append("No quota data available")
+    return InfoSheet(title=f"Gemini{suffix} status", body="\n".join(lines), actions=actions or None)
+
+
+async def open_gemini_status(oauth: Any, account_id: int, *, io: Callable[..., Any], page: Any = None,
+                             say: Optional[Callable[[str], Any]] = None) -> Optional[InfoSheet]:
+    """Read ``OAuthBridge.gemini_status`` on a worker and show the status sheet (Accounts › slot ⋯ ›
+    📊 Status and the ModelSheet route row's 📊 chip)."""
+    try:
+        status = await io(oauth.gemini_status, account_id)
+    except Exception as exc:
+        if say is not None:
+            say(f"❌ Gemini status check failed: {exc}")
+        return None
+    sheet = gemini_status_sheet(oauth, dict(status or {}), int(account_id or 0))
+    if page is not None:
+        sheet.show(page)
+    return sheet
 
 
 class LoginPanel(ft.Column):
@@ -441,6 +500,140 @@ class LoginSheet:
             close_dialog(self._page, self.dialog)
 
 
+class GcpProjectPicker:
+    """The Gemini GCP project picker (desktop ``authgem_project_combo``, config ``authgem_project``).
+
+    Accounts › Gemini and the ModelSheet route row of ``authgem-vertex/`` models (UI_SPEC §2.2) use this one
+    control: the project list of the signed-in slot (``OAuthBridge.gemini_projects``) with the desktop
+    ✅ / ❔ / ⚠️ billing marks (``gemini_project_items``) and selection rule (``gemini_project_choice``), a typed
+    project id, and the choice saved and pushed into authgem_auth's project cache (``set_gemini_project``).
+    ``slot()`` is the Gemini account slot the list and the cache belong to."""
+
+    def __init__(self, oauth: Any, *, config_get: Callable[..., Any], config_set: Optional[Callable[[dict], Any]],
+                 io: Callable[..., Any], slot: Callable[[], int], push: Optional[Callable[..., Any]] = None,
+                 key: str = "authgem-project") -> None:
+        self.oauth = oauth
+        self.config_get = config_get
+        self.config_set = config_set
+        self.io = io
+        self.slot = slot
+        self._push_fn = push
+        self.key = key
+        self.dropdown: Optional[ft.Dropdown] = None
+        self.field: Optional[ft.TextField] = None
+        self.note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.projects: list = []
+        self.control: Optional[ft.Control] = None
+
+    def _cfg(self, key: str, default: Any = None) -> Any:
+        try:
+            return self.config_get(key, default)
+        except Exception:
+            return default
+
+    def _push(self, *controls: Any) -> None:
+        if self._push_fn is not None:
+            self._push_fn(*controls)
+            return
+        for control in controls:
+            try:
+                control.update()
+            except Exception:
+                pass
+
+    def build(self) -> ft.Control:
+        current = str(self._cfg("authgem_project", "") or "")
+        self.dropdown = ft.Dropdown(
+            label="GCP project (authgem-vertex/)",
+            value=current or None,
+            options=[ft.DropdownOption(key=current, text=current)] if current else [],
+            on_select=lambda e: self.select_project(e.control.value or ""),
+            dense=True,
+            expand=True,
+            key=self.key,
+        )
+        self.field = ft.TextField(hint_text="Or type a project id", dense=True, expand=True,
+                                  on_submit=lambda e: self.select_project(e.control.value or ""))
+        self.note.value = "Vertex AI needs a Google Cloud project with billing. authgem/ (AI Studio) does not."
+        self.control = ft.Column(
+            [
+                ft.Row([self.dropdown,
+                        ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Load projects", size_constraints=HIT_TARGET,
+                                      on_click=self._on_load_projects, key=f"{self.key}-load")],
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self.field,
+                self.note,
+            ],
+            spacing=4,
+            tight=True,
+            key=f"{self.key}-picker",
+        )
+        return self.control
+
+    async def load_projects(self) -> list:
+        account_id = self.slot()
+        try:
+            projects = await self.io(self.oauth.gemini_projects, account_id)
+        except Exception as exc:
+            self.note.value = f"Could not list projects: {exc}"
+            self._push(self.note)
+            return []
+        self.projects = list(projects)
+        # The desktop dropdown items and selection rule (authgem_auth.authgem_project_items /
+        # choose_authgem_project_index); the local labels only for a build without them.
+        items = self.oauth.gemini_project_items(self.projects) if hasattr(self.oauth, "gemini_project_items") else None
+        if items is None:
+            marks = {"billed": "✅", "unknown": "❔", "unbilled": "⚠️"}
+            items = [(f"{marks.get(status, '❔')} {pid}{' (no billing)' if status == 'unbilled' else ''}", pid)
+                     for pid, status in self.projects]
+        options = [ft.DropdownOption(key=pid, text=label) for label, pid in items]
+        if self.dropdown is not None:
+            self.dropdown.options = options
+        chosen = None
+        if self.projects and hasattr(self.oauth, "gemini_project_choice"):
+            try:
+                chosen = self.oauth.gemini_project_choice(self.projects, str(self._cfg("authgem_project", "") or ""))
+            except Exception:
+                log.debug("choosing the GCP project failed", exc_info=True)
+        if chosen:
+            self.apply_project(chosen)  # desktop: the picker applies its selection at once
+        billed = [pid for pid, status in self.projects if status == "billed"]
+        self.note.value = (f"Found {len(billed)} GCP project(s) with billing enabled" if billed
+                           else "⚠️ No GCP projects with billing found — Vertex AI won't work"
+                           if self.projects else "No projects found; type a project id.")
+        self._push(self.dropdown, self.note)
+        return self.projects
+
+    async def _on_load_projects(self, e: Any = None) -> None:
+        await self.load_projects()
+
+    def apply_project(self, project_id: str) -> Optional[str]:
+        """Save and push ``project_id`` (desktop ``_authgem_project_changed``) and select it in the picker."""
+        project_id = str(project_id or "").strip()
+        if not project_id:
+            return None
+        if self.config_set is not None:
+            self.config_set({"authgem_project": project_id})
+        try:
+            self.oauth.set_gemini_project(project_id, self.slot())
+        except Exception:
+            log.debug("set_gemini_project failed", exc_info=True)
+        if self.dropdown is not None:
+            if all(getattr(o, "key", None) != project_id for o in self.dropdown.options or []):
+                self.dropdown.options = list(self.dropdown.options or []) + [
+                    ft.DropdownOption(key=project_id, text=project_id)]
+            self.dropdown.value = project_id
+        return project_id
+
+    def select_project(self, project_id: str) -> Optional[str]:
+        project_id = self.apply_project(project_id)
+        if not project_id:
+            return None
+        self.note.value = f"📁 AuthGem project set: {project_id}"
+        self._push(self.dropdown, self.note)
+        return project_id
+
+
 class AccountsScreen(Screen):
     title = "Accounts"
 
@@ -477,10 +670,8 @@ class AccountsScreen(Screen):
         self.cards: dict[str, ft.Control] = {}
         self.slot_columns: dict[str, ft.Column] = {}
         self.slot_rows: dict[tuple, ft.ListTile] = {}
-        self.project_dropdown: Optional[ft.Dropdown] = None
-        self.project_field: Optional[ft.TextField] = None
-        self.project_note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.projects: list = []
+        self.project_picker = GcpProjectPicker(oauth, config_get=self._cfg, config_set=config_set, io=self._io,
+                                               slot=self._gemini_slot, push=self._push)
         self.sheet: Any = None
         self._refresh_task: Any = None
         self._unsub: Optional[Callable[[], None]] = None
@@ -530,26 +721,51 @@ class AccountsScreen(Screen):
 
     def build_body(self) -> ft.Control:
         controls: list[ft.Control] = [self._provider_card(provider) for provider in self.providers]
-        controls.append(ft.ExpansionTile(
-            title=f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})",
-            expanded=False,
-            key="accounts-experimental",
-            controls=[
-                ft.ListTile(title=ft.Text(label), subtitle=ft.Text(route, theme_style=ft.TextThemeStyle.BODY_SMALL),
-                            trailing=ReasonChip(reason="Experimental", detail=reason), disabled=True)
-                for label, route, reason in EXPERIMENTAL_ACCOUNTS
-            ],
-        ))
+        controls.append(self._experimental_tile())
         controls.append(ft.ExpansionTile(
             title=f"Unavailable on mobile ({len(UNAVAILABLE_ACCOUNTS)})",
             expanded=True,
             key="accounts-unavailable",
-            controls=[
-                ft.ListTile(title=ft.Text(label), trailing=ReasonChip(reason=NOT_ON_MOBILE, detail=reason), disabled=True)
+            controls=[  # enabled rows: a disabled ListTile would disable (and silence) its ReasonChip
+                unavailable_tile(label, reason=NOT_ON_MOBILE, detail=reason, dense=False, key=f"unavailable-{label}")
                 for label, reason in UNAVAILABLE_ACCOUNTS
             ],
         ))
         return ft.ListView(controls=controls, expand=True, padding=12, spacing=8)
+
+    def _experimental_tile(self) -> ft.Control:
+        """UI_SPEC §4.13 Experimental: AuthND / Gemini Free. Tappable rows (how it works +
+        limitations) while the WebViewBridge is registered; disabled rows with a ReasonChip
+        where flet-webview does not run."""
+        available, reason = webview_bridge.availability()
+        rows: list[ft.Control] = []
+        for label, route, about in EXPERIMENTAL_ACCOUNTS:
+            if available:
+                rows.append(ft.ListTile(
+                    key=f"experimental-{route}",
+                    title=ft.Text(label),
+                    subtitle=ft.Text(f"{route} · no sign-in · hidden in-app browser",
+                                     theme_style=ft.TextThemeStyle.BODY_SMALL),
+                    trailing=ReasonChip(reason=EXPERIMENTAL_CHIP, detail=webview_bridge.LIMITATIONS),
+                    on_click=lambda e, title=label, text=about: self.show_experimental(title, text),
+                ))
+            else:
+                rows.append(unavailable_tile(label, reason=NEEDS_WEBVIEW_CHIP, detail=reason, subtitle=route,
+                                             dense=False, key=f"experimental-{route}"))
+        return ft.ExpansionTile(
+            title=f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})",
+            expanded=False,
+            key="accounts-experimental",
+            controls=rows,
+        )
+
+    def show_experimental(self, title: str, about: str) -> InfoSheet:
+        """How an Experimental route works and its limitations (InfoSheet)."""
+        sheet = InfoSheet(title=title, body=f"{about}\n\n{webview_bridge.LIMITATIONS}")
+        page = self._page()
+        if page is not None:
+            sheet.show(page)
+        return sheet
 
     def _provider_card(self, provider: str) -> ft.Control:
         info = PROVIDER_INFO[provider]
@@ -619,34 +835,26 @@ class AccountsScreen(Screen):
         if push:
             self._push(column)
 
-    # ---- Gemini GCP project picker -----------------------------------------------------------
+    # ---- Gemini GCP project picker (U9: GcpProjectPicker, shared with the ModelSheet route row) -----------
+
+    @property
+    def project_dropdown(self) -> Optional[ft.Dropdown]:
+        return self.project_picker.dropdown
+
+    @property
+    def project_field(self) -> Optional[ft.TextField]:
+        return self.project_picker.field
+
+    @property
+    def project_note(self) -> ft.Text:
+        return self.project_picker.note
+
+    @property
+    def projects(self) -> list:
+        return self.project_picker.projects
 
     def _project_row(self) -> ft.Control:
-        current = str(self._cfg("authgem_project", "") or "")
-        self.project_dropdown = ft.Dropdown(
-            label="GCP project (authgem-vertex/)",
-            value=current or None,
-            options=[ft.DropdownOption(key=current, text=current)] if current else [],
-            on_select=lambda e: self.select_project(e.control.value or ""),
-            dense=True,
-            expand=True,
-            key="authgem-project",
-        )
-        self.project_field = ft.TextField(hint_text="Or type a project id", dense=True, expand=True,
-                                          on_submit=lambda e: self.select_project(e.control.value or ""))
-        self.project_note.value = "Vertex AI needs a Google Cloud project with billing. authgem/ (AI Studio) does not."
-        return ft.Column(
-            [
-                ft.Row([self.project_dropdown,
-                        ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Load projects", size_constraints=HIT_TARGET,
-                                      on_click=self._on_load_projects)],
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                self.project_field,
-                self.project_note,
-            ],
-            spacing=4,
-            tight=True,
-        )
+        return self.project_picker.build()
 
     def _gemini_slot(self) -> int:
         """Slot the project picker uses: the model's Gemini slot when signed in, else the first signed-in slot."""
@@ -660,67 +868,16 @@ class AccountsScreen(Screen):
         return 0
 
     async def load_projects(self) -> list:
-        account_id = self._gemini_slot()
-        try:
-            projects = await self._io(self.oauth.gemini_projects, account_id)
-        except Exception as exc:
-            self.project_note.value = f"Could not list projects: {exc}"
-            self._push(self.project_note)
-            return []
-        self.projects = list(projects)
-        # The desktop dropdown items and selection rule (authgem_auth.authgem_project_items /
-        # choose_authgem_project_index); the local labels only for a build without them.
-        items = self.oauth.gemini_project_items(self.projects) if hasattr(self.oauth, "gemini_project_items") else None
-        if items is None:
-            marks = {"billed": "✅", "unknown": "❔", "unbilled": "⚠️"}
-            items = [(f"{marks.get(status, '❔')} {pid}{' (no billing)' if status == 'unbilled' else ''}", pid)
-                     for pid, status in self.projects]
-        options = [ft.DropdownOption(key=pid, text=label) for label, pid in items]
-        if self.project_dropdown is not None:
-            self.project_dropdown.options = options
-        chosen = None
-        if self.projects and hasattr(self.oauth, "gemini_project_choice"):
-            try:
-                chosen = self.oauth.gemini_project_choice(self.projects, str(self._cfg("authgem_project", "") or ""))
-            except Exception:
-                log.debug("choosing the GCP project failed", exc_info=True)
-        if chosen:
-            self.apply_project(chosen)  # desktop: the picker applies its selection at once
-        billed = [pid for pid, status in self.projects if status == "billed"]
-        self.project_note.value = (f"Found {len(billed)} GCP project(s) with billing enabled" if billed
-                                   else "⚠️ No GCP projects with billing found — Vertex AI won't work"
-                                   if self.projects else "No projects found; type a project id.")
-        self._push(self.project_dropdown, self.project_note)
-        return self.projects
+        return await self.project_picker.load_projects()
 
     async def _on_load_projects(self, e: Any = None) -> None:
         await self.load_projects()
 
     def apply_project(self, project_id: str) -> Optional[str]:
-        """Save and push ``project_id`` (desktop ``_authgem_project_changed``) and select it in the picker."""
-        project_id = str(project_id or "").strip()
-        if not project_id:
-            return None
-        if self.config_set is not None:
-            self.config_set({"authgem_project": project_id})
-        try:
-            self.oauth.set_gemini_project(project_id, self._gemini_slot())
-        except Exception:
-            log.debug("set_gemini_project failed", exc_info=True)
-        if self.project_dropdown is not None:
-            if all(getattr(o, "key", None) != project_id for o in self.project_dropdown.options or []):
-                self.project_dropdown.options = list(self.project_dropdown.options or []) + [
-                    ft.DropdownOption(key=project_id, text=project_id)]
-            self.project_dropdown.value = project_id
-        return project_id
+        return self.project_picker.apply_project(project_id)
 
     def select_project(self, project_id: str) -> Optional[str]:
-        project_id = self.apply_project(project_id)
-        if not project_id:
-            return None
-        self.project_note.value = f"📁 AuthGem project set: {project_id}"
-        self._push(self.project_dropdown, self.project_note)
-        return project_id
+        return self.project_picker.select_project(project_id)
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -855,39 +1012,9 @@ class AccountsScreen(Screen):
             self._spawn(self.load_projects())
 
     async def show_gemini_status(self, account_id: int) -> Optional[InfoSheet]:
-        suffix = f" #{account_id}" if account_id else ""
-        try:
-            status = await self._io(self.oauth.gemini_status, account_id)
-        except Exception as exc:
-            self._say(f"❌ Gemini status check failed: {exc}")
-            return None
-        lines: list[str] = []
-        actions: list[ft.Control] = []
-        if status.get("error"):
-            lines.append(f"❌ Gemini{suffix} status: {status['error']}")
-        elif not status.get("verified", True):
-            lines.append(f"⚠️ Gemini{suffix}: {status.get('verification_message') or 'Account verification required'}")
-            url = status.get("verification_url") or ""
-            if url:
-                actions.append(ft.FilledTonalButton(content="Open verification page",
-                                                    on_click=lambda e, u=url: self.oauth.open_url(u)))
-            lines.append("💡 After completing verification, check the status again to confirm.")
-        else:
-            lines.append(f"✅ Gemini{suffix}: Account verified")
-            lines.append(f"📊 {status.get('sub_label', '')} | Credits: {status.get('credit_label', '')}")
-            if status.get("project"):
-                lines.append(f"Project: {status['project']}")
-            quota = list(status.get("quota_lines") or [])
-            if quota:
-                lines.append("⚠️ Daily Quota: EXHAUSTED" if status.get("quota_exhausted") else "📊 Daily Quota:")
-                lines.extend(str(q) for q in quota)
-            else:
-                lines.append("No quota data available")
-        sheet = InfoSheet(title=f"Gemini{suffix} status", body="\n".join(lines), actions=actions or None)
-        self.sheet = sheet
-        page = self._page()
-        if page is not None:
-            sheet.show(page)
+        sheet = await open_gemini_status(self.oauth, account_id, io=self._io, page=self._page(), say=self._say)
+        if sheet is not None:
+            self.sheet = sheet
         return sheet
 
     def _spawn(self, coro: Any) -> Any:

@@ -31,8 +31,18 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.sheet import fits_compact, scroll_column, sheet_frame
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import targets as tg
-from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text, schema_tiles
+from glossarion_mobile.ui.tools.common import (
+    JobWatch,
+    action_button,
+    ask,
+    card,
+    failed_job_card,
+    hint_text,
+    job_failed,
+    schema_tiles,
+)
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
 __all__ = ["DISPLAY_DEFAULTS", "MODE_KEYS", "ReviewScreen", "display_style", "read_review", "review_spec"]
@@ -163,19 +173,20 @@ class ReviewScreen(Screen):
         self.picker: Optional[SourcePicker] = None
         self.display_sheet: Any = None
         self.order_sheet: Any = None
+        self.last_job: Any = None  # the review job shown in the Run card (View log, the ErrorCard)
 
     # ---- layout -----------------------------------------------------------------------------------
 
     def actions(self) -> list:
         return [ft.IconButton(icon=ft.Icons.TEXT_FIELDS, tooltip="Display", key="review-display-action",
-                              on_click=lambda e: self.open_display_sheet())]
+                              on_click=lambda e: self.open_display_sheet(), size_constraints=HIT_TARGET)]
 
     def build_body(self) -> ft.Control:
         self.book_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_MEDIUM, expand=True, key="review-book")
         self.nav_prev = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous", key="review-prev",
-                                      on_click=lambda e: self.step(-1))
+                                      on_click=lambda e: self.step(-1), size_constraints=HIT_TARGET)
         self.nav_next = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next", key="review-next",
-                                      on_click=lambda e: self.step(1))
+                                      on_click=lambda e: self.step(1), size_constraints=HIT_TARGET)
         self.token_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="review-tokens")
         books = card("Books", [
             ft.Row([self.nav_prev, self.book_text, self.nav_next], vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -208,8 +219,13 @@ class ReviewScreen(Screen):
                                              on_click=self._on_stop, key="review-stop")
         self.progress = ft.ProgressBar(visible=False, key="review-progress")
         self.run_status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="review-run-status")
-        run = card("Run", [ft.Row([self.start_button, self.all_button, self.stop_button], wrap=True, spacing=8),
-                           self.progress, self.run_status], icon="PLAY_CIRCLE", key="review-run")
+        # U9 (UI_SPEC §7.4): the job's log (Jobs › job, like the QA scanner's) and a failed run's ErrorCard
+        self.log_button = ft.TextButton(content="View log", icon=ft.Icons.TERMINAL, visible=False,
+                                        on_click=lambda e: self.view_log(), key="review-log")
+        self.error_holder = ft.Container(visible=False, key="review-error")
+        run = card("Run", [ft.Row([self.start_button, self.all_button, self.stop_button, self.log_button], wrap=True,
+                                  spacing=8),
+                           self.progress, self.run_status, self.error_holder], icon="PLAY_CIRCLE", key="review-run")
         self.output = ft.Markdown("", selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                                   md_style_sheet=display_style(self.ctx.cfg, dark=self.ctx.dark), key="review-output")
         self.output_hint = hint_text("Generated review will appear here...", key="review-output-hint")
@@ -223,7 +239,25 @@ class ReviewScreen(Screen):
     def did_show(self) -> None:
         for snap in self.watch.adopt((KIND,)):
             self._on_job_change(snap)
+        out = self.match.get("out") if self.match is not None else None
+        if out:  # Book › Output › 📝 Review (UI_SPEC §4.8): that book is the source
+            self.ctx.spawn(self.preselect_book(out))
+            return
         self.ctx.spawn(self.load_current())
+
+    async def preselect_book(self, bid: str) -> Optional[tg.ToolTarget]:
+        """``?out=<bid>``: the Library book as the review's source (like QaScannerScreen.preselect_book)."""
+        service = getattr(self.ctx, "service", None)
+        book = service.book_for_bid(bid) if service is not None else None
+        if not book:
+            await self.load_current()
+            return None
+        target = await self.ctx.io(tg.target_for_book, service, book)
+        if target is not None and target.source:
+            self.set_targets([target])
+        else:
+            await self.load_current()
+        return target
 
     def dispose(self) -> None:
         self.watch.stop()
@@ -506,12 +540,42 @@ class ReviewScreen(Screen):
             else:
                 paths, mode = [target.source], "single"
         spec = review_spec(paths, mode=mode, options=self.options(), title=target.source_name or target.title)
+        job_id = await self._submit(spec)
+        if job_id:
+            self.ctx.remember_source("tools.review", target.title)
+        return job_id
+
+    async def _submit(self, spec: Any) -> Optional[str]:
         job_id = await self.ctx.submit(spec)
         if job_id:
             self.watch.watch(job_id)
-            self.ctx.remember_source("tools.review", target.title)
+            self._show_error(None)
             self._set_running(True, "Queued…")
+            self.ctx.say("Reviewing…", "Jobs", lambda: self.ctx.go("jobs.detail", {"jid": job_id}))
         return job_id
+
+    async def retry(self, snap: Any) -> Optional[str]:
+        """ErrorCard › Retry: the failed job's own spec again."""
+        spec = getattr(snap, "spec", None)
+        if spec is None:
+            return None
+        return await self._submit(spec)
+
+    def view_log(self) -> None:
+        """View log: Jobs › job of the running (or last) review."""
+        snap = self.watch.active() or self.last_job
+        job_id = str(getattr(snap, "id", "") or "")
+        if job_id:
+            self.ctx.go("jobs.detail", {"jid": job_id})
+
+    def _show_error(self, snap: Any) -> None:
+        if snap is None:
+            self.error_holder.content = None
+            self.error_holder.visible = False
+            return
+        self.error_holder.content = failed_job_card(self.ctx, snap, key="review-error-card",
+                                                    on_retry=lambda s=snap: self.ctx.spawn(self.retry(s)))
+        self.error_holder.visible = True
 
     def _set_running(self, running: bool, text: str) -> None:
         self.progress.visible = running
@@ -529,12 +593,18 @@ class ReviewScreen(Screen):
                 log.exception("stopping the review failed")
 
     def _on_job_change(self, snap: Any) -> None:
+        self.last_job = snap
+        self.log_button.visible = True
         if not getattr(snap, "is_terminal", False):
             self._set_running(True, str(getattr(snap, "phase", "") or "Reviewing…"))
 
     def _on_job_end(self, snap: Any) -> None:
+        self.last_job = snap
+        self.log_button.visible = True
         error = getattr(snap, "error", None)
         text = "Stopped" if getattr(snap, "stopped", False) else (f"Failed: {error}" if error else "Done")
+        # UI_SPEC §7.4 Tools error state: Retry · Copy error · View log
+        self._show_error(snap if job_failed(snap) else None)
         self._set_running(False, text)
         self.ctx.spawn(self.load_current())
 

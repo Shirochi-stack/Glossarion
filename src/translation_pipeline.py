@@ -421,6 +421,64 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
 
         return results
 
+    def _get_pdf_range_entries_for_preview(self, pdf_path, start, end):
+        """Return the exact bookmark sections (or page fallback) for a PDF range."""
+        results = []
+        use_toc = bool(getattr(self, 'pdf_use_toc_sections_var', True))
+        render_mode = str(
+            getattr(self, 'pdf_render_mode_var', 'fast_semantic') or ''
+        ).strip().lower()
+        plan = []
+
+        if use_toc and render_mode != 'image':
+            try:
+                from pdf_extractor import extract_pdf_toc_section_plan
+
+                plan = extract_pdf_toc_section_plan(pdf_path)
+            except Exception as exc:
+                print(f"⚠️ Could not preview PDF bookmark range: {exc}")
+
+        if plan:
+            for section in plan:
+                try:
+                    section_num = int(section.get('num'))
+                    start_page = int(section.get('start_page'))
+                    end_page = int(section.get('end_page'))
+                except (TypeError, ValueError):
+                    continue
+                if not (start <= section_num <= end):
+                    continue
+                title = " ".join(
+                    str(section.get('title') or f"Section {section_num}").split()
+                )
+                page_label = (
+                    f"Page {start_page}"
+                    if start_page == end_page
+                    else f"Pages {start_page}–{end_page}"
+                )
+                results.append((
+                    f"[{section_num:03d}]",
+                    f"{title}  •  {page_label}",
+                    False,
+                ))
+            return results, 'bookmark', len(plan)
+
+        page_count = 0
+        try:
+            import fitz
+
+            with fitz.open(pdf_path) as document:
+                page_count = len(document)
+        except Exception as exc:
+            print(f"⚠️ Could not preview PDF page range: {exc}")
+            return results, 'page', page_count
+
+        first_page = max(1, int(start))
+        last_page = min(int(end), page_count)
+        for page_num in range(first_page, last_page + 1):
+            results.append((f"[{page_num:03d}]", f"Page {page_num}", False))
+        return results, 'page', page_count
+
     def _get_opf_file_order(self, file_list):
         """
         Sort files based on OPF spine order if available.

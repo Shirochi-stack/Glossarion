@@ -8175,6 +8175,70 @@ def _request_graceful_stop(mi):
         print("[STOP] Set _global_cancellation on manga_integration")
 
 
+def _delete_translated_outputs(self):
+    """Clear Boxes: delete the page's translated output image (never the cleaned one) from the
+    ``<name>_translated`` folder under the OUTPUT_DIRECTORY override and the source folder (lifted
+    verbatim from manga_image_preview's ``_on_clear_boxes_clicked`` in U9; ``self`` is the preview
+    widget: ``current_image_path`` and ``main_gui``)."""
+    if self.current_image_path:
+        # Get OUTPUT_DIRECTORY override if set
+        override_dir = None
+        if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+            override_dir = self.main_gui.config.get('output_directory', '')
+        if not override_dir:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+
+        source_dir = os.path.dirname(self.current_image_path)
+        source_filename = os.path.basename(self.current_image_path)
+        source_name_no_ext = os.path.splitext(source_filename)[0]
+
+        # Build list of directories to check (override dir first, then source dir)
+        search_dirs = []
+        if override_dir:
+            search_dirs.append(override_dir)
+            print(f"[CLEAR] Checking OUTPUT_DIRECTORY override: {override_dir}")
+        search_dirs.append(source_dir)
+
+        # Check each directory for translated folder
+        for check_dir in search_dirs:
+            translated_folder = os.path.join(check_dir, f"{source_name_no_ext}_translated")
+
+            # Delete translated output file (non-cleaned file) from isolated folder
+            if os.path.exists(translated_folder):
+                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                for filename in os.listdir(translated_folder):
+                    name_lower = filename.lower()
+                    # Find and delete files that match the source name but NOT cleaned files
+                    if (name_lower.startswith(source_name_no_ext.lower()) and
+                        name_lower.endswith(image_extensions) and
+                        '_cleaned' not in name_lower):
+                        translated_path = os.path.join(translated_folder, filename)
+                        try:
+                            os.remove(translated_path)
+                            print(f"[CLEAR] Deleted translated output: {os.path.basename(translated_path)}")
+                        except Exception as e:
+                            print(f"[CLEAR] Failed to delete translated output: {e}")
+
+
+def _clear_saved_page_state(self):
+    """Clear Boxes: drop the page's saved OCR / translation / overlay / box state and flush it (lifted
+    verbatim from manga_image_preview's ``_on_clear_boxes_clicked`` in U9; ``self`` is the preview
+    widget: ``manga_integration`` and ``current_image_path``)."""
+    if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and self.current_image_path:
+        st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+        # Clear ALL saved state data - OCR, translations, overlays, etc.
+        st.pop('overlay_offsets', None)
+        st.pop('last_render_positions', None)
+        st.pop('translated_texts', None)
+        st.pop('recognized_texts', None)  # Clear OCR data
+        st.pop('detection_regions', None)  # Clear detection data
+        st.pop('viewer_rectangles', None)  # Clear rectangle data
+        self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+        # Force immediate flush to disk to ensure deletion persists
+        self.manga_integration.image_state_manager.flush()
+        print(f"[CLEAR] Flushed cleared state to disk for {os.path.basename(self.current_image_path)}")
+
+
 # ===========================================================================
 # Moved from manga_integration.py: the per-image editor state (worker gated for mobile)
 # ===========================================================================
@@ -9143,6 +9207,15 @@ class EditorPreview:
                 self._session._restore_page_state(image_path)
         return True
 
+    @property
+    def manga_integration(self):
+        """The session (the desktop widget's ``manga_integration``, read by the Clear Boxes helpers)."""
+        return self._session
+
+    @property
+    def main_gui(self):
+        return getattr(self._session, 'main_gui', None)
+
     def _persist_rectangles_state(self):
         """manga_image_preview's _persist_rectangles_state: write ``viewer_rectangles`` only."""
         try:
@@ -9744,6 +9817,41 @@ class MangaEditorSession:
         with self._op_lock:
             _handle_delete_rectangle(self, int(index), self._box(index))
             self._finish()
+
+    def clear_page(self, image_path=None):
+        """Clear Boxes (manga_image_preview's ``_on_clear_boxes_clicked``): every box of the page, its
+        detection / OCR / translation state and its translated output image (the cleaned image stays),
+        then the page reloads from the cleaned or source image."""
+        with self._op_lock:
+            preview = self.image_preview_widget
+            page = os.path.abspath(image_path) if image_path else preview.current_image_path
+            if not page:
+                return None
+            if not preview.current_image_path or os.path.normcase(page) != os.path.normcase(preview.current_image_path):
+                self.open_page(page)
+            preview.viewer.clear_rectangles()
+            _clear_detection_state_for_image(self, page)
+            self.clear_text_overlays_for_image(page)
+            for name in ('_translation_data', '_recognition_data'):
+                data = getattr(self, name, None)
+                if hasattr(data, 'clear'):
+                    data.clear()
+            try:
+                _delete_translated_outputs(preview)
+            except Exception as e:
+                self._log(f"[CLEAR] Error deleting translated output: {e}", "warning")
+            try:
+                if self.image_state_manager:
+                    _clear_saved_page_state(preview)
+            except Exception:
+                pass
+            preview._persist_rectangles_state()
+            self._current_regions = []
+            self._rendered_images_map.pop(page, None)
+            preview.current_translated_path = None
+            self.image_state_manager.flush()
+            self.output_revision += 1
+            return self.page_snapshot(page)
 
     def set_box_free_text(self, index, free_text=None):
         """Mark as free text / bubble text (ImageRenderer._handle_toggle_free_text_region); None toggles."""

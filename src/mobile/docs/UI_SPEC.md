@@ -131,7 +131,7 @@ From top to bottom:
    - Halgakos avatar (28 dp, `CircleAvatar` with `assets/icon.png`) and "Glossarion".
    - Trailing: `IconButton(edit_square)` "New chat" and `IconButton(chat_bubble_outline dashed)` "New scratch chat".
 2. **Unified search.** `SearchBar`, placeholder "Search chats, books, glossaries".
-   - Opening it switches the drawer body to results grouped as **Chats · Books · Glossaries · Files**, with filter chips for the same groups. **Series** joins them once the optional Series feature ships (U9).
+   - Opening it switches the drawer body to results grouped as **Chats · Books · Glossaries · Files**, with filter chips for the same groups. **Series** joins them (U9: matched on the series name).
    - Chats match on title and message text; the index is built in io_pool from the v2 JSON plus response files, lazily.
    - Books use `library_core.query.book_matches_query`. Glossaries match on file names and terms.
 3. **Destinations row.** A horizontally scrolling row of `Chip`s with leading icons:
@@ -139,7 +139,7 @@ From top to bottom:
    - One tap navigates and closes the drawer.
    - Settings is deliberately not a destination chip. It lives in the footer (item 7).
 4. **Pinned.** Chat rows. Hidden when empty.
-5. **Series (U9, optional).** Shown only after the optional Series feature ships (§2.15) and at least one series exists. One `ExpansionTile` per series:
+5. **Series (U9, optional; shipped).** Shown once at least one series exists (§2.15). Series chats leave Recents. One `ExpansionTile` per series:
    - leading colour dot and series name; trailing count;
    - children are its chats plus "＋ New chat in series" and "Series page ›".
 6. **Recents.**
@@ -403,7 +403,7 @@ On iOS the same text goes to local notifications, plus the `BGContinuedProcessin
 
 **Language tab**
 - Target language list from `language_options.TARGET_LANGUAGES`, with search, a Recent section and editable free text.
-- Scope switch: "Global default" / "This chat" / "This series" (the last only in U9).
+- Scope switch: "Global default" / "This chat". As built (U9) a series' model, profile and language are set from the Series page › Defaults card (Chat settings in series mode); the ModelSheet has no "This series" scope.
 
 ### 2.3 Composer (`ui/chat/composer.py`)
 
@@ -610,6 +610,7 @@ Every tap triggers `HapticFeedback.light_impact`.
 ### 2.7 Slash commands and quick-action chips
 
 **Slash popover.** Typing "/" at the start of the field opens a `Container` overlay above the composer (inside the root `Stack`), containing a `ListView` of matching commands (max 6 visible). Tapping a command inserts it or runs it.
+- U9 (`ui/chat/slash.py`): the popover sits in the chat column directly above the composer card. A command with an argument goes into the field on tap ("/model "); Send / Enter on a complete command runs it instead of sending. Each command runs the handler its button uses (＋ sheet tools, ModelSheet tabs, Chat settings, drawer). `/lang` and `/profile` with an argument apply it directly; `/policy manual` opens Chat settings (it needs a glossary file); `/settings <query>` opens the shared settings search prefilled.
 
 | Command | Effect |
 |---|---|
@@ -981,9 +982,9 @@ Sections are `ExpansionTile`s. The labels are exact desktop labels.
 
 ### 2.15 Series (projects): optional, mobile-only, U9
 
-Series is a mobile-only grouping stored in `mobile_series.json`. It is not a desktop feature, and it is optional: it ships in U9 if time allows.
+Series is a mobile-only grouping stored in `mobile_series.json`. It is not a desktop feature, and it is optional; it shipped in U9.
 
-Until then no Series UI exists: no drawer section, no "Move to Series…" items and no `/series` route. That hides no desktop feature.
+**As built (U9).** `mobile_series.json` sits beside the chat sidecar (`{version: 1, series: [{id, name, color, cover_bid, book_ids, defaults, created_at}]}`, 12-hex route-safe ids, 8 swatches). A chat's series is `series_id` in `direct_text_chats.mobile.json` (scratch chats cannot join). Layering runs through `ChatStoreAdapter.override_layers` (Global → Series defaults → the chat's own overrides; `own_overrides()` is the chat alone), so runs, the header subtitle, the "custom" chip and the option pills see series defaults with no backend change. The Series page edits defaults with the Chat settings sheet in `subject="series"` mode. Not built: the ModelSheet "This series" scope, Glossaries "Use as manual glossary" for a series and a series target in "Add term to glossary" (a series' manual glossary pre-fills the chat's manual-glossary sheet instead).
 
 **Fields.** Name, colour (8 tonal swatches), icon or cover (from a linked Library book), linked book ids, and these defaults:
 - model
@@ -1545,7 +1546,7 @@ File row ⋯ (`ActionSheet`): Open · Use as manual glossary · Share · Delete 
   - Long-press selects; the bulk bar offers Delete / Export selection / Change type.
 - **FAB:** "＋ Entry".
 - **⋯ menu:**
-  - Save As · Export selection · Backups (list → restore) · Edit raw (CodeEditor: `JSON` for .json, `PLAINTEXT` for .csv/.txt/.md) · Use as manual glossary (chat / next run; series in U9)
+  - Save As · Export selection · Backups (list → restore) · Edit raw (CodeEditor: `JSON` for .json, `PLAINTEXT` for .csv/.txt/.md) · Use as manual glossary (chat / next run)
   - switches: Update output files on save · Hide unused entries
   - **Advanced ›** Reload · Clean empty fields · Remove duplicates · Backup settings · Trim entries · Filter entries · Convert format · About format
   - Text size
@@ -1668,7 +1669,8 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 - **Rendering:**
   - background, font sizing, constraints, wrap, caps;
   - font style + import, colour / shadow;
-  - presets Manga / Manhwa / Large Text, reset.
+  - presets Manga / Manhwa / Large Text, reset (the desktop values, measured off the UI loop; U9).
+- **Inpainting (U9):** mask presets B&W Manga / Colored / Uniform; Local / API model ⓘ (Model Information) and "Import model file…"; Image keys next to the custom image edit Test.
 - **Advanced:**
   - preprocessing, HD strategy, mask, OCR params, merging, batching/ROI;
   - debug, parallel panel, memory cap, experimental brush/eraser;
@@ -1679,6 +1681,8 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 - A page strip, and a Source / Translated segmented control (side by side on tablet).
 - **Pan mode:** `InteractiveViewer`.
 - **Edit mode:** `Stack(Image, canvas.Canvas, GestureDetector(drag_interval=24))`, with tools Select/Move · Box · Circle · Lasso · Brush · Eraser.
+  - Brush and Eraser are **Excluded** (disabled with a ReasonChip): the desktop's experimental mask painting stays desktop only.
+  - Clear boxes (toolbar, confirm): the desktop Clear Boxes (`manga_editor_core._delete_translated_outputs` / `_clear_saved_page_state`, U9).
 - **Workflow buttons:** Detect · Clean · Recognize · Translate · Translate all (MANGA_STEP jobs).
 - **Long-press a box → BoxSheet**, with tabs "📝 OCR Recognition Result" and "🌍 Translation Result":
   - edit, Save, **Save & Update Overlay**, re-run OCR / translate, Delete.
@@ -1846,6 +1850,19 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 | Data | Storage · Backup & restore · Import from desktop · Logs & diagnostics |
 | About | Updates · About · User guide · Welcome guide · Danger zone |
 
+*Implementation (U9).* The curated sections are a mobile layer over the desktop schema sections
+(`ui/settings/model.CURATED_SECTIONS`, applied by `SchemaAccess.sections()`): `translation_defaults`,
+`context_memory`, `epub_output`, `pdf`, `thinking` and `provider_options` take their listed keys out
+of the desktop sections, with their own sub-headings (Pacing, Multipass, Rolling summary, Input /
+Output, …); `other.response` keeps its id and is regrouped under Streaming / Retries / Truncation /
+Duplicates / Failure saving / HTTP / …. The remaining desktop sections keep their ids with the
+mobile titles (`other.meta_data` "Metadata, TOC & headers", `other.processing` "Processing &
+extraction", `other.processing.extraction` "Chapter extraction", `other.image` "Image & vision").
+A desktop id the move emptied (`main.run`, `other.output`) resolves to the section that took its
+keys, and `open_setting(section, key)` follows the key. KeyPoolTiles (§4.12) sit at the end of
+Context & memory (rolling summary), Response handling (translation, truncation retry), Metadata
+(metadata), Provider options (fallback), QA Scanner (AI truncation) and the Glossary Refinement tab.
+
 **SectionPage.** It is a `ListView(build_controls_on_demand=False)`. A section has at most about 80 tiles, so every tile is built and is a valid `ScrollKey` target.
 
 **Tiles** (§5.7):
@@ -1946,8 +1963,8 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | Component (module) | Anatomy | States | Built from |
 |---|---|---|---|
 | `AppShell` (`shell/app_shell.py`) | Phone: a `page.views` stack with the chat root View. Tablet: one View with `Row[Sidebar, MainArea, SidePanel?]` | size class phone / large phone / tablet / wide; rebuilt only when the class changes | `View`, `Row`, `Container`, `SafeArea`, `page.on_resize` |
-| `Router` (`shell/router.py`) | Whitelist parser for paths and `glossarion://app/` URIs; a per-destination back stack on tablet | known route · ignored route · deferred (backend not ready: Boot View, then replay) | `page.on_route_change`, `page.on_view_pop`, `page.push_route` |
-| `BootView` (`shell/boot_view.py`) | Halgakos, `Shimmer`, "Preparing…", and an error banner slot | preparing · ready (replaced by the shell) · keys could not be decrypted (banner → Keys) | `View`, `Image`, `Shimmer`, `Banner` |
+| `Router` (`shell/router.py`) | Whitelist parser for paths and `glossarion://app/` URIs; a per-destination back stack on tablet | known route · ignored route · (backend not ready: the screen opens at once; actions that need the engine wait on "Preparing engine…") | `page.on_route_change`, `page.on_view_pop`, `page.push_route` |
+| ~~`BootView`~~ (adopted adaptation, U9) | Not built: the native splash (Halgakos) shows until Flet draws, then the shell mounts immediately. Until the warm import ends Send is `blocked` "Preparing engine…" and the drawer status chip says so; keys that could not be decrypted show the Settings home notice (→ re-enter in Keys) | — | native splash, `SendButton` blocked state, drawer status chip |
 | `ChatDrawer` / `Sidebar` (`shell/drawer.py`, `sidebar.py`) | Header (avatar, New chat, New scratch chat) · SearchBar · destination chips · Pinned · Series (U9) · Recents · footer (status chip, Settings, Help) | closed · open · searching (results replace the body) · sidebar (tablet, persistent) | `NavigationDrawer(controls=…)` on phone (Appendix C item 3); a `Container` column on tablet; `SearchBar`, `Chip`, `Control.badge`, `ExpansionTile`, `ListView(build_controls_on_demand=True)` for Recents (group headers are interleaved, so no prototype), `ListTile(on_long_press=…)` |
 | `SidePanel` (`shell/side_panel.py`) | 380 dp right panel: title row (title, pin, ✕) and swappable content | hidden · open · pinned (wide) | `Container(width=380)`, `AnimatedSwitcher` |
 | `JobStrip` (`shell/job_strip.py`) | 44 dp strip: `ProgressRing` with the kind icon · title + subtitle · queued badge · Stop | running · finishing · stopping · done (10 s) · failed (10 s) · hidden · dismissed until the next state change | `Container`, `ProgressRing`, `Text`, `IconButton`, `Control.badge`, `Dismissible`, `Semantics(live_region=True)` |
@@ -2317,7 +2334,8 @@ On tablets, sheets become SidePanel content (persistent tasks) or centered dialo
 
 ```
 theme/        theme.py tokens.py colors.py (semantic + status constants, §6.1)
-shell/        app_shell.py router.py boot_view.py drawer.py sidebar.py side_panel.py job_strip.py launch_banner.py
+shell/        app_shell.py router.py drawer.py sidebar.py side_panel.py job_strip.py launch_banner.py
+              (no boot_view.py: native splash + immediate shell, §5.1)
 chat/         chat_view.py header.py (+ ChatSearchBar) transcript.py composer.py output_mode_row.py
               mode_options_sheet.py send_button.py messages.py (UserBubble, UserFileCard, AssistantMessage,
               VersionSwitcher) cards.py (GlossaryApprovalCard, JobCard, RequestSheet) media_cards.py media_model.py
@@ -2337,9 +2355,12 @@ tools/        tools_home.py source_picker.py progress_view.py qa.py qa_report.py
 settings/     settings_home.py search.py section_page.py tiles.py model_sheet.py poe_setup.py model_manager.py keys.py
               key_editor.py accounts.py login_sheet.py profiles.py prompt_editor.py endpoints.py data_*.py about.py welcome.py
 components/   shared components of §5: action_sheet.py dialogs.py reason_chip.py info_sheet.py empty_state.py
-              status.py log_console.py section_card.py media_viewer.py (U7); planned: error_card.py skeleton.py
-              file_chip.py windowed_list.py html_view.py pull_to_refresh.py master_detail.py (the ExportSheet is
-              ChatFeature.export_file, the full-screen editor is screens/output_editor.py)
+              status.py log_console.py section_card.py media_viewer.py (U7); error_card.py skeleton.py
+              windowed_list.py pull_to_refresh.py master_detail.py surface.py (U9: where a sheet opens per size
+              class); planned: file_chip.py html_view.py (the ExportSheet is ChatFeature.export_file, the
+              full-screen editor is screens/output_editor.py)
+(top level)   motion.py (reduce motion, §6.3) text_scale.py (system font scale probe, §7.5) foreground.py (no
+              polling in the background, §7.3) - U9
 ```
 
 ## Appendix B: Mobile-only data files (under `FLET_APP_STORAGE_DATA`, written atomically; never read by desktop)
@@ -2422,12 +2443,12 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 - **U7 (recorded at the U7 integration).**
   - Retranslate (Book page › Chapters) and Resolve QA's Partial.b branch run as jobs (`retranslate`, `resolve_qa`), so they queue behind a running job; the desktop applies Retranslate Selected at once. The confirmation, the RECYCLED three-button choice and the result texts are the desktop's.
   - Resolve QA follows the desktop row menu: an LLM-token issue is repaired in place, otherwise the raw foreign-text issue runs the single-entry Partial.b job (U5 had tried the job first).
-  - "🔊 Open Audio File" hands the file to another app (Share) instead of an inline player.
+  - "🔊 Open Audio File" hands the file to another app (Share) instead of an inline player. (U9: it is "🔊 Play audio" in the in-app MediaViewer now, with Share as a secondary action.)
   - RPG Maker: a picked game folder is copied into the Inbox and a ZIP game is extracted into `<output root>/RPG Maker` (the shared entry `rpgmaker_job.prepare_rpgmaker_game`; the run patches the game's `data` folder, so it needs a writable copy); "Share game as ZIP" afterwards is mobile-only.
-  - Google Cloud TTS voices: `google-cloud-texttospeech` has no Android / iOS build (grpcio >= 1.84 has no cp313 mobile wheel, and its requests floor conflicts with the pinned requests), so the Audio options show a ReasonChip; the REST fallback is a U9 tier-B item (dependency rule).
+  - Google Cloud TTS voices: `google-cloud-texttospeech` has no Android / iOS build (grpcio >= 1.84 has no cp313 mobile wheel, and its requests floor conflicts with the pinned requests), so the Audio options show a ReasonChip; the REST fallback is a U9 tier-B item (dependency rule). (U9: google-cloud-texttospeech 2.38.0 resolves with the grpcio 1.81 / grpcio-status 1.81 pins and ships; no REST fallback was needed.)
   - The text editor and the SDLXLIFF Notepad layout use a monospace text field while `flet-code-editor` is not in the build.
   - SDLXLIFF reviewer: Mark as Completed updates the reviewer session's copy of the progress; the Book page reads the change from disk on its next 2 s poll.
-  - Not built yet (disabled with a ReasonChip or absent until the shared helpers exist): source-only SDLXLIFF sidecars for Not Translated rows in Manual editing (they need Retranslation_GUI's `_progress_manager_untranslated_entries` closure); the "✏️ Edit file" jump to the QA issue's line (the search-term extraction is a Progress Manager row-menu closure; the editor opens at the top with Find).
+  - Not built yet at U7 (both built in U9 on shared helpers): source-only SDLXLIFF sidecars for Not Translated rows in Manual editing (`progress_core.untranslated_manual_entries`, moved from Retranslation_GUI's `_progress_manager_untranslated_entries` closure); the "✏️ Edit file" jump to the QA issue (`progress_actions.qa_issue_search_target`).
 
 **Flet 1.0.3 constraints applied.** These came from source verification; details are in §5.0. In summary:
 - `scroll_to` needs an `ft.ScrollKey` and only reaches built items.

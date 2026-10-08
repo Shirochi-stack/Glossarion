@@ -9,6 +9,7 @@ actions: open the editor, submit jobs, load as manual glossary for the current c
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -16,11 +17,14 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 from glossarion_mobile.ui.library.common import LibraryContext
 
-__all__ = ["GlossaryContext", "ask", "ago", "kind_icon", "kind_label"]
+__all__ = ["GlossaryContext", "ask", "ago", "attach_mode_locks", "kind_icon", "kind_label", "mode_locks_changed"]
+
+log = logging.getLogger("glossarion.glossary.ui")
 
 KIND_LABELS = {"book": "Book", "output": "Book (output)", "manual": "Manual", "unified": "Unified"}
 KIND_ICONS = {"book": "MENU_BOOK", "output": "FOLDER_SPECIAL", "manual": "DESCRIPTION", "unified": "MERGE_TYPE"}
@@ -39,6 +43,35 @@ class GlossaryContext(LibraryContext):
             fn(*args)
             return
         dispatcher.post(fn, *args)
+
+
+def mode_locks_changed(ctx: Any) -> dict:
+    """The Glossary Manager's lock pass after a mode change (``GlossaryService.apply_mode_locks``: every
+    mode-locked toggle takes its forced value); returns ``{key: value}`` changed."""
+    changed = ctx.service.apply_mode_locks()
+    if changed:
+        log.info("glossary mode locks applied: %s", sorted(changed))
+    return changed or {}
+
+
+def attach_mode_locks(ctx: Any) -> list:
+    """The Glossary Manager's mode locks on a page that shows its toggles (the Glossary view, Settings ›
+    Glossary): the lock pass once now (a config whose stored toggles disagree with the mode is fixed when
+    the page opens, like desktop) and again on every ``auto_glossary_mode`` change. Returns the
+    unsubscribe callables."""
+    unsubs: list = []
+    try:
+        ctx.service.apply_mode_locks()
+    except Exception:
+        log.exception("glossary mode lock pass failed")
+    store = getattr(getattr(ctx, "settings", None), "store", None)
+    if store is not None:
+        try:
+            unsubs.append(store.observe("auto_glossary_mode",
+                                        lambda key, value: ctx.post_ui(lambda: mode_locks_changed(ctx))))
+        except Exception:
+            log.debug("observing the glossary mode failed", exc_info=True)
+    return unsubs
 
 
 def kind_label(kind: str) -> str:
@@ -159,16 +192,21 @@ def sheet(title: str, controls: list, *, actions: Optional[list] = None, key: Op
 
 
 class SheetHost:
-    """Opens / closes one ``ft.BottomSheet`` through the page (``page.show_dialog`` / ``close_dialog``)."""
+    """Opens / closes one ``ft.BottomSheet`` through the page (``page.show_dialog`` / ``close_dialog``).
+
+    ``panel_title``: a persistent task (the term sheet) that opens in the SidePanel on tablets
+    instead (UI_SPEC §1.1, §4.1 "the entry editor in the SidePanel"); ``close`` closes either."""
 
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
         self.dialog: Any = None
 
-    def open(self, dialog: Any) -> Any:
+    def open(self, dialog: Any, *, panel_title: Optional[str] = None) -> Any:
         self.dialog = dialog
         page = getattr(self.ctx, "page", None)
         if page is not None:
+            if panel_title and surface.present_sheet(page, dialog, title=panel_title, owner=dialog):
+                return dialog
             page.show_dialog(dialog)
         return dialog
 

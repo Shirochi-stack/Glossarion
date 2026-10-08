@@ -81,8 +81,8 @@ class EntrySheet:
                                        key="entry-save"))
         self.error = ft.Text("", color=ft.Colors.ERROR, visible=False, key="entry-error")
         controls.append(self.error)
-        self.dialog = sheet(title or ("New entry" if new else "Edit entry"), controls, actions=actions,
-                            key="entry-sheet")
+        self.title = title or ("New entry" if new else "Edit entry")
+        self.dialog = sheet(self.title, controls, actions=actions, key="entry-sheet")
 
     @staticmethod
     def _input(name: str, value: str, types: Sequence[str], text_size: float) -> ft.Control:
@@ -123,7 +123,8 @@ class EntrySheet:
     # ---- actions ---------------------------------------------------------------------------------------
 
     def show(self, page: Any = None) -> "EntrySheet":
-        self.host.open(self.dialog)
+        """A bottom sheet on phones; the SidePanel beside the editor list on tablets (UI_SPEC §4.1)."""
+        self.host.open(self.dialog, panel_title=self.title)
         return self
 
     def close(self) -> None:

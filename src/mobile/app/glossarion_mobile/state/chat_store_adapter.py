@@ -585,6 +585,10 @@ class ChatStoreAdapter:
         self._saving: set = set()  # scratch chats whose Save is moving files
         self._saver = DebouncedSaver(self._save_now, delay=save_delay, name="gl-chats-save")
         self.saves = 0
+        #: U9 Series (UI_SPEC §2.14 layering): callables ``cid -> dict`` of inherited override values
+        #: (the chat's series defaults). ``overrides`` puts them beneath the chat's own overrides;
+        #: ``own_overrides`` is the sidecar value alone (Chat settings' "custom" badge and ↺).
+        self.override_layers: list[Callable[[Any], Optional[dict]]] = []
 
     # ---- lifecycle --------------------------------------------------------------------------
 
@@ -1306,9 +1310,27 @@ class ChatStoreAdapter:
         self._meta_saved(cid)
         self._notify()
 
-    def overrides(self, cid: Any) -> dict:
+    def own_overrides(self, cid: Any) -> dict:
+        """The chat's own sidecar overrides (no inherited layer)."""
         overrides = self.meta(cid).get("overrides")
         return dict(overrides) if isinstance(overrides, dict) else {}
+
+    def overrides(self, cid: Any) -> dict:
+        """The effective per-chat overrides: inherited layers (Series defaults, U9) beneath the
+        chat's own values; what a run and the header use."""
+        own = self.own_overrides(cid)
+        if not self.override_layers:
+            return own
+        merged: dict = {}
+        for layer in list(self.override_layers):
+            try:
+                values = layer(cid) or {}
+            except Exception:
+                log.exception("override layer failed")
+                continue
+            merged.update({k: v for k, v in values.items() if k in OVERRIDE_KEYS and v is not None})
+        merged.update(own)
+        return merged
 
     def set_override(self, cid: Any, key: str, value: Any) -> None:
         if key not in OVERRIDE_KEYS:

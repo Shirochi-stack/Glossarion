@@ -729,7 +729,10 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
     assert keys == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem",
                     "accounts-experimental", "accounts-unavailable"]
     assert body.controls[-2].title == f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})"
-    assert all(tile.disabled for tile in body.controls[-1].controls) and len(body.controls[-1].controls) == len(UNAVAILABLE_ACCOUNTS)
+    # U9: enabled rows without a tap action (a disabled ListTile would disable its ReasonChip too)
+    assert all(not tile.disabled and tile.on_click is None and tile.trailing.detail
+               for tile in body.controls[-1].controls)
+    assert len(body.controls[-1].controls) == len(UNAVAILABLE_ACCOUNTS)
     fake_auth.modules["authgem"].get_store(2).save_tokens({"access_token": "g", "email": "gem@example.com",
                                                           "expires_at": time.time() + 3 * 3600 + 60})
     out = _run(screen.refresh())
@@ -1558,8 +1561,9 @@ def test_storage_usage_clear_and_mirror(tmp_path):
     paths = types.SimpleNamespace(data=tmp_path / "data", output=tmp_path / "data" / "Output", library=tmp_path / "lib",
                                   cache=tmp_path / "cache", temp=tmp_path / "temp", logs=tmp_path / "data" / "logs")
     folders = storage_folders(paths)
-    assert [f.id for f in folders] == ["data", "output", "library", "inbox", "cache", "temp", "logs"]
-    assert [f.id for f in folders if f.clearable] == ["cache", "temp"]
+    assert [f.id for f in folders] == ["data", "output", "library", "inbox", "cache", "temp", "logs", "payloads",
+                                       "http_requests"]  # U9: the Logs & diagnostics dumps
+    assert [f.id for f in folders if f.clearable] == ["cache", "temp", "payloads", "http_requests"]
     (tmp_path / "cache" / "tiktoken").mkdir(parents=True)
     (tmp_path / "cache" / "tiktoken" / "enc").write_bytes(b"x" * 10)
     (tmp_path / "cache" / "covers").mkdir()
@@ -1844,7 +1848,7 @@ def test_feature_on_the_real_app_renders_every_page(app_env, caplog, monkeypatch
                 await asyncio.sleep(0.3)  # did_show work (account status, folder usage, backups) runs off the loop
             assert built == ["AccountsScreen", "ProfilesScreen", "ProfileDetailScreen", "PrefillScreen",
                              "AppearanceScreen", "StorageScreen", "BackupScreen", "DesktopImportScreen", "AboutScreen",
-                             "DangerZoneScreen", "WelcomeScreen"]
+                             "DangerZoneScreen", "NotificationsScreen", "WelcomeScreen"]
             assert feature.screens_built == list(SCREEN_ROUTES)
             errors = [r for r in caplog.records if r.levelno >= 40 and r.name.startswith("glossarion")]
             assert not errors, [r.getMessage() for r in errors]

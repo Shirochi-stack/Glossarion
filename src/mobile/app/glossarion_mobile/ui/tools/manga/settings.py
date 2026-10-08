@@ -46,9 +46,19 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
 from glossarion_mobile.ui.tools.manga.common import MangaTab, push, reason_or_chip
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.manga.models import ModelDownloadRow, ModelManagerSheet
 
 __all__ = ["CURATED_KEYS", "SCHEMA_GROUPS", "SettingsTab", "group_manga_keys", "preview_style"]
+
+#: The desktop Reset to Defaults question (MangaTranslationTab._reset_rendering_to_defaults).
+RESET_CONFIRM_TEXT = ("Are you sure you want to reset all rendering settings to their default values?\n\n"
+                      "This will reset:\n"
+                      "• Background opacity and style\n"
+                      "• Font size and style settings\n"
+                      "• Text color and shadow settings\n"
+                      "• Auto-fit style and text wrapping\n"
+                      "• All other rendering options")
 
 log = logging.getLogger("glossarion.tools.manga")
 
@@ -102,7 +112,13 @@ CURATED_KEYS = frozenset({
     "manga_shadow_offset_x", "manga_shadow_offset_y", "manga_shadow_blur", "manga_constrain_to_bubble",
     "manga_force_caps_lock", "manga_strict_text_wrapping", "manga_settings.font_sizing.line_spacing",
     "manga_settings.font_sizing.algorithm",
+    # Auto size mode: Minimum / Maximum Font Size (the desktop spin boxes; manga_max_font_size wins over
+    # rendering.auto_max_size in manga_env, so both are written together)
+    "manga_settings.rendering.auto_min_size", "manga_settings.rendering.auto_max_size",
 })
+
+#: The desktop Minimum / Maximum Font Size spin boxes' range (manga_integration ``min_size_spinbox``).
+FONT_BOUNDS = (1, 999)
 
 BG_STYLES = (("box", "Box"), ("circle", "Circle"), ("wrap", "Wrap"))
 SIZE_MODES = (("auto", "Auto"), ("fixed", "Fixed Size"), ("multiplier", "Dynamic Multiplier"))
@@ -184,6 +200,11 @@ def preview_style(config: Any) -> dict:
         "shadow_blur": max(0, int(get("manga_shadow_blur", 0) or 0)),
         "font_path": str(get("manga_font_path", "") or ""),
     }
+
+
+def _muted(disabled: bool) -> Any:
+    """Title colour of an unavailable option row (the row itself stays enabled so its ReasonChip opens)."""
+    return ft.Colors.ON_SURFACE_VARIANT if disabled else None
 
 
 class _EditorCtx:
@@ -379,11 +400,12 @@ class SettingsTab(MangaTab):
             tile = ft.ListTile(
                 leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED,
                                 color=ft.Colors.PRIMARY if selected and not row.disabled else None),
-                title=ft.Text(row.label, max_lines=2),
+                title=ft.Text(row.label, max_lines=2, color=_muted(row.disabled)),
                 subtitle=ft.Text(row.detail, theme_style=ft.TextThemeStyle.BODY_SMALL) if row.detail else None,
                 trailing=reason_or_chip(row, key=self.k(f"ms-ocr-chip-{row.value}"), dark=self.ctx.dark),
+                # never disabled=True: Flet would disable the ReasonChip too (no InfoSheet, UI_SPEC §5.2)
                 on_click=None if row.disabled else (lambda e, v=row.value: self.select_provider(v)),
-                disabled=row.disabled, dense=True, opacity=0.6 if row.disabled else 1.0,
+                dense=True,
                 key=self.k(f"ms-ocr-{row.value}-{self._gen}"),
             )
             self.provider_tiles[row.value] = tile
@@ -510,21 +532,33 @@ class SettingsTab(MangaTab):
                                  allowed_extensions=["json"], subtitle=svc.K_GOOGLE_CREDS)
         return self.editor.show()
 
-    def _keep_private_copy(self, path: str, folder: str) -> str:
-        """Picked files live in the app's private manga folder (picker cache copies vanish)."""
+    def _keep_private_copy(self, path: str, folder: str, move: bool = False) -> str:
+        """Picked files live in the app's private manga folder (picker cache copies vanish);
+        ``move`` moves the picker's own Inbox copy there instead of copying it."""
         target_dir = os.path.join(self.session.root, folder)
         try:
             if os.path.commonpath([os.path.abspath(path), os.path.abspath(target_dir)]) == os.path.abspath(target_dir):
                 return path
         except ValueError:
             pass
+        target = os.path.join(target_dir, os.path.basename(path))
         try:
             os.makedirs(target_dir, exist_ok=True)
-            target = os.path.join(target_dir, os.path.basename(path))
-            shutil.copy2(path, target)
+            if move:
+                shutil.move(path, target)
+            else:
+                shutil.copy2(path, target)
             return target
         except OSError:
-            return path
+            return path if os.path.isfile(path) or not os.path.isfile(target) else target
+
+    @staticmethod
+    def _discard(path: str) -> None:
+        """Remove a picked file that is not used (its Inbox copy)."""
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     # ---- prompts -----------------------------------------------------------------------------------
 
@@ -589,7 +623,7 @@ class SettingsTab(MangaTab):
             selected = row.value == current
             controls.append(ft.ListTile(
                 leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED),
-                title=ft.Text(row.label), dense=True, disabled=row.disabled, opacity=0.6 if row.disabled else 1.0,
+                title=ft.Text(row.label, color=_muted(row.disabled)), dense=True,
                 trailing=ReasonChip(reason=row.chip or row.reason, detail=row.reason) if row.disabled else None,
                 on_click=None if row.disabled else (lambda e, v=row.value: self._select_detector(v)),
                 key=self.k(f"ms-detector-{row.value}-{self._gen}")))
@@ -751,18 +785,23 @@ class SettingsTab(MangaTab):
             selected = row.value == method
             controls.append(ft.ListTile(
                 leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED),
-                title=ft.Text(row.label), dense=True, disabled=row.disabled, opacity=0.6 if row.disabled else 1.0,
+                title=ft.Text(row.label, color=_muted(row.disabled)), dense=True,
                 trailing=ReasonChip(reason=row.chip or row.reason, detail=row.reason) if row.disabled else None,
                 on_click=None if row.disabled else (lambda e, v=row.value: self.select_inpaint(v)),
                 key=self.k(f"ms-inpaint-{row.value}-{self._gen}")))
         if method == "local":
-            controls.append(ft.Text("Local / API model", theme_style=ft.TextThemeStyle.TITLE_SMALL))
+            controls.append(ft.Row([
+                ft.Text("Local / API model", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                ft.IconButton(icon=ft.Icons.INFO_OUTLINE, tooltip="Model information", key=self.k("ms-model-info"),
+                              size_constraints=HIT_TARGET, on_click=lambda e, m=local: self.show_model_info(m)),
+            ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER))
             for row in svc.local_model_rows():
                 selected = row.value == local
                 controls.append(ft.ListTile(
                     leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED),
-                    title=ft.Text(row.label), subtitle=ft.Text(row.value, theme_style=ft.TextThemeStyle.BODY_SMALL),
-                    dense=True, disabled=row.disabled, opacity=0.6 if row.disabled else 1.0,
+                    title=ft.Text(row.label, color=_muted(row.disabled)),
+                    subtitle=ft.Text(row.value, theme_style=ft.TextThemeStyle.BODY_SMALL),
+                    dense=True,
                     trailing=ReasonChip(reason=row.chip or row.reason, detail=row.reason) if row.disabled else None,
                     on_click=None if row.disabled else (lambda e, v=row.value: self.select_inpaint("local", v)),
                     key=self.k(f"ms-local-{row.value}-{self._gen}")))
@@ -780,6 +819,8 @@ class SettingsTab(MangaTab):
                                 if self.session.models.available else svc.MISSING_CORE + " (manga_models).")))
             elif local == "custom-image-edit":
                 controls += self._image_edit_controls(cfg)
+            if local and local != "custom-image-edit":
+                controls += self._model_file_controls(cfg, local)
         elif method == "cloud":
             quality = str(cfg.get("manga_inpaint_quality", "high") or "high")
             controls += [
@@ -791,7 +832,96 @@ class SettingsTab(MangaTab):
                                                                 (list(e.control.selected) or ["high"])[0])),
                 hint_text("Not recommended: this option has performed poorly in tests."),
             ]
+        controls += self._mask_preset_controls()
         return controls
+
+    #: The desktop Browse filter of a local inpainting model file (``_browse_local_model``).
+    MODEL_FILE_EXTENSIONS = ("safetensors", "pt", "pth", "ckpt", "onnx")
+
+    def _model_file_controls(self, cfg: dict, local: str) -> list:
+        """Desktop Browse: a model file of your own for the local method (``manga_<method>_model_path``,
+        which the run loads instead of the downloaded model)."""
+        path = str(cfg.get(f"manga_{local}_model_path") or "")
+        row: list = [ft.TextButton(content="Import model file…", icon=ft.Icons.UPLOAD_FILE,
+                                   key=self.k("ms-model-import"),
+                                   on_click=lambda e, m=local: self.ctx.spawn(self.import_model_file(m)))]
+        if path:
+            row += [hint_text(os.path.basename(path), key=self.k("ms-model-file")),
+                    ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Use the downloaded model", key=self.k("ms-model-clear"),
+                                  size_constraints=HIT_TARGET, on_click=lambda e, m=local: self.clear_model_file(m))]
+        return [ft.Row(row, wrap=True, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)]
+
+    def show_model_info(self, model_type: str) -> str:
+        """ⓘ: the desktop Model Information text of the local model type (``manga_models.MODEL_INFO``)."""
+        from glossarion_mobile.ui.components.info_sheet import InfoSheet
+
+        text = svc.model_info_text(model_type) or "Please select a model type first"
+        title = f"{model_type.upper()} Model" if model_type else "Model information"
+        if self.ctx.page is not None:
+            InfoSheet(title=title, body=text).show(self.ctx.page)
+        return text
+
+    async def import_model_file(self, model_type: str) -> Optional[str]:
+        """Desktop ``_browse_local_model``: pick a model file and store its path in
+        ``manga_<type>_model_path`` (kept as a private copy: picker cache copies vanish).
+
+        The Android / iOS pickers map extensions to MIME types / UTIs and none of the model
+        extensions has one, so there the picker shows every file and the extension is checked
+        after the pick; the desktop keeps the Browse filter. The picker's Inbox copy is moved
+        into the models folder, so a large model is not stored twice."""
+        files = self.ctx.files
+        if files is None:
+            self.ctx.say("File picking is not available")
+            return None
+        platform = str(getattr(files, "platform", None) or getattr(self.ctx, "platform", "") or "")
+        extensions = None if platform in ("android", "ios") else list(self.MODEL_FILE_EXTENSIONS)
+        picked = await files.pick_files(allowed_extensions=extensions, allow_multiple=False,
+                                        dialog_title=f"Select {model_type.upper()} Model")
+        if not picked:
+            return None
+        chosen = picked[0]
+        name = str(getattr(chosen, "name", "") or os.path.basename(chosen.path))
+        inbox_copy = not getattr(chosen, "reused", False)  # an identical file already in the Inbox stays
+        if os.path.splitext(name)[1].lower().lstrip(".") not in self.MODEL_FILE_EXTENSIONS:
+            if inbox_copy:
+                await self.ctx.io(self._discard, chosen.path)
+            self.ctx.say(f"{name} is not a model file (.safetensors, .pt, .pth, .ckpt or .onnx)")
+            return None
+        path = await self.ctx.io(self._keep_private_copy, chosen.path, "models", inbox_copy)
+        self.set(f"manga_{model_type}_model_path", path)
+        self.refresh()
+        self.ctx.say(f"Using {os.path.basename(path)} for {model_type}")
+        return path
+
+    def clear_model_file(self, model_type: str) -> None:
+        self.set(f"manga_{model_type}_model_path", "")
+        self.refresh()
+
+    def _mask_preset_controls(self) -> list:
+        """The manga settings dialog's mask dilation quick presets (B&W Manga / Colored / Uniform;
+        shared ``manga_settings_defaults.MASK_PRESETS``)."""
+        rows = svc.mask_preset_rows()
+        if not rows:
+            return []
+        chips = [ft.OutlinedButton(content=label, key=self.k(f"ms-mask-{pid}"),
+                                   on_click=lambda e, p=pid: self.apply_mask_preset(p))
+                 for pid, label in rows]
+        return [ft.Text("Mask presets", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                ft.Row(chips, wrap=True, spacing=8, key=self.k(f"ms-mask-presets-{self._gen}")),
+                hint_text("Sets the mask dilation and the per-region dilation iterations.")]
+
+    def apply_mask_preset(self, preset: str) -> bool:
+        """A mask quick preset (desktop ``_set_mask_preset`` + Save): mask dilation, all-iterations,
+        and the text bubble / empty bubble / free text dilation iterations."""
+        updates = svc.mask_preset_updates(preset)
+        if not updates:
+            self.ctx.say("Mask presets need the shared manga settings module")
+            return False
+        for key, value in updates.items():
+            self.set(key, value)
+        self.refresh()
+        self.ctx.say(f"Applied the {dict(svc.mask_preset_rows()).get(preset, preset)} mask preset")
+        return True
 
     def _local_model_status(self, method: str) -> Any:
         manager = self.session.models
@@ -842,6 +972,8 @@ class SettingsTab(MangaTab):
                                  on_click=lambda e: self.edit_image_edit_prompts()),
             ft.TextButton(content="Test", icon=ft.Icons.NETWORK_CHECK, key=self.k("ms-edit-test"), disabled=not can_test,
                           on_click=lambda e: self.ctx.spawn(self.test_image_edit())),
+            ft.TextButton(content="Image keys", icon=ft.Icons.KEY, key=self.k("ms-edit-keys"),
+                          on_click=lambda e: self.ctx.go("settings.keys.pool", {"pool": "inpainter"})),
         ]
         if not can_test:
             test_row.append(ReasonChip(reason="Test needs manga_env",
@@ -887,7 +1019,7 @@ class SettingsTab(MangaTab):
         get = (lambda key, default=None: svc.effective_setting(cfg, key, default))
         mode = str(get("manga_font_size_mode", "fixed") or "fixed")
         presets_ok = svc.presets_available()  # cheap; the presets themselves are measured on the io pool
-        reset_ok = bool(svc.rendering_reset_updates())
+        reset_ok = svc.rendering_reset_available()  # cheap; the reset values are measured on the io pool
         preset_row: list = [ft.OutlinedButton(content=label, key=self.k(f"ms-preset-{pid}"), disabled=not presets_ok,
                                               on_click=lambda e, p=pid: self.ctx.spawn(self.apply_preset_async(p)))
                             for pid, label in PRESETS]
@@ -900,9 +1032,9 @@ class SettingsTab(MangaTab):
                                                 "settings module (manga_settings_defaults), which this build does not "
                                                 "provide."))
         elif not reset_ok:
-            preset_row.append(ReasonChip(reason="Reset is desktop only",
-                                         detail="The desktop Reset to Defaults values sit inside its confirmation "
-                                                "dialog and are not shared yet; set the rendering options here instead."))
+            preset_row.append(ReasonChip(reason="Reset needs the shared defaults",
+                                         detail="The Reset to Defaults values come from the shared manga settings "
+                                                "module (manga_settings_defaults), which this build does not provide."))
         controls: list = [
             self.preview,
             ft.Row(preset_row, wrap=True, spacing=8),
@@ -915,10 +1047,12 @@ class SettingsTab(MangaTab):
         elif mode == "multiplier":
             controls.append(self._slider("Size multiplier", "manga_font_size_multiplier", 0.5, 2.0, 30,
                                          float(get("manga_font_size_multiplier", 1.0) or 1.0), "ms-font-mult"))
+        else:  # Auto: the desktop Minimum / Maximum Font Size spin boxes
+            controls.append(self._font_bounds_row(get))
         controls += [
             self._segmented("Algorithm", ("manga_settings", "font_sizing", "algorithm"), ALGORITHMS,
                             str(get(("manga_settings", "font_sizing", "algorithm"), "smart") or "smart"), "ms-algorithm"),
-            self._slider("Line spacing", ("manga_settings", "font_sizing", "line_spacing"), 1.0, 3.0, 40,
+            self._slider("Line spacing", ("manga_settings", "font_sizing", "line_spacing"), 1.0, 2.0, 20,
                          float(get(("manga_settings", "font_sizing", "line_spacing"), 1.3) or 1.3), "ms-line-spacing"),
             self._segmented("Background style", "manga_bg_style", BG_STYLES,
                             str(get("manga_bg_style", "circle") or "circle"), "ms-bg-style"),
@@ -947,7 +1081,7 @@ class SettingsTab(MangaTab):
         controls += [
             self._switch("Safe area (keep text inside the bubble's inner area)", "manga_safe_area_enabled",
                          bool(get("manga_safe_area_enabled", False)), "ms-safe-area"),
-            self._slider("Safe area scale", "manga_safe_area_scale", 0.5, 1.0, 10,
+            self._slider("Safe area scale", "manga_safe_area_scale", 0.70, 1.10, 40,
                          float(get("manga_safe_area_scale", 1.0) or 1.0), "ms-safe-area-scale"),
             self._switch("Constrain text to bubble", "manga_constrain_to_bubble",
                          bool(get("manga_constrain_to_bubble", True)), "ms-constrain"),
@@ -983,7 +1117,8 @@ class SettingsTab(MangaTab):
         path = str(cfg.get("manga_font_path") or "")
         style = str(cfg.get("manga_font_style") or "Default")
         fonts = self.available_fonts(cfg)
-        options = [ft.DropdownOption(key="", text="Default")] + [
+        # "Default": on a phone the run renders with a scalable system font (manga_models.mobile_default_font)
+        options = [ft.DropdownOption(key="", text="Default (system font)")] + [
             ft.DropdownOption(key=p, text=os.path.splitext(os.path.basename(p))[0]) for p in fonts]
         return ft.Row([
             ft.Dropdown(label="Font", options=options, value=path if path in fonts else "", dense=True, width=220,
@@ -1061,6 +1196,62 @@ class SettingsTab(MangaTab):
         return ft.Column([text, ft.Slider(min=lo, max=hi, divisions=divisions, value=value, key=self.k(ui_key),
                                           on_change=changed, on_change_end=ended)], spacing=0, tight=True)
 
+    @staticmethod
+    def _font_bounds(get: Any) -> tuple:
+        """``(min, max)`` the Auto mode uses (manga_env: ``manga_max_font_size``, else rendering.auto_max_size;
+        rendering.auto_min_size)."""
+        def number(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        high = number(get("manga_max_font_size", None), 0) or number(
+            get(("manga_settings", "rendering", "auto_max_size"), 48), 48)
+        low = number(get(("manga_settings", "rendering", "auto_min_size"), 8), 8)
+        return low, high
+
+    def _font_bounds_row(self, get: Any) -> ft.Control:
+        low, high = self._font_bounds(get)
+        lo, hi = FONT_BOUNDS
+
+        def field(label: str, which: str, value: int, ui_key: str) -> ft.TextField:
+            return ft.TextField(label=label, value=str(value), width=170, dense=True,
+                                keyboard_type=ft.KeyboardType.NUMBER, helper=f"{lo}–{hi}", key=self.k(ui_key),
+                                on_submit=lambda e: self.set_font_bound(which, e.control.value),
+                                on_blur=lambda e: self.set_font_bound(which, e.control.value))
+
+        return ft.Row([field("Minimum font size", "min", low, "ms-min-font"),
+                       field("Maximum font size", "max", high, "ms-max-font")], wrap=True, spacing=12)
+
+    def set_font_bound(self, which: str, raw: Any) -> Optional[tuple]:
+        """Minimum / Maximum Font Size (Auto mode): clamped to 1-999, a minimum above the maximum is
+        lowered to it (desktop ``_validate_font_size_range_manga``), saved like the desktop
+        ``_save_rendering_settings`` (``manga_max_font_size`` plus the rendering / font_sizing mirrors)."""
+        try:
+            value = int(float(str(raw).strip()))
+        except (TypeError, ValueError):
+            self.refresh()
+            return None
+        lo, hi = FONT_BOUNDS
+        value = max(lo, min(hi, value))
+        low, high = self._font_bounds(self.get)
+        if which == "min":
+            low = value
+        else:
+            high = value
+        if low > high:
+            low = high
+        self.set_many({
+            "manga_max_font_size": high,
+            ("manga_settings", "rendering", "auto_min_size"): low,
+            ("manga_settings", "rendering", "auto_max_size"): high,
+            ("manga_settings", "font_sizing", "min_size"): low,
+            ("manga_settings", "font_sizing", "max_size"): high,
+        })
+        self.refresh()
+        return low, high
+
     def _color_row(self, label: str, key: str, rgb: tuple, ui_key: str) -> ft.Control:
         swatches = []
         for index, color in enumerate(COLOR_SWATCHES):
@@ -1137,12 +1328,20 @@ class SettingsTab(MangaTab):
     async def reset_rendering(self) -> bool:
         from glossarion_mobile.ui.tools.common import ask
 
-        updates = svc.rendering_reset_updates()
+        updates = svc.cached_rendering_reset_updates()
+        if updates is None:
+            try:
+                updates = await self.ctx.io(svc.rendering_reset_updates)
+            except svc.PresetsBusy as exc:
+                self.ctx.say(str(exc))
+                return False
+            except Exception as exc:
+                self.ctx.say(f"Reset failed: {exc}")
+                return False
         if not updates:
             self.ctx.say("Reset needs the shared manga settings module")
             return False
-        answer = await ask(self.ctx, "Reset to Defaults",
-                           "Are you sure you want to reset all rendering settings to their default values?",
+        answer = await ask(self.ctx, "Reset to Defaults", RESET_CONFIRM_TEXT,
                            (("no", "No", "text"), ("yes", "Yes", "filled")), key=self.k("ms-reset-confirm"))
         if answer != "yes":
             return False

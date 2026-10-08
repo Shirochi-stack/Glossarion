@@ -37,7 +37,7 @@ import os
 from typing import Any, Optional
 
 from glossarion_mobile.job_kinds import owner_method
-from glossarion_mobile.job_kinds.translate import check_inputs, record_output_dirs
+from glossarion_mobile.job_kinds.translate import check_inputs, record_output_dirs, resolve_workspace_collisions
 
 __all__ = ["KINDS", "glossary_outputs", "run", "run_pair", "run_refine", "run_unified"]
 
@@ -98,7 +98,7 @@ def glossary_outputs(owner: Any, files: list) -> list:
 
 
 def run(ctx: Any) -> dict:
-    files = check_inputs(ctx.inputs)
+    files = resolve_workspace_collisions(ctx, check_inputs(ctx.inputs))  # the desktop selection's rename
     owner = ctx.owner
     extract = owner_method(owner, "run_glossary_extraction_direct")
     owner.selected_files = list(files)

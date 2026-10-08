@@ -58,6 +58,7 @@ CONTRACT_KEYS = (
     "USE_ASYNC_CHAPTER_EXTRACTION",
     "PDF_EXTRACTION_WORKERS",
     "QA_USE_THREAD_EXECUTOR",
+    "GRPC_DNS_RESOLVER",
 )
 
 _ENV_INPUTS = (
@@ -143,6 +144,7 @@ def test_env_contract_applied(storage, capsys):
         "USE_ASYNC_CHAPTER_EXTRACTION": "0",
         "PDF_EXTRACTION_WORKERS": "1",
         "QA_USE_THREAD_EXECUTOR": "1",
+        "GRPC_DNS_RESOLVER": "native",
     }
     assert set(expected) == set(CONTRACT_KEYS)
     for key, value in expected.items():

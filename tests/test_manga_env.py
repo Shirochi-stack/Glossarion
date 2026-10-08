@@ -350,6 +350,13 @@ def test_module_helpers_are_verbatim():
     assert "_IS_WINDOWS = platform.system().lower().startswith('win')" in runner
 
 
+#: U9: desktop methods rewired to shared helpers (manga_models.MODEL_INFO, manga_settings_defaults.
+#: RENDERING_RESET_VALUES / MASK_PRESETS, manga_env's custom image-edit endpoint probe). Their exact
+#: text (the legacy body with the listed replacements) is pinned by tests/parity/test_u9_extractions.py.
+U9_REWIRED_TAB_METHODS = ("_reset_rendering_to_defaults", "_test_custom_image_edit_endpoint", "_show_model_info")
+U9_REWIRED_DIALOG_METHODS = ("_create_inpainting_tab",)
+
+
 def test_desktop_tab_keeps_only_gui_methods_and_inherits_the_mixins():
     mi_text = _module_text("manga_integration")
     tree = ast.parse(mi_text)
@@ -369,10 +376,11 @@ def test_desktop_tab_keeps_only_gui_methods_and_inherits_the_mixins():
     for names in MOVED_MODULE_NAMES.values():
         for name in names:
             assert name not in module_defs and name not in module_assigns, name
-    # every method the tab still defines is unchanged, except __init__ (checked above)
+    # every method the tab still defines is unchanged, except __init__ (checked above) and the U9 rewires
     legacy = _legacy_tab_methods()
     changed = [name for name, node in methods.items()
-               if name != "__init__" and rp.node_text(mi_text, node) != legacy.get(name)]
+               if name != "__init__" and name not in U9_REWIRED_TAB_METHODS
+               and rp.node_text(mi_text, node) != legacy.get(name)]
     assert not changed, changed
 
 
@@ -396,9 +404,10 @@ def test_settings_dialog_builds_its_defaults_from_the_shared_module():
     ret = fn.body[-1]
     new_lines = msd_text.split("\n")[ret.lineno:ret.end_lineno - 1]
     assert new_lines == [_strip_n(line, 4) for line in legacy_lines]
-    # every other dialog method is unchanged
+    # every other dialog method is unchanged (the U9 mask-preset rewire is pinned in tests/parity/test_u9_extractions.py)
     changed = [name for name, node in methods.items()
-               if name != "__init__" and rp.node_text(new_text, node) != rp.node_text(legacy_text, legacy_methods[name])]
+               if name != "__init__" and name not in U9_REWIRED_DIALOG_METHODS
+               and rp.node_text(new_text, node) != rp.node_text(legacy_text, legacy_methods[name])]
     assert not changed, changed
 
 

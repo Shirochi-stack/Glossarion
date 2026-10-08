@@ -17,6 +17,16 @@ config.json in This-chat scope.
 The sheet body scrolls (``components.sheet``): on a phone the sections are taller than the
 screen (owner report: "chat settings doesn't scroll down"). A change rebuilds the rows; each
 section keeps the expanded / collapsed state the user left it in.
+
+On tablets the same body opens in the shell's SidePanel next to the chat (UI_SPEC §1.1, §2.14;
+``components.surface.present_sheet``); ``close`` closes whichever it is.
+
+U9 Series (§2.14 item 5, §2.15): the chat's series defaults sit between All chats and the chat
+(``ChatStoreAdapter.overrides`` layers them; "custom" and ↺ use the chat's ``own_overrides``), so a
+row the series sets reads "Inherited from: Series <name>"; the SeriesFeature fills ``SERIES_HOOKS``
+(that label and the "Series" section: current series · Move to Series…). ``subject="series"`` is
+the same sheet over one series' defaults (``state.series.SeriesDefaultsChats``): "This series" ·
+All chats, without the chat-only rows (skip plan, text size).
 """
 
 from __future__ import annotations
@@ -36,16 +46,24 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     normalize_rendered_card_limit,
 )
 from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = [
     "CHAT_SETTING_KEYS",
     "ChatSettingsSheet",
     "DESCRIPTIONS",
     "INTRO",
+    "SERIES_HOOKS",
     "global_updates_for",
 ]
+
+#: U9 Series, installed by ``ui.chat.series_feature.SeriesFeature`` (unset = no Series UI):
+#: ``inherited_label(chats, cid, field)`` -> "Series <name>" when the chat's series sets ``field``;
+#: ``section(sheet)`` -> the "Series" ExpansionTile (current series · Move to Series…) or None.
+SERIES_HOOKS: dict = {"inherited_label": None, "section": None}
 
 INTRO = "These overrides apply only to Direct Text runs and are saved between sessions."
 
@@ -115,6 +133,8 @@ class ChatSettingsSheet:
         on_changed: Optional[Callable[[], Any]] = None,
         on_choose_model: Optional[Callable[[str], Any]] = None,  # scope -> opens the model sheet
         scope: str = "chat",
+        subject: str = "chat",  # "series": the sheet edits one series' defaults (U9)
+        title: Optional[str] = None,
     ) -> None:
         self.cid = str(cid)
         self.config = config
@@ -124,19 +144,22 @@ class ChatSettingsSheet:
         self.on_changed = on_changed
         self.on_choose_model = on_choose_model
         self.scope = scope if scope in ("chat", "global") else "chat"
+        self.subject = "series" if subject == "series" else "chat"
+        self.title = title or ("Series defaults" if self.subject == "series" else "Direct Text settings")
         self._page: Any = None
         self.body = ft.Column([], tight=True, spacing=4)
         #: section id -> ExpansionTile of the last rebuild; its ``expanded`` follows the user's taps.
         self.sections: dict = {}
-        self.expanded = {"model": True, "glossary": True, "run": False, "conversation": False}
+        self.expanded = {"model": True, "glossary": True, "run": False, "conversation": False, "series": True}
         self.scope_button = ft.SegmentedButton(
-            segments=[ft.Segment(value="chat", label="This chat"), ft.Segment(value="global", label="All chats")],
+            segments=[ft.Segment(value="chat", label="This series" if self.subject == "series" else "This chat"),
+                      ft.Segment(value="global", label="All chats")],
             selected=[self.scope],
             on_change=self._on_scope,
         )
         self.column = scroll_column(
             [
-                ft.Text("Direct Text settings", theme_style=ft.TextThemeStyle.TITLE_LARGE),
+                ft.Text(self.title, theme_style=ft.TextThemeStyle.TITLE_LARGE),
                 ft.Text(INTRO, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
                 self.scope_button,
                 self.body,
@@ -154,6 +177,15 @@ class ChatSettingsSheet:
 
     def overrides(self) -> dict:
         values = dict(self.chats.overrides(self.cid))
+        meta = self.chats.meta(self.cid)
+        if meta.get("skip_plan") is not None:
+            values["skip_plan"] = bool(meta.get("skip_plan"))
+        return values
+
+    def own_overrides(self) -> dict:
+        """The chat's own values (no Series layer): what "custom" and ↺ act on."""
+        own = getattr(self.chats, "own_overrides", None)
+        values = dict(own(self.cid) if callable(own) else self.chats.overrides(self.cid))
         meta = self.chats.meta(self.cid)
         if meta.get("skip_plan") is not None:
             values["skip_plan"] = bool(meta.get("skip_plan"))
@@ -178,7 +210,19 @@ class ChatSettingsSheet:
         return getattr(settings, field_name)
 
     def is_overridden(self, field_name: str) -> bool:
-        return self.scope == "chat" and self.overrides().get(field_name) is not None
+        return self.scope == "chat" and self.own_overrides().get(field_name) is not None
+
+    def inherited_from(self, field_name: str) -> str:
+        """Where a This-chat row's value comes from: "All chats" or "Series <name>" (U9)."""
+        label = SERIES_HOOKS.get("inherited_label")
+        if self.subject == "chat" and callable(label):
+            try:
+                text = label(self.chats, self.cid, field_name)
+            except Exception:
+                text = None
+            if text:
+                return str(text)
+        return "All chats"
 
     def set_value(self, field_name: str, value: Any) -> None:
         if self.scope == "chat":
@@ -189,7 +233,9 @@ class ChatSettingsSheet:
         else:
             if field_name in ("model", "profile", "target_language"):
                 key = {"model": "model", "profile": "active_profile", "target_language": "output_language"}[field_name]
-                self.config.set_many({key: value})
+                from glossarion_mobile.state.setting_writes import write_setting
+
+                write_setting(self.config, key, value)  # profile extraction method, language fan-out
             else:
                 updates = global_updates_for(field_name, value)
                 if updates:
@@ -213,10 +259,13 @@ class ChatSettingsSheet:
     def _changed(self) -> None:
         if self.on_changed is not None:
             self.on_changed()
-        try:
-            self.dialog.update()
-        except Exception:
-            pass
+        # the column is mounted in the sheet or in the tablet SidePanel
+        for control in (self.column, self.dialog):
+            try:
+                control.update()
+                return
+            except Exception:
+                continue
 
     def _on_scope(self, e: Any = None) -> None:
         selected = list(getattr(e.control, "selected", []) or []) if e is not None else []
@@ -233,10 +282,11 @@ class ChatSettingsSheet:
             return [
                 ft.Container(content=ft.Text("custom", theme_style=ft.TextThemeStyle.LABEL_SMALL),
                              bgcolor=ft.Colors.SECONDARY_CONTAINER, border_radius=6, padding=ft.Padding.symmetric(horizontal=6)),
-                ft.IconButton(icon=ft.Icons.RESTART_ALT, icon_size=18, tooltip="Reset to All chats",
-                              on_click=lambda e, f=field_name: self.reset(f)),
+                ft.IconButton(icon=ft.Icons.RESTART_ALT, icon_size=18,
+                              tooltip=f"Reset to {self.inherited_from(field_name)}",
+                              on_click=lambda e, f=field_name: self.reset(f), size_constraints=HIT_TARGET),
             ]
-        return [ft.Text("Inherited from: All chats", theme_style=ft.TextThemeStyle.LABEL_SMALL,
+        return [ft.Text(f"Inherited from: {self.inherited_from(field_name)}", theme_style=ft.TextThemeStyle.LABEL_SMALL,
                         color=ft.Colors.ON_SURFACE_VARIANT)]
 
     def _switch(self, field_name: str, label: str) -> ft.Control:
@@ -381,12 +431,34 @@ class ChatSettingsSheet:
                         ],
                         spacing=2,
                         tight=True,
+                        key="setting-text_scale",
                     ),
                 ],
             ),
         }
-        footer = [ft.TextButton(content="Reset chat overrides", on_click=lambda e: self.reset())] if self.scope == "chat" else []
+        if self.subject == "series":  # chat-only rows (sidecar meta) are not series defaults
+            for section_id in ("run", "conversation"):
+                tile = self.sections[section_id]
+                tile.controls = [c for c in tile.controls
+                                 if getattr(c, "key", None) not in ("setting-skip_plan", "setting-text_scale")]
+        else:
+            self._add_series_section()
+        reset_label = "Reset series defaults" if self.subject == "series" else "Reset chat overrides"
+        footer = [ft.TextButton(content=reset_label, on_click=lambda e: self.reset())] if self.scope == "chat" else []
         self.body.controls = [*self.sections.values(), *footer]
+
+    def _add_series_section(self) -> None:
+        """Section 5 "Series" (U9): current series and Move to Series… (SeriesFeature hook)."""
+        hook = SERIES_HOOKS.get("section")
+        if not callable(hook):
+            return
+        try:
+            tile = hook(self)
+        except Exception:
+            tile = None
+        if tile is not None:
+            tile.expanded = self.expanded.get("series", True)
+            self.sections["series"] = tile
 
     def _set_text_scale(self, value: Any) -> None:
         try:
@@ -399,8 +471,17 @@ class ChatSettingsSheet:
 
     # ---- presentation -----------------------------------------------------------------------
 
+    @property
+    def in_panel(self) -> bool:
+        """True while the tablet SidePanel shows this sheet."""
+        return surface.hosts(self._page, self.dialog)
+
     def show(self, page: Any) -> None:
+        """A bottom sheet on phones; the SidePanel on tablets."""
         self._page = page
+        panel_title = "Series defaults" if self.subject == "series" else "Chat settings"
+        if surface.present_sheet(page, self.dialog, title=panel_title, owner=self.dialog):
+            return
         page.show_dialog(self.dialog)
 
     def close(self) -> None:

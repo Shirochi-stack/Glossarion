@@ -32,6 +32,7 @@ import os
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from glossarion_mobile.ui.router import RouteMatch
+from glossarion_mobile.ui.text_scale import effective as effective_text_scale
 
 __all__ = ["GlossaryFeature", "IMPLEMENTED_ROUTES", "SCREEN_ROUTES"]
 
@@ -39,6 +40,8 @@ log = logging.getLogger("glossarion.glossary")
 
 SCREEN_ROUTES = ("glossary", "glossary.detail", "glossary.unified", "glossary.parallel_pair")
 SHEET_ROUTES = ("glossary.entry",)
+#: Settings › Glossary › Unified Glossary (schema section) opens the Unified glossary page (U9).
+UNIFIED_SECTION = "glossary.unified"
 #: Routes this feature ships (for the drawer / hubs; Integrate merges them).
 IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES + SHEET_ROUTES)
 
@@ -74,6 +77,32 @@ class GlossaryFeature:
                                jobs=getattr(app, "jobs", None), library=getattr(app, "library", None),
                                run_io=self.run_io)
 
+    async def search_glossaries(self, query: str) -> list:
+        """Drawer › Glossaries: file names and book names of the Glossaries home listing."""
+        from glossarion_mobile.ui.glossary.common import kind_icon, kind_label
+        from glossarion_mobile.ui.shell.drawer import SEARCH_LIMIT, SearchHit
+
+        rows = list(self.listing or [])
+        if not rows:
+            rows = list(await self.run_io(self.service.list_glossaries) or [])
+            self.listing = list(rows)
+        needle = query.casefold()
+        hits: list = []
+        for row in rows:
+            if needle not in str(row.name).casefold() and needle not in str(row.book or "").casefold():
+                continue
+            navigate = getattr(self.app, "navigate_to", None)
+            hits.append(SearchHit(
+                title=str(row.name),
+                subtitle=" · ".join(part for part in (kind_label(row.kind), row.book) if part),
+                icon=kind_icon(row.kind),
+                open=(lambda gid=row.gid: navigate("glossary.detail", {"gid": gid})) if navigate else None,
+                key=row.gid,
+            ))
+            if len(hits) >= SEARCH_LIMIT:
+                break
+        return hits
+
     def attach(self) -> None:
         app = self.app
         app.glossary = self.service
@@ -86,9 +115,22 @@ class GlossaryFeature:
             shell.screen_factory = self.screen_factory
             self._fallback_sheet = shell.show_sheet
             shell.show_sheet = self.show_sheet
+        settings_ctx = getattr(getattr(app, "settings", None), "ctx", None)
+        extras = getattr(settings_ctx, "extras", None)
+        if isinstance(extras, dict):
+            # Settings › Glossary (home, its wide-screen detail pane and search hits) opens the Glossary tabs
+            # (the mode row, profile bars and links) and the Unified glossary page, not a plain SectionPage
+            from glossarion_mobile.ui.glossary.settings_tabs import SECTION_TABS
+
+            screens = extras.setdefault("section_screens", {})
+            for section_id in (*SECTION_TABS, UNIFIED_SECTION):
+                screens[section_id] = self.section_screen
         library = getattr(app, "library", None)
         if library is not None:
             library.glossary_hooks = self
+        drawer = getattr(app, "drawer", None)
+        if drawer is not None and hasattr(drawer, "register_search"):
+            drawer.register_search("glossaries", self.search_glossaries)  # unified search (UI_SPEC §1.3)
         chat_view = getattr(app, "chat_view", None)
         if chat_view is not None and hasattr(chat_view, "_on_tool") and not getattr(chat_view, "_glossary_tool", False):
             original = chat_view._on_tool
@@ -105,6 +147,8 @@ class GlossaryFeature:
             chat_view._on_tool = on_tool
             chat_view._glossary_tool = True
         if chat_view is not None:
+            # the Plan card / BatchPlanCard glossary chip -> PlanGlossarySheet (desktop glossary row)
+            chat_view.plan_glossary_opener = self.open_plan_glossary_sheet
             # the approval card's raw editor -> "Open in table editor"; response ⋯ -> Add term to glossary
             chat_view.glossary_table_opener = self.open_editor_for_path
             chat_view.glossary_term_adder = lambda term="", **kw: self.spawn(self.add_term(term, **kw))
@@ -178,7 +222,7 @@ class GlossaryFeature:
         shell = getattr(app, "shell", None)
         state = getattr(app, "state", None)
         try:
-            scale = float(state.text_scale.value) if state is not None else 1.0
+            scale = effective_text_scale(state) if state is not None else 1.0  # app x system (U9)
         except Exception:
             scale = 1.0
         settings = getattr(app, "settings", None)
@@ -248,8 +292,35 @@ class GlossaryFeature:
             return ParallelPairScreen(match, ctx)
         return None
 
+    def section_screen(self, match: RouteMatch) -> Any:
+        """``settings.section`` of a Glossary Manager tab -> its GlossarySettingsScreen; ``glossary.unified``
+        -> the UnifiedGlossaryScreen (Enable / Generate, location, 🔄 Rebuild Now: the same page as Glossaries
+        › Unified, UI_SPEC §4.15); else None."""
+        from glossarion_mobile.ui.glossary.settings_tabs import SECTION_TABS, GlossarySettingsScreen
+
+        section = str(match.params.get("section") or "")
+        if getattr(self.app, "settings", None) is None:
+            return None
+        if section == UNIFIED_SECTION:
+            from glossarion_mobile.ui.glossary.unified import UnifiedGlossaryScreen
+
+            return UnifiedGlossaryScreen(match, self.context())
+        tab = SECTION_TABS.get(section)
+        if tab is None:
+            return None
+        return GlossarySettingsScreen(match, self.context(), tab)
+
     def screen_factory(self, match: RouteMatch) -> Any:
         screen = None
+        if match.name == "settings.section":
+            try:
+                screen = self.section_screen(match)
+            except Exception:
+                log.exception("building the glossary settings page %s failed", match.params.get("section"))
+                screen = None
+            if screen is not None:
+                self.screens_built.append(match.name)
+                return screen
         if match.name in SCREEN_ROUTES:
             try:
                 screen = self.make_screen(match)
@@ -302,8 +373,11 @@ class GlossaryFeature:
         return sheet.show()
 
     def open_plan_glossary_sheet(self, *, book: Optional[Mapping[str, Any]] = None, effective: str = "",
-                                 on_changed: Optional[Callable[[], Any]] = None) -> Any:
-        """PlanGlossarySheet for the chat Plan card / the Library TranslateSheet glossary chip."""
+                                 on_changed: Optional[Callable[[], Any]] = None,
+                                 inputs: Optional[Sequence[str]] = None) -> Any:
+        """PlanGlossarySheet for the chat Plan card / BatchPlanCard / the Library TranslateSheet glossary
+        chip. ``inputs``: the run's input files; with more than one EPUB the sheet offers "Map
+        glossaries…" (desktop ``load_glossary`` opens the mapping dialog for several EPUBs)."""
         from glossarion_mobile.ui.glossary.sheets import PlanGlossarySheet
 
         ctx = self.context()
@@ -336,14 +410,59 @@ class GlossaryFeature:
             done()
 
         def review() -> None:
-            self.spawn(self.open_editor_for_book(book)) if book else ctx.go("glossary")
+            loaded = str(self.service.cfg("manual_glossary_path", "") or "")
+            if book:
+                self.spawn(self.open_editor_for_book(book))
+            elif loaded and os.path.isfile(loaded):
+                self.open_editor_for_path(loaded)
+            else:
+                ctx.go("glossary")
 
+        epubs = [p for p in (inputs or ()) if str(p).lower().endswith(".epub")]
+        on_map = (lambda: self.open_map_glossaries(epubs, on_saved=lambda _r: done())) if len(epubs) > 1 else None
+        settings = getattr(self.app, "settings", None)
+        settings_ctx = getattr(settings, "ctx", None)
+        on_settings = ((lambda: settings_ctx.open_setting("glossary.general"))
+                       if settings_ctx is not None and hasattr(settings_ctx, "open_setting") else None)
         sheet = PlanGlossarySheet(ctx, book=book, effective=effective, on_load_file=lambda: self.spawn(load_file()),
                                   on_use_book=(lambda: self.spawn(use_book())) if book else None,
                                   on_clear=lambda: self.spawn(clear()), on_review=review,
-                                  on_mode=lambda: self.open_mode_sheet(on_changed=done))
+                                  on_mode=lambda: self.open_mode_sheet(on_changed=done), on_map=on_map,
+                                  on_settings=on_settings)
         self.sheets.append(sheet)
         return sheet.show()
+
+    def open_map_glossaries(self, epubs: Sequence[str], *, on_saved: Optional[Callable[[dict], Any]] = None) -> Any:
+        """Map glossaries (desktop "Map Glossaries to EPUBs") for several EPUBs of one run."""
+
+        async def go() -> Any:
+            from glossarion_mobile.services.glossary import CoreMissing
+            from glossarion_mobile.ui.glossary.map_glossaries import MapGlossariesSheet
+
+            ctx = self.context()
+            try:
+                rows = await ctx.io(self.service.mapped_glossaries, list(epubs))
+            except CoreMissing as exc:
+                ctx.say(f"Map glossaries needs {exc.name} (not in this build)")
+                return None
+
+            async def pick() -> Optional[str]:
+                files = ctx.files
+                if files is None:
+                    return None
+                picked = await files.pick_files(target="inbox", allowed_extensions=["csv", "json", "txt", "md"],
+                                                allow_multiple=False, dialog_title="Select glossary file")
+                if not picked:
+                    return None
+                self.service.record_import(picked[0].path)
+                return picked[0].path
+
+            sheet = MapGlossariesSheet(ctx, rows, pick=pick, guess=self.service.guess_glossary,
+                                       save=self.service.save_glossary_map, on_saved=on_saved)
+            self.sheets.append(sheet)
+            return sheet.show()
+
+        return self.spawn(go())
 
     def _book_source(self, book: Optional[Mapping[str, Any]]) -> Optional[str]:
         library = getattr(self.app, "library", None)

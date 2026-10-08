@@ -47,6 +47,7 @@ from job_runner import JOB_LOCK, _is_pool_state_attr, isolated_key_pools, restor
 
 __all__ = [
     "ENV_PREVIEW_LOCK",
+    "EnvCheckResult",
     "EnvPreviewResult",
     "EnvPreviewScreen",
     "EnvRow",
@@ -57,7 +58,9 @@ __all__ = [
     "isolated_key_pools",
     "preview_input_path",
     "redact_env",
+    "redact_log_lines",
     "restore_mapping",
+    "run_env_check",
     "rows_as_text",
     "scoped_process_env",
 ]
@@ -296,6 +299,101 @@ def build_env_preview(
         rows = redact_env(env, secrets)
         return EnvPreviewResult(True, rows=rows, secs=round(time.monotonic() - started, 2), input_path=input_path,
                                 logs=host.lines)
+    finally:
+        lock.release()
+
+
+# ---- Check environment (Logs & diagnostics, UI_SPEC §4.16) --------------------------------------
+
+#: ``RunEnvMixin.debug_environment_variables`` line with a value: "✅ [ENV_DEBUG] NAME: value".
+_ENV_DEBUG_VALUE = re.compile(r"^(?P<head>.*?\[ENV_DEBUG\] )(?P<name>[A-Za-z_][A-Za-z0-9_]*): (?P<value>.*)$")
+
+
+@dataclass
+class EnvCheckResult:
+    ok: bool  # the check ran
+    passed: bool = False  # initialize_environment_variables() and debug_environment_variables() both True
+    lines: list[str] = field(default_factory=list)  # the owner's log, values redacted
+    error: str = ""
+    secs: float = 0.0
+
+    @property
+    def verdict(self) -> str:
+        if not self.ok:
+            return "❌ " + (self.error or "The check did not run")
+        return ("✅ Environment variables are properly configured" if self.passed else
+                "❌ Environment variable issues detected - check the lines below")
+
+
+def redact_log_lines(lines: Iterable[str], secrets: Iterable[str] = ()) -> list[str]:
+    """The ``[ENV_DEBUG] NAME: value`` lines with the Env preview's redaction rule applied to the value
+    (``<REDACTED> (N chars)``); other lines with any config secret replaced."""
+    secrets = [s for s in secrets if isinstance(s, str) and len(s) >= _MIN_SECRET_LEN]
+    out: list[str] = []
+    for line in lines:
+        text = str(line)
+        match = _ENV_DEBUG_VALUE.match(text)
+        if match and _needs_redaction(match.group("name"), match.group("value"), secrets):
+            text = f"{match.group('head')}{match.group('name')}: <REDACTED> ({len(match.group('value'))} chars)"
+        else:
+            for secret in secrets:
+                if secret in text:
+                    text = text.replace(secret, f"<REDACTED> ({len(secret)} chars)")
+        out.append(text)
+    return out
+
+
+class _CheckHost(_PreviewHost):
+    """A preview host that keeps the whole check (several hundred lines)."""
+
+    def log(self, message: Any = "", *args: Any, **kwargs: Any) -> None:
+        self.lines.append(str(message))
+        del self.lines[:-4000]
+
+    append_log = log
+
+
+def run_env_check(
+    config: dict,
+    *,
+    lock: Any = ENV_PREVIEW_LOCK,
+    lock_timeout: float = 5.0,
+    owner_factory: Optional[Callable[..., Any]] = None,
+) -> EnvCheckResult:
+    """Blocking: the desktop Debug "Check environment" action (``other_settings._run_debug_check``):
+    ``initialize_environment_variables()`` then ``debug_environment_variables(show_all=True)`` on a
+    HeadlessOwner of ``config``, under the job lock and the process-env scope (nothing leaks into the
+    app's environment). The desktop button exists only in debug mode, so the check runs with
+    ``show_debug_buttons`` on (that is what makes the owner log each variable)."""
+    started = time.monotonic()
+    if not lock.acquire(timeout=lock_timeout):
+        return EnvCheckResult(False, error="Busy: a job or a preview is using the engine. Try again when it finishes.")
+    host = _CheckHost()
+    try:
+        snapshot = copy.deepcopy(config)
+        snapshot["show_debug_buttons"] = True
+        key = str(snapshot.get("api_key") or "")
+        try:
+            with scoped_process_env():
+                owner = (owner_factory or _default_owner_factory)(snapshot, host=host, api_key=key)
+                host.lines.clear()  # the owner's start-up lines are not part of the check
+                host.log("🔍 [DEBUG ACTION] Running comprehensive environment variable check...")
+                init_ok = owner.initialize_environment_variables()
+                debug_ok = owner.debug_environment_variables(show_all=True)
+        except ImportError as exc:
+            return EnvCheckResult(False, error=f"The shared HeadlessOwner / run_env modules are not in this build ({exc}).",
+                                  secs=round(time.monotonic() - started, 2))
+        except Exception as exc:
+            tail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            log.exception("environment check failed")
+            return EnvCheckResult(False, error=f"Debug check failed: {tail}", secs=round(time.monotonic() - started, 2),
+                                  lines=redact_log_lines(host.lines, config_secrets(snapshot) | ({key} if key else set())))
+        passed = bool(init_ok) and bool(debug_ok)
+        host.log("✅ [DEBUG ACTION] Environment variables are properly configured" if passed else
+                 "❌ [DEBUG ACTION] Environment variable issues detected - check log for details")
+        secrets = config_secrets(snapshot) | ({key} if key else set())
+        return EnvCheckResult(True, passed=passed, lines=redact_log_lines(host.lines, secrets),
+                              secs=round(time.monotonic() - started, 2))
     finally:
         lock.release()
 

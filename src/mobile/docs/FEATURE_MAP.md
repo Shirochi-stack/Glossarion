@@ -52,8 +52,8 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 - **Adapted**: the mobile form differs from desktop.
 - **New**: a mobile addition.
 - **Excluded**: on the plan's exclusion list, or native-impossible. The feature is shown as a **disabled row with a ReasonChip** where users would look for it, never hidden, and its config values are preserved.
-- **Dependency rule**: ships when its packages resolve for Android and iOS (`check_mobile_wheels.py`). Otherwise it uses a REST equivalent. Until the enabling milestone it shows a disabled row with "Needs <package> · not in this build".
-- **(U3)**, **(U9)**: the milestone that ships the surface. Series is optional (U9).
+- **Dependency rule**: ships when its packages resolve for Android and iOS (`check_mobile_wheels.py`). Otherwise it uses a REST equivalent, or shows a disabled row with "Needs <package> · not in this build". U9 outcomes: grpcio 1.81 + google-ai-generativelanguage, google-cloud-translate / -texttospeech / -vision are pinned; google-cloud-aiplatform is not installable (protobuf<7), so Vertex runs over REST; sentence-transformers and argostranslate stay disabled.
+- **(U3)**, **(U9)**: the milestone that ships the surface. Every milestone (U0-U9) has shipped; Series (optional, mobile only) shipped in U9.
 
 ---
 
@@ -69,7 +69,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 5 | File status label / selection summary | Attachment chip meta line + status caption ("Attached X · Vision enabled") |  |
 | 6 | 💬 Direct Text (chat-style input/output translator) | **Chat home (root screen)** | The whole app shell is built on it |
 | 7 | Asst. Prompt (assistant prefill) dialog with profiles | Settings › Profiles & prompts › Assistant prefill; ModelSheet › Profile › Prefill dropdown |  |
-| 8 | GCloud Creds + Vertex AI location | ModelSheet route row (Vertex creds PathTile + location Dropdown); Settings › Endpoints › Vertex | Dependency rule: google-cloud-aiplatform when its wheels resolve, else Vertex REST + google-auth; until the enabling milestone the row shows a ReasonChip "Needs Vertex support · not in this build" |
+| 8 | GCloud Creds + Vertex AI location | ModelSheet route row (Vertex creds PathTile + location Dropdown); Settings › Endpoints › Vertex | Dependency rule (U9): google-cloud-aiplatform needs protobuf<7 and is not shipped, so Vertex runs through REST + google-auth (Gemini via google-genai `vertexai=True`, Claude via `AnthropicVertex`; the desktop code) |
 | 9 | Model box (editable, autocomplete, poll ✓ markers) | Header subtitle → ModelSheet (search, favourites, provider groups, ✓ polled) |  |
 | 10 | Automatic provider catalog polling | ModelSheet: shimmer on the provider group while polling (24 h TTL) | Automatic |
 | 11 | Model right-click menu | ModelSheet: 🌐 refresh on each provider-group header + title-row ⋯ (Refresh online models · Manage models · Hide unpolled); model row long-press ActionSheet; same in ModelPicker field mode | Refresh ignores the 24 h TTL (desktop "🌐 Refresh Online Models") |
@@ -130,9 +130,9 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 66 | ⚙️ Glossary Settings / Progress Manager / 🖼️ Manga Translator / 📦 Async Translator (toolbar launchers) | Drawer › Glossaries; Tools › Progress / Manga / Async |  |
 | 67 | 💾 Save Config (toolbar) | Auto-save (600 ms debounce) + Settings ⋯ Save now / Discard changes | Adapted |
 | 68 | 📄 Load Glossary (toolbar) | Plan card glossary chip → PlanGlossarySheet › Load file…; Glossaries › Import → Use as manual glossary |  |
-| 69 | Splash screen + parallel module preload | Boot View (logo + Shimmer "Preparing…"); background warm import; Send `blocked` "Preparing engine…" | Adapted |
+| 69 | Splash screen + parallel module preload | Native splash, then the chat shell immediately; background warm import; Send `blocked` "Preparing engine…" + drawer status chip until it ends | Adapted: native splash, then the shell at once; until the warm import ends Send shows `blocked` "Preparing engine…" and the drawer status chip says so (no separate Boot View); undecryptable keys: Settings home notice |
 | 70 | First-run Welcome wizard | `/welcome` (step 1 = Sign in with ChatGPT for the default `authgpt/gpt-6-luna`); About › Welcome guide |  |
-| 71 | Update checker | About › Updates | Self-install excluded; links to APK / AltStore |
+| 71 | Update checker | About › Updates (Check now · Check on startup · Skip this version · release notes; `update_core`) | (U9) Self-install excluded; links to the APK for the device ABI / AltStore; a release without a mobile build says so |
 | 72 | Theme / scaling | Settings › Appearance (theme, accent, text scale) | DPI scaling excluded; the OS handles it |
 | 73 | Keyboard: F11 fullscreen, Ctrl+/-/0 zoom | Chat ⋯ › Text size; Reader pinch → Aa font size; MediaViewer pinch zoom; Ctrl ± 0 on tablet keyboards | F11 n/a: mobile is always full screen |
 | 74 | Config load/decrypt/sanitize/auto-encrypt/save/backup | Automatic (config_store); Data › Backup; "keys could not be decrypted" banner |  |
@@ -182,7 +182,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 36 | Output directory override | Data › Storage › Output folder | Adapted: output root limited to app storage / iOS Files-visible Documents (+ Android "Mirror outputs to Downloads/Glossarion"); arbitrary SAF folders are not supported |
 | 37 | Save glossary copy in output | Settings › Glossary › General |  |
 | 38 | Multi API key pools | Keys |  |
-| 39 | Vertex AI credentials | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule: SDK when its wheels resolve, else Vertex REST + google-auth |
+| 39 | Vertex AI credentials | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule (U9): google-cloud-aiplatform needs protobuf<7 and is not shipped, so Vertex runs through REST + google-auth (Gemini via google-genai `vertexai=True`, Claude via `AnthropicVertex`; the desktop code) |
 | 40 | Custom endpoints & routing | Settings › Endpoints; Models › Custom prefixes |  |
 | 41 | Thinking / reasoning controls | Settings › Thinking & reasoning; ModelSheet › Thinking; Chat settings "Disable all thinking" |  |
 | 42 | Sampling / anti-duplicate parameters | Settings › Anti-duplicate |  |
@@ -201,7 +201,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 55 | Async (batch API) processing | Tools › Async batch; Plan card Start ▾ "Run as async batch" |  |
 | 56 | Parallel EPUB Pair (glossary-only) | Glossaries › Parallel EPUB pair |  |
 | 57 | Manga translator launch | Tools › Manga; ＋ sheet › Manga; "Translate as manga" chip |  |
-| 58 | Browser-backed free routes (authnd/, Gemini-free) | Accounts › Experimental (WebViewBridge, U9 best effort); ModelSheet route chip | Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
+| 58 | Browser-backed free routes (authnd/, Gemini-free) | Accounts › Experimental (WebViewBridge); ModelSheet route chip | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
 | 59 | Subscription logins (ChatGPT/Claude/Gemini/Grok) | Accounts |  |
 | 60 | Antigravity / GLM / Arena proxies, OcAgy | Accounts › Unavailable | **Excluded**: antigravity / authza / autharena / ocagy |
 | 61 | Tor proxy routing | Settings › Response handling & retries › "Tor proxy routing" (disabled row + ReasonChip) | **Excluded**: Tor binary; value preserved |
@@ -284,7 +284,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 6 | Custom prefix routes | Models › Custom prefixes |  |
 | 7 | Gemini native (gemini-*, gemma-*, palm*, bard*) | ModelSheet › Google; Settings › Thinking (Gemini); Provider options & safety |  |
 | 8 | Gemini OpenAI-compatible endpoint | Settings › Endpoints › Gemini custom |  |
-| 9 | Gemini raw gRPC transport | Settings › Endpoints › Gemini gRPC transport | Ships when grpcio 1.81 wheels resolve (Tier-B pin, check_mobile_wheels.py); until then disabled row + ReasonChip "Needs grpcio · not in this build" |
+| 9 | Gemini raw gRPC transport | Settings › Endpoints › Gemini gRPC transport | Tier-B pin (U9): grpcio 1.81.0 + google-ai-generativelanguage 0.12.1 ship; the bootstrap sets `GRPC_DNS_RESOLVER=native` |
 | 10 | Gemini Veo / Omni video and Lyria music generation | Mode options 🎬 / 🔊 |  |
 | 11 | Anthropic native (claude*, sonnet*, opus*, haiku*) | ModelSheet › Anthropic; Settings › Thinking; Endpoints › Anthropic custom |  |
 | 12 | Force Native Anthropic format | Settings › Endpoints |  |
@@ -311,10 +311,10 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 33 | Chinese and other legacy OpenAI-compatible providers | ModelSheet |  |
 | 34 | AI21 / Replicate / Aleph Alpha / HuggingFace | ModelSheet |  |
 | 35 | Azure OpenAI (azure*) | ModelSheet; Settings › Endpoints (Azure version); KeyEditor |  |
-| 36 | Vertex AI Model Garden (vertex/, model@version) | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule: SDK when its wheels resolve, else Vertex REST + google-auth |
+| 36 | Vertex AI Model Garden (vertex/, model@version) | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule (U9): google-cloud-aiplatform needs protobuf<7 and is not shipped, so Vertex runs through REST + google-auth (Gemini via google-genai `vertexai=True`, Claude via `AnthropicVertex`; the desktop code) |
 | 37 | DeepL (deepl) | ModelSheet; Keys |  |
 | 38 | Google Translate Free (google-translate-free) | ModelSheet |  |
-| 39 | Google Cloud Translate (google-translate) | ModelSheet (Google Cloud Translate route) | Dependency rule: google-cloud-translate when its wheels resolve, else the Translation v2 REST API |
+| 39 | Google Cloud Translate (google-translate) | ModelSheet (Google Cloud Translate route) | Dependency rule (U9): google-cloud-translate 3.28.0 ships (its translate_v2 client is REST) |
 | 40 | Local OpenAI-compatible routes (ollama/, lmstudio/) | ModelSheet › Local; Settings › Endpoints › Local LLM host | iOS local-network permission |
 | 41 | Managed Ollama (ollamapull/) | ModelSheet ollamapull/ rows (disabled row + ReasonChip) | **Excluded**: desktop binary install |
 | 42 | AuthGPT (authgpt/, authgptN/) ChatGPT subscription | Accounts › ChatGPT |  |
@@ -325,8 +325,8 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 47 | Antigravity (antigravity/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 48 | OcAgy (ocagy/, ocagy0/, ocagyN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 49 | AuthArena (autharena/, autharena0/, autharenaN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
-| 50 | AuthND (authnd/, authndN/) NVIDIA Build browser route | Accounts › Experimental (WebViewBridge, U9); Settings › Response handling › NIM/AuthND helpers | Experimental WebViewBridge (best effort) |
-| 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge, U9); Settings › Response handling › Gemini Free chunking | Experimental (best effort) |
+| 50 | AuthND (authnd/, authndN/) NVIDIA Build browser route | Accounts › Experimental (WebViewBridge); Settings › Response handling › NIM/AuthND helpers | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
+| 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge); Settings › Response handling › Gemini Free chunking | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
 | 52 | Opera Aria (search/opera) | ModelSheet search/opera rows + Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 53 | Tor proxy for provider traffic | Settings › Response handling & retries › "Tor proxy" (disabled row + ReasonChip) | **Excluded**; value preserved |
 | 54 | Streaming responses | Settings › Response handling › Streaming |  |
@@ -393,11 +393,11 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 17 | AuthGem GCP project dropdown (authgem-vertex/) | Accounts › Gemini › Project; ModelSheet route row |  |
 | 18 | AuthGem account slots and authgem-vertex0/ pool | Accounts › Gemini slots |  |
 | 19 | AuthGem translation routes | Automatic (no control); status in Accounts › Gemini | Automatic |
-| 20 | AuthND (authnd/), NVIDIA Build free browser route | Accounts › Experimental |  |
+| 20 | AuthND (authnd/), NVIDIA Build free browser route | Accounts › Experimental | Experimental (U9): hCaptcha tokens are minted in the hidden in-app WebView (`browser_driver`); an interactive challenge fails at the token timeout |
 | 21 | NIM / AuthND token helper settings | Settings › Response handling › NIM/AuthND helpers | Adapted: the subprocess-limit field is shown disabled with a ReasonChip (no subprocesses on mobile) |
 | 22 | AuthND model catalog polling | Models › Poll providers |  |
-| 23 | Gemini Free (search/gemini) | Accounts › Experimental |  |
-| 24 | Gemini Free browser chunking settings | Settings › Response handling |  |
+| 23 | Gemini Free (search/gemini) | Accounts › Experimental | Experimental (U9): AI Mode runs in the hidden in-app WebView; Google consent / verification pages surface as errors |
+| 24 | Gemini Free browser chunking settings | Settings › Response handling | (U9) Every chunking setting applies: one hidden page per helper request (at most 4) |
 | 25 | Opera Aria (search/opera, search/opera-think) | ModelSheet search/opera rows + Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 26 | TOR proxy rotation (search/opera and ocz/) | Settings › Response handling & retries › "Tor rotation" (disabled row + ReasonChip) | **Excluded**; value preserved |
 | 27 | Antigravity Login (antigravity/, antigravityN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
@@ -411,7 +411,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 35 | Arena Login (autharena/, autharenaN/, autharena0/ rotation) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 36 | Arena account selector (#0..#N, + New) and catalog refresh | ModelSheet autharena/ rows + Accounts › Unavailable on mobile › Arena row (disabled row + ReasonChip) | **Excluded** |
 | 37 | Google Translate Free (google-translate-free) | ModelSheet |  |
-| 38 | Gemini gRPC endpoint transport | Settings › Endpoints › Gemini gRPC transport | Ships when grpcio wheels resolve (Tier-B pin); until then disabled row + ReasonChip |
+| 38 | Gemini gRPC endpoint transport | Settings › Endpoints › Gemini gRPC transport | Tier-B pin (U9): grpcio 1.81.0 + google-ai-generativelanguage 0.12.1 ship; the bootstrap sets `GRPC_DNS_RESOLVER=native` |
 | 39 | 🦙 Load Ollama button (ollamapull/ route) | ModelSheet ollamapull/ rows + Settings › Endpoints "Load Ollama" row (disabled row + ReasonChip) | **Excluded**: ollamapull |
 | 40 | Ollama settings dialog | Settings › Endpoints › Local LLM host (URL / port only) | Install / pull excluded |
 | 41 | ollamapull/ chat requests | ModelSheet ollamapull/ rows (disabled row + ReasonChip) | **Excluded** |
@@ -454,7 +454,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 26 | Consider Translated Column | General |  |
 | 27 | Precise Term Matching + 'Whole term for' (All/Gender Entries/Custom/None) + Configure… | General + Configure subpage |  |
 | 28 | Multipass: Exclude Already-Applied Entries | General |  |
-| 29 | Log Match Differences (shadow mode) + verdict allowlist | General (ListEditor) |  |
+| 29 | Log Match Differences (shadow mode) + verdict allowlist | General › "Log Match Differences" switch | Adapted: the per-glossary verdict allowlist (always_keep / always_drop) and "apply verdicts" stay a desktop CLI tool (`tools/glossary_match_report.py`); no mobile surface, the files round-trip untouched |
 | 30 | Save Glossary Backup in Output | General |  |
 | 31 | Gender tracker controls: Skip Gender Tracking / Ignore rare gender flips slider / Bias | General |  |
 | 32 | Glossary Append Format prompt | General (PromptTile) |  |
@@ -552,7 +552,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 38 | Rolling Summary: Max tokens | Context & memory |  |
 | 39 | Configure Memory Prompts | Context & memory › PromptTiles |  |
 | 40 | RS Keys (rolling summary key pool) | Context & memory › KeyPoolTile |  |
-| 41 | Application Updates: Check for Updates + Check on startup | About › Updates | Install excluded |
+| 41 | Application Updates: Check for Updates + Check on startup | About › Updates | (U9) Install excluded |
 | 42 | Config Backup: Create Backup / Restore Backup | Data › Backup & restore |  |
 | 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android "Mirror outputs to Downloads/Glossarion") |
 | 44 | Auto DPI Scale / GUI Scale Factor / GUI Font Scale | Settings › Appearance › "Auto DPI / GUI scale" (disabled row + ReasonChip); Appearance › Text scale replaces it | **Excluded**: DPI scaling (the OS handles it); value preserved |
@@ -571,7 +571,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 57 | NIM / AuthND Token Helpers (auto limits, token concurrency, subprocess limit, token timeout) | Settings › Response handling › NIM/AuthND helpers | Adapted: the subprocess-limit field is shown disabled with a ReasonChip (no subprocesses) |
 | 58 | Dispatch order timeout (s) | Response handling |  |
 | 59 | Enable TOR proxy rotation (search/opera, ocz/) | Settings › Response handling & retries › "Tor rotation" (disabled row + ReasonChip) | **Excluded**: Tor; value preserved |
-| 60 | Gemini Free Browser Chunking (search/gemini) | Response handling (shown when the search/gemini experimental route is enabled) | Adapted: experimental WebView route; not in the exclusion list |
+| 60 | Gemini Free Browser Chunking (search/gemini) | Response handling (shown when the search/gemini experimental route is enabled) | Adapted: experimental WebView route (U9); every chunking setting applies; not in the exclusion list |
 | 61 | Parallel Extraction: Enable + Workers | Response handling › Parallel extraction | Threads; capped by CPU |
 | 62 | Enable GUI Responsiveness Yield | Settings › Response handling & retries › "GUI Responsiveness Yield" (disabled row + ReasonChip) | **Excluded**: Qt event-loop workaround; the mobile UI thread never blocks. Value preserved |
 | 63 | Translation Keys (Main Pool) status + Configure API Keys | Response handling › KeyPoolTile → Keys |  |
@@ -627,8 +627,8 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 113 | Skip Non-Spine Special Files in EPUB | EPUB output |  |
 | 114 | Skip Unreferenced Images in EPUB | EPUB output |  |
 | 115 | PDF Input: Output format (pdf/epub) | Settings › PDF › Input |  |
-| 116 | PDF Input: Async page threshold | PDF › Input | Adapted: threads |
-| 117 | PDF Input: Extraction workers (auto / 1..cores) + Auto | PDF › Input | Threads |
+| 116 | PDF Input: Async page threshold | PDF › Input (disabled row + ReasonChip) | Adapted: PDF extraction runs single-process on mobile; value preserved |
+| 117 | PDF Input: Extraction workers (auto / 1..cores) + Auto | PDF › Input (disabled row + ReasonChip) | Adapted: PDF extraction runs single-process on mobile; value preserved |
 | 118 | PDF Input: Use PDF table of contents for sections | PDF › Input |  |
 | 119 | PDF Input: Render mode | PDF › Input |  |
 | 120 | PDF Input: Paragraph alignment / Header alignment / Paragraph justification / RTL layout | PDF › Input layout |  |
@@ -845,9 +845,9 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 8 | Skip processing per file | Per-file "Process this image" switch |  |
 | 9 | Persist selected files across sessions | Automatic (no control); the selection is restored when Files reopens | Automatic |
 | 10 | OCR provider: custom-api (LLM vision OCR) | Manga › Settings › OCR provider |  |
-| 11 | OCR provider: Google Cloud Vision | OCR provider (status chip; credentials PathTile) | Dependency rule: google-cloud-vision when its wheels resolve, else Google Vision REST (`google_vision_rest`) |
+| 11 | OCR provider: Google Cloud Vision | OCR provider (status chip; credentials PathTile) | Dependency rule (U9): google-cloud-vision 3.16.0 ships (the SDK path, like desktop); `google_vision_rest` stays the fallback |
 | 12 | OCR provider: Azure Computer Vision | OCR provider (key / endpoint) |  |
-| 13 | OCR provider: Azure Document Intelligence | OCR provider (status chip) | Dependency rule: azure-ai-documentintelligence when its wheels resolve, else its REST API |
+| 13 | OCR provider: Azure Document Intelligence | OCR provider (status chip) | REST (`azure_document_intelligence_rest`, U8): the SDKs resolve (U9 check) but ocr_manager imports azure.ai.formrecognizer, never documentintelligence |
 | 14 | OCR provider: RapidOCR | OCR provider + ONNX download (status chip) | Ships when pyclipper / shapely wheels resolve (check_mobile_wheels.py); otherwise disabled row + ReasonChip |
 | 15 | OCR provider: manga-ocr (Japanese) | OCR provider list: manga-ocr row (disabled row + ReasonChip "Needs PyTorch") | **Excluded**: PyTorch model; no mobile wheels |
 | 16 | OCR provider: Qwen2-VL (local) | OCR provider list: Qwen2-VL row (disabled row + ReasonChip) | **Excluded**: PyTorch |
@@ -873,9 +873,9 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 36 | Inpaint method: Local - ONNX models (aot_onnx, anime_onnx, lama_onnx) | Inpainting + model download manager | onnxruntime |
 | 37 | Inpaint method: Local - torch JIT/checkpoint models (aot, lama, anime, lama_official, mat) | Inpainting method list: torch JIT rows (disabled row + ReasonChip) | **Excluded**: PyTorch |
 | 38 | Inpaint method: custom-image-edit (OpenAI-compatible image edit endpoint) | Inpainting (endpoint, prompt, batch) |  |
-| 39 | Test custom image edit endpoint | Inpainting › Test |  |
+| 39 | Test custom image edit endpoint | Inpainting › Test (the desktop check and texts, `manga_env.test_custom_image_edit_endpoint`) · Image keys (`inpainter` pool) |  |
 | 40 | Inpaint method: Hybrid | Inpainting method list: Hybrid row (disabled row + ReasonChip) | **Excluded**: depends on torch models |
-| 41 | Local model file Browse / Load / Download / Model Info / status | Inpainting › Model manager (download, info sheet, delete) | Adapted: no Browse; imports via PathTile |
+| 41 | Local model file Browse / Load / Download / Model Info / status | Inpainting › Local / API model ⓘ (the desktop Model Information text, `manga_models.MODEL_INFO`) · "Import model file…" (`manga_<type>_model_path`, a private copy) · Model manager (download, delete) | Adapted: Browse is Import model file (U9) |
 | 42 | Disable Performance Mode (local inpaint) | Inpainting |  |
 | 43 | Inpainter preload / pool tracker | Inpainting method row status chip (Preloaded / Loading / Not downloaded / Needs key) | Adapted |
 | 44 | Background settings (opacity, size, style Box/Circle/Wrap, preserve free text) | Settings › Rendering |  |
@@ -884,13 +884,13 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 47 | Strict text wrapping / Force CAPS | Rendering |  |
 | 48 | Font Style selection + Browse Custom Font | Rendering (FontTile, import) |  |
 | 49 | Font color / Shadow (enable, color, offset X/Y, blur) | Rendering (ColorTile) |  |
-| 50 | Reset rendering to defaults | Rendering ⋯ Reset |  |
+| 50 | Reset rendering to defaults | Rendering › Reset (confirm; the desktop values, `manga_settings_defaults.RENDERING_RESET_VALUES`) | (U9) |
 | 51 | Start / Stop batch translation (graceful and force stop) | Files › Start / state machine; Job card / JobStrip |  |
 | 52 | Parallel panel translation | Settings › Advanced | Capped workers |
 | 53 | Webtoon mode / format detection | Advanced / Preprocessing |  |
 | 54 | Image preprocessing (enhancement, denoise, size limits) | Preprocessing |  |
 | 55 | Inpainting HD strategy (original/resize/crop) and tiling | Preprocessing |  |
-| 56 | Mask settings (dilation, kernel, per-type iterations, auto iterations, presets) | Settings › Mask |  |
+| 56 | Mask settings (dilation, kernel, per-type iterations, auto iterations, presets) | Settings › Mask; Inpainting › Mask presets (B&W Manga / Colored / Uniform, `manga_settings_defaults.MASK_PRESETS`) | Presets (U9) |
 | 57 | OCR parameters (language hints, cloud confidence, detection mode, min region size, retries) | Settings › OCR params |  |
 | 58 | Text region merging & filtering | OCR params |  |
 | 59 | OCR batching, concurrency and ROI locality | OCR params |  |
@@ -902,11 +902,11 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 65 | Advanced: performance (parallel processing, max workers, parallel rendering, RT-DETR concurrency, inpainting concurrency, cache, disable worker process) | Advanced › Performance | Adapted: capped for phones |
 | 66 | Advanced: ONNX conversion, quantization, torch precision | Manga › Settings › Advanced: "ONNX conversion / quantization" (disabled row + ReasonChip) | **Excluded**: needs torch |
 | 67 | Advanced: memory management and RAM cap | Advanced › Memory | Adapted |
-| 68 | Experimental editing tools (Brush, Eraser) | Editor tools (Advanced switch) |  |
+| 68 | Experimental editing tools (Brush, Eraser) | Editor toolbar: Brush / Eraser (disabled + ReasonChip) | **Excluded**: experimental mask painting stays desktop only |
 | 69 | Manual Edit settings (Translate This Text) | Settings › Manual edit |  |
 | 70 | Settings dialog Save / Reset to defaults | Auto-save + ⋯ Reset |  |
 | 71 | Preview: dual viewer (Source / Translated Output) with thumbnails and navigation | Manga › Editor (Source / Translated, page strip) |  |
-| 72 | Preview: manual box/circle/lasso drawing, move/resize, delete, clear | Editor Edit mode tools |  |
+| 72 | Preview: manual box/circle/lasso drawing, move/resize, delete, clear | Editor Edit mode tools; toolbar Clear boxes (confirm; the desktop's Clear Boxes halves, `manga_editor_core`) | Clear boxes (U9) |
 | 73 | Preview workflow: Detect Text | Editor › Detect |  |
 | 74 | Preview workflow: Clean | Editor › Clean |  |
 | 75 | Preview workflow: Recognize Text | Editor › Recognize |  |
@@ -981,7 +981,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 49 | Reader: fullscreen & settings persistence | Reader full screen + `epub_reader_*` keys + per-book overrides, `reader_positions` and `reader_bookmarks` in `mobile_state.json` (Prefs) | New: reading positions |
 | 50 | Reader: QtWebEngine prewarm & QTextBrowser fallback | Reader (flet-webview on Android/iOS; native fallback renderer elsewhere) | **Excluded** (Qt-specific); replaced |
 | 51 | Open reader from Progress Manager / Direct Text attachments | Chapters row tap; Job card "Read" / "Open reader" |  |
-| 52 | AuthND browser-token routing (shares the Library's QtWebEngine) | Accounts › Experimental (off-screen WebViewBridge, U9 best effort) |  |
+| 52 | AuthND browser-token routing (shares the Library's QtWebEngine) | Accounts › Experimental (off-screen WebViewBridge) | Experimental (U9): `browser_driver` pages in the hidden WebView |
 | 53 | Translation context history (HistoryManager) | Automatic (no control); context settings live in Settings › Context & memory | Automatic |
 
 ## 12. multikey-misc (52)
@@ -1023,8 +1023,8 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 32 | Auto-poll selected provider (24h TTL) | ModelSheet shimmer | Automatic |
 | 33 | Model Manager: Custom Prefix routes | Models › Custom prefixes |  |
 | 34 | Model Provider Information | ModelSheet ⓘ |  |
-| 35 | Check for Updates (manual) | About › Updates › Check now |  |
-| 36 | Check for updates on startup | About › Updates |  |
+| 35 | Check for Updates (manual) | About › Updates › Check now | (U9) |
+| 36 | Check for updates on startup | About › Updates | (U9) Once per session, only when a release has a file for this device |
 | 37 | Install downloaded update | About › Updates "Download APK" / AltStore link | **Excluded**: self-installing updates |
 | 38 | Automatic config backup before every save | Data › Backup (list) | Automatic |
 | 39 | Create config backup (manual) | Data › Backup › Create |  |
@@ -1036,8 +1036,8 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 45 | Gemini prohibited-use refusal detection | Automatic (no control); ErrorCard "Blocked by the provider's safety filter" | Automatic |
 | 46 | EPUB metadata extraction/merge helpers | Automatic (no control); used by the Book › Overview metadata list | Automatic |
 | 47 | Hard stop / shutdown progress restore | Jobs › Interrupted recovery | Automatic |
-| 48 | Startup splash and module preloading | Boot View + warm import | Adapted |
-| 49 | Dialog fade animations / spinning Halgakos icons | M3 motion tokens; Halgakos in the boot view | Adapted |
+| 48 | Startup splash and module preloading | Native splash + immediate shell + warm import ("Preparing engine…" on Send and the drawer status) | Adapted: native splash, then the shell at once; until the warm import ends Send shows `blocked` "Preparing engine…" and the drawer status chip says so (no separate Boot View); undecryptable keys: Settings home notice |
+| 49 | Dialog fade animations / spinning Halgakos icons | M3 motion tokens; Halgakos in the native splash, the drawer header, About and the empty states | Adapted |
 | 50 | Memory usage logger | Data › Logs & diagnostics › Memory stats (off by default) | Adapted |
 | 51 | API key encryption at rest | Automatic (no control); Data › Backup offers passphrase-encrypted export | Automatic (SecureStorage key) |
 
@@ -1131,14 +1131,14 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 30 | Payload saving | Data › Logs & diagnostics |  |
 | 31 | Provider: OpenAI and OpenAI-compatible endpoints (custom base URL, OpenRouter, DeepSeek, Groq, xAI, Fireworks, SambaNova, NVIDIA, chutes, ElectronHub, NanoGPT, etc.) | ModelSheet; Settings › Endpoints |  |
 | 32 | Provider: Gemini native (google-genai) | ModelSheet |  |
-| 33 | Provider: Gemini raw gRPC transport | Settings › Endpoints › Gemini gRPC transport | Ships when grpcio wheels resolve (Tier-B pin); until then disabled row + ReasonChip |
+| 33 | Provider: Gemini raw gRPC transport | Settings › Endpoints › Gemini gRPC transport | Tier-B pin (U9): grpcio 1.81.0 + google-ai-generativelanguage 0.12.1 ship; the bootstrap sets `GRPC_DNS_RESOLVER=native` |
 | 34 | Provider: Anthropic / Mistral / Cohere | ModelSheet |  |
 | 35 | Provider: DeepL | ModelSheet |  |
-| 36 | Provider: Google Cloud Translate | ModelSheet (Google Cloud Translate route) | Dependency rule: SDK when its wheels resolve, else the Translation v2 REST API |
+| 36 | Provider: Google Cloud Translate | ModelSheet (Google Cloud Translate route) | Dependency rule (U9): google-cloud-translate 3.28.0 ships (its translate_v2 client is REST) |
 | 37 | Provider: Google Free Translate | ModelSheet |  |
-| 38 | Provider: Vertex AI / Model Garden (incl. Claude on Vertex) | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule: SDK when its wheels resolve, else Vertex REST + google-auth |
+| 38 | Provider: Vertex AI / Model Garden (incl. Claude on Vertex) | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule (U9): google-cloud-aiplatform needs protobuf<7 and is not shipped, so Vertex runs through REST + google-auth (Gemini via google-genai `vertexai=True`, Claude via `AnthropicVertex`; the desktop code) |
 | 39 | Provider: Poe | ModelSheet | Deprecated |
-| 40 | Google Cloud Text-to-Speech | Mode options › Audio (voice); Settings › Endpoints › TTS | Dependency rule: google-cloud-texttospeech when its wheels resolve, else the Text-to-Speech REST API |
+| 40 | Google Cloud Text-to-Speech | Mode options › Audio (voice); Settings › Endpoints › TTS | Dependency rule (U9): google-cloud-texttospeech 2.38.0 ships (with the grpcio 1.81 pins) |
 | 41 | NanoGPT image/video generation and media probing | Image / Video modes |  |
 | 42 | OAuth subscription routes: AuthGPT (ChatGPT), AuthCD (Claude), AuthGem (Gemini/Code Assist), AuthGrok (xAI) | Accounts |  |
 | 43 | Browser-backed keyless routes: AuthND (NVIDIA Build) and Search/Gemini Free | Accounts › Experimental |  |
@@ -1159,7 +1159,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 
 | # | Feature | Mobile surface | Notes |
 |---|---|---|---|
-| 0 | Direct Text: chat sessions, sidebar and history persistence | ChatDrawer (Pinned / Recents; Series in U9), header rename, `direct_text_chats.json` v2 via ChatStore, per-chat drafts, auto-title | Sidecar for extras |
+| 0 | Direct Text: chat sessions, sidebar and history persistence | ChatDrawer (Pinned / Series / Recents; Series is U9, optional: `mobile_series.json` + `series_id` in the sidecar), header rename, `direct_text_chats.json` v2 via ChatStore, per-chat drafts, auto-title | Sidecar for extras |
 | 1 | Direct Text: file attachments that run the full pipeline | Composer attach → Plan card → Job card; attached-text prompt role; Vision / Image auto-switch |  |
 | 2 | Direct Text: attachment workspace manager with Migrate | `/chat/<cid>/attachments`; Job card "Migrate to Library" |  |
 | 3 | Direct Text: per-chat settings panel and glossary override | Chat settings sheet (This chat / All chats) + ManualGlossarySheet |  |

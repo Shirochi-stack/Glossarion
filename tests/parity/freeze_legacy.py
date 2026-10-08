@@ -266,7 +266,13 @@ SHARED_MIXIN_MODULES = (
 #: the mixin modules so the legacy side never runs their live working-tree versions.
 #: U7: the image / generative-only and RPG Maker runners (TranslationPipelineMixin inherits
 #: image_job.ImageJobMixin and rpgmaker_job.RpgMakerJobMixin, like JobHooksMixin above).
-SHARED_HELPER_MODULES = ("job_runner", "stop_control", "image_job", "rpgmaker_job")
+#: U9 (P5b): save_config's settings_map and _init_variables' bool_vars / str_vars are built by
+#: settings_schema.desktop_settings_map / desktop_bool_vars / desktop_str_vars from the generated
+#: rows in settings_schema_data, so both are frozen whole too: an oracle frozen after P5b keeps the
+#: tables of its SHA instead of the working tree's (settings_schema resolves its converter /
+#: default modules with importlib.import_module, which _load_frozen_mixins routes the same way).
+SHARED_HELPER_MODULES = ("job_runner", "stop_control", "image_job", "rpgmaker_job",
+                         "settings_schema", "settings_schema_data")
 
 #: (method, statement prefix) - GUI-backed *state* assignments made while _setup_gui builds widgets.
 GUI_STATE_STATEMENTS = (
@@ -1566,10 +1572,28 @@ def _load_frozen_mixins(short: str, manifest: dict) -> tuple:
         # the frozen modules import their live src siblings (emoticon_patterns, app_paths, ...)
         sys.path.insert(0, str(SRC_DIR))
     real_import = builtins.__import__
+    import importlib as real_importlib
+
+    class _FrozenImportlib(types.ModuleType):
+        """``importlib`` as frozen code sees it: ``import_module`` of a frozen module name returns the
+        frozen copy (U9: settings_schema resolves converters / defaults that way), the rest is live."""
+
+        def __getattr__(self, attr):
+            return getattr(real_importlib, attr)
+
+    def import_module(name, package=None):
+        if package is None and name in frozen:
+            return load(name)
+        return real_importlib.import_module(name, package)
+
+    frozen_importlib = _FrozenImportlib("importlib")
+    frozen_importlib.import_module = import_module
 
     def frozen_import(name, globals=None, locals=None, fromlist=(), level=0):
         if level == 0 and name in frozen:
             return load(name)
+        if level == 0 and name == "importlib" and all(item == "import_module" for item in (fromlist or ())):
+            return frozen_importlib
         return real_import(name, globals, locals, fromlist, level)
 
     frozen_builtins = _FrozenBuiltins(__import__=frozen_import)
@@ -1584,6 +1608,11 @@ def _load_frozen_mixins(short: str, manifest: dict) -> tuple:
         mod.__builtins__ = frozen_builtins
         mod.__frozen_path__ = str(path)
         modules[module] = mod  # registered first: import cycles resolve like sys.modules
+        # A module with its own ``from __future__ import annotations`` (U9: settings_schema) has
+        # string annotations, and @dataclass then looks the class's module up in sys.modules while
+        # the class is created: the frozen copy is listed under its private name for the exec only
+        # (the live module name is never touched).
+        sys.modules[mod.__name__] = mod
         try:
             # dont_inherit: a whole module is compiled with ITS future flags, not this file's
             # ``from __future__ import annotations`` (string annotations break @dataclass in a
@@ -1592,6 +1621,9 @@ def _load_frozen_mixins(short: str, manifest: dict) -> tuple:
         except BaseException:
             modules.pop(module, None)
             raise
+        finally:
+            if sys.modules.get(mod.__name__) is mod:
+                del sys.modules[mod.__name__]
         return mod
 
     for module in frozen:

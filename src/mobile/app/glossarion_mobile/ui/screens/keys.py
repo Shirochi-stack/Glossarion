@@ -405,20 +405,111 @@ def _normalize_plan(result: Any, payload: Any) -> ImportPlan:
 # ---- controller --------------------------------------------------------------------------------------
 
 
-def key_status(entry: Mapping[str, Any]) -> str:
-    """Card status: active · disabled · passed · failed · cooling · encrypted."""
+#: ``key_pool_service.key_tree_status`` tags -> the card's status chip (colour) id.
+_TAG_STATUS = {"testing": "testing", "disabled": "disabled", "passed": "passed", "failed": "failed",
+               "timeout": "failed", "error": "failed", "ratelimited": "cooling", "cooling": "cooling",
+               "active": "active"}
+#: The desktop status texts shown as such on the card (emoji / "Error: …" prefix dropped by the chip).
+_TAG_TEXT = {"timeout": "Timed out", "ratelimited": "Rate limited", "error": "Error"}
+
+
+def _status_key(entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] = None) -> Any:
+    """The attributes ``key_tree_status`` reads: the config entry, with the running client's
+    cooldown state (``live_key_stats``) when a job has used the pool."""
+    import types
+
+    live = live or {}
+    cooldown = live.get("cooldown") if live.get("cooldown") is not None else entry.get("cooldown", 60)
+    try:
+        cooldown = int(cooldown)
+    except (TypeError, ValueError):
+        cooldown = 60
+    return types.SimpleNamespace(
+        last_test_result=entry.get("last_test_result"), last_test_message=entry.get("last_test_message"),
+        enabled=bool(entry.get("enabled", True)), is_cooling_down=bool(live.get("is_cooling_down")),
+        last_error_time=live.get("last_error_time"), cooldown=cooldown)
+
+
+def key_status_info(entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] = None) -> tuple:
+    """``(status id, text)`` of a key card: the desktop key tree's rule
+    (``key_pool_service.key_tree_status``: Disabled / Passed / Failed / Timed out / Rate limited /
+    Error / Cooling (Ns) / Active) plus "encrypted" for an undecryptable key."""
     if str(entry.get("api_key") or "").startswith("ENC:"):
-        return "encrypted"
-    if not entry.get("enabled", True):
-        return "disabled"
-    result = entry.get("last_test_result")
-    if result == "passed":
-        return "passed"
-    if result in ("failed", "error", "timeout"):
-        return "failed"
-    if result == "rate_limited":
-        return "cooling"
-    return "active"
+        return "encrypted", _STATUS_TEXT["encrypted"]
+    try:
+        from key_pool_service import key_tree_status
+
+        text, tags = key_tree_status(_status_key(entry, live))
+        tag = tags[0] if tags else "active"
+    except Exception:  # backend missing: the stored test result alone
+        result = entry.get("last_test_result")
+        tag = ("disabled" if not entry.get("enabled", True) else
+               {"passed": "passed", "failed": "failed", "error": "error", "timeout": "timeout",
+                "rate_limited": "ratelimited"}.get(str(result), "active"))
+        text = ""
+    status = _TAG_STATUS.get(tag, "active")
+    if tag == "cooling" and text:
+        return status, text  # "Cooling (42s)"
+    return status, _TAG_TEXT.get(tag) or _STATUS_TEXT.get(status, status)
+
+
+def key_status(entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] = None) -> str:
+    """Card status: active · disabled · passed · failed · cooling · encrypted."""
+    return key_status_info(entry, live)[0]
+
+
+def key_overrides_text(entry: Mapping[str, Any]) -> str:
+    """The per-key overrides the desktop key tree has as columns, when not the default:
+    "⌛ 90s · limit 4096 · T 0.3 · delay 2s"."""
+    parts = []
+    try:
+        cooldown = int(entry.get("cooldown")) if entry.get("cooldown") is not None else 60
+    except (TypeError, ValueError):
+        cooldown = 60
+    if cooldown != 60:
+        parts.append(f"⌛ {cooldown}s")
+    try:
+        limit = int(entry.get("individual_output_token_limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit > 0:
+        parts.append(f"limit {limit}")
+    temperature = entry.get("individual_key_temperature")
+    if temperature not in (None, ""):
+        parts.append(f"T {temperature}")
+    try:
+        delay = float(entry.get("api_call_delay") or 0)
+    except (TypeError, ValueError):
+        delay = 0.0
+    if delay > 0:
+        parts.append(f"delay {delay:g}s")
+    return " · ".join(parts)
+
+
+def excluded_model_reason(model: Any) -> Optional[tuple]:
+    """``(reason, detail)`` for a key whose model is a route excluded on mobile (``model_catalog.model_block``;
+    such keys arrive with a desktop config import and fail at run time), else None."""
+    if not model:
+        return None
+    try:
+        from glossarion_mobile.services.model_catalog import model_block
+
+        return model_block(str(model))
+    except Exception:
+        return None
+
+
+def key_counts_text(entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] = None) -> str:
+    """"✅ 12 · ❌ 1": the success / error counts (the running client's, else the stored ones)."""
+    source = live if live else entry
+    try:
+        success = int(source.get("success_count") or 0)
+        errors = int(source.get("error_count") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not success and not errors:
+        return ""
+    return f"✅ {success} · ❌ {errors}"
 
 
 class KeysController:
@@ -479,8 +570,54 @@ class KeysController:
     def set_setting(self, key: str, value: Any) -> None:
         self.store.set(key, value)
 
-    def new_entry(self, pool: str = "main") -> dict:
-        return self.backend.new_entry("", "")
+    def new_entry(self, pool: str = "main", api_key: str = "", model: str = "") -> dict:
+        return self.backend.new_entry(api_key or "", model or "")
+
+    def current_key_entry(self, pool: str = "main") -> dict:
+        """A new entry with the main API key and model (desktop "Copy Current Key":
+        ``MultiAPIKeyDialog._copy_current_settings`` fills the Add Key form from the main window)."""
+        api_key = str(self.store.get("api_key", "") or "") if self.store is not None else ""
+        model = ""
+        if self.store is not None:
+            effective = getattr(self.store, "effective", None)
+            model = str((effective("model") if callable(effective) else self.store.get("model", "")) or "")
+        return self.new_entry(pool, api_key, model)
+
+    def live_stats(self, pool: str) -> list:
+        """The running client's per-key stats paired with this pool's keys (None: no runtime row)."""
+        keys = self.keys(pool)
+        try:
+            import key_pool_service as kps
+
+            live = kps.live_key_stats(self.spec(pool).id)
+            return kps.merge_live_stats(keys, live)
+        except Exception:
+            return [None] * len(keys)
+
+    def set_key_fields(self, pool: str, indices: Iterable[int], values: Mapping[str, Any]) -> tuple:
+        """Bulk per-key edit (the desktop shared key menu: Change Model, Set Cooldown, Set / Clear
+        Output Token Limit, Temperature, API Call Delay, Individual Endpoint, Request Parameters):
+        ``values`` replace those fields on every selected key, each key is validated like the
+        KeyEditor's save (``validate_entry``). Returns ``(changed, [errors])``."""
+        errors: list = []
+        with self._lock:
+            keys = self.keys(pool)
+            changed = 0
+            for i in sorted({int(i) for i in indices}):
+                if not 0 <= i < len(keys):
+                    continue
+                entry = dict(keys[i])
+                entry.update(copy.deepcopy(dict(values)))
+                clean, error = self.backend.validate(entry, self.spec(pool).id)
+                if clean is None:
+                    errors.append(f"#{i + 1}: {error or 'invalid'}")
+                    continue
+                if clean != keys[i]:
+                    keys[i] = clean
+                    changed += 1
+            if changed:
+                self.set_keys(pool, keys)
+        return changed, errors
 
     def add_key(self, pool: str, entry: Mapping[str, Any]) -> tuple:
         """``(index, None)`` or ``(None, error)``; an exact duplicate of a key in the pool is refused."""
@@ -812,9 +949,10 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui.components._handlers import call_handler
     from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
     from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
-    from glossarion_mobile.ui.components.reason_chip import ReasonChip
+    from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
     from glossarion_mobile.ui.components.section_card import SectionCard
     from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+    from glossarion_mobile.ui.foreground import poll_sleep
     from glossarion_mobile.ui.screens.base import Screen
     from glossarion_mobile.ui.settings.model import mask_secret
     from glossarion_mobile.ui.theme import HIT_TARGET, status_color
@@ -827,6 +965,7 @@ _STATUS_TEXT = {"active": "Active", "disabled": "Disabled", "passed": "Passed", 
                 "cooling": "Cooling", "encrypted": "Re-enter key", "testing": "Testing…"}
 _STATUS_PALETTE = {"active": "info", "disabled": "disabled", "passed": "completed", "failed": "failed",
                    "cooling": "cooling", "encrypted": "failed", "testing": "running"}
+LIVE_REFRESH_SECONDS = 1.0
 DESKTOP_ONLY_ROWS = (
     ("Lock mouse wheel", "Desktop mouse-wheel guard; touch screens have no wheel. The setting is kept."),
     ("Key list zoom", "Mobile follows Settings › Appearance › Text scale. The setting is kept."),
@@ -864,9 +1003,11 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         export_dir: Optional[str] = None,
         tablet: bool = False,
         dark: bool = False,
+        is_top: Optional[Callable[[Any], bool]] = None,
     ) -> None:
         super().__init__(match)
         self.controller = controller
+        self.is_top = is_top  # shell: is this screen shown (top of the stack)? Gates the live-stats ticker
         self.ctx = ctx
         self.sheet_env = sheet_env
         self.files = files
@@ -891,6 +1032,8 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self.last_sheet: Any = None
         self._unsub: Optional[Callable[[], None]] = None
         self._stop_tests = threading.Event()
+        self.cooling = False
+        self._ticker: Any = None
 
     # ---- helpers -------------------------------------------------------------------------------------
 
@@ -973,12 +1116,57 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             keys = [s.config_key for s in self.controller.specs] + [s.toggle_key for s in self.controller.specs] + [
                 "force_key_rotation", "rotation_frequency", "use_main_key_fallback", "fallback_key_shuffle"]
             self._unsub = observe(keys, lambda key, value: self._on_store_change(key))
+        if self._ticker is None:
+            try:
+                self._ticker = self.spawn(self._tick_live_stats())
+            except Exception:
+                self._ticker = None
 
     def dispose(self) -> None:
         self._stop_tests.set()
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        if self._ticker is not None and hasattr(self._ticker, "cancel"):
+            self._ticker.cancel()
+        self._ticker = None
+
+    def _shown(self) -> bool:
+        """On top of the stack (not covered by another screen); True without a shell hook."""
+        if self.is_top is None:
+            return True
+        try:
+            return bool(self.is_top(self))
+        except Exception:
+            return True
+
+    async def _tick_live_stats(self, interval: Optional[float] = None) -> None:
+        """While the screen is shown: re-render when the running client's pool changed (success /
+        error counts) or a key is cooling down (the countdown), like the desktop tree's refresh.
+        No ticks while the app is in the background (``poll_sleep`` parks, UI_SPEC §7.3) or another
+        screen covers this one; one refresh when it is shown again."""
+        interval = LIVE_REFRESH_SECONDS if interval is None else interval
+        last = None
+        missed = False
+        while not self._stop_tests.is_set():
+            if await poll_sleep(self.page, interval):
+                missed = True
+            if self._stop_tests.is_set():
+                return
+            if not self._shown():
+                missed = True
+                continue
+            try:
+                live = self.controller.live_stats(self.pool)
+            except Exception:
+                continue
+            signature = repr([(row or {}).get(k) for row in live for k in ("success_count", "error_count",
+                                                                            "is_cooling_down", "times_used")])
+            if signature != last or self.cooling or missed:
+                last = signature
+                if any(live) or self.cooling or missed:
+                    missed = False
+                    self._external_refresh()
 
     def _on_store_change(self, key: str) -> None:
         on_ui = getattr(self.ctx, "on_ui", None)
@@ -1024,7 +1212,10 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self._render_selection_bar()
         keys = self.controller.keys(self.pool)
         self.selected = {i for i in self.selected if i < len(keys)}
-        self.cards = [self._key_card(i, entry) for i, entry in enumerate(keys)]
+        live = self.controller.live_stats(self.pool)
+        live = list(live) + [None] * (len(keys) - len(live))
+        self.cooling = any(row and row.get("is_cooling_down") for row in live)
+        self.cards = [self._key_card(i, entry, live[i]) for i, entry in enumerate(keys)]
         if not keys:
             self.list_view.controls = [ft.Container(
                 key="keys-empty", padding=ft.Padding.all(16),
@@ -1076,7 +1267,8 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             ft.Row([
                 self.add_button,
                 ft.TextButton(content="Copy current key", icon=ft.Icons.CONTENT_COPY,
-                              on_click=lambda e: self.spawn(self.copy_current_key())),
+                              tooltip="Add the main API key and model to this pool",
+                              on_click=lambda e: self.copy_current_key()),
                 self.test_selected_button, self.test_all_button,
                 ft.TextButton(content="Import", icon=ft.Icons.FILE_OPEN_OUTLINED,
                               on_click=lambda e: self.spawn(self.import_keys())),
@@ -1084,25 +1276,32 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
                 ft.TextButton(content="Refusal patterns", icon=ft.Icons.BLOCK, on_click=lambda e: self._open_refusal()),
             ], wrap=True, spacing=6, run_spacing=6),
         ]
-        for label, reason in DESKTOP_ONLY_ROWS:
-            rows.append(ft.ListTile(title=ft.Text(label), disabled=True, dense=True,
-                                    trailing=ReasonChip(reason="Desktop only", detail=reason), key=f"desktop-{label}"))
+        for label, reason in DESKTOP_ONLY_ROWS:  # an enabled row: a disabled one would disable its chip
+            rows.append(unavailable_tile(label, reason="Desktop only", detail=reason, key=f"desktop-{label}"))
         return ft.Container(content=ft.Column(rows, spacing=4, tight=True),
                             padding=ft.Padding.only(top=8, bottom=24))
 
-    def _key_card(self, index: int, entry: Mapping[str, Any]) -> "ft.Control":
-        status = "testing" if index in self.testing else key_status(entry)
+    def _key_card(self, index: int, entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] = None) -> "ft.Control":
+        if index in self.testing:
+            status, text = "testing", _STATUS_TEXT["testing"]
+        else:
+            status, text = key_status_info(entry, live)
         color = status_color(_STATUS_PALETTE.get(status, "info"), self.dark)
-        text = _STATUS_TEXT.get(status, status)
         disabled_ctx = list(entry.get("disabled_contexts") or [])
         details = [str(entry.get("model") or "(no model)")]
+        overrides = key_overrides_text(entry)
+        if overrides:
+            details.append(overrides)
+        counts = key_counts_text(entry, live)
+        if counts:
+            details.append(counts)
         if entry.get("use_individual_endpoint") and entry.get("azure_endpoint"):
             details.append("individual endpoint")
         if entry.get("request_parameters"):
             details.append(f"🧩 {len(entry['request_parameters'])}")
         if disabled_ctx:
             details.append(f"{len(disabled_ctx)} context{'s' if len(disabled_ctx) != 1 else ''} off")
-        used = entry.get("times_used") or 0
+        used = (live or {}).get("times_used") or entry.get("times_used") or 0
         if used:
             details.append(f"used {used}×")
         message = str(entry.get("last_test_message") or "") if status in ("failed", "cooling") else ""
@@ -1124,6 +1323,10 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         if message:
             lines.append(ft.Text(message, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ERROR, max_lines=2,
                                  overflow=ft.TextOverflow.ELLIPSIS))
+        excluded = excluded_model_reason(entry.get("model"))
+        if excluded is not None:  # U9: a key imported from a desktop config whose route cannot run here
+            lines.append(ft.Row([ReasonChip(reason=NOT_ON_MOBILE, detail=excluded[1])], wrap=True,
+                                key=f"key-excluded-{index}"))
         leading = ft.Checkbox(value=selected, on_change=lambda e, i=index: self.toggle_select(i)) if self.selected else \
             ft.Icon(ft.Icons.KEY, color=color)
         card = ft.Container(  # no explicit key: rebuilt cards must not be reconciled (frozen) by index
@@ -1161,6 +1364,13 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self.selected.clear()
         self.render()
         _push(self.list_view)
+
+    def handle_back(self) -> bool:
+        """Android back leaves selection mode before it leaves the screen (UI_SPEC §1.6 rule 2)."""
+        if self.selected:
+            self.clear_selection()
+            return True
+        return False
 
     def _render_selection_bar(self) -> None:
         if not self.selected:
@@ -1212,7 +1422,20 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
 
     def open_bulk_more(self) -> "ActionSheet":
         others = [s for s in self.controller.specs if s.id != self.pool]
-        items = [ActionItem("Set request contexts…", lambda: self.open_context_sheet(), icon="TUNE")]
+        items = [
+            ActionItem("Change model…", lambda: self.open_bulk_field("model"), icon="SMART_TOY_OUTLINED"),
+            ActionItem("Set cooldown…", lambda: self.open_bulk_field("cooldown"), icon="TIMER_OUTLINED"),
+            ActionItem("Set / clear output token limit…", lambda: self.open_bulk_field("individual_output_token_limit"),
+                       icon="DATA_USAGE"),
+            ActionItem("Set / clear key temperature…", lambda: self.open_bulk_field("individual_key_temperature"),
+                       icon="THERMOSTAT"),
+            ActionItem("Set / clear API call delay…", lambda: self.open_bulk_field("api_call_delay"),
+                       icon="HOURGLASS_EMPTY"),
+            ActionItem("Individual endpoint…", lambda: self.open_bulk_field("endpoint"), icon="LAN_OUTLINED"),
+            ActionItem("🧩 Request parameters…", lambda: self.open_bulk_field("request_parameters"), icon="TUNE"),
+            ActionItem("Set request contexts…", lambda: self.open_context_sheet(), icon="TUNE"),
+            ActionItem("Copy key", lambda: self.spawn(self.copy_key_to_clipboard()), icon="CONTENT_COPY"),
+        ]
         items += [ActionItem(f"Move to {s.title}", lambda s=s: self.copy_selected(s.id, move=True), icon="DRIVE_FILE_MOVE_OUTLINE")
                   for s in others]
         items += [ActionItem(f"Copy to {s.title}", lambda s=s: self.copy_selected(s.id, move=False), icon="CONTENT_COPY")
@@ -1222,6 +1445,29 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         if self.page is not None:
             sheet.show(self.page)
         return sheet
+
+    def open_bulk_field(self, field: str) -> "BulkFieldSheet":
+        """One field across the selected keys (desktop shared key menu): a sheet with the value,
+        Apply and, where the desktop has it, Clear."""
+        indices = sorted(self.selected)
+        keys = self.controller.keys(self.pool)
+        first = keys[indices[0]] if indices and indices[0] < len(keys) else {}
+        sheet = BulkFieldSheet(field, first, count=len(indices), sheet_env=self.sheet_env, page=self.page,
+                               on_apply=lambda values: self.apply_bulk_fields(indices, values))
+        self.last_sheet = sheet
+        if self.page is not None:
+            sheet.show(self.page)
+        return sheet
+
+    def apply_bulk_fields(self, indices: list, values: Mapping[str, Any]) -> Optional[str]:
+        changed, errors = self.controller.set_key_fields(self.pool, indices, values)
+        if errors and not changed:
+            return "; ".join(errors[:3])
+        note = f" ({len(errors)} skipped: {errors[0]})" if errors else ""
+        self.say(f"Updated {changed} key(s){note}")
+        self.render()
+        _push(self.list_view)
+        return None
 
     def copy_selected(self, target: str, *, move: bool) -> int:
         count = self.controller.copy_to(self.pool, sorted(self.selected), target, move=move)
@@ -1260,13 +1506,13 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
 
     # ---- editor --------------------------------------------------------------------------------------------
 
-    def open_editor(self, index: Optional[int]) -> Any:
+    def open_editor(self, index: Optional[int], *, prefill: Optional[Mapping[str, Any]] = None) -> Any:
         from glossarion_mobile.ui.screens.key_editor import KeyEditor
 
         spec = self.spec
         keys = self.controller.keys(self.pool)
         new = index is None or not 0 <= index < len(keys)
-        entry = self.controller.new_entry(spec.id) if new else keys[index]
+        entry = (dict(prefill) if prefill is not None else self.controller.new_entry(spec.id)) if new else keys[index]
         azure_versions: list = []
         schema = getattr(self.ctx, "schema", None)
         try:
@@ -1314,7 +1560,19 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         return await self.run_tests(indices)
 
     async def test_all(self) -> list:
-        return await self.run_tests(list(range(self.controller.count(self.pool))))
+        """Test all. The Translation pool tests only its enabled keys (desktop ``_test_all``: "Only test
+        enabled keys", "No enabled keys to test"); the other pools test every key, as on desktop."""
+        keys = self.controller.keys(self.pool)
+        if self.pool == "main":
+            if not keys:
+                self.say("No keys to test")
+                return []
+            indices = [i for i, entry in enumerate(keys) if entry.get("enabled", True)]
+            if not indices:
+                self.say("No enabled keys to test")
+                return []
+            return await self.run_tests(indices)
+        return await self.run_tests(list(range(len(keys))))
 
     async def run_tests(self, indices: list) -> list:
         if not indices:
@@ -1355,7 +1613,16 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         _push(self.list_view)
         return results
 
-    async def copy_current_key(self) -> Optional[str]:
+    def copy_current_key(self) -> Any:
+        """Desktop "Copy Current Key" (``_copy_current_settings``): the Add key editor pre-filled with
+        the main API key and model."""
+        entry = self.controller.current_key_entry(self.spec.id)
+        if not entry.get("api_key") and not entry.get("model"):
+            self.say("No main API key or model to copy")
+        return self.open_editor(None, prefill=entry)
+
+    async def copy_key_to_clipboard(self) -> Optional[str]:
+        """The selected (else first enabled) key's text to the clipboard."""
         keys = self.controller.keys(self.pool)
         index = min(self.selected) if self.selected else next(
             (i for i, k in enumerate(keys) if k.get("enabled", True)), None)
@@ -1506,6 +1773,161 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             call_handler(self.open_refusal_patterns)
 
 
+#: Bulk numeric fields: (label, kind, low, high, clear value or None when the desktop has no Clear).
+BULK_NUMBER_FIELDS = {
+    "cooldown": ("Cooldown (seconds)", "int", 10, 3600, None),
+    "individual_output_token_limit": ("Output token limit", "int", 0, 2_000_000, "clear"),
+    "individual_key_temperature": ("Temperature", "float", 0.0, 2.0, "clear"),
+    "api_call_delay": ("API call delay (seconds)", "float", 0.0, 3600.0, "clear"),
+}
+#: What "Clear" writes (the KeyEditor's empty values: the global limit / temperature / delay).
+BULK_CLEAR_VALUES = {"individual_output_token_limit": None, "individual_key_temperature": None,
+                     "api_call_delay": 0.0, "request_parameters": {}}
+
+
+def parse_bulk_value(field: str, text: str) -> tuple:
+    """``(values, error)`` for one bulk numeric field typed as text."""
+    label, kind, low, high, _clear = BULK_NUMBER_FIELDS[field]
+    raw = str(text or "").strip()
+    try:
+        value: Any = int(raw) if kind == "int" else float(raw)
+    except ValueError:
+        return None, "Enter a whole number" if kind == "int" else "Enter a number"
+    if not low <= value <= high:
+        return None, f"{label}: {low}–{high}"
+    return {field: value}, None
+
+
+class BulkFieldSheet:
+    """Apply one key field to N selected keys (Change model / cooldown / limits / temperature / delay /
+    individual endpoint / request parameters)."""
+
+    TITLES = {"model": "Change model", "endpoint": "Individual endpoint", "request_parameters": "🧩 Request parameters"}
+
+    def __init__(self, field: str, sample: Mapping[str, Any], *, count: int,
+                 on_apply: Callable[[Mapping[str, Any]], Optional[str]], sheet_env: Any = None,
+                 page: Any = None) -> None:
+        self.field = field
+        self.count = count
+        self.on_apply = on_apply
+        self.page = page
+        self.result: Optional[dict] = None
+        self.error = ft.Text("", color=ft.Colors.ERROR, visible=False, theme_style=ft.TextThemeStyle.BODY_SMALL)
+        controls: list = []
+        self.can_clear = field in BULK_CLEAR_VALUES
+        if field == "model":
+            from glossarion_mobile.ui.sheets.model_sheet import ModelPicker
+
+            self.input: Any = ModelPicker(value=str(sample.get("model") or ""), label="Model", env=sheet_env,
+                                          page=page, key="bulk-model")
+            controls.append(self.input)
+        elif field == "endpoint":
+            self.endpoint_switch = ft.Switch(label="Use individual endpoint",
+                                             value=bool(sample.get("use_individual_endpoint", True)))
+            self.endpoint_field = ft.TextField(value=str(sample.get("azure_endpoint") or ""), label="Endpoint URL",
+                                               hint_text="https://…", dense=True, keyboard_type=ft.KeyboardType.URL)
+            self.version_field = ft.TextField(value=str(sample.get("azure_api_version") or "2025-01-01-preview"),
+                                              label="Azure API version", dense=True)
+            controls += [self.endpoint_switch, self.endpoint_field, self.version_field]
+            self.input = self.endpoint_field
+        elif field == "request_parameters":
+            params = sample.get("request_parameters") or {}
+            self.input = ft.TextField(value=json.dumps(params, ensure_ascii=False, indent=2) if params else "",
+                                      label="Parameters (JSON object)", multiline=True, min_lines=3, max_lines=10,
+                                      hint_text='{"top_p": 0.9}', key="bulk-params")
+            controls.append(self.input)
+        else:
+            label, kind, low, high, _clear = BULK_NUMBER_FIELDS[field]
+            value = sample.get(field)
+            self.input = ft.TextField(value="" if value in (None, "") else str(value), label=label, dense=True,
+                                      keyboard_type=ft.KeyboardType.NUMBER,
+                                      helper=f"{low}–{high:,}" if kind == "int" else f"{low}–{high}",
+                                      key="bulk-number")
+            controls.append(self.input)
+            self.can_clear = BULK_NUMBER_FIELDS[field][4] is not None
+        title = self.TITLES.get(field) or BULK_NUMBER_FIELDS.get(field, (field,))[0]
+        buttons = [ft.TextButton(content="Cancel", on_click=lambda e: self.close())]
+        if self.can_clear:
+            buttons.append(ft.TextButton(content="Clear", on_click=lambda e: self.apply(clear=True), key="bulk-clear"))
+        buttons.append(ft.FilledButton(content="Apply", on_click=lambda e: self.apply(), key="bulk-apply"))
+        self.sheet = bottom_sheet(sheet_frame(scroll_column([
+            ft.Text(f"{title} · {count} key{'s' if count != 1 else ''}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
+                    weight=ft.FontWeight.W_600),
+            *controls, self.error,
+        ], footer=[ft.Row(buttons, alignment=ft.MainAxisAlignment.END)])))
+
+    def values(self, *, clear: bool = False) -> tuple:
+        field = self.field
+        if clear:
+            if field == "endpoint":
+                return {"use_individual_endpoint": False}, None
+            return {field: copy.deepcopy(BULK_CLEAR_VALUES[field])}, None
+        if field == "model":
+            model = str(getattr(self.input, "value", "") or "").strip()
+            return ({"model": model}, None) if model else (None, "Choose a model")
+        if field == "endpoint":
+            url = str(self.endpoint_field.value or "").strip()
+            on = bool(self.endpoint_switch.value)
+            if on and not url:
+                return None, "Enter the endpoint URL"
+            return {"use_individual_endpoint": on, "azure_endpoint": url or None,
+                    "azure_api_version": str(self.version_field.value or "").strip() or None}, None
+        if field == "request_parameters":
+            text = str(self.input.value or "").strip()
+            if not text:
+                return {"request_parameters": {}}, None
+            try:
+                value = json.loads(text)
+            except ValueError as exc:
+                return None, f"Not valid JSON: {exc}"
+            if not isinstance(value, dict):
+                return None, "Enter a JSON object"
+            return {"request_parameters": value}, None
+        return parse_bulk_value(field, str(self.input.value or ""))
+
+    def apply(self, *, clear: bool = False) -> Optional[str]:
+        values, error = self.values(clear=clear)
+        if error is None and values is not None:
+            error = self.on_apply(values)
+        if error:
+            self.error.value = error
+            self.error.visible = True
+            _push(self.error)
+            return error
+        self.result = dict(values or {})
+        self.close()
+        return None
+
+    def show(self, page: Any) -> None:
+        self.page = page
+        page.show_dialog(self.sheet)
+
+    def close(self) -> None:
+        close_dialog(self.page, self.sheet)
+
+
+def context_presets(contexts: Sequence[str]) -> list:
+    """``[(label, allowed contexts), ...]`` of the desktop context dialog (``key_contexts.context_presets``)."""
+    try:
+        from key_contexts import context_presets as shared
+    except Exception:
+        return []
+    try:
+        return [(str(label), set(allowed)) for label, allowed in shared(tuple(contexts))]
+    except Exception:
+        return []
+
+
+def context_preset_row(contexts: Sequence[str], on_preset: Callable[[Any], Any], *, key: str) -> Any:
+    """The "Enable all · Disable all · 🖼️ Images only" chip row above a context chip list."""
+    chips = [ft.Chip(label=ft.Text(label), on_click=lambda e, a=allowed: on_preset(a),
+                     leading=ft.Icon(ft.Icons.DONE_ALL if label == "Enable all" else ft.Icons.REMOVE_DONE
+                                     if label == "Disable all" else ft.Icons.IMAGE_OUTLINED, size=16),
+                     key=f"{key}-{index}")
+             for index, (label, allowed) in enumerate(context_presets(contexts))]
+    return ft.Row(chips, wrap=True, spacing=6, run_spacing=6, visible=bool(chips), key=key)
+
+
 class ContextSheet:
     """Bulk "Set request contexts": tri-state chips (on · off · mixed); untouched ones stay as they are."""
 
@@ -1523,11 +1945,14 @@ class ContextSheet:
             self.chips[context] = ft.Chip(label=ft.Text(self._label(context)), selected=bool(self.states[context]),
                                           on_click=lambda e, c=context: self.cycle(c), key=f"bulk-ctx-{context}")
         self.apply_button = ft.FilledButton(content="Apply", on_click=lambda e: self.apply())
+        # the desktop dialog's shortcut buttons (key_contexts.context_presets)
+        self.preset_row = context_preset_row(list(self.states), self.apply_preset, key="bulk-ctx-presets")
         # 25 chips are taller than a phone: they scroll, Cancel / Apply stay pinned below them.
         self.dialog = bottom_sheet(sheet_frame(scroll_column([
             ft.Text("Request contexts", theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
             ft.Text("Tap to switch a context on or off for every selected key. “–” means the keys differ; "
                     "contexts you do not touch stay as they are.", theme_style=ft.TextThemeStyle.BODY_SMALL),
+            self.preset_row,
             ft.Row(list(self.chips.values()), wrap=True, spacing=6, run_spacing=6),
         ], footer=[ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.close()), self.apply_button],
                           alignment=ft.MainAxisAlignment.END)])))
@@ -1552,6 +1977,22 @@ class ContextSheet:
         chip.label = ft.Text(self._label(context))
         _push(chip)
         return new
+
+    def apply_preset(self, allowed: Any) -> None:
+        """Enable all · Disable all · Images only: every context on exactly when it is in ``allowed``
+        (desktop ``set_routes``: the mixed state is cleared)."""
+        allowed = set(allowed or ())
+        for context in self.states:
+            new = context in allowed
+            self.states[context] = new
+            if new == self.initial.get(context):
+                self.changes.pop(context, None)
+            else:
+                self.changes[context] = new
+            chip = self.chips[context]
+            chip.selected = new
+            chip.label = ft.Text(self._label(context))
+        _push(*self.chips.values())
 
     def apply(self) -> Any:
         if self.applied:  # a second tap while the sheet closes

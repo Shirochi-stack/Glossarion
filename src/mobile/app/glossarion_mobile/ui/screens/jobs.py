@@ -57,16 +57,17 @@ from glossarion_mobile.services.jobs import (
 from glossarion_mobile.services.notifications import ACTION_RESUME, ACTION_SHARE, JobNotifications, chat_of
 from glossarion_mobile.services.wakelock import SharedWakelock
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.status import StatusChip
-from glossarion_mobile.ui.router import RouteMatch
+from glossarion_mobile.ui.router import RouteError, RouteMatch, build_route, parse_route
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.screens.job_detail import JobDetailScreen
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
-__all__ = ["DONE_STRIP_SECONDS", "JobsFeature", "JobsScreen", "SCREEN_ROUTES"]
+__all__ = ["DONE_STRIP_SECONDS", "JobsFeature", "JobsScreen", "SCREEN_ROUTES", "open_job_in_panel"]
 
 log = logging.getLogger("glossarion.jobs.ui")
 
@@ -83,6 +84,18 @@ def _platform_name(page: Any) -> str:
     if getattr(page, "web", False):
         return "desktop"
     return value if value in ("android", "ios") else "desktop"
+
+
+def open_job_in_panel(page: Any, jid: Any) -> bool:
+    """Tablets: job ``jid``'s detail in the shell's SidePanel beside what is on screen (UI_SPEC
+    §1.1, §1.7); False on phones (the caller pushes ``/jobs/<jid>``)."""
+    if page is None or not surface.is_tablet(page):
+        return False
+    try:
+        match = parse_route(build_route("jobs.detail", {"jid": str(jid)}))
+    except RouteError:
+        return False
+    return match is not None and surface.open_route_in_panel(page, match)
 
 
 class JobsScreen(Screen):
@@ -297,6 +310,8 @@ class JobsScreen(Screen):
             self.notify(text)
 
     def _open(self, snap: JobSnapshot) -> None:
+        if open_job_in_panel(self.page, snap.id):  # tablets: the detail beside the list
+            return
         if self.navigate is not None:
             self.navigate("jobs.detail", {"jid": snap.id})
 
@@ -347,6 +362,18 @@ class JobsScreen(Screen):
 # ---------------------------------------------------------------------------
 # Feature wiring
 # ---------------------------------------------------------------------------
+
+
+def sign_in_label(provider: str, account_id: int = 0) -> str:
+    """"ChatGPT" / "Claude #2": the provider's name (``PROVIDER_INFO``) and a non-default slot."""
+    try:
+        from glossarion_mobile.services.oauth import PROVIDER_INFO
+
+        info = PROVIDER_INFO.get(provider)
+        name = info.label if info is not None else provider
+    except Exception:
+        name = provider
+    return f"{name} #{account_id}" if account_id else name
 
 
 class JobsFeature:
@@ -437,6 +464,9 @@ class JobsFeature:
             if strip is not None:
                 strip.on_open = self.open_strip_job
                 strip.on_stop = self.stop_from_strip
+        drawer = getattr(app, "drawer", None)
+        if drawer is not None and hasattr(drawer, "register_search") and self.prefs is not None:
+            drawer.register_search("files", self.search_files)  # unified search (UI_SPEC §1.3)
         native = getattr(app, "native", None)
         if native is not None and hasattr(native, "add_listener"):
             native.add_listener("share", self._on_share_event)
@@ -484,10 +514,23 @@ class JobsFeature:
         notify = getattr(self.app, "notify", None)
         return notify(message, action_label, on_action) if notify is not None else None
 
-    def _navigate(self, name: str, params: Optional[dict] = None) -> None:
+    def _navigate(self, name: str, params: Optional[dict] = None, query: Optional[dict] = None) -> None:
         navigate = getattr(self.app, "navigate_to", None)
         if navigate is not None:
-            navigate(name, params)
+            if query:
+                navigate(name, params, query)
+            else:
+                navigate(name, params)
+
+    def _open_progress_folder(self, folder: str) -> Any:
+        """Job detail › Progress: the output folder in the Progress manager (the chat's workspace
+        opener: ``ChatFeature.open_progress`` builds the Library row and its route id)."""
+        chat_feature = getattr(self.app, "chat_feature", None)
+        opener = getattr(chat_feature, "open_progress", None)
+        if not callable(opener):
+            self._notify("The Progress manager is not available in this session")
+            return None
+        return self.spawn(opener(folder))
 
     def _navigate_route(self, route: str) -> None:
         navigate = getattr(self.app, "navigate", None)
@@ -510,6 +553,54 @@ class JobsFeature:
             raise RuntimeError("Prefs unavailable")
         return self.prefs.file_ref(path)
 
+    def _chat_workspace(self, snap: Any) -> str:
+        """Job detail › Files of a chat job: its persisted Attachments workspace (``ChatFeature.job_workspace``)."""
+        feature = getattr(self.app, "chat_feature", None)
+        lookup = getattr(feature, "job_workspace", None)
+        return str(lookup(snap) or "") if callable(lookup) else ""
+
+    async def search_files(self, query: str) -> list:
+        """Drawer › Files: names under the safe roots (Output, Library, Inbox), searched on the io pool;
+        a hit opens its folder in the file browser."""
+        return await self.run_io(self._search_files_blocking, query)
+
+    def _search_files_blocking(self, query: str, *, max_entries: int = 20000, max_depth: int = 4) -> list:
+        from glossarion_mobile.ui.shell.drawer import SEARCH_LIMIT, SearchHit
+
+        needle = query.casefold()
+        hits: list = []
+        seen = 0
+        roots = [(key, path) for key, path in self.file_roots().items() if key != "chats" and path]
+        for root_key, root in roots:
+            if not os.path.isdir(root):
+                continue
+            base_depth = root.rstrip(os.sep).count(os.sep)
+            for folder, dirs, files in os.walk(root):
+                if folder.count(os.sep) - base_depth >= max_depth:
+                    dirs[:] = []
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for name in [*dirs, *files]:
+                    seen += 1
+                    if seen > max_entries or len(hits) >= SEARCH_LIMIT:
+                        return hits
+                    if needle not in name.casefold():
+                        continue
+                    path = os.path.join(folder, name)
+                    target = path if os.path.isdir(path) else folder
+                    try:
+                        fid = self.file_ref(target)
+                    except Exception:
+                        continue
+                    relative = os.path.relpath(folder, root)
+                    hits.append(SearchHit(
+                        title=name,
+                        subtitle=f"{root_key.title()} › {relative}" if relative != "." else root_key.title(),
+                        icon="FOLDER" if os.path.isdir(path) else "DESCRIPTION",
+                        open=lambda r=root_key, f=fid: self._navigate("tools.files.folder", {"root": r, "fid": f}),
+                        key=fid + name,
+                    ))
+        return hits
+
     def file_roots(self) -> dict:
         paths = self.paths
         output = str(getattr(paths, "output", "") or "")
@@ -518,6 +609,9 @@ class JobsFeature:
             "library": str(getattr(paths, "library", "") or ""),
             "inbox": self.inbox_dir,
             "chats": os.path.join(output, "Direct Text") if output else "",
+            # U9 Logs & diagnostics: the API dumps and the log files
+            "payloads": os.path.join(str(getattr(paths, "data", "") or ""), "Payloads") if getattr(paths, "data", "") else "",
+            "logs": str(getattr(paths, "logs", "") or ""),
         }
 
     async def _confirm(self, title: str, body: str) -> bool:
@@ -536,8 +630,38 @@ class JobsFeature:
 
     # ---- submit / stop -------------------------------------------------------------------------
 
-    async def submit(self, spec: JobSpec, *, long_job: bool = True) -> str:
-        """Send / Start: background preparation on the user's tap, then queue the job."""
+    def model_block(self, spec: JobSpec) -> Optional[tuple]:
+        """``(reason, detail)`` when ``spec`` would run a model route excluded on mobile (U9 preflight,
+        ``model_catalog.job_model_block``), else None."""
+        store = getattr(self.app, "config_store", None)
+        get = getattr(store, "get", None) if store is not None else None
+        try:
+            from glossarion_mobile.services.model_catalog import job_model_block
+
+            return job_model_block(spec.kind, spec.params, get)
+        except Exception:
+            log.debug("model preflight failed", exc_info=True)
+            return None
+
+    def choose_model(self) -> Any:
+        """"Choose model" of a refused start: the global ModelSheet (the chat's picker)."""
+        chat_view = getattr(self.app, "chat_view", None)
+        opener = getattr(chat_view, "open_model_sheet", None) if chat_view is not None else None
+        if callable(opener):
+            return opener("model")
+        self._navigate("settings.models")
+        return None
+
+    async def submit(self, spec: JobSpec, *, long_job: bool = True) -> Optional[str]:
+        """Send / Start: background preparation on the user's tap, then queue the job.
+
+        U9 preflight: a job whose model is a route excluded on mobile (ocz/, ollamapull/, antigravity/ …)
+        is not queued - it would fail inside the API client with desktop-only text - and the reason is
+        shown with "Choose model" (Library › Translate, the Book page, Tools and glossary starts)."""
+        block = self.model_block(spec)
+        if block is not None:
+            self._notify(block[0], "Choose model", self.choose_model)
+            return None
         try:
             await self.background.prepare_for_run(spec, long_job=long_job)
         except Exception:
@@ -573,8 +697,15 @@ class JobsFeature:
                 # a pending glossary approval is answered on the chat's approval card
                 self._navigate("chat", {"cid": cid})
                 return
+            origin = snap.spec.origin or {}
+            if snap.question and origin.get("type") == "library" and origin.get("bid"):
+                # U9: the Library review gate is answered on the Book page's approval sheet
+                self._navigate("library.book", {"bid": str(origin.get("bid"))})
+                return
             if snap.question and (snap.question or {}).get("kind") == "async_batch_question":
                 self._navigate("tools.async")  # Tools › Async batch answers the dialog's questions
+                return
+            if open_job_in_panel(self.page, snap.id):  # tablets: SidePanel (UI_SPEC §1.7)
                 return
             self._navigate("jobs.detail", {"jid": snap.id})
         else:
@@ -594,7 +725,8 @@ class JobsFeature:
             screen = JobDetailScreen(match, service=self.service, files=self.files, dispatcher=self.dispatcher,
                                      page=self.page, navigate=self._navigate, notify=notify, copy_handler=copy,
                                      file_ref=self.file_ref if self.prefs is not None else None, tablet=tablet,
-                                     dark=dark)
+                                     dark=dark, open_progress=self._open_progress_folder, roots=self.file_roots,
+                                     chat_workspace=self._chat_workspace)
         elif match.name in ("tools.files", "tools.files.folder"):
             from glossarion_mobile.ui.screens.files import FileBrowserScreen
 
@@ -709,10 +841,39 @@ class JobsFeature:
     def _on_job_event(self, job_id: str, kind: str, data: Any) -> None:
         """Job events JobService does not consume itself (UI loop)."""
         if kind == "sign_in_required":
-            # UI_SPEC §1.9: the job lost (or never had) its ChatGPT login and the backend falls
-            # back to the browser login; point the user at the Accounts sign-in instead.
-            self.spawn(self.notifications.sign_in_required("ChatGPT"))
-            self._notify("Sign-in required for ChatGPT", "Sign in", lambda: self._navigate("settings.accounts"))
+            # UI_SPEC §1.9: the job lost (or never had) its login (ChatGPT / Claude / Gemini / Grok)
+            # and the backend falls back to the browser login or refuses it; point the user at that
+            # provider's LoginSheet (OAuthBridge: Custom Tab, paste fallback, sign-in service).
+            data = data if isinstance(data, dict) else {}
+            provider = str(data.get("provider") or "authgpt")
+            try:
+                account_id = int(data.get("account_id") or 0)
+            except (TypeError, ValueError):
+                account_id = 0
+            label = sign_in_label(provider, account_id)
+            self.spawn(self.notifications.sign_in_required(label))
+            self._notify(f"Sign-in required for {label}", "Sign in",
+                         lambda: self.open_login_sheet(provider, account_id))
+
+    def open_login_sheet(self, provider: str, account_id: int = 0) -> Any:
+        """The provider's LoginSheet for that slot (Accounts when the bridge is not available)."""
+        oauth = getattr(getattr(self.app, "chat_feature", None), "oauth", None)
+        if oauth is None or self.page is None:
+            self._navigate("settings.accounts")
+            return None
+        try:
+            from glossarion_mobile.ui.screens.accounts import LoginSheet
+
+            pages = getattr(self.app, "pages_feature", None)
+            on_done = (lambda _status: pages._signed_in_changed()) if pages is not None else None
+            sheet = LoginSheet(oauth, provider=provider, account_id=int(account_id or 0), on_done=on_done)
+            sheet.show(self.page)
+            self.login_sheet = sheet
+            return sheet
+        except Exception:
+            log.exception("opening the %s sign-in failed", provider)
+            self._navigate("settings.accounts")
+            return None
 
     # ---- native events -----------------------------------------------------------------------------------
 

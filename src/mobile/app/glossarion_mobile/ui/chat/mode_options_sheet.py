@@ -52,7 +52,7 @@ __all__ = [
 MODE_HINTS = {
     "text": "Translate text, documents, subtitles and books",
     "vision": "Vision OCR prompt · Skip translation (OCR only) · Batch Vision API requests · Keep OCR image · "
-    "Process long images · Hide labels · Vision keys",
+    "Process long images · Hide labels · OCR source prepass · Vision keys",
     "image": "Output resolution 1K / 2K / 4K · Batch requests · Image keys · Custom image-edit endpoint",
     "video": "Duration 5 / 10 / 15 / 20 / 30 / 60 s · Resolution 360p / 480p / 720p / 1080p",
     "audio": "TTS voice · TTS keys",
@@ -65,6 +65,8 @@ MODE_OPTION_KEYS = {
         "vision_ocr_prompt", "vision_ocr_user_prompt", "vision_ocr_skip_translation",
         "vision_ocr_batch_translation", "vision_ocr_batch_size", "vision_ocr_keep_images",
         "process_webnovel_images", "hide_image_translation_label",
+        # FEATURE_MAP manga #88 / deps-audit #6: OCR the source first (Auto / On / Off; schema choices)
+        "vision_ocr_source_prepass",
     ),
     "image": ("image_output_resolution", "vision_ocr_batch_translation", "vision_ocr_batch_size"),
     "video": ("nanogpt_video_duration", "nanogpt_video_resolution"),

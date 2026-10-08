@@ -30,6 +30,7 @@ import flet as ft
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools.common import card, hint_text
 
@@ -93,7 +94,7 @@ class QaReportScreen(Screen):
 
     def actions(self) -> list:
         return [ft.IconButton(icon=ft.Icons.IOS_SHARE, tooltip="Share report", on_click=self._on_share,
-                              key="qa-report-share")]
+                              key="qa-report-share", size_constraints=HIT_TARGET)]
 
     def build_body(self) -> ft.Control:
         if not self.path or not os.path.isfile(self.path):

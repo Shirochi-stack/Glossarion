@@ -35,7 +35,7 @@ from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from language_options import TARGET_LANGUAGES
 from translation_artifacts import update_translation_artifact_progress
 from epub_package import find_epub_opf_member
-from metadata_defaults import ensure_metadata_prompt_defaults
+from metadata_defaults import ensure_metadata_prompt_defaults, reset_metadata_prompts
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -1730,28 +1730,11 @@ class MetadataBatchTranslatorUI:
     
     def _reset_all_prompts_to_defaults(self):
         """Reset all prompts to default values"""
-        # Remove prompt-related keys from config
-        prompt_keys = [
-            'book_title_system_prompt', 'book_title_prompt',
-            'metadata_system_prompt',
-            'batch_header_system_prompt',
-            'batch_header_prompt', 'batch_header_prepend_number_pattern',
-            'metadata_batch_prompt',
-            'metadata_field_prompts', 'lang_prompt_behavior',
-            'forced_source_lang', 'output_language'
-        ]
-        
-        for key in prompt_keys:
-            if key in self.gui.config:
-                del self.gui.config[key]
-        
-        # Force set book title prompt to new default
-        self.gui.config['book_title_prompt'] = ""
+        # Remove prompt-related keys from config, force set book title prompt to new default and
+        # re-initialize other defaults (metadata_defaults.reset_metadata_prompts, shared with the mobile app)
+        reset_metadata_prompts(self.gui.config)
         if hasattr(self.gui, 'book_title_prompt'):
             self.gui.book_title_prompt = ""
-        
-        # Re-initialize other defaults
-        self._initialize_default_prompts()
         
         # Force save and reload to ensure fresh state
         self.gui.save_config(show_message=False)

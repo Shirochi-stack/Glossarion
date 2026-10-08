@@ -6,7 +6,8 @@ right after ``_install_chat()`` (it uses the chat feature's OAuthBridge and Chat
 1. wraps the shell's screen factory for ``/settings/accounts`` (all four providers,
    slots, project picker), ``/settings/profiles`` (+ ``/<pid>``), ``/settings/prefill``,
    ``/settings/appearance``, ``/settings/storage``, ``/settings/backup``,
-   ``/settings/import``, ``/settings/about``, ``/settings/danger`` and ``/welcome`` (the
+   ``/settings/import``, ``/settings/about``, ``/settings/danger``, ``/settings/notifications`` (U9:
+   permission, battery optimisation, iOS background note) and ``/welcome`` (the
    chat feature's Welcome flow plus the step-2 sign-ins, the Endpoints link and the
    permission requests); every other route falls through;
 2. marks those pages implemented on the Settings home (no "Arrives in" chip) and
@@ -46,6 +47,7 @@ SCREEN_ROUTES = (
     "settings.import",
     "settings.about",
     "settings.danger",
+    "settings.notifications",
     "welcome",
 )
 #: Settings home pages this feature ships (merged into ``SettingsHome.implemented``).
@@ -303,7 +305,8 @@ class AccountsProfilesFeature:
         if name == "settings.backup":
             from glossarion_mobile.ui.screens.backup import BackupScreen
 
-            return BackupScreen(match, ctx, share_file=self._share_one, temp_dir=self._temp_dir())
+            return BackupScreen(match, ctx, share_file=self._share_one, temp_dir=self._temp_dir(),
+                                pick_files=getattr(ctx, "pick_files", None))
         if name == "settings.import":
             from glossarion_mobile.ui.screens.desktop_import import DesktopImportScreen
 
@@ -321,6 +324,16 @@ class AccountsProfilesFeature:
             return AboutScreen(match, ctx, boot=getattr(app, "boot", None), paths=self._paths(),
                                platform_name=self._platform(),
                                open_url=getattr(oauth, "open_url", None) if oauth is not None else None)
+        if name == "settings.notifications":
+            from glossarion_mobile.ui.screens.notifications import NotificationsScreen
+
+            background = getattr(getattr(app, "jobs", None), "background", None)
+            return NotificationsScreen(
+                match, ctx, background=background,
+                request_notifications=(lambda: self.request_notifications(background)) if background is not None else None,
+                request_battery=(lambda: self.request_battery(background))
+                if background is not None and getattr(background, "is_android", False) else None,
+            )
         if name == "settings.danger":
             from glossarion_mobile.ui.screens.danger_zone import DangerZoneScreen
 

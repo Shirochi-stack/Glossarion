@@ -1863,3 +1863,210 @@ def run_cli_main(main_fn: Callable[[], Optional[int]], cleanup_fns: Optional[Ite
             cleanup_fns=cleanup_fns,
             cleanup_epub_reader_caches=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# Debug-cache size caps (moved from translator_gui in U9: _fmt_bytes, _sweep_size_capped_dir,
+# _sweep_large_caches; TranslatorGUI calls these, Glossarion Mobile runs the same sweep over its
+# data / logs folders at startup). ``script_file``: the caller's script (its folder is a root);
+# ``extra_roots``: more folders whose Payloads/ and http_requests/ are capped.
+# ---------------------------------------------------------------------------
+
+
+def fmt_bytes(n: int) -> str:
+    """Pretty-print a byte count for log lines (KB/MB/GB)."""
+    try:
+        n = float(n)
+    except Exception:
+        return f"{n} B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024.0:
+            return f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} PB"
+
+
+def sweep_size_capped_dir(folder: str, max_bytes: int, label: str = "") -> tuple:
+    """Cap a debug/cache directory's total size by deleting oldest files first.
+
+    Walks ``folder`` recursively, sums the size of every file, and if the
+    total exceeds ``max_bytes`` deletes files in ascending mtime order until
+    we're back under the cap. Then removes any empty subdirectories left
+    behind so the tree doesn't turn into a forest of empty folders.
+
+    Prints a single ``[CLEANUP]`` summary line to stdout whenever anything
+    is actually deleted (or when the folder is already at/over cap but we
+    couldn't free any files because they were all in use).
+
+    Best-effort: silently skips anything we can't stat or remove (files
+    held open by another running instance, permission errors, etc.).
+
+    Returns ``(removed_count, bytes_freed, total_before, total_after)``
+    so callers can produce higher-level summaries.
+    """
+    try:
+        if not folder or not os.path.isdir(folder):
+            return (0, 0, 0, 0)
+
+        entries = []  # list[(mtime, size, path)]
+        total = 0
+        for root, _dirs, files in os.walk(folder, followlinks=False):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                try:
+                    st = os.stat(fp)
+                except Exception:
+                    continue
+                entries.append((st.st_mtime, st.st_size, fp))
+                total += st.st_size
+
+        total_before = total
+        tag = label or folder
+
+        if total <= max_bytes:
+            # Nothing to do; don't spam the console for under-cap folders.
+            return (0, 0, total_before, total)
+
+        # Oldest first — delete until we're back under the cap.
+        entries.sort(key=lambda e: e[0])
+        removed = 0
+        freed = 0
+        skipped = 0
+        for _mtime, size, path in entries:
+            if total <= max_bytes:
+                break
+            try:
+                os.remove(path)
+                total -= size
+                freed += size
+                removed += 1
+            except Exception:
+                skipped += 1
+                # File held open, permission issue, etc. Skip.
+                pass
+
+        # Prune empty subdirectories (bottom-up), keep the root itself.
+        pruned = 0
+        for root, dirs, files in os.walk(folder, topdown=False, followlinks=False):
+            if os.path.abspath(root) == os.path.abspath(folder):
+                continue
+            try:
+                if not os.listdir(root):
+                    os.rmdir(root)
+                    pruned += 1
+            except Exception:
+                pass
+
+        try:
+            msg = (
+                f"[CLEANUP] {tag}: removed {removed} file(s), freed "
+                f"{fmt_bytes(freed)} ({fmt_bytes(total_before)} → {fmt_bytes(total)}, "
+                f"cap {fmt_bytes(max_bytes)})"
+            )
+            if skipped:
+                msg += f"; {skipped} file(s) in use"
+            if pruned:
+                msg += f"; pruned {pruned} empty dir(s)"
+            print(msg)
+        except Exception:
+            pass
+
+        return (removed, freed, total_before, total)
+    except Exception:
+        return (0, 0, 0, 0)
+
+
+def sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup", *,
+                       script_file: Optional[str] = None, extra_roots: Iterable[str] = ()) -> None:
+    """Enforce a per-folder size cap on app-local debug caches.
+
+    Targets:
+      * ``Payloads/`` — API request/response dumps written by
+        ``unified_api_client._payloads_dir`` (resolved against CWD with a
+        temp-dir fallback).
+      * ``http_requests/`` — raw HTTP traces written by
+        ``http_logger.enable_detailed_http_logging`` (resolved against the
+        script/exe directory).
+
+    Each folder is independently capped at ``max_bytes`` (default 400 MB)
+    by deleting oldest files first. These folders grow without bound
+    otherwise because the debug dumps are append-only.
+
+    Resolution is best-effort: we check both CWD and the executable/script
+    directory and dedupe by absolute path, since the resolution logic in
+    the writers above depends on which one happens to be writable at the
+    moment the first dump is saved.
+
+    ``phase`` is just a label for log output (``startup`` or ``exit``).
+    When anything is actually deleted, each folder produces a
+    ``[CLEANUP] <folder>: removed N file(s), freed X MB (...)`` line and
+    a final ``[CLEANUP] <phase>: total removed ... freed ...`` summary.
+    """
+    try:
+        # Candidate roots: exe dir (frozen), script dir (dev), and CWD.
+        roots = []
+        try:
+            if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
+                roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+        except Exception:
+            pass
+        try:
+            roots.append(os.path.dirname(os.path.abspath(script_file or __file__)))
+        except Exception:
+            pass
+        try:
+            roots.append(os.path.abspath(os.getcwd()))
+        except Exception:
+            pass
+        # Glossarion Mobile: the app data / logs folders where its Payloads and http_requests live.
+        for extra in extra_roots or ():
+            if extra:
+                roots.append(os.path.abspath(os.fspath(extra)))
+
+        # Also check the tempdir fallback used by _payloads_dir() in
+        # unified_api_client.py when CWD isn't writable.
+        fallback_payloads = None
+        try:
+            import tempfile
+            fallback_payloads = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+        except Exception:
+            pass
+
+        seen = set()
+        targets = []  # list[(label, path)]
+        for r in roots:
+            if not r:
+                continue
+            for sub in ("Payloads", "http_requests"):
+                p = os.path.abspath(os.path.join(r, sub))
+                key = os.path.normcase(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                targets.append((sub, p))
+        if fallback_payloads:
+            key = os.path.normcase(os.path.abspath(fallback_payloads))
+            if key not in seen:
+                seen.add(key)
+                targets.append(("Payloads (tmp fallback)", fallback_payloads))
+
+        total_removed = 0
+        total_freed = 0
+        for label, t in targets:
+            try:
+                removed, freed, _before, _after = sweep_size_capped_dir(t, max_bytes, label=label)
+                total_removed += removed
+                total_freed += freed
+            except Exception:
+                pass
+
+        if total_removed:
+            try:
+                print(
+                    f"[CLEANUP] {phase}: total removed {total_removed} file(s), "
+                    f"freed {fmt_bytes(total_freed)} across {len(targets)} folder(s)"
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass

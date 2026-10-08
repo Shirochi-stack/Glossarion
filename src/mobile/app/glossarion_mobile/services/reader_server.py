@@ -67,6 +67,7 @@ __all__ = [
     "TOKEN_HEADER",
     "document_csp",
     "image_id_for",
+    "sniff_font_mime",
     "sniff_image_mime",
 ]
 
@@ -143,6 +144,27 @@ def sniff_image_mime(data: Any) -> Optional[str]:
     if _looks_like_svg(head):
         return "image/svg+xml"
     return None
+
+#: Font files the Reader serves (the Converter's "Load Font…" folder), by signature.
+_FONT_MAGIC = (
+    (b"\x00\x01\x00\x00", "font/ttf"),
+    (b"true", "font/ttf"),
+    (b"OTTO", "font/otf"),
+    (b"ttcf", "font/collection"),
+    (b"wOFF", "font/woff"),
+    (b"wOF2", "font/woff2"),
+)
+MAX_FONT_BYTES = 64 * 1024 * 1024
+
+
+def sniff_font_mime(data: Any) -> Optional[str]:
+    """The font type of ``data`` by its signature, or None when it is not a font file."""
+    head = bytes(data[:4]) if data else b""
+    for magic, mime in _FONT_MAGIC:
+        if head == magic:
+            return mime
+    return None
+
 
 ImageSource = Union[bytes, str, Callable[[], Optional[bytes]]]
 EventCallback = Callable[[dict], Any]
@@ -296,6 +318,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "Set-Cookie": f"{COOKIE_NAME}={owner.token}; Path=/; HttpOnly; SameSite=Strict",
             })
             return
+        if len(rest) == 2 and rest[0] == "font":
+            found = owner.font(rest[1])
+            if found is None:
+                self._not_found()
+                return
+            data, mime = found
+            self._send(HTTPStatus.OK, data, mime, {"Cache-Control": "private, max-age=3600",
+                                                   "Content-Security-Policy": IMAGE_CSP})
+            return
         if len(rest) == 2 and rest[0] == "img":
             found = owner.image(rest[1])
             if found is None:
@@ -345,6 +376,7 @@ class ReaderServer:
         self._docs: dict[str, OrderedDict] = {}
         self._doc_serial = 0
         self._images: "OrderedDict[str, _Image]" = OrderedDict()
+        self._fonts: dict = {}  # font id -> file path (Aa › Text imported fonts)
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
         self.events_received = 0
@@ -491,6 +523,32 @@ class ReaderServer:
             # Not an image by content (e.g. a book <img src="../../..."> that resolved to an
             # app-private file): never served.
             log.warning("reader image %s refused: not an image", entry.key[-80:])
+            return None
+        return data, mime
+
+    def register_font(self, path: str) -> str:
+        """Serve a font file chosen by the Reader (the "Load Font…" folder); returns its URL path."""
+        font_id = image_id_for("font:" + os.path.abspath(str(path)))
+        with self._lock:
+            self._fonts[font_id] = str(path)
+        return f"{self.base_path}font/{font_id}"
+
+    def font(self, font_id: str) -> Optional[tuple]:
+        with self._lock:
+            path = self._fonts.get(font_id)
+        if not path:
+            return None
+        try:
+            if os.path.getsize(path) > MAX_FONT_BYTES:
+                return None
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            log.info("reader font unavailable: %s", exc)
+            return None
+        mime = sniff_font_mime(data)
+        if mime is None:
+            log.warning("reader font %s refused: not a font file", os.path.basename(path))
             return None
         return data, mime
 

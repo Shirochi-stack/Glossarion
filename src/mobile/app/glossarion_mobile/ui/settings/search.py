@@ -20,13 +20,18 @@ from glossarion_mobile.ui.settings.model import config_path, label_for, summariz
 from glossarion_mobile.ui.settings.schema_access import SEARCH_LIMIT, SearchHit
 from glossarion_mobile.ui.settings.tiles import EffectiveConfig
 
-__all__ = ["FILTERS", "SettingsSearch", "find_settings", "matches_filters"]
+__all__ = ["FILTERS", "SettingsSearch", "find_settings", "matches_filters", "search_sheet"]
 
 FILTERS = (
     ("modified", "Modified"),
     ("locked", "Locked"),
+    ("advanced", "Advanced"),
     ("unavailable", "Unavailable on mobile"),
 )
+
+#: The Settings home group the "Advanced" chip keeps (UI_SPEC §4.15: Other Stored Settings, Internal
+#: State and what the curated map left of the desktop Context Management & Memory section).
+ADVANCED_GROUP = "Advanced"
 
 
 def matches_filters(ctx: Any, hit: SearchHit, filters: Iterable[str], config: Optional[Any] = None) -> bool:
@@ -34,6 +39,8 @@ def matches_filters(ctx: Any, hit: SearchHit, filters: Iterable[str], config: Op
         if name == "modified" and not ctx.store.is_modified(config_path(hit.spec)):
             return False
         if name == "unavailable" and ctx.schema.availability(hit.key)[0]:
+            return False
+        if name == "advanced" and str(getattr(hit, "group", "") or "") != ADVANCED_GROUP:
             return False
         if name == "locked":
             view = config if config is not None else EffectiveConfig(ctx.store)
@@ -196,3 +203,19 @@ class SettingsSearch:
         )
         self.result_rows[hit.key] = row
         return row
+
+def search_sheet(search: "SettingsSearch") -> ft.BottomSheet:
+    """The search sheet (field, filter chips, results) the section pages' search button and the
+    chat's ``/settings <query>`` show."""
+    return ft.BottomSheet(
+        content=ft.Container(
+            padding=ft.Padding.only(left=12, right=12, bottom=12),
+            height=520,
+            content=ft.Column([search.field, search.filter_row, search.results],
+                              spacing=tokens.SPACING["sm"], expand=True,
+                              horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+        ),
+        show_drag_handle=True,
+        scrollable=True,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+    )

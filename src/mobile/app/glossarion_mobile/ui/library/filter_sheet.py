@@ -2,7 +2,8 @@
 
 * **Filter:** format chips All / EPUB / TXT / PDF / HTML / IMG (``epub_library_format_filter``);
   tri-state state chips (In progress · Ready to compile · Not started · Outdated ·
-  Has QA failures · Missing raw: off → only → hide); Series (U9, disabled).
+  Has QA failures · Missing raw: off → only → hide); Series (U9, optional Series: "All" or one
+  series' linked books; a hint while no series exists).
 * **Sort:** Date / A-Z / Size (``epub_library_sort``) + Reverse.
 * **Display:** Grid / List · Density (all 11 desktop presets 2XS-6XL,
   ``epub_library_card_size``) · Raw titles (``epub_library_show_raw_titles``) ·
@@ -16,13 +17,12 @@ switches in Prefs.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library.models import (
     DENSITY_LABELS,
     DENSITY_ORDER,
@@ -60,6 +60,8 @@ class FilterSheet:
         page_size: str = "20",
         on_change: Optional[Callable[[str, Any], Any]] = None,
         initial_tab: int = 0,
+        series: Sequence[tuple] = (),  # U9: (sid, name, colour hex) of every series
+        series_selected: Optional[str] = None,
     ) -> None:
         self.state = state
         self.view_mode = view_mode
@@ -74,6 +76,9 @@ class FilterSheet:
         self.state_chips: dict[str, ft.Chip] = {}
         self.density_chips: dict[str, ft.Chip] = {}
         self.page_chips: dict[str, ft.Chip] = {}
+        self.series = [tuple(item) for item in series]
+        self.series_selected = series_selected if series_selected in {item[0] for item in self.series} else None
+        self.series_chips: dict = {}  # sid ("" = All) -> Chip
         self.sort_buttons = ft.SegmentedButton(
             segments=[ft.Segment(value=k, label=ft.Text(v)) for k, v in SORTS],
             selected=[state.sort if state.sort in dict(SORTS) else "date"],
@@ -139,8 +144,34 @@ class FilterSheet:
             ft.Text("Tap once to show only, twice to hide, three times to clear.",
                     theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.Row(list(self.state_chips.values()), wrap=True, spacing=6, run_spacing=6),
-            ft.Row([ft.Text("Series", expand=True), ReasonChip(reason="Arrives in U9")]),
+            *self._series_rows(),
         ], spacing=tokens.SPACING["sm"], padding=ft.Padding.only(top=12))
+
+    def _series_rows(self) -> list:
+        """U9 Series filter: "All" or one series' linked books."""
+        rows: list[ft.Control] = [self._label("Series")]
+        if not self.series:
+            rows.append(ft.Text("No series yet. Add books to a series from a book's ⋯ › Add to Series.",
+                                theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                key="series-none"))
+            return rows
+        self.series_chips[""] = ft.Chip(label=ft.Text("All"), selected=self.series_selected is None,
+                                        show_checkmark=False, on_select=lambda e: self._on_series(None),
+                                        key="series-all")
+        for sid, name, color in self.series:
+            self.series_chips[sid] = ft.Chip(
+                label=ft.Text(name), selected=self.series_selected == sid, show_checkmark=False,
+                leading=ft.Container(width=10, height=10, border_radius=5, bgcolor=color),
+                on_select=lambda e, s=sid: self._on_series(s), key=f"series-{sid}")
+        rows.append(ft.Row(list(self.series_chips.values()), wrap=True, spacing=6, run_spacing=6))
+        return rows
+
+    def _on_series(self, sid: Optional[str]) -> None:
+        self.series_selected = sid
+        for key, chip in self.series_chips.items():
+            chip.selected = (key or None) == sid
+        self._refresh(*self.series_chips.values())
+        self._emit("series", sid)
 
     def _sort_tab(self) -> ft.Control:
         return ft.ListView([self._label("Sort by"), self.sort_buttons, self.reverse_switch],

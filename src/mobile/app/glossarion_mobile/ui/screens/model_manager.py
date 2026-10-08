@@ -272,6 +272,10 @@ class ModelManagerScreen(Screen):
         chips = []
         for provider, status in sorted(snap.statuses.items()):
             text = str(status)
+            if mc.provider_excluded(provider):  # a route excluded on mobile: its reason, not a poll warning
+                chips.append(ReasonChip(reason=f"{mc.provider_label(provider)} · {mc.EXCLUDED_STATUS}",
+                                        detail=mc.provider_excluded_detail(provider), key=f"mm-status-{provider}"))
+                continue
             ok = text.startswith("online")
             color = semantic("success") if ok else (ft.Colors.OUTLINE if "credential" in text else semantic("warning"))
             short = text.replace("online ", "").replace("static fallback ", "")
@@ -592,12 +596,20 @@ class ModelsKeysFeature:
             copy_text=getattr(app, "_copy_text", None),
             read_clipboard=getattr(getattr(app, "clipboard", None), "get", None),
             run_io=self.run_io, spawn=self.spawn, sign_in=self.sign_in, signed_in_keys=self.signed_in_keys,
-            test_key=self.test_key, tablet=self._tablet,
+            test_key=self.test_key, tablet=self._tablet, next_slot=self.next_slot,
+            gemini_status=self.gemini_status, gcp_project_picker=self.gcp_project_picker,
         ))
         shell = getattr(app, "shell", None)
         if shell is not None and self._fallback_factory is None:
             self._fallback_factory = shell.screen_factory
             shell.screen_factory = self.screen_factory
+        extras = getattr(self.ctx, "extras", None)
+        if isinstance(extras, dict):
+            # Settings › Response handling › "Manage refusal patterns…" (section_page STATIC_LINKS action)
+            extras.setdefault("actions", {})["refusal_patterns"] = self.open_refusal_patterns
+            # Settings › Custom API Endpoints (home, search hits, open_setting) opens the Endpoints page
+            # (quick-paste chips, dependency ReasonChips, Local AI, Test connection), not a plain SectionPage
+            extras.setdefault("section_screens", {})["other.endpoints"] = self.endpoints_section_screen
         if self.store is not None and not self._unsubs:
             observe = getattr(self.store, "observe_keys", None)
             if observe is not None:
@@ -607,6 +619,40 @@ class ModelsKeysFeature:
                 # desktop: a model change auto-polls that provider once its 24 h TTL is due (debounced)
                 self._unsubs.append(observe(("model", "api_key"), lambda key, value: self._post(self._schedule_auto_poll)))
         self.spawn(self.catalog.load())
+
+    def gcp_project_picker(self, model: str) -> Any:
+        """ModelSheet route row of ``authgem-vertex/`` models: the Accounts GCP project picker
+        (``accounts.GcpProjectPicker``) for the model's Gemini slot; None without the OAuthBridge."""
+        oauth = self._oauth()
+        if oauth is None or self.store is None:
+            return None
+        from glossarion_mobile.ui.screens.accounts import GcpProjectPicker
+
+        _route, account = mc.login_route(model)
+        store = self.store
+        return GcpProjectPicker(oauth, config_get=store.get, config_set=store.set_many, io=self.run_io,
+                                slot=lambda: int(account or 0), key="route-gcp-project")
+
+    def endpoints_section_screen(self, match: RouteMatch) -> Any:
+        """``settings.section`` ``other.endpoints`` (``#key`` focuses that field): the Endpoints page."""
+        if self.ctx is None:
+            return None
+        from glossarion_mobile.ui.screens.endpoints import EndpointsScreen
+
+        return EndpointsScreen(match, self.ctx, run_io=self.run_io, open_local_ai=self.open_local_ai,
+                               copy_text=getattr(self.app, "_copy_text", None),
+                               read_clipboard=getattr(getattr(self.app, "clipboard", None), "get", None))
+
+    async def gemini_status(self, account_id: int) -> Any:
+        """ModelSheet › 📊: ``accounts.open_gemini_status`` with the chat feature's OAuthBridge."""
+        oauth = getattr(getattr(self.app, "chat_feature", None), "oauth", None)
+        if oauth is None:
+            return None
+        from glossarion_mobile.ui.screens.accounts import open_gemini_status
+
+        notify = getattr(self.app, "notify", None)
+        return await open_gemini_status(oauth, account_id, io=self.run_io, page=getattr(self.app, "page", None),
+                                        say=notify)
 
     def detach(self) -> None:
         for unsub in self._unsubs:
@@ -671,6 +717,16 @@ class ModelsKeysFeature:
     def _tablet(self) -> bool:
         return bool(getattr(getattr(self.app, "shell", None), "tablet", False))
 
+    def _is_shown(self, screen: Any) -> bool:
+        """``screen`` is what the user sees: the shell's top screen with no overlay View (Refusal
+        patterns, Local AI) above it. True without a shell."""
+        shell = getattr(self.app, "shell", None)
+        if shell is None:
+            return True
+        if getattr(shell, "overlays", None):
+            return False
+        return getattr(shell, "top_screen", screen) is screen
+
     def _dark(self) -> bool:
         try:
             from glossarion_mobile.ui.theme import is_dark
@@ -692,6 +748,17 @@ class ModelsKeysFeature:
         except Exception:
             pass
         return frozenset(signed)
+
+    def next_slot(self, route: str) -> int:
+        """ModelSheet slot menu "+ Add account": OAuthBridge.next_slot (desktop slot allocation)."""
+        oauth = self._oauth()
+        if oauth is None:
+            return 1
+        try:
+            return int(oauth.next_slot(route))
+        except Exception:
+            log.debug("next_slot failed for %s", route, exc_info=True)
+            return 1
 
     def sign_in(self, route: str, account: int = 0) -> Any:
         """A sign-in chip / row: the Accounts LoginSheet for that provider and slot (OAuthBridge);
@@ -738,7 +805,7 @@ class ModelsKeysFeature:
                                 copy_text=getattr(self.app, "_copy_text", None),
                                 read_clipboard=getattr(getattr(self.app, "clipboard", None), "get", None),
                                 run_io=self.run_io, spawn=self.spawn, open_refusal_patterns=self.open_refusal_patterns,
-                                export_dir=export_dir, tablet=self._tablet(), dark=self._dark())
+                                export_dir=export_dir, tablet=self._tablet(), dark=self._dark(), is_top=self._is_shown)
         elif match.name == "settings.endpoints" and self.ctx is not None:
             from glossarion_mobile.ui.screens.endpoints import EndpointsScreen
 

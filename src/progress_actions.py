@@ -32,6 +32,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -2803,6 +2804,7 @@ __all__ = [
     'find_row_audio',
     'insert_missing_images',
     'llm_token_repair_summary',
+    'qa_issue_search_target',
     'plan_remove_qa_marks',
     'plan_retranslation',
     'prepare_single_qa_resolution',
@@ -2822,3 +2824,67 @@ __all__ = [
     'row_actions',
     'special_keyword_for',
 ]
+
+
+def qa_issue_search_target(qa_file_path, qa_issues):
+    """Progress Manager ✏️ Edit File (find QA issue): ``(search_term, line_number)`` for a QA-flagged
+    output (moved verbatim from Retranslation_GUI): the first quoted / bracketed text of the QA issue
+    lines, else the file's first non-ASCII run; the line is where the term (or its longest prefix)
+    first appears (1 when not found). The desktop copies the term and opens an editor at the line;
+    Glossarion Mobile's text editor opens at the term."""
+    search_term = None
+    _line_num = 1
+    # Extract a meaningful search term from the QA issue strings
+    # Try all common delimiter styles in order
+    _QUOTE_PATTERNS = [
+        r"'([^']+)'",                    # single quotes: 'text'
+        r'"([^"]+)"',                   # double quotes: "text"
+        r"\u201c([^\u201d]+)\u201d",    # curly double quotes: “text”
+        r"\u2018([^\u2019]+)\u2019",    # curly single quotes: ‘text’
+        r"\u300c([^\u300d]+)\u300d",    # Japanese corner brackets: 「text」
+        r"\u300e([^\u300f]+)\u300f",    # Japanese white corner brackets: 『text』
+        r"\uff62([^\uff63]+)\uff63",    # Halfwidth corner brackets
+        r"\[([^\]]+)\]",              # square brackets: [text]
+        r"\(([^)]+)\)",               # parentheses: (text)
+    ]
+    for _issue in qa_issues:
+        _s = str(_issue)
+        for _pat in _QUOTE_PATTERNS:
+            _m = re.search(_pat, _s)
+            if _m and _m.group(1).strip():
+                search_term = _m.group(1)
+                break
+        if search_term:
+            break
+    # Fallback: scan file for any non-ASCII sequence
+    if not search_term:
+        try:
+            with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
+                _content = _f.read()
+            _m = re.search(r'[^\x00-\x7f]{1,30}', _content)
+            if _m:
+                search_term = _m.group(0)
+        except Exception:
+            pass
+    # Find line number of search term in file
+    # Try progressively shorter prefixes in case the QA term is truncated
+    if search_term and os.path.exists(qa_file_path):
+        try:
+            with open(qa_file_path, 'r', encoding='utf-8', errors='ignore') as _f:
+                _lines = _f.readlines()
+            # Strip surrounding quote/bracket chars so we search raw content
+            _STRIP_QUOTES = '\'"「」『』“”‘’｢｣《》〈〉（）'
+            _bare = search_term.strip(_STRIP_QUOTES)
+            _base = _bare if _bare else search_term
+            # Build candidates: full bare term, then shrinking prefixes (min 1 char)
+            _candidates = [_base[:_l] for _l in range(len(_base), 0, -1)]
+            for _cand in _candidates:
+                for _i, _ln in enumerate(_lines, 1):
+                    if _cand in _ln:
+                        _line_num = _i
+                        break
+                if _line_num > 1:
+                    break
+        except Exception:
+            pass
+    return search_term, _line_num

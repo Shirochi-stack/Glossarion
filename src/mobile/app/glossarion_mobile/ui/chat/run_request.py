@@ -220,6 +220,14 @@ def config_overrides(overrides: Optional[Mapping[str, Any]]) -> dict:
         value = (overrides or {}).get(name)
         if isinstance(value, str) and value.strip():
             out[key] = value.strip()
+    if out.get("active_profile"):
+        # a per-chat profile switches the extraction method like the desktop profile combo
+        # (prompt_profiles.extraction_method_for_profile: *_BeautifulSoup / *_html2text)
+        from glossarion_mobile.state.setting_writes import extraction_method_for_profile
+
+        method = extraction_method_for_profile(out["active_profile"])
+        if method is not None:
+            out["text_extraction_method"] = method
     return out
 
 

@@ -9,6 +9,12 @@
   list of "Search in chat" over the message bodies.
 * **Export chat** (§2.18): a Markdown transcript, or a ZIP of the chat folder plus the v2 JSON
   subset of this session with its file references rebased into the ZIP.
+* **Job card outputs** (§2.12.4, U9): ``turn_workspace`` (the ``Attachments/<stem>`` workspace of a
+  turn's responses) and ``workspace_outputs`` (its compiled EPUB / PDF in ``list_compiled_outputs``
+  order, then ``*_translated.txt``, subtitles, SDLXLIFF and the glossary).
+* **MessageMoreSheet** (§2.10, U9): ``copy_text_for`` (Copy as Markdown / HTML / plain text from the
+  response's own ``Chat Messages`` copies) and ``glossary_terms_markdown`` ("Glossary terms used":
+  ``glossary_usage.build_chapter_footnote`` over the turn's source and this output).
 """
 
 from __future__ import annotations
@@ -20,9 +26,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 __all__ = [
+    "COPY_FORMATS",
     "JumpEntry",
+    "OUTPUT_KINDS",
     "VersionView",
     "build_chat_export_zip",
+    "copy_text_for",
+    "glossary_terms_markdown",
+    "source_text_for",
+    "turn_workspace",
+    "workspace_outputs",
     "jump_entries",
     "safe_file_stem",
     "search_matches",
@@ -40,6 +53,198 @@ STORAGE_PATH_KEYS = (
 
 def _role(message: Any) -> str:
     return str(message[0]) if isinstance(message, (list, tuple)) and message else ""
+
+
+# ---------------------------------------------------------------------------
+# Job card outputs (UI_SPEC §2.12.4)
+# ---------------------------------------------------------------------------
+
+#: Output chip kinds: (kind, label, icon).
+OUTPUT_KINDS = {
+    "epub": ("EPUB", "MENU_BOOK"),
+    "pdf": ("PDF", "PICTURE_AS_PDF"),
+    "html": ("HTML", "LANGUAGE"),
+    "txt": ("TXT", "DESCRIPTION"),
+    "subtitle": ("Subtitles", "SUBTITLES"),
+    "sdlxliff": ("SDLXLIFF", "TRANSLATE"),
+    "glossary": ("Glossary", "SPELLCHECK"),
+}
+_SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".lrc", ".sbv", ".sub")
+_OUTPUT_LIMIT = 24
+
+
+def turn_workspace(messages: Sequence[Any], indices: Iterable[Any]) -> str:
+    """The ``Attachments/<stem>`` workspace of a turn: the first response among ``indices`` whose output
+    folder (``message[4]``) lies inside an ``Attachments`` folder (walking up to its ``<stem>``
+    directory) and exists; '' when none does. Blocking (``os.path.isdir``)."""
+    for index in indices:
+        if index is None or not (0 <= int(index) < len(messages)):
+            continue
+        message = messages[int(index)]
+        folder = str(message[4] or "") if isinstance(message, (list, tuple)) and len(message) > 4 else ""
+        while folder and os.path.basename(os.path.dirname(folder)).lower() != "attachments":
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                folder = ""
+                break
+            folder = parent
+        if folder and os.path.isdir(folder):
+            return folder
+    return ""
+
+
+def workspace_outputs(folder: str) -> list:
+    """Blocking: ``[(path, kind)]`` of a chat workspace's output files: the compiled outputs
+    (``library_core.list_compiled_outputs``: EPUB / PDF / TXT / HTML, its priority order; the
+    desktop attachment rule ``ChatStoreMixin._preferred_attachment_compiled_documents`` without the
+    core), then the top-level ``*_translated.txt``, subtitle (SRT / ASS / VTT / LRC …) and SDLXLIFF
+    files and ``glossary.csv`` / ``glossary.json``."""
+    if not folder or not os.path.isdir(folder):
+        return []
+    out: list = []
+    seen: set = set()
+
+    def add(path: str, kind: str) -> None:
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen and os.path.isfile(path) and len(out) < _OUTPUT_LIMIT:
+            seen.add(key)
+            out.append((path, kind))
+
+    try:
+        from library_core import list_compiled_outputs  # shared (U5)
+
+        for name, kind in list_compiled_outputs(folder) or ():
+            path = str(name) if os.path.isabs(str(name)) else os.path.join(folder, str(name))
+            add(path, str(kind).lower())
+    except Exception:
+        try:
+            from direct_text_store import ChatStoreMixin  # shared (U3)
+
+            preferred = ChatStoreMixin._preferred_attachment_compiled_documents(folder)
+            for ext in (".epub", ".pdf"):
+                if preferred.get(ext):
+                    add(os.path.join(folder, preferred[ext]), ext[1:])
+        except Exception:
+            pass
+    try:
+        names = sorted(os.listdir(folder), key=str.casefold)
+    except OSError:
+        names = []
+    for name in names:
+        lower = name.lower()
+        path = os.path.join(folder, name)
+        if lower.endswith("_translated.txt"):
+            add(path, "txt")
+        elif lower.endswith(_SUBTITLE_EXTENSIONS):
+            add(path, "subtitle")
+        elif lower.endswith(".sdlxliff"):
+            add(path, "sdlxliff")
+    for sub in ("SDLXLIFF", "sdlxliff"):
+        sub_dir = os.path.join(folder, sub)
+        if os.path.isdir(sub_dir):
+            for name in sorted(os.listdir(sub_dir), key=str.casefold):
+                if name.lower().endswith(".sdlxliff"):
+                    add(os.path.join(sub_dir, name), "sdlxliff")
+            break
+    for name in ("glossary.csv", "glossary.json"):
+        add(os.path.join(folder, name), "glossary")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# MessageMoreSheet: Copy as… and Glossary terms used (UI_SPEC §2.10)
+# ---------------------------------------------------------------------------
+
+#: (format, label, storage key of the desktop's per-response copy in ``Chat Messages/``).
+COPY_FORMATS = (
+    ("markdown", "Markdown", "content_path"),
+    ("html", "HTML", "content_html_path"),
+    ("text", "Plain text", "content_text_path"),
+)
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            return handle.read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def copy_text_for(fmt: str, content: str, storage: Any = None,
+                  resolve: Callable[[str], str] = lambda ref: ref) -> str:
+    """Blocking: a response as Markdown / HTML / plain text. The desktop writes every response body
+    three ways (``ChatStoreMixin._write_response_files``: the Markdown body, its ``.html`` and
+    ``.txt``); those copies win. Without them (an inline reply) the body is converted with the
+    dialog's converters: ``direct_text_store.markup_to_html`` (Markdown or HTML -> sanitised HTML)
+    and ``glossary_usage.html_to_text``."""
+    storage = storage if isinstance(storage, Mapping) else {}
+    key = {f: k for f, _label, k in COPY_FORMATS}.get(fmt)
+    if key and storage.get(key) and fmt != "markdown":
+        text = _read_text(resolve(str(storage[key])))
+        if text:
+            return text
+    body = str(content or "")
+    if fmt == "markdown":
+        return body
+    try:
+        from direct_text_store import markup_to_html  # shared (U3)
+
+        html_text = markup_to_html(body)
+    except Exception:
+        html_text = body
+    if fmt == "html":
+        return html_text
+    try:
+        from glossary_usage import html_to_text  # shared
+
+        return html_to_text(html_text)
+    except Exception:
+        return body
+
+
+#: Attachments read as text for "Glossary terms used" (an EPUB is read chapter by chapter).
+_TEXT_SOURCE_EXTENSIONS = (".txt", ".md", ".html", ".htm", ".xhtml", ".srt", ".ass", ".ssa", ".vtt", ".lrc",
+                           ".csv", ".json", ".xml", ".sdlxliff")
+_SOURCE_LIMIT = 4 * 1024 * 1024
+
+
+def source_text_for(message: Any) -> str:
+    """Blocking: the source of a user turn: the typed text, or the attached file's text (text-like
+    files as read, an EPUB's spine chapters through ``glossary_usage.read_epub_spine_chapters``)."""
+    role = _role(message)
+    if role == "user":
+        return str(message[1] or "") if len(message) > 1 else ""
+    if role != "user_file" or len(message) < 3:
+        return ""
+    path = str(message[2] or "")
+    if not path or not os.path.isfile(path):
+        return ""
+    lower = path.lower()
+    if lower.endswith(".epub"):
+        try:
+            from glossary_usage import read_epub_spine_chapters
+
+            return "\n\n".join(str(c.get("text") or "") for c in read_epub_spine_chapters(path) or ())
+        except Exception:
+            return ""
+    if lower.endswith(_TEXT_SOURCE_EXTENSIONS):
+        try:
+            with open(path, "rb") as handle:
+                return handle.read(_SOURCE_LIMIT).decode("utf-8-sig", errors="replace")
+        except OSError:
+            return ""
+    return ""
+
+
+def glossary_terms_markdown(glossary_path: str, source_text: str, output_text: str, *, label: str = "") -> str:
+    """Blocking: "Glossary terms used" for one response: ``glossary_usage.build_chapter_footnote`` of the
+    glossary entries the turn's source mentions, each confirmed (or not) in this output."""
+    from glossary_usage import build_chapter_footnote, parse_glossary_file
+
+    entries = parse_glossary_file(glossary_path)
+    chapter = {"text": str(source_text or ""), "filename": label or os.path.basename(str(glossary_path or ""))}
+    return build_chapter_footnote(entries, chapter, output_text=str(output_text or ""))
 
 
 def turn_span(messages: Sequence[Any], user_index: int) -> list:

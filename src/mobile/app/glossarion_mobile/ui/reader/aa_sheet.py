@@ -46,8 +46,10 @@ class AaSheet:
         on_change: Optional[Callable[[dict, str], Any]] = None,
         on_scope: Optional[Callable[[str], Any]] = None,
         height: Optional[float] = None,
+        extra_families: Sequence[str] = (),
     ) -> None:
         self.settings = settings
+        self.extra_families = [str(f) for f in extra_families or () if f]  # imported fonts (Load Font…)
         self.themes = [dict(t) for t in themes] or [{"name": "Dark", "bg": "#1e1e1e", "fg": "#d4d4d4"}]
         self.scope = scope if scope in SCOPE_LABELS else SCOPE_ALL
         self.double_allowed = double_allowed
@@ -95,7 +97,9 @@ class AaSheet:
     def _text_tab(self) -> ft.Control:
         s = self.settings
         # A desktop config may name a system font (the desktop combo lists them): keep it selectable.
-        families = list(rm.FONT_FAMILIES) + ([s.font_family] if s.font_family not in rm.FONT_FAMILIES else [])
+        families = list(rm.FONT_FAMILIES) + [f for f in self.extra_families if f not in rm.FONT_FAMILIES]
+        if s.font_family not in families:
+            families.append(s.font_family)
         self.family = ft.Dropdown(
             label="Font",
             value=s.font_family,

@@ -34,6 +34,7 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text
@@ -92,7 +93,7 @@ class QaScannerScreen(Screen):
 
     def actions(self) -> list:
         return [ft.IconButton(icon=ft.Icons.TUNE, tooltip="QA Scanner Settings", key="qa-settings-action",
-                              on_click=lambda e: self.open_settings("qa.settings"))]
+                              on_click=lambda e: self.open_settings("qa.settings"), size_constraints=HIT_TARGET)]
 
     def build_body(self) -> ft.Control:
         self.mode_row = ft.ResponsiveRow(spacing=8, run_spacing=8, key="qa-modes")
@@ -206,7 +207,7 @@ class QaScannerScreen(Screen):
                 leading=ft.Icon(ft.Icons.MENU_BOOK), title=ft.Text(target.title, max_lines=2),
                 subtitle=ft.Text(" · ".join(lines), max_lines=2, theme_style=ft.TextThemeStyle.BODY_SMALL),
                 trailing=trailing or ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Remove",
-                                                   on_click=lambda e, t=target: self.remove_target(t)),
+                                                   on_click=lambda e, t=target: self.remove_target(t), size_constraints=HIT_TARGET),
                 on_click=lambda e, t=target: self.target_actions(t),
                 dense=True, key=f"qa-target-{target.key}"))
         if not rows:

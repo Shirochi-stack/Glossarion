@@ -27,7 +27,7 @@ from glossarion_mobile.ui.glossary.common import SheetHost, sheet
 __all__ = ["ExtractSheet", "IMAGE_EXTENSIONS", "ModeSheet", "PlanGlossarySheet", "RefineSheet"]
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
-SOURCE_EXTENSIONS = ["epub", "txt", "pdf", "srt", "ass", "lrc", "zip", "sdlxliff", "html", "htm", "md"]
+SOURCE_EXTENSIONS = ["epub", "txt", "pdf", "srt", "ass", "lrc", "zip", "sdlxliff", "html", "htm", "md", "cbz"]
 
 
 class ExtractSheet:
@@ -39,30 +39,41 @@ class ExtractSheet:
         self.on_pair = on_pair
         service = ctx.service
         reason = None if service.has_job_kind("extract_glossary") else "The job service is not running"
+        detail = None
+        if reason is None:  # U9 preflight: the extraction runs the main model; an excluded route cannot start
+            from glossarion_mobile.services.model_catalog import job_model_block
+
+            block = job_model_block("extract_glossary", {}, service.cfg)
+            if block is not None:
+                reason, detail = block
+        self.start_reason = reason
         tiles: list = [ft.Text(f"Glossary mode: {service.mode_label()} · Extract Glossary runs the Balanced/Full "
                                "extractor with the Glossary settings.", theme_style=ft.TextThemeStyle.BODY_SMALL,
                                color=ft.Colors.ON_SURFACE_VARIANT, key="ex-mode")]
         if source_path:
             tiles.append(self._tile(f"This book: {title or os.path.basename(source_path)}", "MENU_BOOK",
-                                    lambda: self.submit([source_path], title), "ex-this", reason))
+                                    lambda: self.submit([source_path], title), "ex-this", reason, detail))
         tiles.append(self._tile("Library book…", "LOCAL_LIBRARY", lambda: ctx.spawn(self.pick_library_book()),
-                                "ex-library", reason))
-        tiles.append(self._tile("File… (EPUB, TXT, PDF, subtitles)", "DESCRIPTION",
-                                lambda: ctx.spawn(self.pick_file()), "ex-file", reason))
+                                "ex-library", reason, detail))
+        tiles.append(self._tile("File… (EPUB, TXT, PDF, subtitles, CBZ)", "DESCRIPTION",
+                                lambda: ctx.spawn(self.pick_file()), "ex-file", reason, detail))
         tiles.append(self._tile("Image folder…", "PHOTO_LIBRARY", lambda: ctx.spawn(self.pick_images()), "ex-images",
-                                reason))
+                                reason, detail))
         if on_pair is not None:
             tiles.append(self._tile("Parallel EPUB pair…", "COMPARE_ARROWS", self._pair, "ex-pair", None))
         self.dialog = sheet("Extract glossary", tiles, actions=[
             ft.TextButton(content="Cancel", on_click=lambda e: self.host.close())], key="ex-sheet")
 
     @staticmethod
-    def _tile(label: str, icon: str, handler: Callable[[], Any], key: str, reason: Optional[str]) -> ft.ListTile:
-        from glossarion_mobile.ui.components.reason_chip import ReasonChip
+    def _tile(label: str, icon: str, handler: Callable[[], Any], key: str, reason: Optional[str],
+              detail: Optional[str] = None) -> ft.ListTile:
+        from glossarion_mobile.ui.components.reason_chip import unavailable_tile
         from glossarion_mobile.ui.theme import icon_data
 
-        return ft.ListTile(leading=ft.Icon(icon_data(icon)), title=ft.Text(label), disabled=reason is not None,
-                           trailing=ReasonChip(reason=reason) if reason else None,
+        if reason:  # never a disabled ListTile: Flet would disable the ReasonChip too (UI_SPEC §5.2)
+            return unavailable_tile(label, reason=reason, detail=detail, leading=ft.Icon(icon_data(icon)), key=key,
+                                    min_height=48, dense=False)
+        return ft.ListTile(leading=ft.Icon(icon_data(icon)), title=ft.Text(label), trailing=None,
                            on_click=lambda e: handler(), key=key, min_height=48)
 
     def show(self, page: Any = None) -> "ExtractSheet":
@@ -120,6 +131,22 @@ class ExtractSheet:
         if not picked:
             return None
         paths = [p.path for p in picked]
+        archives = [p for p in paths if p.lower().endswith(".cbz")]
+        if archives:
+            # a CBZ is its page images, as one image group named after the archive (like an image folder)
+            for archive in archives:
+                try:
+                    images = await self.ctx.io(self.ctx.service.expand_cbz, archive)
+                except Exception as exc:
+                    self.ctx.say(f"Could not read {os.path.basename(archive)}: {exc}")
+                    continue
+                if not images:
+                    self.ctx.say(f"{os.path.basename(archive)} has no images")
+                    continue
+                self.submit(images, os.path.splitext(os.path.basename(archive))[0])
+            paths = [p for p in paths if p not in archives]
+            if not paths:
+                return archives
         self.submit(paths)
         return paths
 
@@ -258,7 +285,8 @@ class PlanGlossarySheet:
     def __init__(self, ctx: Any, *, book: Optional[Mapping[str, Any]] = None, on_load_file: Callable[[], Any],
                  on_use_book: Optional[Callable[[], Any]] = None, on_clear: Callable[[], Any],
                  on_review: Optional[Callable[[], Any]] = None, on_mode: Callable[[], Any],
-                 effective: str = "") -> None:
+                 effective: str = "", on_map: Optional[Callable[[], Any]] = None,
+                 on_settings: Optional[Callable[[], Any]] = None) -> None:
         self.ctx = ctx
         self.host = SheetHost(ctx)
         service = ctx.service
@@ -281,6 +309,13 @@ class PlanGlossarySheet:
             ft.ListTile(leading=ft.Icon(ft.Icons.EDIT_NOTE), title=ft.Text("Review glossary"), key="pg-review",
                         disabled=on_review is None, on_click=lambda e: self._run(on_review)),
         ]
+        if on_map is not None:  # batch / several EPUBs: desktop "Map Glossaries to EPUBs"
+            tiles.append(ft.ListTile(leading=ft.Icon(ft.Icons.ACCOUNT_TREE), title=ft.Text("Map glossaries…"),
+                                     subtitle=ft.Text("One glossary per EPUB"), key="pg-map",
+                                     on_click=lambda e: self._run(on_map)))
+        if on_settings is not None:
+            tiles.append(ft.TextButton(content="Change glossary mode settings", icon=ft.Icons.SETTINGS,
+                                       on_click=lambda e: self._run(on_settings), key="pg-settings"))
         title = "Glossary" + (f" · {book.get('name')}" if book else "")
         self.dialog = sheet(title, tiles, actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())],
                             key="pg-sheet")

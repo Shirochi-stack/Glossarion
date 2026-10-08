@@ -25,6 +25,14 @@ Public API: ``SettingSpec``, ``Section``, ``EnvBinding``, ``MISSING``,
 ``is_available(key, platform='mobile')``, ``env_names(key)``, ``choice_values(key)``,
 ``evaluate_rule(rule_id, config)``.
 
+Desktop tables (U9 P5b): ``desktop_settings_map(owner)``, ``desktop_bool_vars(owner)`` and
+``desktop_str_vars(owner)`` return save_config's ``settings_map`` and ``_init_variables``'
+``bool_vars`` / ``str_vars`` exactly as the desktop literals built them (same rows, order,
+sources, defaults and converter behaviour), from the generated ``DESKTOP_*`` rows. The desktop
+methods call them, so the schema is the single source of those tables; the literals live on in
+``src/mobile/tools/frozen_desktop_tables.py`` (the generator's input and the oracle of
+tests/test_schema_p5b.py). They never build the SettingSpec index.
+
 ``visible_if`` / ``locked_if`` (U4) are rule ids that ``settings_rules.evaluate`` answers:
 ``lock:<key>`` gives the lock reason from ``settings_rules.evaluate_locks`` ('' when the
 setting is free); the visibility ids (``thinking:*``, ``output_mode:*``, ``glossary:*``) are
@@ -46,6 +54,7 @@ __all__ = [
     "sections", "section", "section_of", "effective_default", "coerce", "apply_converter",
     "search", "is_available", "is_value_available", "unavailable_values", "env_names", "keys",
     "choice_values", "evaluate_rule", "LOCKED_IF", "VISIBLE_IF",
+    "desktop_settings_map", "desktop_bool_vars", "desktop_str_vars",
 ]
 
 
@@ -109,6 +118,7 @@ class SettingSpec:
     flags: Tuple[str, ...] = ()
     unavailable: Tuple[Tuple[str, str], ...] = ()   # ((platform, reason), ...)
     unavailable_values: Tuple[Tuple[str, str, str], ...] = ()   # ((value, platform, reason), ...)
+    readonly: str = ""                # U9: reason a plain tile only shows the value (READONLY_REASONS)
 
     @property
     def nested(self) -> bool:
@@ -374,11 +384,29 @@ SECTION_OVERRIDES = {
     "google_cloud_credentials": "main.model",
     "replicate_api_key": "other.endpoints",
     "use_thread_pool_extraction": "other.processing.extraction",
+    # U9: the Glossary Refinement tab's "Request mode" combo (GlossaryManager_GUI refinement tab)
+    "glossary_refinement_chunking_mode": "glossary.refinement",
+    # U9: bookkeeping of the Custom Fields editor (removing the default 'description' field), not a setting
+    "custom_field_description_removed": "internal.state",
     # legacy keys that desktop startup migrates or removes (kept so old configs round-trip)
     "conservative_batching": "internal.state",
     "conservative_batch_multiplier": "internal.state",
     "max_images_per_chapter": "internal.state",
     "compress_glossary_strict_gender_matching": "internal.state",
+    # U9 gap audit: not top-level settings (a field of every custom_entry_types entry; the old EPUB
+    # layout flag the desktop Other Settings dialog migrates to epub_layout_mode and removes)
+    "has_gender": "internal.state",
+    "selected_files": "internal.state",  # U9 gap audit: the desktop's runtime file selection, not a setting
+    "legacy_structure": "internal.state",
+    # U9: the TTS endpoint override sits with the other endpoint overrides (Endpoints › Text-to-speech)
+    "openai_tts_endpoint": "other.endpoints",
+    # U9: the "Configure All" dialog's ⚙️ Advanced tab (metadata_batch_translator), with its prompts
+    "lang_prompt_behavior": "other.meta_data",
+    "forced_source_lang": "other.meta_data",
+    # U9: the Multi-Key Manager footer's refusal pattern length limit, next to Disable refusal checks
+    "refusal_pattern_length_limit": "other.response",
+    # U9: the Glossary Manager's Balanced/Full tab shows the Single Pass header prompt
+    "single_pass_glossary_header_prompt": "glossary.balanced_full",
 }
 
 # Platform availability: (regex on key, platforms it is unavailable on, reason). The
@@ -390,15 +418,18 @@ UNAVAILABLE_RULES = (
      "Desktop DPI / GUI scaling. The mobile app follows the system display and text size."),
     (r"^(authza_|glm_)|_authza_|authza_use_general_api|glm_access_mode|glm_proxy", ("mobile",),
      "AuthZA / GLM access modes use desktop-only routes (excluded on mobile)."),
-    (r"^authnd_|_authnd_|^nim_token|nim_auto_token", ("mobile",),
-     "The NIM / AuthND browser token helper needs the mobile WebView bridge (planned for U9)."),
-    (r"^gemini_free_", ("mobile",),
-     "Gemini Free browser chunking needs the mobile WebView bridge (planned for U9)."),
+    # U9: AuthND / Gemini Free run in the hidden in-app browser (browser_driver + the mobile
+    # WebViewBridge), so their NIM / AuthND token helper and browser chunking settings apply on
+    # mobile; only the helper-subprocess limit has nothing to limit there (FEATURE_MAP
+    # auth-routes #21, other-settings #57).
+    (r"^authnd_token_subprocess_concurrency$", ("mobile",),
+     "No helper subprocesses on mobile: AuthND tokens come from the hidden in-app browser, "
+     "limited by Token concurrency."),
     (r"(^|_)(auto_install_update|update_install|install_updates|auto_download_update|update_channel_install)($|_)", ("mobile",),
      "Self-installing updates are desktop-only. Mobile shows a 'new version' link instead."),
     (r"mousewheel|mouse_wheel|wheel_lock|wheel_locked", ("mobile",),
      "Mouse-wheel lock has no meaning on touch screens."),
-    (r"key_tree.*(zoom|font)|tree_zoom|multi_key_tree_font", ("mobile",),
+    (r"key_tree.*(zoom|font|height)|tree_zoom|multi_key_tree_font", ("mobile",),
      "Key-tree zoom belongs to the desktop Multi-Key Manager tree view."),
     (r"^enable_gui_yield$|gui_yield", ("mobile",),
      "GUI responsiveness yielding is a desktop Qt event-loop setting; the mobile UI runs on its own loop."),
@@ -422,8 +453,28 @@ UNAVAILABLE_RULES = (
      "Mobile downloads ready-made ONNX models."),
     (r"^qwen2vl_", ("mobile",),
      "Qwen2-VL OCR needs PyTorch + transformers · not available on mobile."),
-    (r"^manga_settings\.ocr\.(bubble_model_path|bubble_max_detections_yolo)$", ("mobile",),
+    (r"^manga_settings\.ocr\.(bubble_model_path|bubble_max_detections_yolo|custom_model_path)$", ("mobile",),
      "YOLOv8 / custom detector models need PyTorch + ultralytics · mobile uses RT-DETR ONNX."),
+    # the Manga Settings "experimental editing tools" switch only enables the desktop preview's
+    # Brush / Eraser (EXPERIMENTAL_TRANSLATE_ALL is read by manga_image_preview alone)
+    (r"^experimental_translate_all$", ("mobile",),
+     "Brush and eraser are desktop only (experimental mask painting there; not planned for mobile)."),
+    # U9 Tier B (plan dependency rule; src/mobile/pyproject.toml, tests_host/test_tier_b.py):
+    # sentence-transformers has no Android/iOS build (PyTorch, hf-xet), so the embeddings stage of
+    # silent-truncation detection never runs there (scan_html_folder falls back to the heuristic
+    # score, as desktop does without the package).
+    (r"^qa_scanner_settings\.truncation_embed_threshold$", ("mobile",),
+     "The embeddings stage of silent-truncation detection needs sentence-transformers (PyTorch) · "
+     "not available on mobile. Borderline chapters are judged by the heuristic score alone."),
+    # U9 feature-map audit: the mobile output root is app storage (Android; it can mirror to
+    # Downloads/Glossarion) or the iOS Documents folder; runtime_bootstrap exports OUTPUT_DIRECTORY,
+    # which run_env reads before this key (Settings › Data › Storage says the same).
+    (r"^output_directory$", ("mobile",),
+     "Not on mobile: outputs live in the app's Output folder (Data › Storage; iOS Files › Glossarion, "
+     "Android can mirror to Downloads/Glossarion). The desktop value is kept untouched."),
+    # qa_scan_runtime always scans with threads on mobile (no worker processes).
+    (r"^qa_scanner_settings\.use_thread_executor$", ("mobile",),
+     "Locked on mobile: the QA scan always runs in threads (no worker processes)."),
 )
 
 # Per-value availability for choice settings whose options include desktop-only backends
@@ -448,6 +499,11 @@ UNAVAILABLE_VALUE_RULES = (
      "Hybrid runs an ensemble of local models · needs PyTorch models (experimental on desktop)."),
     (r"^manga_settings\.advanced\.ram_cap_mode$", ("hard",), ("mobile",),
      "The hard RAM cap uses a Windows Job Object (desktop only); mobile uses the soft cap."),
+    # U9 Tier B: argostranslate needs ctranslate2 + sentencepiece (no Android/iOS builds). The
+    # SDLXLIFF reviewer's provider choice (sdlxliff_review_core MACHINE_TRANSLATION_PROVIDER_CONFIG_KEY).
+    (r"^sdlxliff_machine_translation_provider$", ("argos", "argos-translate", "argostranslate"), ("mobile",),
+     "Argos Translate (offline) needs ctranslate2 + sentencepiece, which have no Android/iOS builds · "
+     "not available on mobile."),
 )
 
 # Fresh-install values measured by the U0 desktop oracle (tests/parity golden
@@ -496,7 +552,48 @@ FRESH_INSTALL_NOTES = {
     key: ("fresh install (U0 oracle): config.json stores '' because the startup save_config "
           "(_glossary_env_mappings) blanks missing glossary prompt keys; runs use the built-in text")
     for key in ("append_glossary_prompt", "unified_auto_glosary_prompt3", "glossary_refinement_system_prompt",
-                "glossary_translation_prompt", "glossary_format_instructions")
+                "glossary_translation_prompt", "glossary_format_instructions",
+                # U9: same _glossary_env_mappings list; its built-in text is a DEFAULT_REFS overlay
+                "single_pass_glossary_header_prompt")
+}
+
+# U9: how a setting behaves differently on Glossarion Mobile (shown with its help, like the
+# desktop discrepancies; the value itself is untouched).
+MOBILE_NOTES = {
+    "ai_hunter_config.ai_hunter_max_workers": (
+        "mobile: QA scans run on at most 2 worker threads (qa_scan_runtime.MOBILE_QA_MAX_WORKERS); "
+        "a smaller value here still applies"),
+    "allow_authgpt_batch_stream_logs": (
+        "mobile: applies to AuthGPT / AuthGrok / AuthGem / AuthCD; AuthZA, Arena, Antigravity and OcAgy "
+        "are excluded on mobile"),
+    # FEATURE_MAP other-settings #139 (Adapted: FFT may be slow; warning note)
+    "advanced_watermark_removal": (
+        "mobile: the Advanced FFT pass is slow on a phone (several seconds per page); the value stays editable"),
+    # FEATURE_MAP manga #52 / #65 (Adapted: capped for phones); services/manga.prepare_run lowers the job's copy
+    "manga_settings.advanced.panel_max_workers": (
+        "mobile: a manga job runs at most 2 panels at once (each loads its own detector / inpainter); "
+        "a higher stored value is lowered for the run only and kept in config.json"),
+    "manga_settings.advanced.max_workers": (
+        "mobile: a manga job uses at most 2 workers; a higher stored value is lowered for the run only "
+        "and kept in config.json"),
+}
+
+# U9: settings that work on mobile for only part of what their desktop label names: key -> the short
+# text of a ReasonChip on the tile (the full sentence is the MOBILE_NOTES entry). Display only.
+MOBILE_PARTIAL_REASONS = {
+    "allow_authgpt_batch_stream_logs": "AuthZA / Arena / Antigravity / OcAgy excluded on mobile",
+    "advanced_watermark_removal": "Advanced FFT is slow on phones",
+    "manga_settings.advanced.panel_max_workers": "Capped to 2 on phones",
+    "manga_settings.advanced.max_workers": "Capped to 2 on phones",
+}
+
+# U9: generated defaults that are empty although the desktop editor shows, and runs use, a built-in
+# text while the stored value is empty: key -> '$ref' target (resolved lazily like other $ref
+# defaults). The stored value is untouched; "Default:" / Reset show the real text.
+DEFAULT_REFS = {
+    # GlossaryManager_GUI._default_single_pass_header_prompt == this constant; extract_glossary_from_epub
+    # falls back to it when SINGLE_PASS_GLOSSARY_HEADER_PROMPT is empty
+    "single_pass_glossary_header_prompt": "extract_glossary_from_epub:DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT",
 }
 
 # Defaults computed at runtime on desktop (effective_default returns None for them).
@@ -514,6 +611,219 @@ COMPUTED_DEFAULTS = {
 CHOICES_OVERRIDES = {
     "translation_chunk_prompt_role": ("system", "assistant", "user"),     # _init_variables
     "rolling_summary_mode": ("replace", "append"),                         # _on_context_mode_changed
+    # U9: desktop radio groups / fixed combos the generator saw no item list for; (value, label)
+    # pairs copied from the desktop controls (other_settings / GlossaryManager_GUI /
+    # QA_Scanner_GUI / ai_hunter_enhanced). A stored value outside the list stays shown as custom.
+    "text_extraction_method": (("standard", "Standard (BeautifulSoup)"),   # other_settings Text Extraction Method
+                               ("enhanced", "🚀 Enhanced (html2text)")),
+    "file_filtering_level": (("smart", "Smart (Aggressive Filtering)"),    # File Filtering Level
+                             ("comprehensive", "Comprehensive (Moderate Filtering)"),
+                             ("full", "No Filtering")),
+    "enhanced_filtering": (("smart", "Smart (Aggressive Filtering)"),      # mirrors file_filtering_level
+                           ("comprehensive", "Comprehensive (Moderate Filtering)"),
+                           ("full", "No Filtering")),
+    "extraction_mode": (("smart", "Smart (Aggressive Filtering)"),         # save_config: 'enhanced' or the level
+                        ("comprehensive", "Comprehensive (Moderate Filtering)"),
+                        ("full", "No Filtering"),
+                        ("enhanced", "🚀 Enhanced (html2text)")),
+    "batching_mode": (("conservative", "Conservative batching"),           # other_settings batching radios
+                      ("direct", "Direct batching"),
+                      ("aggressive", "No batching")),
+    "gemini_service_tier": ("off", "standard", "flex", "fast", "priority"),  # gemini_service_tier_combo
+    "epub_layout_mode": (("auto", "Auto"), ("epub2", "EPUB2"), ("epub3", "EPUB3")),  # layout_combo / Converter
+    "summary_role": ("user", "system", "both"),                            # rolling summary role_combo
+    "duplicate_detection_mode": (("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),
+                                 ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
+                                 ("cascading", "Cascading - Basic first, then AI Hunter")),
+    "emergency_glossary_compliance_mode": (("characters", "Characters"), ("all", "All"), ("custom", "Custom")),
+    "image_compression_format": (("auto", "Auto (Best quality/size ratio)"), ("webp", "WebP (Best compression)"),
+                                 ("jpeg", "JPEG (Wide compatibility)"), ("png", "PNG (Lossless)")),
+    "compress_glossary_strict_matching_mode": (("all", "All"), ("gender", "Gender Entries"),   # "Whole term for"
+                                               ("custom", "Custom"), ("none", "None")),
+    "glossary_entry_type_filter_mode": (("strict", "Strict"), ("loose", "Loose"), ("none", "No Filtering")),
+    "glossary_duplicate_key_mode": (("fuzzy", "Fuzzy"), ("auto", "Auto"), ("skip", "Skip")),  # no desktop control
+    "glossary_duplicate_algorithm": (("auto", "Auto - Uses all algorithms"),
+                                     ("strict", "Strict - High precision, minimal merging"),
+                                     ("balanced", "Balanced - Token + Partial matching"),
+                                     ("aggressive", "Aggressive - Maximum duplicate detection"),
+                                     ("basic", "Basic Only - Simple Levenshtein distance")),
+    "glossary_filter_mode": (("all", "All names & terms"), ("only_with_honorifics", "Names with honorifics only"),
+                             ("only_without_honorifics", "Names without honorifics & terms")),
+    "glossary_refinement_type_mode": (("all", "All Active Entry Types"), ("selected", "Selected Entry Types")),
+    "glossary_refinement_chunking_mode": (("separate", "Send each entry type in a separate request"),  # Request mode
+                                          ("all", "Send all entry types")),
+    "unified_glossary_source_language": tuple(
+        (name.lower(), name) for name in (
+            "Auto", "Korean", "Japanese", "Chinese", "English", "Spanish", "French", "German", "Italian",
+            "Portuguese", "Russian", "Arabic", "Hindi", "Turkish", "Hebrew", "Thai", "Other")),
+    "qa_scanner_settings.report_format": (("summary", "Summary only"), ("detailed", "Detailed (recommended)"),
+                                          ("verbose", "Verbose (all data)")),
+    "qa_scanner_settings.counting_mode": (("sampled", "Character count (sampled) - Fastest"),
+                                          ("exact", "Character count (exact) - Default"),
+                                          ("word", "Word count (legacy)")),
+    "qa_scanner_settings.ai_truncation_prompt_role": ("system", "user"),
+    "ai_hunter_config.detection_mode": (("single_method", "Single Method"),
+                                        ("multi_method", "Multi-Method Agreement"),
+                                        ("weighted_average", "Weighted Average")),
+    # metadata_batch_translator "Configure All" › ⚙️ Advanced › Language Detection radios
+    "lang_prompt_behavior": (("auto", "Auto-detect and include language (e.g., 'Translate this Korean text')"),
+                             ("never", "Never include language (e.g., 'Translate this text')"),
+                             ("always", "Always specify language:")),
+    # Tools › Headers & metadata translation mode radios (headers_model.METADATA_MODES)
+    "metadata_translation_mode": (("together", "Translate together (single API call)"),
+                                  ("metadata_separate", "Translate Metadata separately (2 API calls)"),
+                                  ("parallel", "Translate separately (parallel API calls)")),
+    # U9 gap audit: no desktop control; TransateKRtoEN._vision_ocr_source_prepass_enabled_for_mode reads
+    # auto / 1|true|on|source|qa|new / 0|false|off|direct|old (anything else counts as auto)
+    "vision_ocr_source_prepass": (("auto", "Auto"), ("on", "On (source prepass)"), ("off", "Off (direct OCR)")),
+    # U9 gap audit, Settings › Reader & Library: the desktop Library toolbar / reader values
+    # (library_core._ALL_SIZES with the toolbar labels, SORT_DATE / SORT_NAME / SORT_SIZE,
+    # reader_doc.READER_LAYOUTS / READER_THEME_NAMES; pinned by tests/parity/test_u9_gap_round4.py)
+    "epub_library_card_size": (("2xs", "2XS"), ("xs", "XS"), ("compact", "S"), ("normal", "M"), ("large", "L"),
+                               ("xl", "XL"), ("2xl", "2XL"), ("3xl", "3XL"), ("4xl", "4XL"), ("5xl", "5XL"),
+                               ("6xl", "6XL")),
+    "epub_library_sort": (("date", "Date"), ("name", "A-Z"), ("size", "Size")),
+    "epub_reader_layout": (("single_page", "Single page"), ("scroll", "Scroll"), ("all_scroll", "Scroll all"),
+                           ("double_page", "Double page")),
+    "epub_reader_theme": ((0, "Dark"), (1, "Light"), (2, "Sepia"), (3, "Midnight"), (4, "Forest"), (5, "Rose")),
+}
+
+# U9: types the generator inferred from a text widget although the stored value is structured
+# (a dict written by the profile bar / the Headers metadata-fields sheet) or numeric (the desktop
+# spin boxes store float / int). Display only; desktop tables never read SettingSpec.type.
+TYPE_OVERRIDES = {
+    "glossary_prompt_profiles": "dict",
+    "active_glossary_prompt_profiles": "dict",
+    "glossary_prompt_profile_defaults": "dict",
+    "translate_metadata_fields": "dict",
+    "glossary_compression_factor": "float",
+    "glossary_request_merge_count": "int",
+    # the Glossary Manager's output token limit entry (QLineEdit, saved as int; -1 = the main limit)
+    "glossary_max_output_tokens": "int",
+    # the Multi-Key Manager tree's font size (int) and column heights (dict); typed 'secret' by name
+    "multi_api_key_tree_font_size": "int",
+    "multi_api_key_tree_heights": "dict",
+    # U9 gap audit, Settings › Reader & Library / Progress Manager: checkboxes stored as booleans and the
+    # Glossary Progress refinement temperature (glossary_progress_core: config.get('temperature', 0.1))
+    "epub_details_show_special_files": "bool",
+    "retranslation_manual_editing": "bool",
+    "retranslation_show_model_info": "bool",
+    "sdlxliff_one_column_layout": "bool",
+    "sdlxliff_one_row_layout": "bool",
+    "sdlxliff_two_column_layout": "bool",
+    "temperature": "float",
+}
+
+# U9: settings mobile shows but never edits in a plain tile: structured stores a dedicated surface
+# edits, and mirrors the backend derives from another key (run_env exports USE_TITLE /
+# TRANSLATE_TOC_NCX from skip_title_tag_translation / use_toc_ncx; the glossary mode drives
+# enable_auto_glossary). key -> reason shown on the tile.
+READONLY_REASONS = {
+    "glossary_prompt_profiles": "Edited by the profile bar (Glossary › Balanced/Full, Minimal, Refinement)",
+    "active_glossary_prompt_profiles": "Edited by the profile bar (Glossary › Balanced/Full, Minimal, Refinement)",
+    "glossary_prompt_profile_defaults": "Edited by the profile bar (Glossary › Balanced/Full, Minimal, Refinement)",
+    "translate_metadata_fields": "Edited in Tools › Headers & metadata › Metadata fields",
+    "use_title": "Follows Skip title tag translation",
+    "translate_toc_ncx": "Follows Use & Translate TOC / PDF bookmarks",
+    "enable_auto_glossary": "Follows Glossary mode",
+    # the desktop Output Mode selector writes these legacy flags (settings_rules.output_mode_flags)
+    "enable_image_translation": "Follows Output mode",
+    "enable_image_output_mode": "Follows Output mode",
+    "enable_video_output_mode": "Follows Output mode",
+    "enable_audio_output_mode": "Follows Output mode",
+    "enable_refinement_output_mode": "Follows Output mode",
+    # U9 gap audit: the desktop removed this option (other_settings and owner_state force it off and
+    # run_env exports USE_HEADER_AS_OUTPUT='0'), so a mobile switch would do nothing
+    "use_header_as_output": "Disabled on desktop too: translated titles made surprising file names",
+    # not settings: a field of every custom_entry_types entry; the legacy EPUB layout flag
+    "has_gender": "A field of each entry type (Glossary › Entry types), not a setting of its own",
+    "legacy_structure": ("Legacy EPUB layout flag: the desktop Other Settings dialog migrates it to EPUB layout "
+                         "mode and removes it"),
+    "selected_files": "The desktop's current file selection, not a setting",
+    # U9 gap audit: the desktop Context Mode combo (owner_state._on_context_mode_changed) writes these three as
+    # one choice (settings_rules.apply_context_mode); mobile shows the same Context mode selector
+    "contextual": "Follows Context mode",
+    "use_rolling_summary": "Follows Context mode",
+    "rolling_summary_mode": "Follows Context mode",
+    # U9 gap audit: the Direct Text dialog's settings; Chat settings › All chats edits them with their real
+    # types (the generator saw them as text, so a plain tile would store 'false' as a string)
+    **{key: "Edited in Chat settings › All chats" for key in (
+        "direct_text_attachment_prompt_role", "direct_text_disable_auto_scroll", "direct_text_disable_thinking",
+        "direct_text_force_multipass_off", "direct_text_force_no_glossary", "direct_text_force_simple_mode",
+        "direct_text_glossary_override_mode", "direct_text_manual_glossary", "direct_text_output_mode",
+        "direct_text_rendered_card_limit", "direct_text_skip_prompt_profile",
+        "direct_text_skip_system_prompt_profile", "direct_text_skip_user_prompt_profile",
+    )},
+}
+
+# U9: curated labels that replace the generated widget text where the generator picked a
+# neighbouring label (several settings sharing "Mode" / "Output Resolution" / "Character"), a
+# help sentence or a template placeholder, or the text of an inverted desktop checkbox
+# (glossary_use_smart_filter is shown non-inverted here). Display only.
+LABEL_FIXES = {
+    "max_output_tokens": "Max output tokens",  # the desktop row label is "Budget" (a sub-label)
+    "translation_chunk_prompt": "Chunk prompt",
+    "image_chunk_prompt": "Image chunk prompt",
+    "gemini_safety_threshold": "Gemini safety threshold",
+    "openrouter_preferred_provider": "Preferred OpenRouter provider",
+    "pdf_output_format": "PDF output format",
+    "pdf_render_mode": "PDF render mode",
+    "scan_phase_mode": "Post-translation scan mode",
+    "nanogpt_video_duration": "Video duration",
+    "nanogpt_video_resolution": "Video resolution",
+    "use_toc_ncx": "Use & Translate TOC / PDF bookmarks",
+    "translate_toc_ncx": "Translate TOC / PDF bookmarks",
+    "use_title": "Use title tag",
+    "auto_glossary_mode": "Glossary mode",
+    "enable_auto_glossary": "Automatic glossary generation",
+    "gtool_filter_user_prompt": "GTool image scan system prompt",
+    "gtool_scan_user_prompt": "GTool image scan user prompt",
+    "rolling_summary_system_prompt": "Memory summary system prompt",
+    "rolling_summary_user_prompt": "Memory summary user prompt",
+    "manual_glossary_prompt3": "Balanced/Full extraction prompt",
+    "unified_auto_glosary_prompt3": "Minimal glossary extraction prompt",
+    "glossary_use_smart_filter": "Smart filtering (off: send the full text)",
+    "glossary_refinement_chunking_mode": "Request mode",
+    "openai_tts_endpoint": "TTS endpoint override (/audio/speech)",
+    "vision_ocr_source_prepass": "Vision OCR source prepass",
+    # U9 gap audit: Settings › Reader & Library / Progress Manager / Direct Text (humanized keys before)
+    "epub_details_show_special_files": "Show special files in book details",
+    "epub_library_card_size": "Card size",
+    "epub_library_sort": "Sort by",
+    "epub_reader_font_size": "Reader font size",
+    "epub_reader_layout": "Reader layout",
+    "epub_reader_line_spacing": "Reader line spacing",
+    "epub_reader_native_toc": "Use the book's own table of contents",
+    "epub_reader_theme": "Reader theme",
+    "retranslation_manual_editing": "Manual editing (Chapters ⋯)",
+    "retranslation_show_model_info": "Show model info in the chapter list",
+    "sdlxliff_one_column_layout": "SDLXLIFF reviewer: one-column layout",
+    "sdlxliff_one_row_layout": "SDLXLIFF reviewer: one-row layout",
+    "sdlxliff_two_column_layout": "SDLXLIFF reviewer: two-column layout",
+    "temperature": "Glossary Progress refinement temperature (fallback)",
+    "direct_text_force_simple_mode": "Force simple mode",
+    "direct_text_skip_system_prompt_profile": "Skip prompt profile (system prompt)",
+    "direct_text_skip_user_prompt_profile": "Skip prompt profile (user prompt)",
+    "lang_prompt_behavior": "Source language in prompts",
+    "forced_source_lang": "Language to use (Always specify)",
+    "qa_scanner_settings.word_count_multipliers": "Word-count multipliers (per language)",
+    "qa_scanner_settings.sdlxliff_tag_retention_threshold": "Minimum source tags retained (0-1, 1 = strict)",
+    "qa_scanner_settings.sdlxliff_tag_surplus_tolerance": "Maximum surplus tags allowed (0-1)",
+    "qa_scanner_settings.ai_truncation_prompt_role": "AI truncation prompt role",
+    "ai_hunter_config.enabled": "AI Hunter enabled",
+    "ai_hunter_config.language_detection.enabled": "Language detection enabled",
+    **{f"ai_hunter_config.thresholds.{name}": f"{name.title()} threshold (%)"
+       for name in ("character", "exact", "pattern", "semantic", "structural", "text")},
+    **{f"ai_hunter_config.weights.{name}": f"{name.title()} weight"
+       for name in ("character", "exact", "pattern", "semantic", "structural", "text")},
+}
+
+# U9: tooltips of desktop controls the generator saw no tooltip for (copied from the control). Display only.
+TOOLTIP_OVERRIDES = {
+    "glossary_refinement_chunking_mode": (
+        "Send all entry types combines them within the token budget. If splitting is needed, "
+        "characters and surnames are grouped first, followed by enabled gendered types, then other types. "
+        "A type that exceeds the budget on its own is split into smaller requests."),
 }
 
 # Rule ids evaluated by settings_rules.evaluate (U4). locked_if: the keys a registered
@@ -523,6 +833,8 @@ CHOICES_OVERRIDES = {
 LOCKED_IF = {key: "lock:" + key for key in (
     "batching_mode", "translation_temperature", "enable_thoughts",
     "append_glossary", "append_glossary_auto_load", "fuzzy_auto_mapping", "fuzzy_auto_mapping_threshold",
+    # U9: the manual factors while their Auto box is on (other_settings / Glossary Manager disable them)
+    "compression_factor", "glossary_compression_factor",
 )}
 VISIBLE_IF = {
     # Other Settings > Response Handling: thinking controls follow their enable toggles
@@ -546,6 +858,14 @@ VISIBLE_IF = {
     # (Append Glossary on) and the Minimal tab's Targeted Extraction Settings (Minimal mode)
     "unified_auto_glosary_prompt3": "glossary:extraction_prompt",
     "append_glossary_prompt": "glossary:append_prompt",
+    # Other Settings › Chapter extraction (on_extraction_method_change): the BeautifulSoup option shows only
+    # for Text Extraction Method Standard, the html2text options frame only for Enhanced
+    "fix_stray_p_gt_bs": "extraction:standard",
+    **{key: "extraction:enhanced" for key in (
+        "enhanced_preserve_structure", "skip_markdown_to_html", "allow_ai_markdown_headers",
+        "enhanced_single_line_break", "convert_br_to_paragraphs", "html2text_escape_snob",
+        "preserve_asterisk_separator_lines", "use_markdown2_converter",
+    )},
     **{key: "glossary:targeted_extraction" for key in (
         "glossary_min_frequency", "glossary_max_names", "glossary_max_titles", "glossary_context_window",
         "glossary_max_text_size", "glossary_max_sentences", "glossary_include_all_characters",
@@ -651,12 +971,16 @@ def _build_spec(key: str, entry: dict) -> SettingSpec:
         discrepancies = discrepancies + (FRESH_INSTALL_NOTES[key],)
     if key in COMPUTED_DEFAULTS:
         discrepancies = discrepancies + (f"computed at runtime: {COMPUTED_DEFAULTS[key]}",)
+    if key in MOBILE_NOTES:
+        discrepancies = discrepancies + (MOBILE_NOTES[key],)
+    if key in DEFAULT_REFS and default in ("", MISSING):
+        default = {"$ref": DEFAULT_REFS[key]}  # the stored '' is explained by FRESH_INSTALL_NOTES
     unavailable = _unavailable_for(key)
     platforms = frozenset({"desktop", "mobile"}) - {p for p, _r in unavailable}
-    label = entry.get("label") or LABEL_OVERRIDES.get(key) or _humanize(key)
-    label = label.strip().rstrip(":").strip()
+    label = LABEL_FIXES.get(key) or entry.get("label") or LABEL_OVERRIDES.get(key) or _humanize(key)
+    label = label.replace("&&", "&").strip().rstrip(":").strip()  # Qt mnemonic escape
     choices = CHOICES_OVERRIDES.get(key) or (tuple(entry["choices"]) if entry.get("choices") else None)
-    setting_type = entry.get("type", "str")
+    setting_type = TYPE_OVERRIDES.get(key) or entry.get("type", "str")
     if choices and setting_type == "str" and "editable_choices" not in entry.get("flags", ()):
         setting_type = "choice"     # editable desktop combos keep free text (the items are suggestions)
     return SettingSpec(
@@ -670,7 +994,7 @@ def _build_spec(key: str, entry: dict) -> SettingSpec:
         env=_env_bindings(entry.get("env")),
         section=_section_for(key, entry),
         label=label,
-        tooltip=entry.get("tooltip", ""),
+        tooltip=TOOLTIP_OVERRIDES.get(key) or entry.get("tooltip", ""),
         choices=choices,
         minimum=entry.get("minimum"),
         maximum=entry.get("maximum"),
@@ -687,6 +1011,7 @@ def _build_spec(key: str, entry: dict) -> SettingSpec:
         flags=tuple(entry.get("flags", ())),
         unavailable=unavailable,
         unavailable_values=_unavailable_values_for(key),
+        readonly=READONLY_REASONS.get(key, ""),
     )
 
 
@@ -948,3 +1273,70 @@ def search(query: str, *, limit: Optional[int] = None):
     scored.sort(key=lambda t: t[:3])
     result = [t[3] for t in scored]
     return result[:limit] if limit else result
+
+
+# =========================================================================== desktop tables (U9 P5b)
+# settings_map / bool_vars / str_vars as the desktop literals built them, from the generated
+# DESKTOP_* rows (see the settings_schema_data header for the row encoding).
+_BUILTIN_CONVERTERS = {"bool": bool, "str": str, "int": int, "float": float, "list": list, "dict": dict}
+_SPEC_CONVERTERS = ("safe_int", "safe_float", "int_if_digits", "choice", "str_or")
+_TABLE_CONVERTERS = {}
+
+
+def _table_converter(conv):
+    """The callable the desktop literal held: the builtin itself, the named function itself,
+    None, or a function that applies the lambda's ConvSpec (tier C proves them equal)."""
+    kind = conv[0]
+    if kind in _BUILTIN_CONVERTERS and len(conv) == 1:
+        return _BUILTIN_CONVERTERS[kind]
+    if kind == "none":
+        return None
+    if kind == "call":
+        return _resolve_call(conv[1])
+    if kind not in _SPEC_CONVERTERS:
+        raise ValueError(f"settings_schema: settings_map converter {conv!r} cannot be rebuilt")
+    convert = _TABLE_CONVERTERS.get(conv)
+    if convert is None:
+        def convert(value, _conv=conv):
+            return apply_converter(_conv, value)
+        convert.conv_spec = conv
+        _TABLE_CONVERTERS[conv] = convert
+    return convert
+
+
+def _table_value(spec, owner):
+    """A table default: evaluated for every build, like the literal (lists / dicts are fresh)."""
+    tag = spec[0]
+    if tag == "value":
+        value = spec[1]
+        return copy.deepcopy(value) if isinstance(value, (list, dict, set)) else value
+    if tag == "ref":
+        value = _resolve_marker({"$ref": spec[1]})
+        if value is _UNRESOLVED:
+            raise LookupError(f"settings_schema: desktop table default {spec[1]!r} is not importable")
+        return value
+    if tag == "attr":
+        return getattr(owner, spec[1], _table_value(spec[2], owner))
+    if tag == "config":
+        return owner.config.get(spec[1], _table_value(spec[2], owner))
+    raise ValueError(f"settings_schema: unknown desktop table default {spec!r}")
+
+
+def desktop_settings_map(owner):
+    """save_config's ``settings_map``: ``[(key, [sources...], default, converter), ...]``.
+
+    ``owner`` is the desktop owner (``self`` of ``_apply_live_settings_to_config``): the
+    ``getattr(self, 'default_*', '')`` defaults read it."""
+    return [(key, list(sources), _table_value(default, owner), _table_converter(conv))
+            for key, sources, default, conv in _data().DESKTOP_SETTINGS_MAP]
+
+
+def desktop_bool_vars(owner):
+    """``_init_variables``' ``bool_vars``: ``[(attribute, key, default), ...]``; one default
+    reads ``owner.config`` (``missing_finish_as_prohibited`` falls back to the legacy key)."""
+    return [(var, key, _table_value(default, owner)) for var, key, default in _data().DESKTOP_BOOL_VARS]
+
+
+def desktop_str_vars(owner=None):
+    """``_init_variables``' ``str_vars``: ``[(attribute, key, default), ...]``."""
+    return [(var, key, _table_value(default, owner)) for var, key, default in _data().DESKTOP_STR_VARS]

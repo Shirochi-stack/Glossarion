@@ -608,7 +608,8 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
             if outcome.get("error"):  # desktop "QA Issue Not Fully Resolved"
                 return ("The malformed tags were repaired, but the progress file could not be updated:\n"
                         f"{outcome['error']}")
-            return pa.llm_token_repair_summary(outcome, output_path)
+            return RepairResult(pa.llm_token_repair_summary(outcome, output_path), repair.get("repairs") or (),
+                                int(repair.get("repaired") or 0))
         if action == "insert_image":
             kind, _title, message, _refreshed = pa.insert_missing_images(data, plan.targets[0], restore_fn)
             return str(message)
@@ -620,6 +621,21 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
     finally:
         service.mark_dirty()
     raise ValueError(action)
+
+
+class RepairResult(str):
+    """Resolve QA's result text (``progress_actions.llm_token_repair_summary``) carrying the repair's
+    before / after previews (``outcome['repair']['repairs']``, at most 20) for the desktop
+    "QA Issue Resolved — Before / After" sheet (RG ``_show_llm_token_repair_comparison``)."""
+
+    repairs: list = []
+    repaired: int = 0
+
+    def __new__(cls, text: str, repairs: Any = (), repaired: int = 0) -> "RepairResult":
+        obj = super().__new__(cls, text)
+        obj.repairs = [dict(r) for r in (repairs or ()) if isinstance(r, dict)]
+        obj.repaired = int(repaired or 0)
+        return obj
 
 
 def action_message(result: Any, fallback: str = "Done") -> str:
@@ -991,6 +1007,26 @@ def glossary_signature(view: Optional[GlossaryView], service: Any = None, book: 
         return None
 
 
+#: Parallel EPUB pair progress contexts (desktop ``_parallel_epub_progress_manager_context``), by the raw
+#: EPUB: ``{"raw_path", "generated_path", "raw_filenames", "cache_key"}``. Set in-process by the Parallel
+#: EPUB pair screen before it opens the raw book's Glossary progress (like ``sdlxliff.request_open``).
+PARALLEL_CONTEXTS: dict = {}
+
+
+def _norm_path(path: Any) -> str:
+    return os.path.normcase(os.path.abspath(str(path or ""))) if path else ""
+
+
+def set_parallel_context(context: Mapping[str, Any]) -> None:
+    raw = _norm_path(context.get("raw_path"))
+    if raw:
+        PARALLEL_CONTEXTS[raw] = dict(context)
+
+
+def parallel_context_for(source: Any) -> Optional[dict]:
+    return PARALLEL_CONTEXTS.get(_norm_path(source)) if source else None
+
+
 def load_glossary_view(service: Any, book: Mapping[str, Any], *, previous: Optional[GlossaryView] = None,
                        progress: Optional[ProgressView] = None) -> GlossaryView:
     """Blocking: the Glossary tab model (``glossary_progress_core``)."""
@@ -1014,7 +1050,13 @@ def load_glossary_view(service: Any, book: Mapping[str, Any], *, previous: Optio
         data = gpc.reload_glossary_progress(model)
     else:
         prog = getattr(state, "data", {}).get("prog") if state is not None else None
-        model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog)
+        pair = parallel_context_for(source)
+        if pair is not None:  # Parallel EPUB pair: the working EPUB's progress, the mapped raw chapters
+            model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog,
+                                               source_override=pair.get("generated_path") or None,
+                                               source_filenames=list(pair.get("raw_filenames") or []) or None)
+        else:
+            model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog)
         if model is None:
             return GlossaryView(book_title=title, empty=True, groups=groups)
         path = model._find_gp_for_file(model.fp) or getattr(model, "gp_path", None)

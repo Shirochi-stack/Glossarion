@@ -32,8 +32,8 @@ Files" / "Keep <counterpart>" / "Cancel"), then the confirmed plan runs as a
 "Chunk HTML Not Updated" warning). **Resolve QA** keeps the in-place LLM-token repair
 and runs the raw foreign-text case as a single-entry ``resolve_qa`` (Partial.b) job.
 **Manual editing** and **🔍 Edit Translation** open the SDLXLIFF reviewer; **✏️ Edit
-file** opens the text editor at the QA issue; **🔊 Open Audio File** hands the audio to
-a player app. Image-folder workspaces show the thumbnail grid of the desktop
+file** opens the text editor at the QA issue; **🔊 Play audio** (desktop "Open Audio File")
+plays it in the in-app MediaViewer (Share / Save / Open externally inside it). Image-folder workspaces show the thumbnail grid of the desktop
 "Progress Manager - Images" (Select Translated · Mark as Skipped · Delete Selected).
 """
 
@@ -43,7 +43,8 @@ import asyncio
 import copy
 import logging
 import os
-from typing import Any, Mapping, Optional, Sequence
+import time
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
@@ -53,13 +54,16 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.pull_to_refresh import PullToRefresh
+from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import icon_button, mode_badge, stat_chip, status_avatar, tinted
 from glossarion_mobile.ui.library.models import PAGE_SIZES, page_size_value
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
 
-__all__ = ["ChaptersTab", "confirm_copy", "image_confirm_copy", "is_image_folder_book", "row_palette_status"]
+__all__ = ["ChaptersTab", "confirm_copy", "image_confirm_copy", "is_image_folder_book", "request_range_selection",
+           "row_palette_status", "take_range_request"]
 
 log = logging.getLogger("glossarion.library.ui")
 
@@ -84,6 +88,8 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
 def retranslate_now_question(title: str) -> str:
     return f"“{title}” is already translated.\n\nDelete its current translation and retranslate it now?"
 _SCROLL_APPEND_PX = 800
+#: Image-folder grid tiles (max 168 dp) decode at about 3x that, never at the source size (UI_SPEC §7.3).
+THUMB_CACHE_PX = 504
 # UI_SPEC §7.3 WindowedList: beyond WINDOW_ROWS rows the list mounts one window of at most
 # WINDOW_ROWS rows (a selector moves between windows; jumps re-centre first) and, with
 # "Rows per page: All", appends WINDOW_STEP rows per scroll step instead of all at once.
@@ -143,8 +149,22 @@ def is_image_folder_book(book: Mapping[str, Any], source: str = "") -> bool:
     return False
 
 
+#: ``/retranslate <range>`` handoffs (UI_SPEC §2.7): Book page route id -> (start, end) to select once loaded.
+_RANGE_REQUESTS: dict = {}
+
+
+def request_range_selection(bid: str, start: int, end: int) -> None:
+    """The next Chapters tab of book ``bid`` selects chapters ``start``-``end`` (the range never enters the route)."""
+    _RANGE_REQUESTS[str(bid)] = (int(start), int(end))
+
+
+def take_range_request(bid: str) -> Optional[tuple]:
+    return _RANGE_REQUESTS.pop(str(bid or ""), None)
+
+
 class ChaptersTab:
-    def __init__(self, page: Any, *, initial_filter: Optional[str] = None) -> None:
+    def __init__(self, page: Any, *, initial_filter: Optional[str] = None,
+                 initial_range: Optional[tuple] = None) -> None:
         self.page = page
         self.ctx = page.ctx
         cfg = page.service.cfg
@@ -179,6 +199,8 @@ class ChaptersTab:
         self.image_view: Optional[pm.ImageFolderView] = None
         self.image_selected: set = set()
         self._image_loading = False
+        # U9 /retranslate <range>: the chapters selected once the rows are loaded
+        self.pending_range: Optional[tuple] = tuple(initial_range) if initial_range else None
 
     # ---- build ----------------------------------------------------------------------------------
 
@@ -220,6 +242,8 @@ class ChaptersTab:
         ], spacing=4, expand=True, key="chapters")
         if self.page.progress is not None:
             self.apply(self.page.progress)
+        else:  # row shimmer until the chapters load (UI_SPEC §7.4 Book page)
+            self.list_holder.content = Skeleton("rows", count=8, label="Loading chapters…", key="ch-skeleton").control
         return self.root
 
     def dispose(self) -> None:
@@ -235,15 +259,19 @@ class ChaptersTab:
 
     def _build_image_folder(self, header: ft.Control) -> ft.Control:
         self.image_count = ft.Text("Selected: 0", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, key="img-count")
+        # U9: pulling the grid down reloads it (desktop "Progress Manager - Images" Refresh, also ⟳ below)
+        self.image_pull = PullToRefresh(self.reload_images, spawn=self.ctx.spawn,
+                                        haptic=getattr(self.ctx, "haptic", None), key="img-pull")
         self.image_grid = ft.GridView(max_extent=168, child_aspect_ratio=0.72, spacing=8, run_spacing=8,
                                       padding=ft.Padding.only(left=12, right=12, bottom=24), expand=True,
-                                      key="img-grid")
+                                      on_scroll=self.image_pull.handle, key="img-grid")
 
         def button(label: str, handler: Any, key: str, destructive: bool = False) -> ft.Control:
             style = ft.ButtonStyle(color=ft.Colors.ERROR) if destructive else None
             return ft.FilledTonalButton(content=label, on_click=lambda e: handler(), key=key, style=style)
 
         self.image_actions = ft.Row([
+            button("⟳ Refresh", lambda: self.ctx.spawn(self.reload_images()), "img-refresh"),
             button("Select All", self.select_all_images, "img-select-all"),
             button("Clear Selection", self.clear_images, "img-clear"),
             button("Select Translated", self.select_translated_images, "img-select-translated"),
@@ -256,6 +284,7 @@ class ChaptersTab:
                                            tight=True),
                          padding=ft.Padding.only(left=12, right=12, top=8)),
             self.loading,
+            self.image_pull.bar,
             self.list_holder,
         ], spacing=4, expand=True, key="chapters")
         self.list_holder.content = self.image_grid
@@ -313,7 +342,8 @@ class ChaptersTab:
     def _image_tile(self, item: pm.ImageItemVM) -> ft.Control:
         selected = item.key in self.image_selected
         is_image = item.path.lower().endswith(IMAGE_EXTENSIONS) and os.path.isfile(item.path)
-        thumb: ft.Control = (ft.Image(src=item.path, fit=ft.BoxFit.COVER, expand=True, border_radius=6)
+        thumb: ft.Control = (ft.Image(src=item.path, fit=ft.BoxFit.COVER, expand=True, border_radius=6,
+                                      cache_width=THUMB_CACHE_PX)
                              if is_image else ft.Icon(ft.Icons.DESCRIPTION if item.kind != "cover" else ft.Icons.IMAGE,
                                                       size=40, color=ft.Colors.ON_SURFACE_VARIANT))
         return ft.Container(
@@ -338,6 +368,15 @@ class ChaptersTab:
             self.image_selected.discard(key)
         else:
             self.image_selected.add(key)
+        # only the tapped tile is rebuilt (a large folder re-rendered every tile on each tap)
+        items = list(self.image_view.items) if self.image_view is not None else []
+        index = next((i for i, item in enumerate(items) if item.key == key), None)
+        controls = self.image_grid.controls
+        if index is not None and len(controls) == len(items) and self.list_holder.content is self.image_grid:
+            controls[index] = self._image_tile(items[index])
+            self.image_count.value = f"Selected: {len(self.image_selected)}"
+            self.ctx.push(self.image_grid, self.image_count)
+            return
         self._render_images()
         self.ctx.push(self.list_holder, self.image_count)
 
@@ -444,9 +483,16 @@ class ChaptersTab:
         self._render_chips()
         self.total_text.value = view.total_text
         if view.error:
-            self.banner.content = ft.Text(view.error if not view.unreadable else
-                                          "Progress file could not be read — showing last snapshot",
-                                          color=ft.Colors.ON_ERROR_CONTAINER)
+            text = ft.Text(view.error if not view.unreadable else
+                           "Progress file could not be read — showing last snapshot",
+                           color=ft.Colors.ON_ERROR_CONTAINER, expand=True)
+            if view.unreadable:  # UI_SPEC §7.4: the banner offers a full refresh (read-write reconcile)
+                refresh = ft.TextButton(content="Full refresh", icon=ft.Icons.REFRESH, key="ch-banner-refresh",
+                                        on_click=lambda e: self.ctx.spawn(self.page.full_refresh()))
+                self.banner.content = ft.Row([text, refresh], spacing=8, wrap=True,
+                                             vertical_alignment=ft.CrossAxisAlignment.CENTER)
+            else:
+                self.banner.content = text
             self.banner.visible = True
         else:
             self.banner.visible = False
@@ -461,7 +507,35 @@ class ChaptersTab:
                     self._replace_row(row)
         else:
             self._render_list(new_visible, window_start=self.window_start)
+        if self.pending_range and self.rows:
+            start, end = self.pending_range
+            self.pending_range = None
+            self.select_range(start, end)
         self.ctx.push(self.root)
+
+    def select_range(self, start: int, end: int) -> int:
+        """``/retranslate <range>`` (UI_SPEC §2.7): selection mode on with the chapters numbered ``start``-``end``
+        (the progress row's ``num``, the desktop chapter-range numbering), ready for Retranslate in the bar."""
+        keys = set()
+        for row in self.visible:
+            if row.kind == "chunk":
+                continue
+            try:
+                number = int(float(row.info.get("num")))
+            except (TypeError, ValueError):
+                continue
+            if start <= number <= end:
+                keys.add(row.key)
+        label = f"{start}" if start == end else f"{start}–{end}"
+        if not keys:
+            self.ctx.say(f"No chapter {label} in this book's progress")
+            return 0
+        self.selecting = True
+        self.selected = keys
+        self._render_list(self.visible, window_start=self.window_start)
+        self._sync_selection()
+        self.ctx.say(f"Chapters {label}: {len(keys)} selected · Retranslate is in the bar below")
+        return len(keys)
 
     def _filtered(self) -> list:
         groups = self.view.groups if self.view is not None else {}
@@ -579,10 +653,10 @@ class ChaptersTab:
         return added
 
     def _on_scroll(self, e: Any) -> None:
-        event_type = str(getattr(getattr(e, "event_type", None), "value", getattr(e, "event_type", "")))
-        if event_type == "overscroll":
-            if (getattr(e, "overscroll", 0) or 0) < 0 and (getattr(e, "pixels", 0) or 0) <= 1:
-                self.ctx.spawn(self.page.full_refresh())
+        pull = getattr(self, "pull", None)
+        if pull is None:  # one Book page full refresh per pull (PullToRefresh), not one per notification
+            pull = self.pull = PullToRefresh(self.page.full_refresh, spawn=self.ctx.spawn, haptic=self.ctx.haptic)
+        if pull.handle(e):
             return
         pixels, maximum = getattr(e, "pixels", None), getattr(e, "max_scroll_extent", None)
         if pixels is None or maximum is None:
@@ -596,9 +670,9 @@ class ChaptersTab:
         if old is None or self.list_view is None:
             return
         new = self._row_control(row)
-        try:
-            index = self.list_view.controls.index(old)
-        except ValueError:
+        try:  # by identity (dataclass ``==`` compares every field of every row)
+            index = next(i for i, control in enumerate(self.list_view.controls) if control is old)
+        except StopIteration:
             return
         self.list_view.controls[index] = new
         self.controls[row.key] = new
@@ -979,9 +1053,45 @@ class ChaptersTab:
                     progress = await self.ctx.io(copy.deepcopy, prog) if isinstance(prog, dict) else None
                 except Exception:
                     progress = None
+        manual_entries = await self.ctx.io(self.manual_entries) if self.manual_editing else None
         return sdlxliff.open_reviewer(self.ctx, folder, source=source or None,
                                       focus=(row.output_file or None) if row is not None else None,
-                                      manual_editing=self.manual_editing, progress_data=progress)
+                                      manual_editing=self.manual_editing, progress_data=progress,
+                                      manual_entries=manual_entries)
+
+    def manual_entries(self) -> list:
+        """Blocking: the Not Translated / Pending rows Manual editing gives source-only sidecars
+        (``progress_core.untranslated_manual_entries`` over the view's progress data, like the desktop
+        ``_progress_manager_untranslated_entries``)."""
+        state = self.view.state if self.view is not None else None
+        data = getattr(state, "data", None) if state is not None else None
+        owner = getattr(state, "owner", None) if state is not None else None
+        if not isinstance(data, dict) or owner is None:
+            return []
+        try:
+            from progress_core import untranslated_manual_entries
+        except Exception:
+            return []
+        return list(untranslated_manual_entries(owner, data.get("spine_chapters") or [], data))
+
+    def generate_manual_sidecars(self, progress: Optional[Callable[[dict], Any]] = None) -> dict:
+        """Blocking: Manual editing on → the source-only SDLXLIFF sidecars of the Not Translated rows
+        (``sdlxliff_review_core.SdlxliffAutogenOwner._generate_sdlxliff_sidecars_from_untranslated_entries``,
+        the desktop "Creating sidecars…" step)."""
+        entries = self.manual_entries()
+        state = self.view.state if self.view is not None else None
+        data = getattr(state, "data", None) if state is not None else None
+        folder = (self.view.output_dir if self.view is not None else "") or str(self.page.book.get("output_folder") or "")
+        if not entries or not folder:
+            return {"created": 0, "total": 0, "entries": len(entries)}
+        from sdlxliff_review_core import SdlxliffAutogenOwner
+
+        config = getattr(getattr(state, "owner", None), "config", None)
+        owner = SdlxliffAutogenOwner(dict(config) if isinstance(config, dict) else {})
+        source = str(data.get("file_path") or "") if isinstance(data, dict) else ""
+        stats = owner._generate_sdlxliff_sidecars_from_untranslated_entries(
+            folder, entries, file_path=source or None, progress_callback=progress)
+        return dict(stats) if isinstance(stats, dict) else {}
 
     async def toggle_manual_editing(self) -> bool:
         """⋯ › Manual editing: persisted ``retranslation_manual_editing`` (Retranslate keeps the
@@ -994,7 +1104,39 @@ class ChaptersTab:
         self.ctx.push(self.more_menu)
         self.ctx.say("Manual editing on: the SDLXLIFF reviewer edits the outputs" if enabled
                      else "Manual editing off")
+        if enabled:
+            self.ctx.spawn(self._create_manual_sidecars())
         return enabled
+
+    async def _create_manual_sidecars(self) -> dict:
+        """The desktop toggle's "Creating sidecars… i/N" step on the io pool (progress in the snackbar)."""
+        last = {"t": 0.0}
+        dispatcher = getattr(self.ctx, "dispatcher", None)
+
+        def progress(payload: dict) -> None:
+            total = int((payload or {}).get("total") or 0)
+            index = int((payload or {}).get("index") or 0)
+            now = time.monotonic()
+            if not total or now - last["t"] < 1.0:
+                return
+            last["t"] = now
+            text = f"Creating sidecars… {min(index, total)}/{total}"
+            if dispatcher is not None and getattr(dispatcher, "bound", False):
+                dispatcher.post(self.ctx.say, text)
+
+        try:
+            stats = await self.ctx.io(self.generate_manual_sidecars, progress)
+        except Exception as exc:
+            self.ctx.say(f"Manual sidecar creation failed: {exc}")
+            return {}
+        created = int(stats.get("created") or 0)
+        if created:
+            self.ctx.say(f"Created {created} source-only manual sidecar{'s' if created != 1 else ''}. "
+                         "No HTML output is created until a target row is edited.")
+        elif stats.get("missing_source"):
+            missing = int(stats.get("missing_source") or 0)
+            self.ctx.say(f"Could not locate source HTML for {missing} Not Translated entr{'ies' if missing != 1 else 'y'}.")
+        return stats
 
     def output_path(self, row: pm.RowVM) -> str:
         folder = self.view.output_dir if self.view is not None else ""
@@ -1021,7 +1163,9 @@ class ChaptersTab:
         return text_editor.open_text_editor(self.ctx, path, find=str(term) if term else None)
 
     async def open_audio(self, row: pm.RowVM) -> bool:
-        """🔊 Open Audio File: the generated audio goes to a player app (desktop: the OS default player)."""
+        """🔊 Play audio (desktop "Open Audio File": the OS default player): the in-app MediaViewer with the
+        AudioHub player (Files › Open with › Media viewer, ``files.open_media_viewer``; Save / Share / Open
+        externally inside it). Without an overlay stack the file goes to a player app (share sheet)."""
         if self.view is None:
             return False
         path = await self.ctx.io(pm.audio_path_for, self.page.service, self.view, row)
@@ -1029,10 +1173,28 @@ class ChaptersTab:
         if not path:
             self.ctx.say("No audio file was found for this chapter.")
             return False
+        from glossarion_mobile.ui.screens.files import open_media_viewer
+
+        viewer = open_media_viewer(path, push_overlay=self.ctx.push_overlay, pop_overlay=self._pop_media,
+                                   files=files, page=self.ctx.page, notify=self.ctx.notify, tablet=self.ctx.tablet,
+                                   spawn=self.ctx.spawn)
+        if viewer is not None:
+            self.media_viewer = viewer
+            return True
         if files is None:
             self.ctx.say(path)
             return False
         return bool(await files.share([path]))
+
+    def _pop_media(self, view: Any) -> None:
+        """Close the audio viewer unless Android back already popped it (popping again would leave the
+        Book page)."""
+        shell = getattr(self.ctx, "shell", None)
+        overlays = getattr(shell, "overlays", None) if shell is not None else None
+        if overlays is not None and view not in overlays:
+            return
+        if self.ctx.pop_overlay is not None:
+            self.ctx.pop_overlay()
 
     def open_row_sheet(self, row: pm.RowVM) -> Any:
         return self.ctx.spawn(self.show_row_sheet(row))
@@ -1067,8 +1229,10 @@ class ChaptersTab:
             ActionItem("\U0001f4d6 Open in reader", lambda: self.on_row_tap(row), icon="AUTO_STORIES",
                        disabled_reason=gate("open_reader", "Not an HTML chapter") if allowed is not None else (
                            None if row.filename else "No source file for this row"), key="row-reader"),
-            ActionItem("\U0001f4c2 Open file", lambda: self.ctx.spawn(self.share_output(row)), icon="FOLDER_OPEN",
+            ActionItem("\U0001f4c2 Open file", lambda: self.ctx.spawn(self.open_output(row)), icon="FOLDER_OPEN",
                        disabled_reason=None if row.output_file else NO_OUTPUT_REASON, key="row-open-file"),
+            ActionItem("↗ Share file", lambda: self.ctx.spawn(self.share_output(row)), icon="IOS_SHARE",
+                       disabled_reason=None if row.output_file else NO_OUTPUT_REASON, key="row-share-file"),
             ActionItem("✏️ Edit file (find QA issue)" if row.qa_lines else "✏️ Edit file",
                        lambda: self.edit_file(row), icon="EDIT",
                        disabled_reason=None if row.output_file else NO_OUTPUT_REASON, key="row-edit-file"),
@@ -1077,7 +1241,7 @@ class ChaptersTab:
             ActionItem("\U0001f4cb Copy QA issue", lambda: self.copy_qa(row), icon="CONTENT_COPY",
                        disabled_reason=gate("copy_qa", "No QA issue on this row") if allowed is not None else (
                            None if row.qa_lines else "No QA issue on this row"), key="row-copy-qa"),
-            ActionItem("\U0001f50a Open Audio File", lambda: self.ctx.spawn(self.open_audio(row)), icon="PLAY_CIRCLE",
+            ActionItem("\U0001f50a Play audio", lambda: self.ctx.spawn(self.open_audio(row)), icon="PLAY_CIRCLE",
                        disabled_reason=gate("open_audio", "No audio file"), key="row-open-audio"),
             ActionItem(pm.ACTION_LABELS["delete_audio"], lambda: self.ctx.spawn(self.run_action("delete_audio", rows)),
                        icon="DELETE_OUTLINE", disabled_reason=gate("delete_audio", "No audio file"),
@@ -1114,12 +1278,31 @@ class ChaptersTab:
             return None
         return copy(f"{row.output_file or row.filename}: " + ", ".join(row.qa_lines))
 
+    async def open_output(self, row: pm.RowVM) -> Optional[str]:
+        """📂 Open file (UI_SPEC §3.7): the output in the read-only TextEditor (text / HTML); other files go to
+        Share (an app that can open them)."""
+        from glossarion_mobile.ui.tools import text_editor
+
+        path = self.output_path(row)
+        exists = bool(path) and await self.ctx.io(os.path.isfile, path)
+        if not exists:
+            self.ctx.say("The output file is not on disk")
+            return None
+        if text_editor.is_text_file(path):
+            fid = text_editor.open_text_editor(self.ctx, path, read_only=True)
+            if fid:
+                return fid
+        await self.share_output(row)
+        return None
+
     async def share_output(self, row: pm.RowVM) -> bool:
         files = self.ctx.files
-        folder = self.view.output_dir if self.view is not None else ""
-        path = os.path.join(folder, row.output_file) if folder and row.output_file else ""
-        if files is None or not path or not os.path.isfile(path):
+        path = self.output_path(row)
+        if not path or not await self.ctx.io(os.path.isfile, path):
             self.ctx.say("The output file is not on disk")
+            return False
+        if files is None:
+            self.ctx.say("Sharing files is not available here")
             return False
         return bool(await files.share([path]))
 
@@ -1385,10 +1568,39 @@ class ChaptersTab:
             self.ctx.say(f"Could not update progress: {exc}")
             return None
         self.last_result = message
-        self.ctx.say(message)
+        repairs = getattr(message, "repairs", None)
+        if repairs and int(getattr(message, "repaired", 0) or 0) > 0:
+            self.show_repair_comparison(str(message), repairs, int(message.repaired))
+        else:
+            self.ctx.say(message)
         self.exit_selection()
         await self.page.reload_progress(force=True)
         return message
+
+    def show_repair_comparison(self, summary: str, repairs: list, total: int) -> Any:
+        """Resolve QA: the desktop "QA Issue Resolved — Before / After" (one Before / After pair per repaired
+        tag, at most 20; ``_show_llm_token_repair_comparison``)."""
+        from glossarion_mobile.ui.components.sheet import scroll_sheet
+        from glossarion_mobile.ui.theme import mono_family
+
+        mono = mono_family(getattr(self.ctx, "page", None))
+        rows: list = [ft.Text(summary, selectable=True),
+                      ft.Text(f"Showing {len(repairs)} of {total} repaired tag(s).", color=ft.Colors.ON_SURFACE_VARIANT,
+                              theme_style=ft.TextThemeStyle.BODY_SMALL)]
+        for index, repair in enumerate(repairs, 1):
+            rows.append(ft.Container(content=ft.Column([
+                ft.Text(f"[{index}] Before — malformed LLM token tag", theme_style=ft.TextThemeStyle.LABEL_MEDIUM),
+                ft.Text(str(repair.get("before") or ""), selectable=True, font_family=mono, size=12),
+                ft.Text("After — safe visible text in HTML", theme_style=ft.TextThemeStyle.LABEL_MEDIUM),
+                ft.Text(str(repair.get("after") or ""), selectable=True, font_family=mono, size=12),
+            ], spacing=4, tight=True), bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, border_radius=8, padding=8,
+                key=f"repair-{index}"))
+        sheet = scroll_sheet("QA Issue Resolved — Before / After", rows, key="repair-sheet")
+        page = getattr(self.ctx, "page", None)
+        if page is not None:
+            page.show_dialog(sheet)
+        self.repair_sheet = sheet
+        return sheet
 
 
 _SINGLE_ROW_ACTIONS = ("delete_audio", "resolve_qa", "insert_image", "do_not_skip")

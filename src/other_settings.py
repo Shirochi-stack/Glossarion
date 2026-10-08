@@ -605,64 +605,9 @@ class HeaderTranslationHelpDialog(QDialog):
         )
         content_layout.setSpacing(int(height * 0.015))  # 1.5% spacing
         
-        # Create sections with detailed explanations
-        sections = [
-            {
-                "title": "🔄 Translation Modes",
-                "content": [
-                    "• OFF: Use existing headers from already translated chapters",
-                    "• ON: Extract all headers → Translate in batch → Update files"
-                ]
-            },
-            {
-                "title": "⚙️ Options Explained",
-                "content": [
-                    "• Update headers in HTML files: Modifies the actual chapter files with translated headers",
-                    "• Save translations to .txt: Creates backup files with translation mappings",
-                    "• Headers per batch: Number of headers to translate simultaneously (affects API usage)"
-                ]
-            },
-            {
-                "title": "🚫 Ignore Options",
-                "content": [
-                    "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)",
-                    "• Skip title tag translation: Preserve <title> tags without translating them"
-                ]
-            },
-            {
-                "title": "⚠️ Fallback System",
-                "content": [
-                    "• Use Sorted Fallback: If OPF-based matching fails, use sorted index matching",
-                    "• WARNING: Less accurate - may mismatch chapters if file order differs from OPF spine",
-                    "• Only use if you're experiencing matching issues with standard mode"
-                ]
-            },
-            {
-                "title": "📂 Standalone Mode",
-                "content": [
-                    "• Uses OPF-based exact mapping for precise chapter matching",
-                    "• Translates chapters with matching names (ignores 'response_' prefix and extensions)",
-                    "• The regular translation logic uses this logic as well"
-                ]
-            },
-            {
-                "title": "🗑️ File Management",
-                "content": [
-                    "• Delete Header Files: Removes translated_headers.txt files for all selected EPUBs",
-                    "• Use this to reset translation state or clean up after testing",
-                    "• Safe operation - only removes translation cache files, not original content"
-                ]
-            },
-            {
-                "title": "💡 Best Practices",
-                "content": [
-                    "• Test with a small batch first to verify settings work correctly",
-                    "• Enable 'Save translations to .txt' for backup and debugging",
-                    "• Use 'Ignore header' if chapters already have translated visible titles",
-                    "• Keep 'Headers per batch' moderate to be within your output token limit"
-                ]
-            }
-        ]
+        # Create sections with detailed explanations (metadata_defaults.HEADER_HELP_SECTIONS, U9)
+        from metadata_defaults import HEADER_HELP_SECTIONS
+        sections = HEADER_HELP_SECTIONS
         
         font_size = max(9, int(height * 0.018))  # Scale font with dialog size, minimum 9pt
         
@@ -14567,72 +14512,9 @@ def test_api_connections(self):
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     app_icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon("Halgakos.ico")
     
-    # Collect all configured endpoints
-    endpoints_to_test = []
-    
-    # OpenAI endpoint - only test if checkbox is enabled
-    if self.use_custom_openai_endpoint_var:
-        openai_url = self.openai_base_url_var
-        if openai_url:
-            # Check if it's Azure
-            if '.azure.com' in openai_url or '.cognitiveservices' in openai_url:
-                # Azure endpoint
-                deployment = self.model_var if hasattr(self, 'model_var') else "gpt-35-turbo"
-                api_version = self.azure_api_version_var if hasattr(self, 'azure_api_version_var') else "2024-08-01-preview"
-                
-                # Format Azure URL
-                if '/openai/deployments/' not in openai_url:
-                    azure_url = f"{openai_url.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-                else:
-                    azure_url = openai_url
-                
-                endpoints_to_test.append(("Azure OpenAI", azure_url, deployment, "azure"))
-            else:
-                # Regular custom endpoint
-                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
-        else:
-            # Use default OpenAI endpoint if checkbox is on but no custom URL provided
-            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
-    
-    # Groq endpoint
-    if hasattr(self, 'groq_base_url_var'):
-        groq_url = self.groq_base_url_var
-        if groq_url:
-            # For Groq, we need a groq-prefixed model
-            current_model = self.model_var if hasattr(self, 'model_var') else "llama-3-70b"
-            groq_model = current_model if current_model.startswith('groq/') else current_model.replace('groq/', '')
-            endpoints_to_test.append(("Groq/Local", groq_url, groq_model))
-    
-    # Fireworks endpoint
-    if hasattr(self, 'fireworks_base_url_var'):
-        fireworks_url = self.fireworks_base_url_var
-        if fireworks_url:
-            # For Fireworks, we need the accounts/ prefix
-            current_model = self.model_var if hasattr(self, 'model_var') else "llama-v3-70b-instruct"
-            fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
-            endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
-    
-    # Gemini Custom Endpoint — detect gRPC vs OpenAI-compatible REST
-    if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
-        gemini_url = self.gemini_openai_endpoint_var
-        if gemini_url:
-            _ep = gemini_url.strip().lower()
-            _is_grpc = not ('/openai' in _ep or _ep.startswith('http://') or _ep.startswith('https://'))
-            
-            current_model = self.model_var if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
-            gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
-            
-            if _is_grpc:
-                # Bare hostname → gRPC (eRPC) endpoint
-                endpoints_to_test.append(("Gemini (gRPC)", gemini_url.strip(), gemini_model, "grpc_gemini"))
-            else:
-                # URL with /openai or http(s):// → OpenAI-compatible REST
-                if not gemini_url.endswith('/openai/'):
-                    if gemini_url.endswith('/'):
-                        gemini_url = gemini_url + 'openai/'
-                    else:
-                        gemini_url = gemini_url + '/openai/'
-                endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
+    # Collect all configured endpoints (key_pool_service.collect_test_endpoints, moved in U9)
+    from key_pool_service import collect_test_endpoints, run_endpoint_tests
+    endpoints_to_test = collect_test_endpoints(self)
     
     if not endpoints_to_test:
         msg_box = QMessageBox()
@@ -14759,108 +14641,7 @@ def test_api_connections(self):
     self.conn_test_bridge = ConnTestBridge()
 
     def run_tests_background():
-        results = []
-        for endpoint_info in endpoints_to_test:
-            if cancel_event.is_set():
-                break
-            if len(endpoint_info) == 4 and endpoint_info[3] == "grpc_gemini":
-                # gRPC (eRPC) Gemini endpoint
-                name, grpc_host, model, _ = endpoint_info
-                try:
-                    from grpc_gemini_client import GrpcGeminiClient, GRPC_AVAILABLE, GrpcGeminiError
-                    if not GRPC_AVAILABLE:
-                        results.append(f"❌ {name}: gRPC dependencies not installed (pip install grpcio google-ai-generativelanguage)")
-                        continue
-                    client = GrpcGeminiClient(api_key=api_key, endpoint=grpc_host)
-                    try:
-                        resp = client.generate_content(
-                            model=model,
-                            messages=[{"role": "user", "content": "Hi"}],
-                            max_output_tokens=5
-                        )
-                        results.append(f"✅ {name}: Connected successfully! (Model: {model}, Endpoint: {grpc_host})")
-                    finally:
-                        client.close()
-                except Exception as e:
-                    error_msg = str(e)[:150]
-                    if "UNAUTHENTICATED" in error_msg or "401" in error_msg or "403" in error_msg:
-                        error_msg = "Authentication failed. Check API key."
-                    elif "UNAVAILABLE" in error_msg:
-                        error_msg = f"gRPC endpoint unreachable: {grpc_host}"
-                    results.append(f"❌ {name}: {error_msg}")
-            elif len(endpoint_info) == 4 and endpoint_info[3] == "azure":
-                # Azure endpoint
-                name, base_url, model, endpoint_type = endpoint_info
-                try:
-                    # Azure uses different headers
-                    import requests
-                    headers = {
-                        "api-key": api_key,
-                        "Content-Type": "application/json"
-                    }
-                    
-                    response = requests.post(
-                        base_url,
-                        headers=headers,
-                        json={
-                            "messages": [{"role": "user", "content": "Hi"}],
-                            "max_tokens": 5
-                        },
-                        timeout=5.0
-                    )
-                    
-                    if response.status_code == 200:
-                        results.append(f"✅ {name}: Connected successfully! (Deployment: {model})")
-                    else:
-                        results.append(f"❌ {name}: {response.status_code} - {response.text[:100]}")
-                        
-                except Exception as e:
-                    error_msg = str(e)[:100]
-                    results.append(f"❌ {name}: {error_msg}")
-            else:
-                # Regular OpenAI-compatible endpoint
-                name, base_url, model = endpoint_info[:3]
-                try:
-                    # Quick endpoint reachability probe (low timeout)
-                    try:
-                        import httpx
-                        probe_timeout = 3.0
-                        probe_url = base_url.rstrip("/")  # tolerate missing path
-                        httpx.get(probe_url, timeout=probe_timeout)
-                    except Exception as probe_err:
-                        results.append(f"❌ {name}: Endpoint unreachable ({probe_err})")
-                        continue
-                    if cancel_event.is_set():
-                        break
-                    # Create client for this endpoint
-                    test_client = openai.OpenAI(
-                        api_key=api_key,
-                        base_url=base_url,
-                        timeout=5.0,  # Keep model test short to avoid UI freeze
-                        max_retries=0  # Fail fast on 404/connection errors
-                    )
-                    
-                    # Try a minimal completion
-                    response = test_client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": "Hi"}],
-                        max_tokens=5
-                    )
-                    
-                    results.append(f"✅ {name}: Connected successfully! (Model: {model})")
-                except Exception as e:
-                    error_msg = str(e)
-                    # Simplify common error messages
-                    if "timed out" in error_msg.lower():
-                        error_msg = f"Connection timed out. The endpoint is running but the model '{model}' may be too slow to respond."
-                    elif "404" in error_msg:
-                        error_msg = "404 - Endpoint not found. Check URL and model name."
-                    elif "401" in error_msg or "403" in error_msg:
-                        error_msg = "Authentication failed. Check API key."
-                    elif "model" in error_msg.lower() and "not found" in error_msg.lower():
-                        error_msg = f"Model '{model}' not found at this endpoint."
-                    
-                    results.append(f"❌ {name}: {error_msg}")
+        results = run_endpoint_tests(endpoints_to_test, api_key, openai, cancel_event)
 
         if not cancel_event.is_set():
             self.conn_test_bridge.finished.emit(results)

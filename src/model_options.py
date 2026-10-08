@@ -5,11 +5,13 @@ Returned list should mirror the main GUI model dropdown.
 Updated: 2026-03-10
 """
 import concurrent.futures
+import importlib.util
 import json
 import os
 import platform
 import re
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -1487,6 +1489,17 @@ def _fetch_authenticated_catalog(
     return provider_name, models
 
 
+def _module_bundled(name: str) -> bool:
+    """Whether a helper module ships in this build (Glossarion Mobile leaves the desktop-only route
+    helpers such as ``ocagy_cli`` out); looked up without importing it."""
+    if name in sys.modules:
+        return sys.modules[name] is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _ocagy_has_account() -> bool:
     """Check OcAgy's local OAuth store without exposing or refreshing tokens."""
     import ocagy_cli
@@ -1742,6 +1755,10 @@ def refresh_provider_model_catalogs(
     statuses: Dict[str, str] = {}
     eligible: List[Tuple[ProviderCatalogSpec, str]] = []
     for spec in specs:
+        if spec.name == "opencode-zen" and not _module_bundled("ocagy_cli"):
+            # not bundled: Glossarion Mobile excludes the ocz/ route (its catalog poll needs ocagy_cli)
+            statuses[spec.name] = "unavailable in this build"
+            continue
         if spec.name == "autharena":
             try:
                 from autharena_proxy import list_accounts
@@ -1805,7 +1822,9 @@ def refresh_provider_model_catalogs(
         elif authenticated_name not in statuses:
             statuses[authenticated_name] = "static fallback (no provider credential)"
 
-    if only_provider is None or only_provider == "ocagy":
+    if (only_provider is None or only_provider == "ocagy") and not _module_bundled("ocagy_cli"):
+        statuses["ocagy"] = "unavailable in this build"  # not bundled: Glossarion Mobile excludes ocagy/
+    elif only_provider is None or only_provider == "ocagy":
         try:
             ocagy_authenticated = _ocagy_has_account()
         except Exception as error:
@@ -1939,3 +1958,219 @@ def start_provider_model_catalog_refresh(
     thread = threading.Thread(target=worker, name="provider-model-catalog", daemon=True)
     thread.start()
     return thread
+
+
+# ---------------------------------------------------------------------------
+# Model Provider Information (moved verbatim from TranslatorGUI._show_model_info_dialog in U9;
+# the desktop dialog shows it as rich text, Glossarion Mobile's ModelSheet ⓘ as Markdown)
+# ---------------------------------------------------------------------------
+PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
+        <p>You can use prefixes to access models from different API providers:</p>
+        
+        <h4>OpenRouter (or/)</h4>
+        <p>Access models through OpenRouter API</p>
+        <ul>
+            <li><b>or/google/gemini-2.5-flash</b> - Gemini 2.5 Flash via OpenRouter</li>
+            <li><b>or/openai/gpt-5</b> - GPT-5 via OpenRouter</li>
+            <li><b>or/deepseek/deepseek-chat-v3.1:free</b> - DeepSeek Chat (free tier)</li>
+        </ul>
+
+        <h4>LiteRouter (lr/)</h4>
+        <p>Access free and full-context routes through LiteRouter API</p>
+        <ul>
+            <li><b>lr/deepseek-v3.2:free</b> - DeepSeek V3.2 free route</li>
+            <li><b>lr/gpt-oss-120b:free</b> - GPT OSS 120B free route</li>
+            <li><b>lr/openrouter:free:full-context</b> - OpenRouter full-context route</li>
+        </ul>
+        
+        <h4>ElectronHub (eh/)</h4>
+        <p>Access models through ElectronHub API</p>
+        <ul>
+            <li><b>eh/claude-sonnet-4-5-20250929</b> - Claude Sonnet 4.5</li>
+            <li><b>eh/gemini-2.5-flash</b> - Gemini 2.5 Flash</li>
+            <li><b>eh/gpt-5-chat-latest</b> - Latest GPT-5 Chat</li>
+        </ul>
+        
+        <h4>Chute AI (chutes/)</h4>
+        <p>Access models through Chute AI platform</p>
+        <ul>
+            <li><b>chutes/deepseek-ai/DeepSeek-V3.1</b> - DeepSeek V3.1</li>
+            <li><b>chutes/openai/gpt-oss-120b</b> - GPT OSS 120B</li>
+        </ul>
+        
+        <h4>Vertex AI (vertex/ or @)</h4>
+        <p>Access Google Vertex AI models (requires Google Cloud credentials)</p>
+        <ul>
+            <li><b>vertex/gemini-2.5-flash</b> - Gemini via Vertex AI</li>
+            <li><b>vertex/claude-4-sonnet@20250514</b> - Claude via Vertex AI</li>
+            <li><b>claude-3-7-sonnet@20250219</b> - Models with @ use Vertex AI</li>
+        </ul>
+        
+        <h4>Groq (groq/)</h4>
+        <p>Access fast inference models through Groq API</p>
+        <ul>
+            <li><b>groq/llama-3.1-8b-instant</b> - Llama 3.1 8B (fast inference)</li>
+            <li><b>groq/llama-3.3-70b-versatile</b> - Llama 3.3 70B</li>
+            <li><b>groq/openai/gpt-oss-120b</b> - GPT OSS 120B via Groq</li>
+        </ul>
+        
+        <h4>NanoGPT (nan/)</h4>
+        <p>Access high-quality models and generative AI through NanoGPT</p>
+        <ul>
+            <li><b>nan/gpt-image-2</b> - GPT Image Generative Model</li>
+            <li><b>nan/deepseek/deepseek-v4-flash</b> - DeepSeek V4 Flash via NanoGPT</li>
+            <li><b>nan/openai/gpt-latest</b> - GPT Latest via NanoGPT</li>
+        </ul>
+        
+        <h4>SambaNova Cloud (sam/)</h4>
+        <p>Access models through SambaNova Cloud API (OpenAI-compatible)</p>
+        <ul>
+            <li><b>sam/DeepSeek-V3.2</b> - DeepSeek V3.2 via SambaNova</li>
+            <li><b>sam/Meta-Llama-3.3-70B-Instruct</b> - Llama 3.3 70B</li>
+            <li><b>sam/Llama-4-Maverick-17B-128E-Instruct</b> - Llama 4 Maverick</li>
+            <li><b>sam/gpt-oss-120b</b> - GPT OSS 120B via SambaNova</li>
+        </ul>
+
+        <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
+        <p>Use models running on your computer without an API key or custom endpoint toggle.</p>
+        <ul>
+            <li><b>ollamapull/llama3.2</b> - Install Ollama and download the model as needed</li>
+            <li><b>ollama/llama3.2</b> - Connect to Ollama at <code>http://localhost:11434/v1</code></li>
+            <li><b>lmstudio/model-id</b> - Connect to LM Studio at <code>http://localhost:1234/v1</code></li>
+        </ul>
+        <p>Start the local server and load the model first when using <code>ollama/</code> or <code>lmstudio/</code>.
+           The <b>🦙 Download Ollama</b> button is available for <code>ollamapull/</code>.</p>
+        
+        <h4>ChatGPT Subscription (authgpt/)</h4>
+        <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
+        <ul>
+            <li><b>authgpt/gpt-5.4</b> - GPT-5.4 via ChatGPT subscription</li>
+            <li><b>authgpt/gpt-5.2-pro</b> - GPT-5.2 Pro (Pro subscribers)</li>
+            <li><b>authgpt/gpt-5.2-codex</b> - Codex via ChatGPT subscription</li>
+        </ul>
+        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
+        </p>
+
+        <h4>Arena Proxy (autharena/)</h4>
+        <p>Use your Arena account — no API key needed. Supports real-time streaming and parallel batch requests.</p>
+        <ul>
+            <li><b>autharena/deepseek-v4-pro-low</b> - DeepSeek V4 Pro (low reasoning)</li>
+            <li><b>autharena/kimi-k3</b> - Kimi K3</li>
+            <li><b>autharena/gpt-5.6-sol-medium</b> - GPT-5.6 Sol (medium reasoning)</li>
+        </ul>
+        <p><code>autharena/</code> selects account #0; <code>autharena0/</code> rotates all saved accounts.
+            Numbered prefixes such as <code>autharena1/</code> select the matching account number (#1).</p>
+        <p style="color: #34d399; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click <b>Arena Login</b> next to the model dropdown or in the multi API key manager.
+            Setup is automatic; complete sign-in in the browser. Saved sessions are encrypted.
+        </p>
+
+        <h4>Grok Account (authgrok/)</h4>
+        <p>Use Grok through an xAI account OAuth session — no API key needed</p>
+        <ul>
+            <li><b>authgrok0/grok-4.5</b> - Rotate the pool of saved Grok accounts</li>
+            <li><b>authgrok/grok-4.5</b> - Current flagship and offline fallback</li>
+            <li><b>authgrok1/grok-4.5</b> - Pin numbered account slot #1</li>
+            <li><b>authgrok/grok-4.3</b> - OAuth-compatible route when entitled</li>
+            <li><b>authgrok/grok-build</b> - Coding model when available to the account</li>
+        </ul>
+        <p style="color: #9ca3af; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click <b>🔐 Grok Login</b>; xAI's login page lets you choose Google sign-in.
+            Numbered routes request a fresh login so you can select a different email. The exact model catalog depends on the signed-in account.
+        </p>
+
+        <h4>Claude Subscription (authcd/)</h4>
+        <p>Use your Claude Pro/Max subscription directly — no API key needed</p>
+        <ul>
+            <li><b>authcd/claude-sonnet-4-6</b> - Claude Sonnet 4.6 via subscription</li>
+            <li><b>authcd/claude-haiku-4-5-20251001</b> - Claude Haiku 4.5</li>
+            <li><b>authcd/claude-4-opus</b> - Claude 4 Opus (Max subscribers)</li>
+        </ul>
+        <p style="color: #d97706; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click the <b>🔐 Claude Login</b> button to authenticate.
+            Requires Claude Code CLI (<code>npm install -g @anthropic-ai/claude-code</code>).
+        </p>
+
+        <h4>Gemini Vertex AI (authgem-vertex/)</h4>
+        <p>Use Gemini via Vertex AI — requires GCP project with billing</p>
+        <ul>
+            <li><b>authgem-vertex/gemini-2.5-flash</b> - Vertex AI endpoint</li>
+            <li><b>authgem-vertex/gemini-2.5-pro</b> - Vertex AI endpoint</li>
+        </ul>
+        <p style="color: #4385f4; padding: 2px; font-size: 11px;">
+            <b>ℹ️</b> Click the <b>🔐 Gemini Login</b> button to authenticate.
+            Select a GCP project with billing enabled from the dropdown.
+        </p>
+
+        <h4>Antigravity Proxy (antigravity/)</h4>
+        <p>Free access to Claude &amp; Gemini via Google Cloud Code — no API key needed</p>
+        <ul>
+            <li><b>antigravity/gemini-3-flash</b> - Gemini 3 Flash (fastest)</li>
+            <li><b>antigravity/gemini-3.1-pro-low</b> - Gemini 3.1 Pro (low quota)</li>
+        </ul>
+        <p style="color: #d9534f; padding: 4px; font-size: 11px;">
+            <b>⚠️ Warning:</b> This feature uses a proxy to access Google Cloud Code.
+            Using it may violate Google's Terms of Service. Use at your own risk.
+        </p>
+          <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+             <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:3000.
+              Glossarion will auto-update and launch it when Node/npm or Bun is available.
+          </p>
+
+        <h4>OpenCode Paid (oc/)</h4>
+        <p>Access the full OpenCode model catalog with a subscription API key</p>
+        <ul>
+            <li><b>oc/gpt-6-luna</b> - GPT-6 Luna</li>
+            <li><b>oc/kimi-k3</b> - Kimi K3</li>
+            <li><b>oc/deepseek-v4-pro</b> - DeepSeek V4 Pro</li>
+            <li><b>oc/qwen3.8-flash</b> - Qwen 3.8 Flash</li>
+        </ul>
+        <p style="color: #38bdf8; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Set <b>OPENCODE_API_KEY</b> in the multi API key manager.
+            The catalog is auto-polled from OpenCode's Go endpoint.
+        </p>
+
+        <h4>OpenCode Free (ocz/)</h4>
+        <p>Free-tier models — requires the genuine OpenCode desktop app</p>
+        <ul>
+            <li><b>ocz/deepseek-v4-flash-free</b> - DeepSeek V4 Flash (free)</li>
+            <li><b>ocz/mimo-v2.6-flash-free</b> - MiMo V2.6 Flash (free)</li>
+            <li><b>ocz/nemotron-3-ultra-free</b> - Nemotron 3 Ultra (free)</li>
+        </ul>
+        <p style="color: #f59e0b; padding: 4px; font-size: 11px;">
+            <b>⚠️ Note:</b> Free-tier models can only be used from the official OpenCode app.
+            For third-party access, use <code>oc/</code> with an API key instead.
+        </p>
+
+        <h4>Zhipu AI International (za/)</h4>
+        <p>Route to the GLM international endpoint (https://api.z.ai/api/paas/v4) instead of the Chinese endpoint</p>
+        <ul>
+            <li><b>za/glm-4-plus</b> - GLM-4 Plus via international endpoint</li>
+            <li><b>za/glm-4</b> - GLM-4 via international endpoint</li>
+        </ul>
+        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+            <b>&#x2139;&#xfe0f; Tip:</b> Without the za/ prefix, GLM models route to the Chinese endpoint.
+            Use za/ to access the international API. Requires a Zhipu API key.
+        </p>
+
+        <h4>NVIDIA (nd/ and authnd/)</h4>
+        <p>Access models through NVIDIA Integrate API with <code>nd/</code>, or through NVIDIA Build browser-backed routing with <code>authnd/</code>.</p>
+        <ul>
+            <li><b>nd/meta/llama-4-maverick-17b-128e-instruct</b></li>
+            <li><b>nd/deepseek-ai/deep-r1</b></li>
+            <li><b>authnd/deepseek-ai/deepseek-v4-flash</b></li>
+            <li><b>authnd/openai/gpt-oss-120b</b></li>
+        </ul>
+
+        <h4>Custom Prefix Routes</h4>
+        <p>User-defined prefixes can route models to custom OpenAI-compatible endpoints from Model Manager.</p>
+        
+        <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
+        """
+
+
+def provider_info_html() -> str:
+    """The desktop \"Model Provider Information\" rich text (API provider shortcuts per prefix)."""
+    return PROVIDER_INFO_HTML
+

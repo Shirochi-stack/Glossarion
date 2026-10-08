@@ -50,6 +50,14 @@ e. Nested dict settings: ``qa_scanner_settings.*`` (``qa_scan_runtime`` defaults
    ``MangaSettingsDialog.default_settings`` is built from since U8), ``ai_hunter_config.*``
    (``default_ai_hunter_config()``).
 
+f. The desktop tables themselves (U9 P5b): ``settings_map``, ``bool_vars`` and ``str_vars``
+   row for row (``DESKTOP_SETTINGS_MAP`` / ``DESKTOP_BOOL_VARS`` / ``DESKTOP_STR_VARS``), from
+   which ``settings_schema.desktop_settings_map`` / ``desktop_bool_vars`` / ``desktop_str_vars``
+   build the exact tuples the desktop iterates. Since the switch the desktop methods call those
+   functions (``settings_map = desktop_settings_map(self)``); the literals live on in the frozen
+   copy ``src/mobile/tools/frozen_desktop_tables.py`` and ``load_module`` splices each one back in
+   place of its call, so every record above is read from the same code as before the switch.
+
 The extraction works on both layouts of the shared-core move: code may live in
 ``translator_gui.py`` or in the GUI-free mixin modules (``owner_state.py``,
 ``run_env.py``, ``settings_persistence.py`` and the later pipeline modules). Every
@@ -80,7 +88,8 @@ import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 
-GENERATOR_VERSION = 2   # 2: widget choices; typed defaults settle the type before name heuristics
+GENERATOR_VERSION = 3   # 2: widget choices; typed defaults settle the type before name heuristics
+                        # 3: the desktop tables row for row (DESKTOP_*, U9 P5b)
 
 TOOLS_DIR = Path(__file__).resolve().parent
 DEFAULT_SRC = TOOLS_DIR.parents[1]
@@ -161,6 +170,13 @@ SCAN_EXCLUDE = {
 WIDGET_KEY_PINS = {
     ("translator_gui.py", "show_assistant_prompt_dialog", "profile_combo"): ("active_assistant_prompt_profile",),
 }
+# U9 P5b: the desktop builds its three settings tables from the schema
+# (``settings_map = desktop_settings_map(self)`` in settings_persistence, ``bool_vars =
+# desktop_bool_vars(self)`` / ``str_vars = desktop_str_vars(self)`` in owner_state). The literals
+# live on in this frozen copy (path relative to src/); load_module splices each one back in place
+# of its call, so the generator reads the same code as before the switch.
+FROZEN_TABLES = "mobile/tools/frozen_desktop_tables.py"
+DESKTOP_TABLES = ("settings_map", "bool_vars", "str_vars")
 # GUI-free helpers that TranslatorGUI.__init__ runs on self.config (startup writes).
 EXTRA_INIT_FUNCS = (
     ("metadata_defaults.py", "ensure_metadata_prompt_defaults"),   # via MetadataBatchTranslatorUI / _hook_metadata_defaults
@@ -366,11 +382,65 @@ class Module:
     class_consts: dict = field(default_factory=dict)  # class-body NAME -> str (config key constants)
 
 
+def _table_call(node):
+    """The table name when ``node`` is ``<table> = [module.]desktop_<table>(...)`` (U9 P5b)."""
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+        return None
+    table = node.targets[0].id
+    if table in DESKTOP_TABLES and isinstance(node.value, ast.Call) and _call_name(node.value) == "desktop_" + table:
+        return table
+    return None
+
+
+def frozen_tables(src: Path) -> dict:
+    """Table name -> source text of its literal, from the frozen copy (FROZEN_TABLES)."""
+    path = src / FROZEN_TABLES
+    if not path.is_file():
+        raise SystemExit(f"schema_extract: the desktop builds its tables from settings_schema but the frozen "
+                         f"copy {FROZEN_TABLES} (the save_config settings_map / _init_variables tables) is missing")
+    source = read_source(path)
+    tree = ast.parse(source, filename=FROZEN_TABLES)
+    tables = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in DESKTOP_TABLES and isinstance(node.value, ast.List)):
+            table = node.targets[0].id
+            if table in tables:
+                raise SystemExit(f"schema_extract: {FROZEN_TABLES} defines {table} twice")
+            tables[table] = ast.get_source_segment(source, node.value)
+    missing = [table for table in DESKTOP_TABLES if table not in tables]
+    if missing:
+        raise SystemExit(f"schema_extract: {', '.join(missing)} not found in {FROZEN_TABLES}")
+    return tables
+
+
+def splice_frozen_tables(src: Path, name: str, source: str) -> str:
+    """Put the frozen literal back in place of each ``<table> = desktop_<table>(...)`` call.
+
+    Positions are only used here: records never carry line numbers, so the spliced module
+    yields exactly the records the literal produced before the switch (U9 P5b)."""
+    if "desktop_" not in source:
+        return source
+    calls = [(node.value, table) for node in ast.walk(ast.parse(source, filename=name))
+             for table in (_table_call(node),) if table]
+    if not calls:
+        return source
+    literals = frozen_tables(src)
+    lines = source.split("\n")
+    for value, table in sorted(calls, key=lambda item: (item[0].lineno, item[0].col_offset), reverse=True):
+        first = lines[value.lineno - 1].encode("utf-8")
+        last = lines[value.end_lineno - 1].encode("utf-8")
+        spliced = (first[:value.col_offset].decode("utf-8") + literals[table]
+                   + last[value.end_col_offset:].decode("utf-8"))
+        lines[value.lineno - 1:value.end_lineno] = [spliced]
+    return "\n".join(lines)
+
+
 def load_module(src: Path, name: str):
     path = src / name
     if not path.is_file():
         return None
-    source = read_source(path)
+    source = splice_frozen_tables(src, name, read_source(path))
     tree = ast.parse(source, filename=name)
     excluded = SCAN_EXCLUDE.get(name, ())
     if excluded:
@@ -1004,6 +1074,96 @@ def parse_settings_map(mods: dict):
             unknown[key] = conv[1]
         entries.append(SMEntry(key, tuple(sources), save_default, conv, index))
     return entries, unknown
+
+
+# --------------------------------------------------------------------------- (f) desktop tables
+# Row encoding read by settings_schema (U9 P5b). A table default is a tagged tuple:
+#   ('value', literal)                 the literal (lists / dicts are copied for every build)
+#   ('ref', 'module:NAME')             an imported constant (settings_schema._resolve_marker)
+#   ('attr', name, default)            getattr(self, name, <default>)
+#   ('config', key, default)           self.config.get(key, <default>)
+# Converters are ConvSpecs (converter_spec); sources keep their literal form ('attr' or
+# ('config', key)). Anything else cannot be rebuilt and stops the generator.
+def _desktop_unbuildable(mod: Module, node, what: str):
+    raise SystemExit(f"schema_extract: desktop table {what} {segment(mod, node)!r} cannot be rebuilt by "
+                     "settings_schema (use a literal, an imported constant, getattr(self, 'name', default) "
+                     "or self.config.get('key', default))")
+
+
+def table_default(mod: Module, node):
+    ok, value = literal(node)
+    if ok:
+        return ("value", value)
+    if isinstance(node, ast.Name):
+        if node.id in mod.consts:
+            return ("value", mod.consts[node.id])
+        ref = mod.imports.get(node.id, "")
+        if ":" in ref:
+            return ("ref", ref)
+    if isinstance(node, ast.Call) and not node.keywords:
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) == 3
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "self" and const_str(node.args[1])):
+            return ("attr", const_str(node.args[1]), table_default(mod, node.args[2]))
+        if (isinstance(func, ast.Attribute) and func.attr == "get" and is_self_attr(func.value, "config")
+                and len(node.args) == 2 and const_str(node.args[0])):
+            return ("config", const_str(node.args[0]), table_default(mod, node.args[1]))
+    _desktop_unbuildable(mod, node, "default")
+
+
+def _table_rows(mod: Module, lst, width: int, table: str):
+    if not isinstance(lst, ast.List):
+        _desktop_unbuildable(mod, lst, table)
+    for elt in lst.elts:
+        if not (isinstance(elt, ast.Tuple) and len(elt.elts) == width):
+            _desktop_unbuildable(mod, elt, f"{table} row")
+        yield elt.elts
+
+
+def _table_sources(mod: Module, node):
+    if not isinstance(node, ast.List):
+        _desktop_unbuildable(mod, node, "sources")
+    out = []
+    for elt in node.elts:
+        ok, value = literal(elt)
+        if not (ok and (isinstance(value, str)
+                        or (isinstance(value, tuple) and all(isinstance(v, str) for v in value)))):
+            _desktop_unbuildable(mod, elt, "source")
+        out.append(value)
+    return tuple(out)
+
+
+def _single_table(mods: dict, table: str):
+    """(module, list node) of the bool_vars / str_vars table; copies left by an in-flight
+    move must be identical."""
+    found = []
+    for fn in owner_functions(mods):
+        for node in ast.walk(fn.node):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == table and isinstance(node.value, ast.List)):
+                found.append((fn.module, node.value))
+    if not found:
+        raise SystemExit(f"schema_extract: _init_variables {table} table not found")
+    if len({ast.dump(node) for _mod, node in found}) > 1:
+        raise SystemExit(f"schema_extract: the {table} copies differ")
+    return found[0]
+
+
+def desktop_tables(mods: dict) -> dict:
+    """The three desktop tables, row for row (``DESKTOP_*`` in the generated data)."""
+    mod, lst = find_settings_map(mods)
+    settings_map = tuple(
+        (const_str(key) or _desktop_unbuildable(mod, key, "key"), _table_sources(mod, sources),
+         table_default(mod, default), converter_spec(mods, mod, conv))
+        for key, sources, default, conv in _table_rows(mod, lst, 4, "settings_map"))
+    out = {"settings_map": settings_map}
+    for table in ("bool_vars", "str_vars"):
+        mod, lst = _single_table(mods, table)
+        out[table] = tuple(
+            (const_str(var) or _desktop_unbuildable(mod, var, "attribute"),
+             const_str(key) or _desktop_unbuildable(mod, key, "key"), table_default(mod, default))
+            for var, key, default in _table_rows(mod, lst, 3, table))
+    return out
 
 
 def settings_default(mod: Module, node):
@@ -2656,6 +2816,13 @@ HEADER = '''\
 #   origins, flags, discrepancies.
 # Non-literal defaults: {'$ref': 'module:NAME'}, {'$attr': 'self attribute'},
 # {'$expr': 'source text'}.
+#
+# DESKTOP_SETTINGS_MAP / DESKTOP_BOOL_VARS / DESKTOP_STR_VARS (U9 P5b): the desktop tables row
+# for row; the desktop builds its settings_map / bool_vars / str_vars from them through
+# settings_schema.desktop_settings_map / desktop_bool_vars / desktop_str_vars. Rows:
+#   settings_map (key, sources, default, ConvSpec); bool_vars / str_vars (attribute, key, default).
+#   default: ('value', literal) | ('ref', 'module:NAME') | ('attr', name, default)
+#            | ('config', key, default). The literals live in src/mobile/tools/frozen_desktop_tables.py.
 '''
 
 
@@ -2687,6 +2854,14 @@ def generate(src: Path) -> str:
     lines.append("# settings_map converters the ConvSpec pattern table does not recognise.")
     lines.append("UNKNOWN_CONVERTERS = " + pprint.pformat(dict(sorted(unknown.items())), width=100))
     lines.append("")
+    tables = desktop_tables(collector.mods)
+    for table, comment in (
+            ("settings_map", "save_config settings_map rows (key, sources, default, ConvSpec), in order."),
+            ("bool_vars", "_init_variables bool_vars rows (attribute, key, default), in order."),
+            ("str_vars", "_init_variables str_vars rows (attribute, key, default), in order.")):
+        lines.append(f"# {comment}")
+        lines.append(f"DESKTOP_{table.upper()} = " + pprint.pformat(tables[table], width=100))
+        lines.append("")
     lines.append("SETTINGS = {")
     for key, entry in settings.items():
         body = pprint.pformat(entry, width=96, sort_dicts=True)

@@ -100,15 +100,21 @@ def _summary(result: Any, fallback: str) -> str:
     return fallback
 
 
-async def organize_flow(ctx: Any) -> Optional[Any]:
+async def organize_flow(ctx: Any, books: Optional[Sequence[Any]] = None) -> Optional[Any]:
+    """Organize (n); ``books``: the selection bar's "Organize selected" (only their files move)."""
     service = ctx.service
     try:
-        plan = await ctx.io(service.plan_organize_blocking)
+        if books is None:
+            plan = await ctx.io(service.plan_organize_blocking)
+        else:
+            selected = [dict(b) for b in books]
+            plan = await ctx.io(lambda: service.plan_organize_blocking(selected))
     except CoreMissing as exc:
         ctx.say(f"Organize is not available in this build ({exc.name})")
         return None
     if not plan.get("raw_moves") and not plan.get("translated_moves"):
-        ctx.say("All resolvable files are already in Library/Raw or Library/Translated. Nothing to move.")
+        ctx.say("All resolvable files are already in Library/Raw or Library/Translated. Nothing to move."
+                if books is None else "The selected books' files are already in the Library. Nothing to move.")
         return None
     body = ("Move the following files into the Library?\n\n"
             + "\n".join("  • " + line for line in plan.get("preview") or ())

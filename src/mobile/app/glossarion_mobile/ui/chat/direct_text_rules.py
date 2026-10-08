@@ -53,6 +53,7 @@ __all__ = [
     "PLAN_TEXT_THRESHOLD",
     "attachment_icon",
     "attachment_kind_label",
+    "attachment_text_chars",
     "auto_title",
     "count_tokens",
     "display_markdown",
@@ -154,6 +155,31 @@ def needs_plan(extension: str, text_chars: int = 0, *, skip_plan: bool = False) 
     if ext in PLAN_EXTENSIONS:
         return True
     return ext in PLAN_TEXT_EXTENSIONS and int(text_chars or 0) > PLAN_TEXT_THRESHOLD
+
+
+def attachment_text_chars(record: Any) -> int:
+    """Characters of a TXT / MD attachment for the §2.12.1 threshold (0 for other files).
+
+    A text file never has more characters than bytes and never fewer than a quarter of them (UTF-8 /
+    UTF-16), so the size settles it unless the file is near the threshold; only then is the file
+    read (at most ``4 * PLAN_TEXT_THRESHOLD`` bytes)."""
+    if not isinstance(record, Mapping):
+        return 0
+    path = str(record.get("path") or "")
+    if (str(record.get("extension") or "").lower() or _extension(path)) not in PLAN_TEXT_EXTENSIONS:
+        return 0
+    try:
+        size = int(record.get("size") or 0) or os.path.getsize(path)
+    except (OSError, TypeError, ValueError):
+        return 0
+    if size <= PLAN_TEXT_THRESHOLD or size > 4 * PLAN_TEXT_THRESHOLD:
+        return size if size <= PLAN_TEXT_THRESHOLD else size // 4
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(4 * PLAN_TEXT_THRESHOLD + 4)
+    except OSError:
+        return size
+    return len(raw.decode("utf-8-sig", errors="replace"))
 
 
 # ---------------------------------------------------------------------------

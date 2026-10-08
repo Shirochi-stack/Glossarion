@@ -220,6 +220,8 @@ def _exec_optional_import(segment, failing_import, mobile_failure):
         "__builtins__": dict(vars(builtins), __import__=failing_import),
         "__name__": "optional_import_probe",
         "_MOBILE_IMPORT_FAILURE": mobile_failure,
+        # U9: mobile defers the two gRPC SDK imports (grpc_gemini_client, google.cloud.translate_v2)
+        "_DEFER_GRPC_SDKS": mobile_failure is Exception,
     }
     exec(compile(segment, "<unified_api_client optional import>", "exec"), namespace)
     return namespace
@@ -258,6 +260,11 @@ def test_optional_imports_use_the_gated_handler_and_keep_fallbacks():
 
 def test_optional_imports_desktop_values(uac):
     assert uac._MOBILE_IMPORT_FAILURE is ImportError
+    # desktop imports the gRPC SDKs at import time (nothing deferred; _ensure_* report that result)
+    assert uac._DEFER_GRPC_SDKS is False
+    assert uac._GRPC_GEMINI_PENDING is False and uac._GOOGLE_TRANSLATE_PENDING is False
+    assert uac._ensure_grpc_gemini() is uac.GEMINI_GRPC_AVAILABLE
+    assert uac._ensure_google_translate() is uac.GOOGLE_TRANSLATE_AVAILABLE
     assert uac.AUTHGPT_AVAILABLE is True
     assert uac._authgpt_send is not None
     assert uac.MistralSDKStyle in (None, "legacy", "modern")

@@ -17,6 +17,10 @@ persistent sidebar is not covered by an app bar.
 U7: the ⋯ menu shows "Attachments (N)"; a scratch chat shows a "Scratch" chip and a Save
 button instead of the scratch toggle (UI_SPEC §2.1, §2.16); "Search in chat" turns the title
 into the ``ChatSearchBar`` (field · "3/17" · ▲ ▼ · ✕, §2.18).
+
+U9: ⋯ › "Move to Series…" (the optional Series, §2.15) once the SeriesFeature sets its handler
+(``set_series_handler``); the "custom" chip also covers series defaults (the chat context reads
+the layered overrides).
 """
 
 from __future__ import annotations
@@ -33,13 +37,15 @@ __all__ = ["ChatHeader", "ChatSearchBar", "MENU_ITEMS", "SCROLL_TINT_PX"]
 
 SCROLL_TINT_PX = 4
 
-# (action id, label) for the ⋯ menu (Move to Series… arrives with Series, U9).
+# (action id, label) for the ⋯ menu. "Move to Series…" (U9, optional Series) shows only once the
+# SeriesFeature sets ``on_move_series`` and never in a scratch chat (scratch chats are not saved).
 MENU_ITEMS = (
     ("chat_settings", "Chat settings"),
     ("attachments", "Attachments (0)"),
     ("jump_to", "Jump to…"),
     ("search", "Search in chat"),
     ("text_size", "Text size"),
+    ("move_series", "Move to Series…"),
     ("export", "Export chat"),
     ("delete", "Delete chat"),
 )
@@ -69,6 +75,7 @@ class ChatHeader:
         self.on_menu_action = on_menu_action
         self.scrolled = False
         self.compact_text = False
+        self.text_scale = 1.0  # effective text scale: the bar grows past 56 dp for its two lines
         self.tablet = False
         self.title_text = ft.Text(
             title,
@@ -96,8 +103,7 @@ class ChatHeader:
             content=ft.Text("custom", theme_style=ft.TextThemeStyle.LABEL_SMALL),
             bgcolor=ft.Colors.SECONDARY_CONTAINER,
             border_radius=tokens.RADII["badge"],
-            padding=ft.Padding.symmetric(horizontal=6),
-            height=16,
+            padding=ft.Padding.symmetric(horizontal=6, vertical=1),  # grows with the text (no fixed height)
             visible=False,
             on_click=lambda e: self._menu("chat_settings"),
         )
@@ -123,6 +129,9 @@ class ChatHeader:
             action: ft.PopupMenuItem(content=label, on_click=lambda e, a=action: self._menu(a), key=f"chat-menu-{action}")
             for action, label in MENU_ITEMS
         }
+        #: U9 Series: "Move to Series…" handler (SeriesFeature); the item is hidden without one.
+        self.on_move_series: Optional[Callable[[], Any]] = None
+        self.menu_items["move_series"].visible = False
         self.overflow = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             tooltip="More",
@@ -163,7 +172,7 @@ class ChatHeader:
         bgcolor = ft.Colors.SURFACE_CONTAINER if self.scrolled else ft.Colors.SURFACE
         if tablet:
             self.wrapper = ft.Container(
-                height=tokens.SIZES["app_bar"],
+                height=self.bar_height(),
                 bgcolor=bgcolor,
                 padding=ft.Padding.only(left=16, right=4),
                 content=ft.Row(
@@ -179,11 +188,32 @@ class ChatHeader:
                 actions=self.actions,
                 bgcolor=bgcolor,
                 elevation_on_scroll=0,
-                toolbar_height=tokens.SIZES["app_bar"],
+                toolbar_height=self.bar_height(),
                 center_title=False,
                 automatically_imply_leading=False,
             )
         return self.wrapper
+
+    def bar_height(self) -> int:
+        """56 dp, or what the title + subtitle lines need at large text (UI_SPEC §7.5: no clipped
+        text). Title 22 sp lines + subtitle 14 sp lines, plus 8 dp of breathing room."""
+        lines = tokens.TYPE_SCALE["title_medium"].line + tokens.TYPE_SCALE["label_small"].line
+        return max(tokens.SIZES["app_bar"], int(round(lines * max(1.0, self.text_scale) + 8)))
+
+    def set_text_scale(self, scale: float) -> None:
+        """The effective text scale changed: resize a built bar in place."""
+        try:
+            self.text_scale = max(0.5, float(scale or 1.0))
+        except (TypeError, ValueError):
+            self.text_scale = 1.0
+        wrapper = self.wrapper
+        if wrapper is None:
+            return
+        height = self.bar_height()
+        if isinstance(wrapper, ft.AppBar):
+            wrapper.toolbar_height = height
+        else:
+            wrapper.height = height
 
     # ---- state ---------------------------------------------------------------------
 
@@ -231,6 +261,17 @@ class ChatHeader:
         delete = self.menu_items.get("delete")
         if delete is not None:
             delete.content = "Discard scratch chat" if self.is_scratch else "Delete chat"
+        self._sync_series_item()
+
+    def set_series_handler(self, handler: Optional[Callable[[], Any]]) -> None:
+        """U9 Series: show "Move to Series…" (``handler`` opens the picker) or hide it (None)."""
+        self.on_move_series = handler
+        self._sync_series_item()
+
+    def _sync_series_item(self) -> None:
+        item = self.menu_items.get("move_series")
+        if item is not None:
+            item.visible = self.on_move_series is not None and not self.is_scratch
 
     def set_attachments(self, count: int) -> None:
         item = self.menu_items.get("attachments")
@@ -271,6 +312,9 @@ class ChatHeader:
             self.on_open_model_sheet(tab)
 
     def _menu(self, action: str) -> None:
+        if action == "move_series" and self.on_move_series is not None:
+            self.on_move_series()
+            return
         if self.on_menu_action is not None:
             self.on_menu_action(action)
 

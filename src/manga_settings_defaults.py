@@ -24,14 +24,34 @@ Shared GUI-free core (Glossarion mobile rewrite, milestone U8).
 * :func:`font_preset_updates` (preset, config=None): the config writes of the Rendering
   font-size preset buttons. The values are not repeated here: the call runs the desktop's
   ``_set_font_preset`` through ``manga_env`` (imported lazily, on call).
+* :data:`RENDERING_RESET_VALUES` (U9): the tab attributes Rendering › Reset to Defaults sets
+  (moved from ``MangaTranslationTab._reset_rendering_to_defaults``, which now reads them);
+  :func:`rendering_reset_updates` (config=None) measures the config writes they make through the
+  tab's ``_save_rendering_settings`` (``manga_env``, like the font presets).
+* :data:`MASK_PRESETS` (U9): the mask dilation quick presets of the manga settings dialog
+  (B&W Manga / Colored / Uniform; ``_set_mask_preset`` arguments) and :func:`mask_preset_updates`.
+* :func:`available_fonts` (config=None, U9): the font files a manga run can render with on this
+  device: the platform font folders (:data:`PLATFORM_FONT_DIRS`: Android ``/system/fonts``, iOS /
+  macOS ``/System/Library/Fonts``, Linux ``/usr/share/fonts``), ``src/fonts`` (the desktop tab's
+  custom fonts directory) and the imported ``custom_fonts``. The desktop tab keeps its own list
+  (``MangaTranslationTab._get_available_fonts``: the Windows font folder by display name).
 
 Rules: Python 3.10 compatible; stdlib only at import time; never import PySide6, translator_gui
 or dpi_setup.
 """
 
 import copy
+import os
 
 __all__ = [
+    "FONT_FILE_EXTENSIONS",
+    "PLATFORM_FONT_DIRS",
+    "available_fonts",
+    "MASK_PRESETS",
+    "MASK_PRESET_FIELDS",
+    "RENDERING_RESET_VALUES",
+    "mask_preset_updates",
+    "rendering_reset_updates",
     "MANGA_SETTINGS_SECTIONS",
     "MANGA_TOP_LEVEL_DEFAULTS",
     "MANGA_PROMPT_KEYS",
@@ -273,6 +293,140 @@ def font_preset_updates(preset, config=None):
     import manga_env
 
     return manga_env.font_preset_updates(preset, config)
+
+
+#: Rendering › Reset to Defaults: the manga tab's ``*_value`` attributes and their default values, in the
+#: order the desktop sets them (``MangaTranslationTab._reset_rendering_to_defaults``).
+RENDERING_RESET_VALUES = {
+    # Background settings
+    'bg_opacity_value': 0,
+    'free_text_only_bg_opacity_value': False,
+    'bg_style_value': 'circle',
+    'bg_reduction_value': 1.0,
+    # Font settings
+    'font_size_value': 0,
+    'font_size_mode_value': 'auto',
+    'font_size_multiplier_value': 1.0,
+    'selected_font_path': None,
+    'font_style_value': 'Default',
+    # Auto fit style
+    'auto_fit_style_value': 'compact',
+    'auto_min_size_value': 8,
+    'max_font_size_value': 48,
+    # Text wrapping and constraints
+    'strict_text_wrapping_value': True,
+    'constrain_to_bubble_value': True,
+    'force_caps_lock_value': True,
+    # Font algorithm settings
+    'font_algorithm_value': 'smart',
+    'prefer_larger_value': True,
+    'bubble_size_factor_value': True,
+    'line_spacing_value': 1.3,
+    # Text color
+    'text_color_r_value': 102,
+    'text_color_g_value': 0,
+    'text_color_b_value': 0,
+    # Shadow settings
+    'shadow_enabled_value': True,
+    'shadow_color_r_value': 255,
+    'shadow_color_g_value': 255,
+    'shadow_color_b_value': 255,
+    'shadow_offset_x_value': 2,
+    'shadow_offset_y_value': 2,
+    'shadow_blur_value': 0,
+    # Safe area
+    'safe_area_enabled_value': False,
+    'safe_area_scale_value': 1.0,
+}
+
+
+def rendering_reset_updates(config=None):
+    """``manga_env.rendering_reset_updates``: the config entries Rendering › Reset writes (measured on
+    scratch headless tabs, like :func:`font_preset_updates`)."""
+    import manga_env
+
+    return manga_env.rendering_reset_updates(config)
+
+
+#: The manga settings dialog's mask quick presets: id -> (button text, ``_set_mask_preset`` arguments
+#: (dilation, use_all, all_iter, text_bubble_iter, empty_bubble_iter, free_text_iter)).
+MASK_PRESETS = {
+    'bw_manga': ('B&W Manga', (15, False, 2, 2, 3, 0)),
+    'colored': ('Colored', (15, False, 2, 2, 3, 3)),
+    'uniform': ('Uniform', (0, True, 2, 2, 2, 0)),
+}
+#: The ``manga_settings`` fields the dialog's Save writes from the preset's controls, in argument order.
+MASK_PRESET_FIELDS = ('mask_dilation', 'use_all_iterations', 'all_iterations', 'text_bubble_dilation_iterations',
+                      'empty_bubble_dilation_iterations', 'free_text_dilation_iterations')
+
+
+def mask_preset_updates(preset):
+    """``{'manga_settings.<field>': value}`` a mask preset leaves after the dialog's Save (with the
+    legacy ``bubble_dilation_iterations`` / ``dilation_iterations`` mirrors of the text-bubble value)."""
+    entry = MASK_PRESETS.get(preset)
+    if entry is None:
+        return {}
+    values = dict(zip(MASK_PRESET_FIELDS, entry[1]))
+    out = {f'manga_settings.{name}': value for name, value in values.items()}
+    out['manga_settings.bubble_dilation_iterations'] = values['text_bubble_dilation_iterations']
+    out['manga_settings.dilation_iterations'] = values['text_bubble_dilation_iterations']
+    return out
+
+
+#: Font folders of the platforms a manga run renders on (only the existing ones are read).
+PLATFORM_FONT_DIRS = (
+    "/system/fonts",                      # Android
+    "/System/Library/Fonts",              # iOS / macOS (Core, Supplemental, ... below it)
+    "/usr/share/fonts",                   # Linux
+)
+#: Files Pillow's ``ImageFont.truetype`` renders (the desktop tab's ``.ttf`` / ``.ttc`` / ``.otf``).
+FONT_FILE_EXTENSIONS = ('.ttf', '.ttc', '.otf')
+_FONT_SCAN_LIMIT = 2000
+
+
+def _font_files(folder, limit=_FONT_SCAN_LIMIT):
+    found = []
+    for root, dirs, files in os.walk(folder):
+        dirs.sort()
+        for name in sorted(files):
+            if name.lower().endswith(FONT_FILE_EXTENSIONS):
+                found.append(os.path.join(root, name))
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+def available_fonts(config=None, font_dirs=None):
+    """Font file paths for the manga Rendering › Font list (scalable fonts only, no duplicates).
+
+    The platform folders (``font_dirs``, default :data:`PLATFORM_FONT_DIRS`) sorted by file name,
+    then ``src/fonts`` (walked, like the desktop tab), then ``config['custom_fonts']`` entries
+    (``{'name', 'path'}`` dicts or paths) whose file exists.
+    """
+    seen = set()
+    out = []
+
+    def add(path):
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen and os.path.isfile(path):
+            seen.add(key)
+            out.append(path)
+
+    system = []
+    for folder in (PLATFORM_FONT_DIRS if font_dirs is None else font_dirs):
+        if folder and os.path.isdir(folder):
+            system.extend(_font_files(folder))
+    for path in sorted(system, key=lambda p: os.path.basename(p).lower()):
+        add(path)
+    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    if os.path.isdir(bundled):
+        for path in _font_files(bundled):
+            add(path)
+    for entry in (config or {}).get('custom_fonts') or ():
+        path = entry.get('path') if isinstance(entry, dict) else entry
+        if path:
+            add(str(path))
+    return out
 
 
 def top_level_manga_default(key, default=None):

@@ -1,0 +1,190 @@
+"""``UiDriver``: the Glossarion UI tests' steps over a Flet tester.
+
+The same flows (``flows.py``) run
+  * on a device/emulator under ``flet test android`` (``flet_app.tester`` is Flet's
+    ``RemoteTester``: it drives the on-device Flutter ``WidgetTester``), and
+  * on the host in ``tests_host/test_ui_flows.py`` against the real app on a fake Flet session
+    (``host_tester.PyTester`` implements the same calls on the Python control tree),
+so every key, tooltip and text a flow uses is checked on every host test run.
+
+Finders follow Flutter: ``key`` (a control's ``key``), ``text`` (exact text of a Text or a
+button label), ``contains`` (substring of a text), ``tooltip``. ``wait`` polls with short pumps
+(never ``pump_and_settle``: progress rings never settle). Native screens (the Android file
+picker) are outside Flutter; a ``picker`` object handles them (``android_device.DocumentsPicker``
+on a device, the host's stub picker in host runs).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
+
+__all__ = ["DEFAULT_TIMEOUT", "UiDriver", "UiTimeout"]
+
+DEFAULT_TIMEOUT = float(os.environ.get("GLOSSARION_UI_TIMEOUT", "60"))
+
+
+class UiTimeout(AssertionError):
+    """A finder did not match (or did not go away) in time."""
+
+
+def _describe(**spec: Any) -> str:
+    return ", ".join(f"{k}={v!r}" for k, v in spec.items() if v is not None)
+
+
+class UiDriver:
+    def __init__(self, tester: Any, *, artifacts: Optional[os.PathLike] = None, picker: Any = None,
+                 back: Optional[Callable[[], Awaitable[Any]]] = None,
+                 scroll: Optional[Callable[[], Awaitable[Any]]] = None, poll_ms: int = 400,
+                 log: Callable[[str], Any] = print) -> None:
+        self.t = tester
+        self.artifacts = Path(artifacts) if artifacts else None
+        self.picker = picker
+        self._back = back
+        self._scroll = scroll  # one "swipe up" on the device (Flutter builds list rows lazily)
+        self.poll_ms = poll_ms
+        self.log = log
+        self.steps: list = []
+        self._shots = 0
+
+    # ---- primitives -------------------------------------------------------------------------
+
+    async def pump(self, ms: Optional[int] = None) -> None:
+        from datetime import timedelta
+
+        try:
+            await self.t.pump(timedelta(milliseconds=ms if ms is not None else self.poll_ms))
+        except TypeError:  # a tester without duration support
+            await self.t.pump()
+
+    async def find(self, *, key: Any = None, text: Optional[str] = None, contains: Optional[str] = None,
+                   tooltip: Optional[str] = None) -> Any:
+        if key is not None:
+            return await self.t.find_by_key(key)
+        if text is not None:
+            return await self.t.find_by_text(text)
+        if contains is not None:
+            # Flutter's find.textContaining: keep flows to plain words (no regex characters).
+            return await self.t.find_by_text_containing(contains)
+        if tooltip is not None:
+            return await self.t.find_by_tooltip(tooltip)
+        raise ValueError("a finder needs key, text, contains or tooltip")
+
+    async def count(self, **spec: Any) -> int:
+        return int(getattr(await self.find(**spec), "count", 0))
+
+    async def exists(self, *, timeout: float = 0.0, **spec: Any) -> bool:
+        try:
+            await self.wait(timeout=timeout, quiet=True, **spec)
+            return True
+        except UiTimeout:
+            return False
+
+    async def wait(self, *, timeout: Optional[float] = None, gone: bool = False, quiet: bool = False,
+                   scroll: bool = False, **spec: Any) -> Any:
+        """The finder once it matches (``gone``: once it no longer matches). ``scroll``: the target
+        may sit below the fold of a list; swipe up between polls (a device only: on the host every
+        row is in the tree)."""
+        deadline = time.monotonic() + (DEFAULT_TIMEOUT if timeout is None else timeout)
+        polls = 0
+        while True:
+            finder = await self.find(**spec)
+            matched = int(getattr(finder, "count", 0)) > 0
+            if matched != gone:
+                return finder
+            if time.monotonic() >= deadline:
+                if not quiet:
+                    await self.screenshot("timeout")
+                raise UiTimeout(f"{'still found' if gone else 'not found'} after {timeout or DEFAULT_TIMEOUT:.0f}s: "
+                                f"{_describe(**spec)}")
+            polls += 1
+            if scroll and not gone and self._scroll is not None and polls % 2 == 0:
+                self.step(f"scroll for {_describe(**spec)}")
+                await self._scroll()
+            await self.pump()
+
+    async def wait_any(self, *specs: dict, timeout: Optional[float] = None) -> int:
+        """Index of the first spec that matches."""
+        deadline = time.monotonic() + (DEFAULT_TIMEOUT if timeout is None else timeout)
+        while True:
+            for index, spec in enumerate(specs):
+                if await self.count(**spec):
+                    return index
+            if time.monotonic() >= deadline:
+                await self.screenshot("timeout")
+                raise UiTimeout("none found: " + " | ".join(_describe(**s) for s in specs))
+            await self.pump()
+
+    async def tap(self, *, timeout: Optional[float] = None, index: int = 0, scroll: bool = False,
+                  **spec: Any) -> None:
+        finder = await self.wait(timeout=timeout, scroll=scroll, **spec)
+        target = finder.at(index) if index else finder.first
+        self.step(f"tap {_describe(**spec)}")
+        await self.t.tap(target)
+        await self.pump(150)
+
+    async def enter(self, value: str, *, timeout: Optional[float] = None, **spec: Any) -> None:
+        finder = await self.wait(timeout=timeout, **spec)
+        self.step(f"enter {value!r} into {_describe(**spec)}")
+        await self.t.enter_text(finder.first, value)
+        await self.pump(150)
+
+    async def back(self) -> None:
+        self.step("back")
+        if self._back is not None:
+            await self._back()
+        elif await self.count(tooltip="Back"):
+            await self.tap(tooltip="Back")
+        else:
+            raise UiTimeout("no way back from this screen")
+        await self.pump(300)
+
+    async def pick_file(self, name: str, open_picker: Callable[[], Awaitable[Any]]) -> None:
+        """Open a native file picker with ``open_picker`` and choose ``name`` in it."""
+        if self.picker is None:
+            raise UiTimeout("no file picker driver in this run")
+        self.step(f"pick {name!r}")
+        await self.picker.arm(name)
+        await open_picker()
+        await self.picker.choose(name)
+        await self.pump(500)
+
+    # ---- diagnostics ------------------------------------------------------------------------
+
+    def step(self, label: str) -> None:
+        self.steps.append(label)
+        self.log(f"[ui] {label}")
+
+    async def screenshot(self, name: str) -> Optional[Path]:
+        if self.artifacts is None:
+            return None
+        self._shots += 1
+        path = self.artifacts / f"{self._shots:02d}_{re.sub(r'[^A-Za-z0-9_.-]+', '_', name)}.png"
+        try:
+            data = await self.t.take_screenshot(name)
+        except Exception as exc:  # screenshots are best effort
+            self.log(f"[ui] screenshot {name} failed: {exc}")
+            return None
+        if data:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            return path
+        return None
+
+
+async def poll(predicate: Callable[[], Any], *, timeout: float, interval: float = 0.5) -> Any:
+    """Await a plain predicate (host-side state, adb output) with a deadline."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if asyncio.iscoroutine(value):
+            value = await value
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            return value
+        await asyncio.sleep(interval)

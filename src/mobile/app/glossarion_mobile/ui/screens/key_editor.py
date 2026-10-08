@@ -245,6 +245,35 @@ _NUMBER_FIELDS = (
 )
 
 
+def google_credentials_problem(path: str) -> Optional[str]:
+    """The desktop credential pickers' check (``settings_rules.google_credentials_error``: a service-account
+    JSON with ``type`` and ``project_id``); None when valid or when the rule is not in this build."""
+    try:
+        from settings_rules import google_credentials_error
+    except Exception:
+        return None
+    return google_credentials_error(path)
+
+
+def individual_endpoint_problem(enabled: bool, url: str, api_version: str) -> Optional[str]:
+    """``key_pool_service.individual_endpoint_error`` (the desktop Individual Endpoint dialog's rules)."""
+    try:
+        from key_pool_service import individual_endpoint_error
+    except Exception:
+        return None
+    return individual_endpoint_error(enabled, url, api_version)
+
+
+def endpoint_quick_paste() -> tuple:
+    """The KeyEditor's endpoint chips: the desktop dialog's Ollama / LM Studio / TTS / TTS v1 shortcuts as the
+    Endpoints page's LAN hosts (``endpoints.QUICK_PASTE["openai_base_url"]``, without Clear)."""
+    try:
+        from glossarion_mobile.ui.screens.endpoints import QUICK_PASTE
+    except Exception:
+        return ()
+    return tuple((label, value) for label, value in QUICK_PASTE.get("openai_base_url", ()) if value)
+
+
 def _fmt(value: Any) -> str:
     if value is None:
         return ""
@@ -331,6 +360,11 @@ class KeyEditor(FullScreenEditor):
         self.endpoint_field = ft.TextField(value=str(entry.get("azure_endpoint") or ""), label="Endpoint URL",
                                            hint_text="https://…", dense=True, keyboard_type=ft.KeyboardType.URL,
                                            border_radius=tokens.RADII["field"])
+        # the desktop dialog's shortcut buttons, as LAN hosts to edit (a phone has no localhost server)
+        self.endpoint_chips = ft.Row([ft.Chip(label=ft.Text(label), on_click=lambda e, v=value: self.paste_endpoint(v),
+                                              key=f"key-endpoint-paste-{index}")
+                                      for index, (label, value) in enumerate(endpoint_quick_paste())],
+                                     wrap=True, spacing=6, run_spacing=6, key="key-endpoint-paste")
         version = str(entry.get("azure_api_version") or "2025-01-01-preview")
         if self.azure_versions:
             options = list(dict.fromkeys([version, *self.azure_versions]))
@@ -340,8 +374,8 @@ class KeyEditor(FullScreenEditor):
         else:
             self.version_field = ft.TextField(value=version, label="Azure API version", dense=True,
                                               border_radius=tokens.RADII["field"])
-        self.endpoint_box = ft.Column([self.endpoint_field, self.version_field], spacing=8, tight=True,
-                                      visible=bool(self.endpoint_switch.value))
+        self.endpoint_box = ft.Column([self.endpoint_field, self.endpoint_chips, self.version_field], spacing=8,
+                                      tight=True, visible=bool(self.endpoint_switch.value))
         self.creds_field = ft.TextField(value=str(entry.get("google_credentials") or ""),
                                         label="Google credentials (service account JSON path)", dense=True,
                                         border_radius=tokens.RADII["field"])
@@ -378,9 +412,14 @@ class KeyEditor(FullScreenEditor):
                 self.params_column, self.add_param_button]),
         ]
         if context_controls:
+            from glossarion_mobile.ui.screens.keys import context_preset_row
+
+            # Enable all · Disable all · 🖼️ Images only (the desktop context dialog's shortcuts)
+            self.context_presets = context_preset_row(self.contexts, self.apply_context_preset, key="key-ctx-presets")
             sections.append(_section("Request contexts", [
                 ft.Text("The key serves the selected requests; switch one off to keep this key away from it.",
                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                self.context_presets,
                 ft.Row(context_controls, wrap=True, spacing=6, run_spacing=6)]))
         return ft.ListView(controls=sections, expand=True, spacing=12, padding=ft.Padding.only(left=4, right=4, bottom=24))
 
@@ -389,7 +428,11 @@ class KeyEditor(FullScreenEditor):
         from glossarion_mobile.ui.settings.editors import PathEditor
 
         def save(value: Any) -> Optional[str]:
-            self.creds_field.value = str(value or "")
+            path = str(value or "").strip()
+            problem = google_credentials_problem(path) if path else None
+            if problem:  # the desktop pickers refuse it; the field keeps its value
+                return problem
+            self.creds_field.value = path
             _push(self.creds_field)
             return None
 
@@ -398,6 +441,20 @@ class KeyEditor(FullScreenEditor):
                                       on_save=save, import_dir=extras.get("import_dir"),
                                       allowed_extensions=["json"]).show()
         return self.path_editor
+
+    def paste_endpoint(self, url: str) -> None:
+        self.endpoint_field.value = str(url or "")
+        _push(self.endpoint_field)
+
+    def apply_context_preset(self, allowed: Any) -> None:
+        """Enable all · Disable all · Images only: each context on exactly when it is in ``allowed``."""
+        allowed = set(allowed or ())
+        for context in self.contexts:
+            self.context_enabled[context] = context in allowed
+            chip = self.context_chips.get(context)
+            if chip is not None:
+                chip.selected = context in allowed
+        _push(*self.context_chips.values())
 
     def _on_endpoint_toggle(self, e: Any = None) -> None:
         self.endpoint_box.visible = bool(self.endpoint_switch.value)
@@ -466,6 +523,15 @@ class KeyEditor(FullScreenEditor):
             api_key = str(self.entry.get("api_key") or "")  # unchanged ENC: value round-trips
         use_endpoint = bool(self.endpoint_switch.value)
         version = (self.version_field.value or "").strip() or "2025-01-01-preview"
+        endpoint = (self.endpoint_field.value or "").strip()
+        problem = individual_endpoint_problem(use_endpoint, endpoint, version)
+        if problem:  # the desktop dialog's Validation Error
+            raise ValueError(problem)
+        creds = (self.creds_field.value or "").strip()
+        if creds and creds != str(self.entry.get("google_credentials") or "").strip():
+            problem = google_credentials_problem(creds)
+            if problem:  # a typed path: the desktop pickers' check
+                raise ValueError(problem)
         cooldown = self._number("cooldown")
         params = self.request_parameters()
         disabled = sorted([c for c, on in self.context_enabled.items() if not on] + self.extra_disabled)
@@ -477,9 +543,9 @@ class KeyEditor(FullScreenEditor):
             "individual_key_temperature": self._number("individual_key_temperature"),
             "api_call_delay": self._number("api_call_delay") or 0.0,
             "use_individual_endpoint": use_endpoint,
-            "azure_endpoint": (self.endpoint_field.value or "").strip() or None,
+            "azure_endpoint": endpoint or None,
             "azure_api_version": version,
-            "google_credentials": (self.creds_field.value or "").strip() or None,
+            "google_credentials": creds or None,
             "google_region": (self.region_field.value or "").strip() or None,
         })
         # The Translation pool stores APIKeyEntry.to_dict(); the other pools keep the dict shape

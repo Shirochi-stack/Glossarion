@@ -246,6 +246,23 @@ PREVIEW_SPLITS = (
      "manga_editor_core._request_graceful_stop(mi)"),
 )
 
+#: manga_image_preview Clear Boxes (U9): (helper, start, end, call left in the handler). The helpers
+#: take the preview widget (the mobile session passes its EditorPreview).
+PREVIEW_CLEAR_SPLITS = (
+    ("_delete_translated_outputs", "if self.current_image_path:",
+     "print(f\"[CLEAR] Failed to delete translated output: {e}\")",
+     "# The output files are found by manga_editor_core (shared with the mobile editor's Clear boxes, U9)\n"
+     "import manga_editor_core\n"
+     "manga_editor_core._delete_translated_outputs(self)"),
+    ("_clear_saved_page_state",
+     "if hasattr(self.manga_integration, 'image_state_manager') and "
+     "self.manga_integration.image_state_manager and self.current_image_path:",
+     "print(f\"[CLEAR] Flushed cleared state to disk for {os.path.basename(self.current_image_path)}\")",
+     "# Saved page state cleared by manga_editor_core (shared with the mobile editor's Clear boxes, U9)\n"
+     "import manga_editor_core\n"
+     "manga_editor_core._clear_saved_page_state(self)"),
+)
+
 GATE_LINES = (
     "            # Mobile (U8): no worker process on Android/iOS. The state stays in this process and\n"
     "            # flush() / flush_async() write it (the worker only mirrored it).\n"
@@ -310,6 +327,15 @@ def test_preview_stop_helper_is_lifted_verbatim(split):
     assert body == block
 
 
+@pytest.mark.parametrize("split", PREVIEW_CLEAR_SPLITS, ids=[s[0] for s in PREVIEW_CLEAR_SPLITS])
+def test_preview_clear_helper_is_lifted_verbatim(split):
+    helper, start, end, _call = split
+    frozen_fn = _methods(frozen_source("src/manga_image_preview.py"), "MangaImagePreviewWidget")["_on_clear_boxes_clicked"]
+    block = _canonical_block(_marker_block(frozen_fn, start, end))
+    body = _canonical_block(_function_body(_top_defs(current_source("manga_editor_core.py"))[helper]))
+    assert body == block
+
+
 def _frozen_state_block():
     source = frozen_source("src/manga_integration.py")
     start = source.index("# Module-level worker function for state management (must be picklable)\n")
@@ -363,8 +389,15 @@ def test_desktop_preview_only_calls_the_core():
     current = _methods(current_source("manga_image_preview.py"), "MangaImagePreviewWidget")
     assert set(frozen) == set(current)
     for name in frozen:
-        if name != "_on_stop_translation_clicked":
+        if name not in ("_on_stop_translation_clicked", "_on_clear_boxes_clicked"):
             assert current[name] == frozen[name], name
+    clear_lines = frozen["_on_clear_boxes_clicked"].split("\n")
+    for _helper, start, end, call in PREVIEW_CLEAR_SPLITS:
+        s = next(i for i, line in enumerate(clear_lines) if line.strip() == start.strip())
+        e = next(i for i in range(s, len(clear_lines)) if clear_lines[i].strip() == end.strip())
+        indent = len(clear_lines[s]) - len(clear_lines[s].lstrip(" "))
+        clear_lines = clear_lines[:s] + [" " * indent + c for c in call.split("\n")] + clear_lines[e + 1:]
+    assert current["_on_clear_boxes_clicked"] == "\n".join(clear_lines)
     lines = frozen["_on_stop_translation_clicked"].split("\n")
     for _helper, start, end_after, end, call in PREVIEW_SPLITS:
         s = next(i for i, line in enumerate(lines) if line.strip() == start.strip())
@@ -1708,6 +1741,38 @@ def test_session_per_box_actions(tmp_path, fakes):
     session.delete_box(2)
     assert len(session.boxes) == 2
     assert not [m for level, m in session.test_logs if level == 'error'], session.test_logs
+
+
+def test_session_clear_page_matches_the_desktop_clear_boxes(tmp_path, fakes, monkeypatch):
+    """U9: Clear boxes on mobile runs the desktop's lifted halves: the boxes, the saved page state
+    and the translated output go; the cleaned image stays."""
+    override = tmp_path / "override"
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(override))
+    page = make_page(tmp_path / "pages" / "001.png")
+    session = _session(tmp_path, [page])
+    session.open_page(page)
+    session.detect()
+    session.recognize()
+    assert session.boxes and session.image_state_manager.get_state(page).get('detection_regions')
+    outputs = []
+    for folder in (tmp_path / "pages" / "001_translated", override / "001_translated"):
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ("001.png", "001_cleaned.png", "other.png"):
+            (folder / name).write_bytes(b"x")
+        outputs.append(folder)
+    snapshot = session.clear_page()
+    assert snapshot['boxes'] == [] and session.boxes == []
+    state = session.image_state_manager.get_state(page) or {}
+    for key in ('overlay_offsets', 'last_render_positions', 'translated_texts', 'recognized_texts',
+                'detection_regions'):
+        assert not state.get(key), key
+    assert not state.get('viewer_rectangles')
+    for folder in outputs:
+        assert sorted(os.listdir(folder)) == ["001_cleaned.png", "other.png"]
+    assert not getattr(session, '_recognition_data', None) and not getattr(session, '_translation_data', None)
+    # the preview stand-in answers what the lifted helpers read
+    assert session.image_preview_widget.manga_integration is session
+    assert session.image_preview_widget.main_gui is session.main_gui
 
 
 def test_session_clean_skips_excluded_boxes(tmp_path, fakes):

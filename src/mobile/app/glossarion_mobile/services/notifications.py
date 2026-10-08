@@ -68,9 +68,16 @@ def chat_of(snap: Any) -> Optional[str]:
 
 
 def question_route(snap: Any) -> str:
-    """Where a job's blocking question is answered: the owning chat (its approval card), else the job."""
+    """Where a job's blocking question is answered: the owning chat (its approval card), a Library book's
+    page (U9: the review gate's approval sheet, UI_SPEC §3.10), else the job."""
     cid = chat_of(snap)
-    return f"/chat/{cid}" if cid is not None else job_route(snap.id)
+    if cid is not None:
+        return f"/chat/{cid}"
+    origin = getattr(getattr(snap, "spec", None), "origin", None) or {}
+    bid = str(origin.get("bid") or "") if isinstance(origin, Mapping) and origin.get("type") == "library" else ""
+    if bid:
+        return f"/library/book/{bid}"
+    return job_route(snap.id)
 
 
 def _deep_link(route: str) -> str:

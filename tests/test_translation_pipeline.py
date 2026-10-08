@@ -82,6 +82,7 @@ GLOSSARY_MOVED = (
     "_is_special_file",
     "_should_skip_special_file",
     "_get_spine_filenames_for_preview",
+    "_get_pdf_range_entries_for_preview",  # U9: the Plan card "Choose chapters" PDF preview
     "_get_opf_file_order",
     "run_glossary_extraction_direct",
     "_process_image_folder_for_glossary",

@@ -40,6 +40,7 @@ from glossarion_mobile.ui.chat.media_model import (
     format_clock,
     image_size,
 )
+from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import HIT_TARGET
@@ -168,8 +169,9 @@ class ImageGallery(ft.Column):
         self.controls = controls
 
     def _tile(self, item: MediaItem, position: int, *, width: float, height: Optional[float], fit: Any) -> ft.Control:
+        # decoded at the tile size (a 4K generated image would otherwise be decoded in full per tile)
         image = ft.Image(src=item.path, fit=fit, width=width, height=height, border_radius=12, gapless_playback=True,
-                         semantics_label=f"Generated image {item.name}",
+                         semantics_label=f"Generated image {item.name}", cache_width=decode_width(width),
                          error_content=_missing("image", MediaItem("image", item.path, False)))
         self.images.append(image)
         return ft.Container(
@@ -618,11 +620,23 @@ _BLOCK_COLOURS = {
 }
 
 
+def decode_width(width: Optional[float], pixel_ratio: float = 3.0) -> Optional[int]:
+    """Physical pixels to decode an image shown ``width`` dp wide (``Image.cache_width``)."""
+    try:
+        value = float(width or 0)
+    except (TypeError, ValueError):
+        return None
+    return int(round(value * pixel_ratio)) if value > 0 else None
+
+
 class CompareSheet:
-    """"Compare with original": each refined paragraph stacked under the original it replaced."""
+    """"Compare with original": each refined paragraph stacked under the original it replaced
+    (a bottom sheet; the SidePanel beside the chat on tablets, UI_SPEC §1.1)."""
 
     def __init__(self, original: str, refined: str, *, title: str = "Compare with original") -> None:
         from glossarion_mobile.ui.chat.direct_text_rules import display_markdown
+
+        self.title = title
 
         self.blocks = compare_blocks(display_markdown(original), display_markdown(refined))
         changed = sum(1 for tag, _o, _r in self.blocks if tag != "equal")
@@ -654,4 +668,6 @@ class CompareSheet:
         )
 
     def show(self, page: Any) -> None:
+        if surface.present_sheet(page, self.dialog, title=self.title, owner=self.dialog):
+            return
         page.show_dialog(self.dialog)

@@ -52,8 +52,10 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.foreground import poll_sleep
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.common import hint_text
 
 __all__ = ["ARGOS_REASON", "LEGEND", "NOTEPAD_REASON", "PROVIDERS", "ReviewerBinding", "ReviewerRequest",
@@ -86,6 +88,9 @@ class ReviewerRequest:
     focus: Optional[str] = None  # output file name of the piece to show first
     manual_editing: bool = False
     progress_data: Any = field(default=None, repr=False)  # the Progress Manager's loaded progress
+    # Manual editing: the Not Translated / Pending rows (progress_core.untranslated_manual_entries) that
+    # get source-only sidecars (U9; desktop autogen_manual_entries)
+    manual_entries: Any = field(default=None, repr=False)
 
 
 _REQUESTS: dict = {}
@@ -97,10 +102,11 @@ def _key(folder: str) -> str:
 
 
 def request_open(folder: str, *, source: Optional[str] = None, focus: Optional[str] = None,
-                 manual_editing: bool = False, progress_data: Any = None) -> None:
+                 manual_editing: bool = False, progress_data: Any = None, manual_entries: Any = None) -> None:
     with _LOCK:
         _REQUESTS[_key(folder)] = ReviewerRequest(source=source, focus=focus, manual_editing=bool(manual_editing),
-                                                  progress_data=progress_data)
+                                                  progress_data=progress_data,
+                                                  manual_entries=list(manual_entries) if manual_entries else None)
 
 
 def take_request(folder: str) -> ReviewerRequest:
@@ -109,12 +115,13 @@ def take_request(folder: str) -> ReviewerRequest:
 
 
 def open_reviewer(ctx: Any, folder: str, *, source: Optional[str] = None, focus: Optional[str] = None,
-                  manual_editing: bool = False, progress_data: Any = None) -> Optional[str]:
+                  manual_editing: bool = False, progress_data: Any = None, manual_entries: Any = None) -> Optional[str]:
     """Tools › SDLXLIFF reviewer on ``folder`` (``?out=<fid>``; the rest in-process)."""
     prefs = getattr(ctx, "prefs", None)
     if prefs is None or not folder:
         return None
-    request_open(folder, source=source, focus=focus, manual_editing=manual_editing, progress_data=progress_data)
+    request_open(folder, source=source, focus=focus, manual_editing=manual_editing, progress_data=progress_data,
+                 manual_entries=manual_entries)
     fid = prefs.file_ref(folder)
     ctx.go("tools.sdlxliff", None, {"out": fid})
     return fid
@@ -149,16 +156,17 @@ class ReviewerBinding:
 
     def __init__(self, core: Any, output_dir: str, *, source: Optional[str] = None, focus: Optional[str] = None,
                  config: Optional[dict] = None, save: Optional[Callable[[str, Any], Any]] = None,
-                 progress_data: Any = None) -> None:
+                 progress_data: Any = None, manual_entries: Any = None) -> None:
         opener = getattr(core, "open_sdlxliff_review", None) if core is not None else None
         if not callable(opener):
             raise LookupError(NO_CORE)
         self.output_dir = output_dir
         self.focus = focus
         self.parent = ConfigParent(dict(config or {}), save)
+        kwargs: dict = {"manual_entries": list(manual_entries)} if manual_entries else {}
         self.session = opener(output_dir, self.parent.config, current_path=sidecar_path_for(output_dir, focus),
                               context_parent=self.parent, source_path=source, progress_data=progress_data,
-                              load=False)
+                              load=False, **kwargs)
 
     # ---- data ----------------------------------------------------------------------------------
 
@@ -290,7 +298,8 @@ class SdlxliffScreen(Screen):
         self.folder = (prefs.resolve_file_ref(fid) if prefs is not None and fid else None) or ""
         self.request = take_request(self.folder) if self.folder else ReviewerRequest()
         self.binding: Optional[ReviewerBinding] = None
-        self.error: Optional[str] = None if self.folder else "Open the reviewer from a book's Chapters tab"
+        self.error: Optional[str] = None if self.folder else (
+            "Choose a workspace with SDLXLIFF sidecars, or open the reviewer from a book's Chapters tab")
         self.piece_index = 0
         self.filter_status: Optional[str] = None
         self.notepad = False
@@ -307,12 +316,18 @@ class SdlxliffScreen(Screen):
         self._render_pending = False  # a polled refresh came in during an edit: re-render after it
         self._poll_task: Any = None
         self._visible = False
+        # tablets (UI_SPEC §4.9): the books and pieces as a persistent side list (MasterDetail)
+        self.side_by_side = bool(getattr(ctx, "tablet", False))
+        self.md: Any = None
+        self.root: Optional[ft.Container] = None
+        self.side_list: Optional[ft.ListView] = None
+        self._layout_gen = 0
 
     # ---- layout -----------------------------------------------------------------------------------
 
     def actions(self) -> list:
         return [ft.IconButton(icon=ft.Icons.REFRESH, tooltip="↻ Refresh", key="sdl-refresh",
-                              on_click=lambda e: self.ctx.spawn(self.reload(force=True)))]
+                              on_click=lambda e: self.ctx.spawn(self.reload(force=True)), size_constraints=HIT_TARGET)]
 
     def build_body(self) -> ft.Control:
         self.book_dropdown = ft.Dropdown(label="Book", options=[], dense=True, visible=False,
@@ -320,9 +335,9 @@ class SdlxliffScreen(Screen):
         self.piece_dropdown = ft.Dropdown(label="Piece", options=[], dense=True, expand=True,
                                           on_select=self._on_piece_select, key="sdl-piece")
         self.prev_button = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous piece",
-                                         on_click=lambda e: self.step(-1), key="sdl-prev")
+                                         on_click=lambda e: self.step(-1), key="sdl-prev", size_constraints=HIT_TARGET)
         self.next_button = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next piece",
-                                         on_click=lambda e: self.step(1), key="sdl-next")
+                                         on_click=lambda e: self.step(1), key="sdl-next", size_constraints=HIT_TARGET)
         self.piece_menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Piece actions", key="sdl-piece-menu",
                                              items=self._piece_menu_items())
         self.legend = ft.Row(scroll=ft.ScrollMode.AUTO, spacing=6, key="sdl-legend")
@@ -355,11 +370,130 @@ class SdlxliffScreen(Screen):
                    run_spacing=6),
             ft.Row(layout_row, wrap=True, spacing=6), self.status_text,
         ], spacing=6, tight=True)
+        self.header_column = header
         self.list_view = ft.ListView(controls=[header, self.body_holder], expand=True, spacing=tokens.SPACING["sm"],
                                      padding=ft.Padding.symmetric(horizontal=12, vertical=8), key="sdl-screen")
         if self.error:
             self.rows_column.controls = [hint_text(self.error, key="sdl-error")]
-        return self.list_view
+            if not self.folder:  # the Tools hub tile: choose a workspace (SourcePicker), like the Progress manager
+                self.rows_column.controls.append(ft.FilledTonalButton(
+                    content="Choose a workspace…", icon=ft.Icons.FOLDER_OPEN, key="sdl-choose",
+                    on_click=lambda e: self.open_picker()))
+        self.root = ft.Container(expand=True, key="sdl-root")
+        self._layout()
+        return self.root
+
+    # ---- tablet: side list of books and pieces (UI_SPEC §4.9) --------------------------------------
+
+    def _layout(self) -> None:
+        """Phone: the reviewer list (Dropdown + ‹ › selectors). Tablet: MasterDetail with the books and
+        pieces as a persistent side list and the reviewer as the detail. Every rebuild gets fresh
+        wrapper keys (Flet 1.0.3 freezes a subtree re-rendered under the key it replaces)."""
+        if self.root is None:
+            return
+        self._layout_gen += 1
+        gen = self._layout_gen
+        main = ft.Container(content=self.list_view, expand=True, key=f"sdl-main-{gen}")
+        compact_selectors = not self.side_by_side
+        for control in (self.piece_dropdown, self.prev_button, self.next_button):
+            control.visible = compact_selectors
+        if self.side_by_side:
+            from glossarion_mobile.ui.components.master_detail import MasterDetail
+
+            self.side_list = ft.ListView(spacing=2, expand=True, padding=ft.Padding.symmetric(vertical=8),
+                                         key=f"sdl-side-{gen}")
+            self._render_side_list()
+            self.md = MasterDetail(self.side_list, placeholder=main, two_pane=True, master_width=320,
+                                   key=f"sdl-md-{gen}")
+            self.root.content = self.md.control
+        else:
+            self.md = None
+            self.side_list = None
+            self.root.content = main
+
+    def _piece_color(self, index: int, piece: Mapping[str, Any]) -> str:
+        summary: Mapping[str, Any] = {}
+        session = getattr(self.binding, "session", None)
+        try:
+            summary = session.piece_summary(index) if session is not None else {}
+        except Exception:
+            summary = {}
+        summary = summary or piece
+        if summary.get("completed") or piece.get("manual_green_override"):
+            return STATUS_COLORS["green"]
+        for status in ("red", "yellow", "purple"):
+            if int(summary.get(f"{status}_count") or 0):
+                return STATUS_COLORS[status]
+        return STATUS_COLORS["green"]
+
+    def _render_side_list(self) -> None:
+        if self.side_list is None:
+            return
+        binding = self.binding
+        controls: list = []
+        books = binding.books if binding is not None else []
+        if len(books) > 1:
+            controls.append(ft.Text("Books", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY))
+            current = str(self.book_dropdown.value or "0")
+            for i, book in enumerate(books):
+                label = str(book.get("label") or os.path.basename(str(book.get("output_dir") or "")))
+                controls.append(ft.ListTile(title=ft.Text(label, max_lines=2), dense=True, selected=str(i) == current,
+                                            on_click=lambda e, i=i: self._pick_book(i),
+                                            key=f"sdl-side-book-{self._layout_gen}-{i}"))
+        pieces = binding.pieces if binding is not None else []
+        if pieces:
+            controls.append(ft.Text("Pieces", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY))
+        for i, piece in enumerate(pieces):
+            controls.append(ft.ListTile(
+                leading=ft.Container(width=12, height=12, border_radius=6, bgcolor=self._piece_color(i, piece)),
+                title=ft.Text(binding.label(i), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                dense=True, selected=i == self.piece_index, on_click=lambda e, i=i: self.select_piece(i),
+                key=f"sdl-side-piece-{self._layout_gen}-{i}"))
+        if not controls:
+            controls.append(hint_text("No SDLXLIFF pieces yet", key=f"sdl-side-empty-{self._layout_gen}"))
+        self.side_list.controls = controls
+        self._push(self.side_list)
+
+    def _pick_book(self, index: int) -> None:
+        self.book_dropdown.value = str(index)
+        self.ctx.spawn(self.switch_book(index))
+
+    def select_piece(self, index: int) -> None:
+        """A side-list tap (tablet): the piece the Dropdown would pick."""
+        pieces = self.binding.pieces if self.binding is not None else []
+        if not 0 <= index < len(pieces):
+            return
+        self.piece_index = index
+        self._rerender()
+
+    def apply_size_class(self, size_class: Any) -> None:
+        tablet = bool(getattr(size_class, "persistent_sidebar", False))
+        if tablet == self.side_by_side:
+            return
+        self.side_by_side = tablet
+        self._layout()
+        self._push(self.root)
+
+    def open_picker(self) -> Any:
+        """The SourcePicker (eligible: an output folder with SDLXLIFF sidecars), then the reviewer on it."""
+        from glossarion_mobile.ui.tools.source_picker import SourcePicker
+
+        def eligible(target: Any) -> Optional[str]:
+            folder = str(getattr(target, "folder", "") or "")
+            if not folder:
+                return "Needs an output folder"
+            return None if os.path.isdir(os.path.join(folder, "SDLXLIFF")) else "No SDLXLIFF sidecars in this workspace"
+
+        def chosen(targets: list) -> None:
+            if targets:
+                target = targets[0]
+                open_reviewer(self.ctx, target.folder, source=target.source or None)
+
+        picker = SourcePicker(self.ctx, title="Review SDLXLIFF of…", multi=False, eligible=eligible, on_done=chosen,
+                              segment="library", find_folder=True)
+        if self.ctx.page is not None:
+            picker.show(self.ctx.page)
+        return picker
 
     def did_show(self) -> None:
         self._visible = True
@@ -408,7 +542,8 @@ class SdlxliffScreen(Screen):
             core = None
         config = self.ctx.config_snapshot() if hasattr(self.ctx, "config_snapshot") else {}
         return ReviewerBinding(core, self.folder, source=self.request.source, focus=self.request.focus,
-                               config=config, save=self.ctx.set_cfg, progress_data=self.request.progress_data)
+                               config=config, save=self.ctx.set_cfg, progress_data=self.request.progress_data,
+                               manual_entries=self.request.manual_entries if self.request.manual_editing else None)
 
     async def open(self) -> Optional[ReviewerBinding]:
         try:
@@ -466,7 +601,7 @@ class SdlxliffScreen(Screen):
     async def _poll(self) -> None:
         """2 s poll while visible (the dialog's silent auto refresh)."""
         while self._visible and self.binding is not None:
-            await asyncio.sleep(POLL_SECONDS)
+            await poll_sleep(getattr(self.ctx, "page", None), POLL_SECONDS)  # parks while the app is hidden
             if not self._visible or self.binding is None:
                 return
             if not self._shown():
@@ -510,6 +645,7 @@ class SdlxliffScreen(Screen):
             self.rows_piece_index = self.piece_index
             self.rows_column.controls = self._row_cards(piece)
             self.body_holder.content = self.rows_column
+        self._render_side_list()
         self._push(self.list_view)
 
     def _render_header(self) -> Optional[dict]:

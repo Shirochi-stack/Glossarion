@@ -934,11 +934,13 @@ def test_tiles_edit_validate_reset_and_show_reasons(tmp_path):
         lst.add("<|end|>")
         lst.move(1, -1)
         assert lst.save() and store.get("stop_sequences") == ["<|end|>", "</s>"]
+        # U9: custom_entry_types opens the Entry Type Configuration editor (shared glossary_document rules)
         js = t["custom_entry_types"].activate()
-        js.field.value = "[1, 2]"
-        assert not js.save() and js.error_text.value == "Expected a JSON object ({…})"
-        js.field.value = '{"term": {"enabled": false}}'
-        assert js.save() and store.get("custom_entry_types") == {"term": {"enabled": False}}
+        assert js.add("  Term ", True) == "term" and js.add("term") is None  # lower-cased; a duplicate is refused
+        assert "Duplicate Type" in js.error_text.value
+        js.switches["character"].value = False
+        assert js.save() and store.get("custom_entry_types") == {"character": {"enabled": False},
+                                                                 "term": {"enabled": True, "has_gender": True}}
 
         # Discard changes since opening restores the section's starting point
         changed = prompts.discard_changes()
@@ -1101,7 +1103,8 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
         assert "settings.appearance" not in home.route_tiles  # the schema section "appearance" covers it
         assert isinstance(home.route_tiles["settings.logs"].trailing, ft.Icon)
         assert home.route_tiles["settings.env_preview"].trailing.icon == ft.Icons.CHEVRON_RIGHT
-        assert home.route_tiles["settings.models"].trailing.reason == "Arrives in U4"
+        # U4 has shipped: a route nothing implements here says so instead of "Arrives in U4" (U9 Integrate)
+        assert home.route_tiles["settings.models"].trailing.reason == "Not available in this build"
         assert [n.key for n in home.notices.controls] == ["settings-notice-keys"]  # api_key kept, re-enter notice
         home.section_tiles["glossary"].on_click(None)
         home.route_tiles["settings.env_preview"].on_click(None)

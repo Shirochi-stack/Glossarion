@@ -68,6 +68,9 @@ KIND_MODULES = {
     # U8 (Tools › Manga: the batch Start / Generate glossary and the editor steps)
     "manga": "manga",
     "manga_step": "manga",
+    # U9 (Tools › Converter: the desktop Other Settings retroactive actions)
+    "md_txt_sidecars": "compile",
+    "br_to_paragraphs": "compile",
 }
 
 

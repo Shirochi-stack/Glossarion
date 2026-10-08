@@ -93,7 +93,7 @@ _PATTERNS: dict[str, str] = {
     "key": r"[A-Za-z0-9_.-]{1,96}",
     "token": r"[A-Za-z0-9_-]{1,64}",
     "group": r"[a-z_]{1,32}",
-    "root": r"output|library|inbox|chats|[0-9a-fA-F]{12}",
+    "root": r"output|library|inbox|chats|payloads|logs|[0-9a-fA-F]{12}",
     "pool": "|".join(KEY_POOLS),
     "shelf": r"progress|completed",
     "book_tab": r"overview|chapters|glossary|output",

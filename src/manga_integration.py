@@ -6656,52 +6656,11 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             return
         
         try:
-            # Background settings
-            self.bg_opacity_value = 0
-            self.free_text_only_bg_opacity_value = False
-            self.bg_style_value = 'circle'
-            self.bg_reduction_value = 1.0
-            
-            # Font settings
-            self.font_size_value = 0
-            self.font_size_mode_value = 'auto'
-            self.font_size_multiplier_value = 1.0
-            self.selected_font_path = None
-            self.font_style_value = 'Default'
-            
-            # Auto fit style
-            self.auto_fit_style_value = 'compact'
-            self.auto_min_size_value = 8
-            self.max_font_size_value = 48
-            
-            # Text wrapping and constraints
-            self.strict_text_wrapping_value = True
-            self.constrain_to_bubble_value = True
-            self.force_caps_lock_value = True
-            
-            # Font algorithm settings
-            self.font_algorithm_value = 'smart'
-            self.prefer_larger_value = True
-            self.bubble_size_factor_value = True
-            self.line_spacing_value = 1.3
-            
-            # Text color
-            self.text_color_r_value = 102
-            self.text_color_g_value = 0
-            self.text_color_b_value = 0
-            
-            # Shadow settings
-            self.shadow_enabled_value = True
-            self.shadow_color_r_value = 255
-            self.shadow_color_g_value = 255
-            self.shadow_color_b_value = 255
-            self.shadow_offset_x_value = 2
-            self.shadow_offset_y_value = 2
-            self.shadow_blur_value = 0
-            
-            # Safe area
-            self.safe_area_enabled_value = False
-            self.safe_area_scale_value = 1.0
+            # The default values (manga_settings_defaults.RENDERING_RESET_VALUES, moved in U9; Glossarion
+            # Mobile's Rendering › Reset writes the same values)
+            from manga_settings_defaults import RENDERING_RESET_VALUES
+            for _attr, _value in RENDERING_RESET_VALUES.items():
+                setattr(self, _attr, _value)
             
             # Update UI widgets
             if hasattr(self, 'opacity_slider'):
@@ -9418,31 +9377,23 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                     "Blank URL uses the current main image provider/model. There is no separate custom endpoint URL to test."
                 )
                 return
-            if not url.startswith(('http://', 'https://')):
-                lower = url.lower()
-                url = ('http://' if lower.startswith(('localhost', '127.', '0.0.0.0', '[')) else 'https://') + url
-            url = url.rstrip('/')
+            # manga_env.normalize_custom_image_edit_url / probe_custom_image_edit_endpoint (moved in U9)
+            from manga_env import normalize_custom_image_edit_url, probe_custom_image_edit_endpoint
+            url = normalize_custom_image_edit_url(url)
             if str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip():
                 self._sync_custom_image_edit_controls(url=url, enabled=True, source='manga')
 
             self.local_model_status_label.setText("Testing image edit endpoint...")
             self.local_model_status_label.setStyleSheet("color: orange;")
-            headers = {
-                'Authorization': f"Bearer {os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY') or os.environ.get('OPENAI_API_KEY') or self.main_gui.config.get('api_key', '') or 'sk-local'}"
-            }
-            resp = requests.get(f"{url}/models", headers=headers, timeout=10)
-            if resp.status_code in (200, 201):
-                self.local_model_status_label.setText("Image edit endpoint reachable")
-                self.local_model_status_label.setStyleSheet("color: green;")
-                QMessageBox.information(self.dialog, "Image Edit Endpoint", f"Endpoint is reachable:\n{url}")
-            elif resp.status_code in (401, 403):
-                self.local_model_status_label.setText("Endpoint reached, but authentication failed")
-                self.local_model_status_label.setStyleSheet("color: orange;")
-                QMessageBox.warning(self.dialog, "Custom Image Edit Endpoint", f"Endpoint responded with authentication error ({resp.status_code}).")
+            box, status, color, title, message = probe_custom_image_edit_endpoint(
+                url, self.main_gui.config, http_get=requests.get
+            )
+            self.local_model_status_label.setText(status)
+            self.local_model_status_label.setStyleSheet(f"color: {color};")
+            if box == 'warning':
+                QMessageBox.warning(self.dialog, title, message)
             else:
-                self.local_model_status_label.setText(f"Endpoint responded: HTTP {resp.status_code}")
-                self.local_model_status_label.setStyleSheet("color: orange;")
-                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", f"Endpoint responded with HTTP {resp.status_code}.")
+                QMessageBox.information(self.dialog, title, message)
         except Exception as e:
             self.local_model_status_label.setText("Custom Image Edit Endpoint test failed")
             self.local_model_status_label.setStyleSheet("color: red;")
@@ -9859,73 +9810,8 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         """Show information about models"""
         model_type = self.local_model_type_value
         
-        info = {
-            'aot': "AOT GAN Model:\n\n"
-                   "• Auto-downloads from HuggingFace\n"
-                   "• Traced PyTorch JIT model\n"
-                   "• Good for general inpainting\n"
-                   "• Fast processing speed\n"
-                   "• File size: ~100MB",
-            
-            'aot_onnx': "AOT ONNX Model:\n\n"
-                        "• Optimized ONNX version\n"
-                        "• Auto-downloads from HuggingFace\n"
-                        "• 2-3x faster than PyTorch version\n"
-                        "• Great for batch processing\n"
-                        "• Lower memory usage\n"
-                        "• File size: ~100MB",
-            
-            'lama': "LaMa Model:\n\n"
-                    "• Auto-downloads anime-optimized version\n"
-                    "• Best quality for manga/anime\n"
-                    "• Large model (~200MB)\n"
-                    "• Excellent at removing text from bubbles\n"
-                    "• Preserves art style well",
-            
-            'anime': "Anime-Specific Model:\n\n"
-                     "• Same as LaMa anime version\n"
-                     "• Optimized for manga/anime art\n"
-                     "• Auto-downloads from GitHub\n"
-                     "• Recommended for manga translation\n"
-                     "• Preserves screen tones and patterns",
-            
-            'anime_onnx': "Anime ONNX Model:\n\n"
-                          "• Optimized ONNX version for speed\n"
-                          "• Auto-downloads from HuggingFace\n"
-                          "• 2-3x faster than PyTorch version\n"
-                          "• Perfect for batch processing\n"
-                          "• Same quality as anime model\n"
-                          "• File size: ~190MB\n"
-                          "• DEFAULT for inpainting",
-            
-            'custom-image-edit': "Custom Image Edit Endpoint:\n\n"
-                                 "- Select a local .gguf model file\n"
-                                 "- Sends masked manga cleanup requests to the Custom Image Edit Endpoint\n"
-                                 "- Uses the OpenAI-compatible /images/edits API\n"
-                                 "- Text requests keep using your normal LLM endpoint\n"
-                                 "- Best for running a local image-edit model beside a separate cloud/text LLM",
-
-            'mat': "MAT Model:\n\n"
-                   "• Manual download required\n"
-                   "• Get from: github.com/fenglinglwb/MAT\n"
-                   "• Good for high-resolution images\n"
-                   "• Slower but high quality\n"
-                   "• File size: ~500MB",
-            
-            'ollama': "Ollama:\n\n"
-                      "• Uses local Ollama server\n"
-                      "• No model download needed here\n"
-                      "• Run: ollama pull llava\n"
-                      "• Context-aware inpainting\n"
-                      "• Requires Ollama running locally",
-            
-            'sd_local': "Stable Diffusion:\n\n"
-                        "• Manual download required\n"
-                        "• Get from HuggingFace\n"
-                        "• Requires significant VRAM (4-8GB)\n"
-                        "• Best quality but slowest\n"
-                        "• Can use custom prompts"
-        }
+        # The model texts (manga_models.MODEL_INFO, moved in U9: the mobile Model manager ⓘ shows them)
+        from manga_models import MODEL_INFO as info
         
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
         from PySide6.QtCore import Qt
