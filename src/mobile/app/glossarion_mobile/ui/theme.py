@@ -30,6 +30,7 @@ __all__ = [
     "hit_target",
     "icon_data",
     "is_dark",
+    "log_text",
     "mono_family",
     "page_platform",
     "resolve_color",
@@ -193,3 +194,18 @@ def page_platform(page: Any) -> str:
 
 def mono_family(page: Any = None) -> str:
     return tokens.mono_family(page_platform(page) if page is not None else None)
+
+
+def log_text(value: str = "", *, page: Any = None, family: Optional[str] = None, **kwargs: Any) -> ft.Text:
+    """Selectable log-line ``Text`` (UI_SPEC §6.2 log: 8/11, mono family). The line height is
+    pinned to the token (11/8) so it does not inherit bodyMedium's ratio; the ``TextStyle`` is
+    built fresh for every call. ``family`` overrides the platform mono family of ``page``."""
+    spec = tokens.LOG_STYLE
+    return ft.Text(
+        value,
+        selectable=True,
+        font_family=family or mono_family(page),
+        size=spec.size,
+        style=ft.TextStyle(height=round(spec.line / spec.size, 4)),
+        **kwargs,
+    )

@@ -10,7 +10,7 @@ through ``FileBridge`` (the cache copy is removed) and then offered:
   ``library_core.import_paths`` registers it and scaffolds its workspace, through
   ``FileBridge.library_import``; EPUB / TXT / PDF / HTML only; the Library feature
   adds a handler that also offers "Open" on the new book);
-* **Open in Reader** (EPUB; the Library feature's handler routes to
+* **Open in Reader** (EPUB / TXT; the Library feature's handler routes to
   ``/reader/<bid>`` with the file's opaque id; disabled while no handler is
   registered);
 * **Manga translator** (images, CBZ and ZIP only: the manga feature's handler adds
@@ -58,9 +58,9 @@ ACTION_MANGA = "manga"
 
 _BLOCKED_SCHEMES = ("content:", "file:", "intent:", "data:", "javascript:")
 READER_REASON = "The Reader is not available in this session"
-READER_TYPES_REASON = "The Reader opens EPUB files"
+READER_TYPES_REASON = "The Reader opens EPUB and TXT files"
 #: Shared files the Reader opens straight from the Inbox.
-READER_EXTENSIONS = (".epub",)
+READER_EXTENSIONS = (".epub", ".txt")
 LIBRARY_REASON = "Only EPUB, TXT, PDF and HTML files go to the Library"
 #: Shared files the manga translator takes (its Files tab: images, CBZ, ZIP).
 MANGA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".cbz", ".zip")

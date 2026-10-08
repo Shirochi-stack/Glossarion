@@ -10,7 +10,8 @@ slides the window by ``limit // 3`` (desktop ``_history_page_size``).
 Grouping (UI_SPEC §2.12): a ``user_file`` turn is followed by its JobCard, which
 groups every assistant message up to the next user turn - the request cards, the
 "Extraction report" and the "Attachment actions" cards. Assistant messages after a
-plain text turn render as ordinary cards.
+plain text turn render as ordinary cards. A "QA scan" message (a chat QA job started from a
+Result card, the ＋ sheet or ``/qa``) is its own item wherever it sits.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
 
 __all__ = [
     "ACTIONS_LABEL",
+    "LIBRARY_LABEL",
+    "QA_LABEL",
     "REPORT_LABEL",
     "TranscriptItem",
     "build_items",
@@ -39,6 +42,8 @@ __all__ = [
 REPORT_LABEL = "Extraction report"
 ACTIONS_LABEL = "Attachment actions"
 LIBRARY_LABEL = "Library job"
+#: A chat QA scan's card (storage ``{"qa_job", "folder", "source"}``; the scanned workspace in message[4])
+QA_LABEL = "QA scan"
 
 
 def _role(message: object) -> str:
@@ -129,7 +134,7 @@ def window_around(total: int, limit: int, index: int) -> tuple:
 
 @dataclass
 class TranscriptItem:
-    kind: str  # user | user_file | assistant | job
+    kind: str  # user | user_file | assistant | job | qa
     index: int  # message index (job: the owning user_file index, or -1 when it is outside the window)
     requests: list = field(default_factory=list)  # job: assistant indices of request cards
     report: Optional[int] = None  # job: index of the "Extraction report" card
@@ -172,6 +177,11 @@ def build_items(messages: Sequence, start: int = 0, end: Optional[int] = None) -
             jobs[i] = job
             items.append(job)
         elif role == "assistant":
+            label = str(message[5] if len(message) > 5 else "")
+            if label == QA_LABEL:
+                # its own card, never one of a turn's request cards (it is appended whenever the scan starts)
+                items.append(TranscriptItem("qa", i))
+                continue
             file_index = owner.get(i)
             if file_index is None:
                 items.append(TranscriptItem("assistant", i))
@@ -181,7 +191,6 @@ def build_items(messages: Sequence, start: int = 0, end: Optional[int] = None) -
                 job = TranscriptItem("job", -1)
                 jobs[file_index] = job
                 items.append(job)
-            label = str(message[5] if len(message) > 5 else "")
             if label == REPORT_LABEL:
                 job.report = i
             elif label == ACTIONS_LABEL:

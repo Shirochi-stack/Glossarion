@@ -34,6 +34,7 @@ __all__ = [
     "copy_text_for",
     "glossary_terms_markdown",
     "source_text_for",
+    "moved_workspace",
     "turn_workspace",
     "workspace_outputs",
     "jump_entries",
@@ -90,6 +91,27 @@ def turn_workspace(messages: Sequence[Any], indices: Iterable[Any]) -> str:
             folder = parent
         if folder and os.path.isdir(folder):
             return folder
+    return ""
+
+
+def moved_workspace(messages: Sequence[Any], indices: Iterable[Any]) -> str:
+    """Blocking: a turn's workspace after it moved out of ``Attachments/`` into the Library (the move
+    rewrites the cards' output folders, ``_relocate_session_attachment_paths``): the nearest folder at
+    or above a response's output folder that holds ``translation_progress.json``; '' when none does."""
+    for index in indices:
+        if index is None or not (0 <= int(index) < len(messages)):
+            continue
+        message = messages[int(index)]
+        folder = str(message[4] or "") if isinstance(message, (list, tuple)) and len(message) > 4 else ""
+        for _level in range(3):
+            if not folder or not os.path.isdir(folder):
+                break
+            if os.path.isfile(os.path.join(folder, "translation_progress.json")):
+                return folder
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                break
+            folder = parent
     return ""
 
 

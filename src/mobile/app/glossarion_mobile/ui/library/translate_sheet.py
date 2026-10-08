@@ -12,8 +12,10 @@ mode (the chat's ``effective_glossary_label``, the desktop rule) - plus:
   for several EPUBs), "Run options" (``plan_card.RunOptionsPanel``: "Only for this run" values
   become the job's ``config_overrides``) and, for one book, "Choose chapters" (range + Spine order
   + the desktop 🔍 preview);
-* **Start**: ``LibraryService.translate_spec`` -> ``JobsFeature.submit`` (origin =
-  book, so the Book page strip, the JobStrip and Jobs show it).
+* **Start**: :func:`confirm_output_root` first (the desktop "Output Folder Mismatch"
+  question of Load for translation), then ``LibraryService.translate_spec`` ->
+  ``JobsFeature.submit`` (origin = book, so the Book page strip, the JobStrip and Jobs
+  show it).
 
 Raw sources are resolved on the io pool before the sheet opens
 (:func:`open_translate_sheet`); books without one are listed with the desktop
@@ -22,6 +24,7 @@ Raw sources are resolved on the io pool before the sheet opens
 
 from __future__ import annotations
 
+import logging
 import os
 from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence
@@ -33,9 +36,48 @@ from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library.models import size_text
 
-__all__ = ["TranslateSheet", "open_translate_sheet", "review_gate_supported"]
+__all__ = ["OUTPUT_MISMATCH_TITLE", "TranslateSheet", "confirm_output_root", "open_translate_sheet",
+           "review_gate_supported"]
+
+log = logging.getLogger("glossarion.library.ui")
 
 MISSING_RAW_REASON = "The raw source file can't be found (see “Scan for raw”)"
+OUTPUT_MISMATCH_TITLE = "Output Folder Mismatch"  # desktop _ensure_output_override_matches
+
+
+async def confirm_output_root(ctx: Any, books: Sequence[Mapping[str, Any]]) -> bool:
+    """Desktop ``_ensure_output_override_matches`` (Library "Load for translation"): when a book's
+    workspace sits under another output root than the current one, ask "Output Folder Mismatch"
+    (the shared prompt text; Cancel / Yes) and, on Yes, switch the root so the run resumes in that
+    workspace instead of starting a second one. True when loading can go on (no mismatch, or Yes).
+
+    ``ctx``: a ``LibraryContext`` (``LibraryFeature.context()``): its service's
+    ``output_root_mismatch_blocking`` / ``apply_output_override_blocking`` run on the io pool. A
+    service without them, or a check that fails, never blocks the run."""
+    service = ctx.service
+    check = getattr(service, "output_root_mismatch_blocking", None)
+    if not callable(check):
+        return True
+    rows = [dict(book) for book in books or ()]
+    try:
+        info = await ctx.io(check, rows)
+    except Exception:
+        log.debug("output root check failed", exc_info=True)
+        return True
+    if not info:
+        return True
+    from glossarion_mobile.ui.tools.common import ask
+
+    answer = await ask(ctx, OUTPUT_MISMATCH_TITLE, str(info.get("prompt") or ""),
+                       [("cancel", "Cancel", "text"), ("yes", "Yes", "filled")], key="lib-output-root")
+    if answer != "yes":
+        return False
+    try:
+        await ctx.io(service.apply_output_override_blocking, str(info.get("new_override") or ""))
+    except Exception as exc:
+        ctx.say(f"Could not switch the output folder: {exc}")
+        return False
+    return True
 
 
 def review_gate_supported() -> bool:
@@ -196,6 +238,8 @@ class TranslateSheet:
     async def start(self) -> Optional[str]:
         if self.start_reason is not None:
             return None
+        if not await confirm_output_root(self.ctx, self.ready_books):
+            return None  # Cancel on "Output Folder Mismatch": the sheet stays open
         service = self.ctx.service
         # The sources were resolved on the io pool when the sheet opened: never re-run the
         # registry reads / directory scans of raw_source() on the UI loop.

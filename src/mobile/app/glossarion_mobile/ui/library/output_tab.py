@@ -14,6 +14,9 @@
 * **📝 Review** (UI_SPEC §3.9 / §4.8): when the Review generator wrote ``review/review.md`` (or the
   Volume-mode ``review/combined_review/review.md``) in the workspace, a row opens it in Tools ›
   Review (``tools.review?out=<bid>``).
+
+The workspace is the book's resolved one (``progress_model.book_workspace``): an organized
+Library/Translated book lists, compiles and browses the workspace it came from.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import section_title
 from glossarion_mobile.ui.library.models import size_text
 from glossarion_mobile.ui.theme import HIT_TARGET
@@ -218,9 +222,10 @@ class OutputTab:
         book = self.page.book
 
         def gather() -> tuple:
-            outputs = service.compiled_outputs_blocking(book)
+            # the resolved workspace (an organized book's own folder) and the Library-filed EPUB itself
+            outputs = service.compiled_outputs_blocking(pm.workspace_row(service, book))
             raw = service.raw_source(book)
-            folder = str(book.get("output_folder") or "")
+            folder = pm.book_workspace(service, book)
             size = _folder_size(folder) if folder and os.path.isdir(folder) else None
             return outputs, raw, size, find_review(folder), workspace_groups(folder)
 
@@ -241,7 +246,7 @@ class OutputTab:
         if self.review:
             combined = os.path.join("combined_review", "review.md") in self.review
             self.review_row.subtitle = ft.Text("Combined review (Volume mode)" if combined else "review/review.md")
-        has_workspace = bool(book.get("output_folder"))
+        has_workspace = bool(pm.book_workspace(self.page.service, book))
         for button in self.compile_row.controls:
             button.disabled = not has_workspace
         rows: list[ft.Control] = []
@@ -373,7 +378,7 @@ class OutputTab:
         """Delete one compiled output (inside the book's workspace only); the Library rescans."""
         from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 
-        folder = str(self.page.book.get("output_folder") or "")
+        folder = pm.book_workspace(self.page.service, self.page.book)
         inside = bool(folder) and os.path.normcase(os.path.dirname(os.path.abspath(path))) == os.path.normcase(
             os.path.abspath(folder))
         if not inside:

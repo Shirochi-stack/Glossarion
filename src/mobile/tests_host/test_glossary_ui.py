@@ -1371,8 +1371,16 @@ def test_chat_and_reader_hand_offs_open_the_glossary_editor(iso):
         before = list(went)
         assert await feature.add_term("x", book={"name": "Nobody", "output_folder": str(iso.output / "Nobody")}) is None
         assert went == before
-        # the chat attachment card's QA scan stays disabled: chats are Direct Text workspaces
-        assert "Direct Text" in ATTACHMENT_ACTION_REASONS["qa"]
+        # device fixes 2026-10-08: the chat attachment card's QA scan runs (chat QA, Quick Scan)
+        assert "qa" not in ATTACHMENT_ACTION_REASONS
+        import flet as ft
+
+        from glossarion_mobile.ui.chat.cards import JobCard
+        from glossarion_mobile.ui.chat.job_binding import CardPhase
+
+        card = JobCard(attachment={"name": "Book.epub", "extension": ".epub"}, phase=CardPhase("done"),
+                       on_action=lambda a: None)
+        assert isinstance(card.action_buttons["qa"], ft.FilledTonalButton) and not card.action_buttons["qa"].disabled
 
     asyncio.run(scenario())
 

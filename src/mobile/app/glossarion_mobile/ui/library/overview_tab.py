@@ -8,7 +8,9 @@ the icon row (Translate… · Compile · Translate Metadata · Share · Files; e
 dimmed with a reason when its target can't be resolved), SYNOPSIS (4 lines,
 expandable; "No synopsis available."), METADATA (📘 Title · ✍️ Author · 🏛️
 Publisher · 🌐 Language · 📅 Year, "—" when missing; ✏️ Edit), TAGS and "At a
-glance" (the Chapters stats chips, the glossary summary, the last job).
+glance" (the Chapters stats chips, the glossary summary, the last job; a book with no output
+workspace shows its EPUB's "📖 N chapters"). The workspace (Compile, Files, ✏️ Edit) is the
+book's resolved one (``progress_model.book_workspace``).
 
 Values come from ``library_core.load_book_details`` (``metadata.json`` first, then
 the OPF, then the card) and its display helpers when the core offers them.
@@ -29,7 +31,14 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.skeleton import Skeleton
-from glossarion_mobile.ui.library.common import icon_button, section_title, stat_chip
+from glossarion_mobile.ui.library import progress_model as pm
+from glossarion_mobile.ui.library.common import (
+    OPENS_ELSEWHERE_REASON,
+    icon_button,
+    opens_in_another_app,
+    section_title,
+    stat_chip,
+)
 
 __all__ = ["OverviewTab", "hero_values", "primary_read_label", "progress_strip_text", "split_tags", "two_columns"]
 
@@ -281,6 +290,9 @@ class OverviewTab:
         self.strip.content.value = strip or ""
         label, show_raw = primary_read_label(book, details.get("chapters_info"))
         self.read_button.content = label
+        elsewhere = opens_in_another_app(book)  # the card menus' rule: no Reader for it, ↗ Share instead
+        self.read_button.disabled = elsewhere
+        self.read_button.tooltip = OPENS_ELSEWHERE_REASON if elsewhere else None
         self.raw_button.visible = show_raw
         self._render_continue()
         self._render_icons()
@@ -294,7 +306,7 @@ class OverviewTab:
                     ft.Text(values.get(key) or DASH, expand=True, selectable=True)], key=f"meta-{key}")
             for key, label_text in _METADATA_ROWS
         ]
-        has_workspace = bool(book.get("output_folder"))
+        has_workspace = bool(pm.book_workspace(service, book))
         self.edit_button.disabled = not has_workspace
         self.edit_button.tooltip = None if has_workspace else "No output workspace yet"
         self.tags_row.controls = [ft.Chip(label=ft.Text(tag), key=f"tag-{i}") for i, tag in enumerate(values["tags"])]
@@ -341,7 +353,7 @@ class OverviewTab:
         service = page.service
         raw = str(book.get("raw_source_path") or "")
         has_raw = bool(raw) and not book.get("missing_raw_file")
-        has_workspace = bool(book.get("output_folder"))
+        has_workspace = bool(pm.book_workspace(service, book))
         metadata_reason = page.metadata_reason()  # shared with Book ⋯
 
         def icon(name: str, tip: str, handler: Any, reason: Optional[str], key: str) -> ft.Control:
@@ -372,6 +384,15 @@ class OverviewTab:
             controls.append(ft.Row(row, wrap=True, spacing=6, run_spacing=6))
             if progress.total_text:
                 controls.append(ft.Text(progress.total_text, theme_style=ft.TextThemeStyle.LABEL_SMALL))
+        elif progress is not None and progress.no_workspace:
+            # no workspace: the EPUB's own chapters (the Chapters tab lists them); nothing while they load
+            count = self._epub_chapter_count()
+            if count:
+                controls.append(ft.TextButton(content=f"\U0001f4d6 {count} chapter{'s' if count != 1 else ''}",
+                                              on_click=lambda e: page.set_tab("chapters"), key="glance-chapters"))
+            elif count == 0:
+                controls.append(ft.Text(progress.error, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                        color=ft.Colors.ON_SURFACE_VARIANT))
         elif progress is not None and progress.error:
             controls.append(ft.Text(progress.error, theme_style=ft.TextThemeStyle.BODY_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT))
@@ -392,6 +413,20 @@ class OverviewTab:
                                           on_click=lambda e, jid=last.id: self.ctx.go("jobs.detail", {"jid": jid}),
                                           key="glance-job"))
         self.glance.controls = controls
+
+    def _epub_chapter_count(self) -> Optional[int]:
+        """The book's EPUB chapters (``BookDetailsModel.counts`` total, the desktop "Chapters (N)"); None while
+        the chapter titles are still loading."""
+        details = self.page.details or {}
+        if details.get("chapters_info") is None and not details.get("error"):
+            return None
+        model = self.page.details_model()
+        if model is None:
+            return 0
+        try:
+            return int(model.counts()[1])
+        except Exception:
+            return 0
 
     def _last_job(self) -> Any:
         view = self.page.job_view

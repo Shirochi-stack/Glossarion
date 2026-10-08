@@ -34,7 +34,9 @@ shared code the dialog inherits (``direct_text_store`` / ``direct_text_stream``)
 
 Runs are keyed by chat id; a resumed job (same params after a kill) is re-attached
 from its ``params["run"]``. Listeners (``subscribe``) are told the chat id that changed;
-the chat feature marshals them to the UI loop.
+the chat feature marshals them to the UI loop. ``subscribe_finished`` listeners get
+``(cid, run, job state)`` on the finish thread once the run is committed and saved (the chat
+feature moves a finished book into the Library from there, UI_SPEC §2.17).
 
 A job belongs to the user turn at its submitted ``params["user_index"]`` until a message
 before it is deleted: Delete message records the turn of every job the chat knows
@@ -53,13 +55,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
+from glossarion_mobile.services.jobs import GLOSSARY_QUESTION_KINDS, is_glossary_question  # contract C1
 from glossarion_mobile.ui.chat.direct_text_rules import DirectTextSettings, ManualGlossarySource
 from glossarion_mobile.ui.chat.job_binding import (
     RUNNING_STATES,
     TERMINAL_STATES,
     JobsAdapter,
     chat_id_of,
+    ended_kind,
     job_kind,
+    progress_counts,
     question_of,
     state_name,
 )
@@ -75,7 +80,8 @@ from glossarion_mobile.ui.chat.run_request import (
 )
 from glossarion_mobile.ui.chat.stream_bridge import RunStream
 
-__all__ = ["CHAT_JOB_KINDS", "ChatRun", "ChatRuns", "STATUS", "turn_key"]
+__all__ = ["CHAT_JOB_KINDS", "ChatRun", "ChatRuns", "GLOSSARY_QUESTION_KINDS", "RESUMABLE_ENDINGS", "STATUS",
+           "is_glossary_question", "turn_key"]
 
 log = logging.getLogger("glossarion.chat.runs")
 
@@ -95,15 +101,14 @@ STATUS = {
     "ready": "Ready",
 }
 
-_GLOSSARY_QUESTION_KINDS = ("glossary_approval", "direct_text_glossary_approval")
+#: The glossary gate's question kinds and predicate live in ``services.jobs`` (contract C1); the old
+#: names stay importable from here.
+_GLOSSARY_QUESTION_KINDS = GLOSSARY_QUESTION_KINDS
 #: JobService kinds a chat run can be (Direct Text send, generative-only run).
 CHAT_JOB_KINDS = (DIRECT_TEXT_JOB_KIND, GENERATE_MEDIA_JOB_KIND)
-
-
-def is_glossary_question(kind: Any) -> bool:
-    """The pipeline's Direct Text glossary gate (``_ui_request`` kind), whatever its exact name."""
-    value = str(kind or "").lower()
-    return value in _GLOSSARY_QUESTION_KINDS or ("glossary" in value and "approv" in value)
+#: ``last_job_ending`` values whose job card still offers Resume (running, stopped, failed,
+#: interrupted, discarded) or Retry failed (done with failed chapters, "issues"), UI_SPEC §2.12.4.
+RESUMABLE_ENDINGS = ("live", "stopped", "failed", "interrupted", "discarded", "issues")
 
 
 def _now_iso() -> str:
@@ -180,21 +185,39 @@ class ChatRuns:
         self.runs: dict = {}  # cid -> ChatRun (live or the last finished one)
         self.status: dict = {}  # cid -> last status caption when idle
         self._listeners: list = []
+        self._finished_listeners: list = []
         self._job_unsub: Optional[Callable[[], None]] = None
         self.finish_threads: list = []
 
     # ---- listeners ------------------------------------------------------------------
 
-    def subscribe(self, callback: Callable[[str], Any]) -> Callable[[], None]:
-        self._listeners.append(callback)
+    @staticmethod
+    def _add_listener(listeners: list, callback: Callable[..., Any]) -> Callable[[], None]:
+        listeners.append(callback)
 
         def unsubscribe() -> None:
             try:
-                self._listeners.remove(callback)
+                listeners.remove(callback)
             except ValueError:
                 pass
 
         return unsubscribe
+
+    def subscribe(self, callback: Callable[[str], Any]) -> Callable[[], None]:
+        return self._add_listener(self._listeners, callback)
+
+    def subscribe_finished(self, callback: Callable[[str, "ChatRun", str], Any]) -> Callable[[], None]:
+        """``callback(cid, run, state)`` once a run is committed: on the finish thread, after the
+        chat is saved and marked idle (``state``: the job's state name, ``"DONE"``, ``"FAILED"``,
+        ``"CANCELLED"``, ...). Returns the unsubscribe function."""
+        return self._add_listener(self._finished_listeners, callback)
+
+    def _emit_finished(self, run: "ChatRun", state: str) -> None:
+        for callback in list(self._finished_listeners):
+            try:
+                callback(run.cid, run, state)
+            except Exception:
+                log.exception("chat run finished listener failed")
 
     def _emit(self, cid: str) -> None:
         for callback in list(self._listeners):
@@ -645,6 +668,52 @@ class ChatRuns:
         params, title, _interrupted_id, _kind = self._last_job(cid)
         return params, title
 
+    def last_job_ending(self, cid: Any) -> tuple:
+        """``(ending, snapshot, output folder, source path)`` of the job Resume / Retry failed would
+        resubmit (``_last_job``: this session's run, else the newest job JobService remembers).
+
+        ``ending`` follows the job card (``chat_view`` ended card): "live", "done", "issues" (done
+        with failed chapters: Retry failed), "stopped", "failed", "interrupted", "discarded", or ""
+        when the chat has no job. The output folder is the ``Attachments/<stem>`` workspace the run
+        was committed into (this session's run only; '' otherwise)."""
+        cid = str(cid)
+        run = self.run_for(cid)
+        if run is not None and run.params:
+            snapshot = run.last_snapshot
+            if run.live:
+                ending = "live"
+            else:
+                ending = run.state if run.state in ("stopped", "failed") else "done"
+            folder, source = run.output_folder, run.run.source_path
+        else:
+            entries = self._chat_jobs(cid)
+            if not entries:
+                return "", None, "", ""
+            snapshot = entries[0][0]
+            ending = ended_kind(snapshot)
+            params = getattr(getattr(snapshot, "spec", None), "params", None) or {}
+            run_dict = params.get("run") if isinstance(params, Mapping) else None
+            folder = ""
+            source = str(run_dict.get("source_path") or "") if isinstance(run_dict, Mapping) else ""
+        if ending == "done" and progress_counts(snapshot)["failed"]:
+            ending = "issues"
+        return ending, snapshot, str(folder or ""), str(source or "")
+
+    def relocate_output(self, cid: Any, old: str, new: str) -> bool:
+        """A run's committed workspace moved (into the Library): point ``output_folder`` at it."""
+        run = self.run_for(cid)
+        if run is None or not old or not new:
+            return False
+
+        def same(a: str, b: str) -> bool:
+            return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+        with self._lock:
+            if run.output_folder and same(run.output_folder, old):
+                run.output_folder = str(new)
+                return True
+        return False
+
     async def resubmit(self, cid: Any) -> Optional[ChatRun]:
         """Resume / Retry failed: the same JobSpec params (same run root), so the pipeline continues
         from its ``translation_progress.json`` and only redoes missing or failed chapters.
@@ -801,6 +870,7 @@ class ChatRuns:
             except Exception:
                 log.exception("saving the finished chat failed")
             self._emit(run.cid)
+        self._emit_finished(run, state)
 
     def finish_run_state(self, run: ChatRun, snapshot: Any) -> dict:
         """``ChatStore.finish_run``'s run dict: the prepared run plus what the job ran with.

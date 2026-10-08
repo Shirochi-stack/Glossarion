@@ -87,6 +87,11 @@ class Screen:
     def did_show(self) -> None:
         """Called after the screen's View/body is on the page."""
 
+    def app_resumed(self) -> None:
+        """Called when the app comes back to the foreground (lifecycle "resume") while this screen is
+        on top: a screen showing system state the user may have changed meanwhile (the notification
+        permission in the system settings) reads it again here."""
+
     def dispose(self) -> None:
         """Called when the screen leaves the stack."""
 

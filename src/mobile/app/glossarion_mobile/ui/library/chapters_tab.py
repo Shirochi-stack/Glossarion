@@ -201,6 +201,8 @@ class ChaptersTab:
         self._image_loading = False
         # U9 /retranslate <range>: the chapters selected once the rows are loaded
         self.pending_range: Optional[tuple] = tuple(initial_range) if initial_range else None
+        # No output workspace: the rows are the book's own EPUB chapters (``pm.spine_rows``)
+        self.spine_mode = False
 
     # ---- build ----------------------------------------------------------------------------------
 
@@ -292,8 +294,13 @@ class ChaptersTab:
             self.apply(self.page.progress)
         return self.root
 
+    def _workspace(self) -> str:
+        """The loaded view's output folder, else the book's resolved workspace (``pm.book_workspace``)."""
+        folder = self.view.output_dir if self.view is not None else ""
+        return folder or pm.book_workspace(self.page.service, self.page.book)
+
     def _apply_image_header(self, view: pm.ProgressView) -> None:
-        folder = view.output_dir or str(self.page.book.get("output_folder") or "")
+        folder = view.output_dir or pm.book_workspace(self.page.service, self.page.book)
         self.folder_chip.label = ft.Text(f"\U0001f4c1 {os.path.basename(folder) if folder else '—'}")
         self.mode.content.value = pm.mode_label(view.mode)
 
@@ -303,7 +310,7 @@ class ChaptersTab:
             source = service.raw_source(self.page.book)
         except Exception:
             source = ""
-        return source or str(self.page.book.get("output_folder") or "")
+        return source or pm.book_workspace(service, self.page.book)
 
     async def reload_images(self) -> Optional[pm.ImageFolderView]:
         if self._image_loading:
@@ -476,9 +483,15 @@ class ChaptersTab:
             self._apply_image_header(view)
             self.ctx.spawn(self.reload_images())
             return
+        self.spine_mode = bool(getattr(view, "no_workspace", False))
+        if self.spine_mode:
+            self._render_spine()
+            self.ctx.push(self.root)
+            return
         self.loading.visible = False
-        folder = view.output_dir or str(self.page.book.get("output_folder") or "")
+        folder = view.output_dir or pm.book_workspace(self.page.service, self.page.book)
         self.folder_chip.label = ft.Text(f"\U0001f4c1 {os.path.basename(folder) if folder else '—'}")
+        self.folder_chip.visible = self.mode.visible = True
         self.mode.content.value = pm.mode_label(view.mode)
         self._render_chips()
         self.total_text.value = view.total_text
@@ -512,6 +525,41 @@ class ChaptersTab:
             self.pending_range = None
             self.select_range(start, end)
         self.ctx.push(self.root)
+
+    def _render_spine(self) -> None:
+        """No output workspace (an "Add translation" EPUB, an organized book whose workspace is gone): the
+        EPUB's own chapters from the Book page's ``load_book_details`` (the desktop Book Details list,
+        ``pm.spine_rows``) under "📖 Chapters in this EPUB · N"; a tap opens the Reader at the chapter.
+        Selection and the bulk actions are off (there is no progress to act on)."""
+        if getattr(self, "root", None) is None:
+            return
+        if self.selecting:
+            self.selecting = False
+            self.selected = set()
+            self._sync_selection()
+        self.filter_group = None
+        self.loading.visible = False
+        self.folder_chip.visible = self.mode.visible = False
+        self.stats_row.controls = []
+        details = self.page.details
+        if details is None or (details.get("chapters_info") is None and not details.get("error")):
+            # the full details (the EPUB's chapter titles) are still loading
+            self.total_text.value = ""
+            self.banner.visible = False
+            if not self.rows:
+                self.list_holder.content = Skeleton("rows", count=8, label="Loading chapters…",
+                                                    key="ch-skeleton").control
+            return
+        rows = pm.spine_rows(self.page.details_model(), show_raw_title=self.raw_titles)
+        self.rows = list(rows)
+        if rows:
+            self.total_text.value = f"\U0001f4d6 Chapters in this EPUB · {len(rows)}"
+            self.banner.visible = False
+        else:
+            self.total_text.value = ""
+            self.banner.content = ft.Text(pm.NO_WORKSPACE, color=ft.Colors.ON_ERROR_CONTAINER, expand=True)
+            self.banner.visible = True
+        self._render_list(self._filtered(), window_start=self.window_start)
 
     def select_range(self, start: int, end: int) -> int:
         """``/retranslate <range>`` (UI_SPEC §2.7): selection mode on with the chapters numbered ``start``-``end``
@@ -684,6 +732,11 @@ class ChaptersTab:
             name = os.path.basename(str((info or {}).get("filename") or ""))
             if name:
                 titles[name] = (str(info.get("raw_title") or ""), str(info.get("translated_title") or ""))
+        if self.spine_mode:  # the rows are these chapters
+            self.titles = titles
+            self._render_spine()
+            self.ctx.push(getattr(self, "root", None))
+            return
         if titles == self.titles:
             return
         self.titles = titles
@@ -707,6 +760,8 @@ class ChaptersTab:
         return row.title
 
     def _row_control(self, row: pm.RowVM) -> ft.Control:
+        if row.kind == "spine":
+            return self._spine_control(row)
         dark = self.ctx.dark
         selected = row.key in self.selected
         title = self.display_title(row)
@@ -760,6 +815,32 @@ class ChaptersTab:
             border=ft.Border.all(2, ft.Colors.PRIMARY) if selected else None,
             on_click=lambda e, r=row: self.on_row_tap(r),
             on_long_press=lambda e, r=row: self.on_row_long_press(r),
+            ink=True,
+        )
+
+    def _spine_control(self, row: pm.RowVM) -> ft.Control:
+        """An EPUB chapter row (no workspace): "Ch.NNN · title", the file name, the desktop status badge."""
+        lines: list[ft.Control] = [
+            ft.Text(row.title, theme_style=ft.TextThemeStyle.BODY_MEDIUM, max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS, key="line1"),
+        ]
+        if row.subtitle:
+            lines.append(ft.Text(row.subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                 color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                                 key="line2"))
+        if row.label:
+            lines.append(ft.Text(row.label, size=11, weight=ft.FontWeight.W_600,
+                                 color=status_color(row_palette_status(row.status), self.ctx.dark), key="status"))
+        return ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.ARTICLE_OUTLINED, size=20, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Column(lines, spacing=1, expand=True, tight=True),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+            key=ft.ScrollKey(row.key),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+            border_radius=tokens.RADII["card"],
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            on_click=lambda e, r=row: self.on_row_tap(r),
             ink=True,
         )
 
@@ -871,6 +952,10 @@ class ChaptersTab:
 
     def _after_toggle(self, *, reload: bool) -> None:
         self._refresh_filter_menu()
+        if self.spine_mode:  # no progress to reload: the EPUB rows follow the toggles
+            self._render_spine()
+            self.ctx.push(getattr(self, "list_holder", None), getattr(self, "total_text", None))
+            return
         if reload:
             self.ctx.spawn(self.page.reload_progress())
         elif getattr(self, "root", None) is not None:
@@ -883,6 +968,9 @@ class ChaptersTab:
         if self.selecting:
             self.toggle_select(row.key)
             return
+        if row.kind == "spine":  # the book's own EPUB chapter (no workspace)
+            self.page.open_reader(chapter=row.opf_position, chapter_filename=row.filename or None)
+            return
         if row.kind in ("chapter", "chunk") and (row.filename or (parent and parent.filename)):
             target = parent or row
             chapter = target.opf_position
@@ -892,6 +980,8 @@ class ChaptersTab:
         self.open_row_sheet(row)
 
     def on_row_long_press(self, row: pm.RowVM) -> None:
+        if row.kind == "spine":  # nothing to select without a workspace
+            return
         if not self.selecting:
             self.ctx.haptic("medium_impact")
         self.selecting = True
@@ -1034,8 +1124,7 @@ class ChaptersTab:
         """Tools › SDLXLIFF reviewer on this book's output folder (focused on ``row``'s output)."""
         from glossarion_mobile.ui.tools import sdlxliff
 
-        folder = (self.view.output_dir if self.view is not None else "") or str(
-            self.page.book.get("output_folder") or "")
+        folder = self._workspace()
         if not folder:
             self.ctx.say("This book has no output folder yet")
             return None
@@ -1081,7 +1170,7 @@ class ChaptersTab:
         entries = self.manual_entries()
         state = self.view.state if self.view is not None else None
         data = getattr(state, "data", None) if state is not None else None
-        folder = (self.view.output_dir if self.view is not None else "") or str(self.page.book.get("output_folder") or "")
+        folder = self._workspace()
         if not entries or not folder:
             return {"created": 0, "total": 0, "entries": len(entries)}
         from sdlxliff_review_core import SdlxliffAutogenOwner
@@ -1336,8 +1425,7 @@ class ChaptersTab:
             if not await self._confirm(RETRANSLATE_TITLE, retranslate_now_question(row.title or row.filename)):
                 return None
         if status:
-            folder = (self.view.output_dir if self.view is not None else "") or str(
-                self.page.book.get("output_folder") or "")
+            folder = self._workspace()
             reset = service.core.fn("library_core", "mark_chapter_pending_for_retranslation",
                                     "_mark_chapter_pending_for_retranslation")
             if folder and os.path.isdir(folder) and reset is not None:

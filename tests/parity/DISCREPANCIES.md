@@ -2281,9 +2281,10 @@ passing, and the documented desktop-only trace race).
   book (`?out=<bid>`); the chat approval card's raw editor offers "Open in table editor" (the
   Glossary Manager on the same file); the Reader selection's and a chat response's "Add to
   glossary" open the book's (or the chat workspace's glossary.csv) editor with a new entry whose raw
-  name is filled in (kept once the user Saves). The chat attachment card's "QA scan" stays disabled,
-  now with the reason: the desktop never QA-scans Direct Text workspaces
-  (`qa_scan_runtime.is_direct_text_qa_path`).
+  name is filled in (kept once the user Saves). The chat attachment card's "QA scan" was disabled in
+  U6 (the desktop never QA-scans Direct Text workspaces, `qa_scan_runtime.is_direct_text_qa_path`);
+  since 2026-10-08 it scans the turn's workspace (see "Device fixes 2026-10-08" › "Chat QA of Direct
+  Text workspaces").
 
 ### Self-test and offline E2E additions
 
@@ -3168,6 +3169,10 @@ manga-env step's own section is above.
   `manga_editor_core` in `app_modules` (done for the full manga tier).
 
 ### Editor core (manga_editor_core; ImageRenderer, manga_image_preview, manga_integration rewired)
+Since 2026-10-08 the six editor page reads use `safe_image.cv2_imread` and the render opens its page with
+`safe_image.open_page_image` (see "Device fixes 2026-10-08" › "Image decoder hardening"); ImageRenderer
+imports both so the re-bound bodies resolve them.
+
 Behaviour deltas (intentional):
 - The editor's `google` OCR (`_run_ocr_on_regions`) falls back to `google_vision_rest` when
   `from google.cloud import vision` fails, like manga_translator. Desktop builds ship the SDK.
@@ -3698,3 +3703,248 @@ Pinned by `tests/parity/test_u9_gap_round3.py` (oracle: `git show 96da1ec6`) and
   has an Android MIME type or iOS UTI, so the Android / iOS picker gets no filter and the extension is checked
   after the pick (a wrong file is refused and its Inbox copy removed); the desktop keeps the Browse filter.
   The picker's Inbox copy is moved into `<manga root>/models` instead of copied (a model was stored twice).
+
+## Device fixes 2026-10-08 (owner device report on the U8 APK; two owner-approved desktop-shared changes, the rest mobile only)
+
+The owner's report: 1 Reader pages do not turn (Android); 2 the Reader must open .txt; 3 log font size 8;
+4 the Library auto-migrates chat translations, no manual options; 5 a Completed book opens the Book page;
+6 notifications (glossary Accept, "always accept", progress while hidden, real permission state, re-post
+when swiped); 7 QA scan from the chat (Quick Scan); 8 attach a Library book straight from the chat.
+Desktop source changes are limited to the two owner-approved items below (`git diff cddd73a4 -- src/*.py`:
+qa_scan_runtime.py, safe_image.py and the five manga modules' decoder call sites).
+
+### Chat QA of Direct Text workspaces (owner-approved desktop-shared change)
+
+- `qa_scan_runtime.run_qa_scan_path(..., allow_direct_text=False)` and `run_bulk_qa_scan(...,
+  allow_direct_text=False)`. The only changes are the opt-in keyword, the guard
+  `if not allow_direct_text and (is_direct_text_qa_path(folder_path) or is_direct_text_qa_path(epub_path))`,
+  and the bulk loop handing the flag to its single `run_qa_scan_path` call. Desktop callers
+  (QA_Scanner_GUI.run_qa_scan's bulk scan, TransateKRtoEN._run_multipass_refinement_qa_scan) never pass
+  it, so desktop behaviour and log lines are identical.
+- On mobile only the chat's own `qa_scan` job flags a target `direct_text: True`
+  (`ui/tools/qa_model.chat_qa_job`), and `job_kinds.qa` passes `allow_direct_text=True` only then.
+  Unflagged Direct Text folders and the inputs fallback keep the desktop skip and its log line, and
+  Tools › QA Scanner still does not pick Direct Text workspaces. Chat scans run Quick Scan.
+- Tests: tests/test_qa_runtime_additions.py (`test_runtime_changed_only_in_the_documented_places`,
+  `test_runtime_changed_only_by_the_direct_text_opt_in_since_u9` [AST vs cddd73a4],
+  `test_direct_text_guard_refuses_by_default_and_scans_only_with_the_opt_in`,
+  `test_bulk_scan_hands_the_opt_in_to_each_folder_scan`, `test_desktop_callers_never_pass_the_direct_text_opt_in`);
+  tests/test_u7_tool_cores.py::test_bulk_qa_scan_matches_the_frozen_worker unchanged; tests_host/test_tools_ui.py
+  (`test_qa_adapter_scans_flagged_chat_workspaces_only`, `test_chat_qa_scans_a_direct_text_workspace_with_the_real_scanner`).
+- Test hygiene (test-only): the E2E subprocess of tests/test_qa_runtime_additions.py now passes
+  `GLOSSARION_HTTP_LOG` through its env filter, so its tiktoken download is no longer logged into src/http_requests.
+
+### Image decoder hardening (owner-approved desktop-shared change; safe_image + the manga OpenCV reads)
+
+Owner-approved security change (research workflow wf_25aa917f-10b, critic-corrected). PNG / JPEG / WEBP / BMP
+/ GIF images behave exactly as before.
+
+- **OpenCV content gate.** OpenCV picks its decoder from the file content. So `cv2.imread` / `cv2.imdecode`
+  handed untrusted manga pages, CBZ / EPUB images and custom image-edit responses to its bundled OpenJPEG 2.5.3
+  (OSV-2025-219 heap write, no fixed release, OpenJPEG unmaintained), libtiff 4.7.1, OpenEXR (desktop wheels)
+  and its PNM / PAM / PFM / HDR / Sun raster parsers. This bypassed `safe_image.open_image`.
+  - `safe_image.cv2_imread` / `cv2_imdecode` now give OpenCV only PNG, JPEG, WEBP, BMP and GIF bytes
+    (magic-byte allowlist, `sniff_image_format`). Anything else returns None (cv2's own failure value)
+    without calling OpenCV, with one warning per source.
+  - All 23 reads go through them: ImageRenderer 1, bubble_detector 5, local_inpainter 2, manga_editor_core 6,
+    manga_translator 9.
+  - Behaviour delta: a page whose bytes are TIFF / JPEG 2000 / PNM / HDR / EXR / ICNS (the manga tab only
+    accepts .png/.jpg/.jpeg/.gif/.bmp/.webp/.cbz, so this means mislabelled content) is no longer decoded at
+    all. `MangaTranslator.process_image` refuses such a page first (`safe_image.cv2_refusal`): "Not a
+    supported image: <page> (it is TIFF, not PNG, JPEG, WEBP, BMP or GIF)" in the log and the result's
+    errors, the page counts as failed, and no OCR request, decoder or "no text found" copy of the page runs
+    (before, such a page could be copied unchanged as its own "translation" and packed into the CBZ). The
+    Pillow fallbacks for None (Unicode paths: detect_text_regions RT-DETR + Azure full-image OCR and the
+    OCR-provider path, `_save_debug_image`, process_image, `_process_webtoon_chunks`) and the editor render
+    (`_render_with_manga_translator`, a listed EDITS line) use `safe_image.open_page_image`: `open_image`
+    limited to the same five formats, so a page OpenCV may not decode is not decoded by Pillow's libtiff /
+    PPM / ICNS plugins either ("cannot identify image file <page>"). The OCR-provider path now also falls
+    back to the page file when the gate refuses its preprocessed bytes (before: a None image crashed in
+    ocr_manager). Elsewhere (bubble detection, editor Detect / Clean / OCR / Clean This Rectangle,
+    inpaint_with_bubble_detection, the custom image-edit endpoint response) the existing "failed to load
+    image" path runs. A path Python cannot open still goes to cv2.imread unchanged, so missing-file
+    behaviour and messages are identical.
+  - Windows ANSI file names: OpenCV gets a str path as UTF-8 bytes and opens them through the narrow C runtime
+    in the ANSI code page, so for a non-ASCII name it reads a different file than Python's `open()`
+    (`"é.png"` -> `"Ã©.png"`; a CBZ can ship both names). The gate sniffs that ANSI-named file too
+    (`safe_image._windows_ansi_name`, the `mbcs` codec); a name without an ANSI form returns None
+    (OpenCV cannot open it; the Pillow fallback reads the page). Linux, macOS, Android and iOS have no alias.
+  - A refused buffer (`cv2_imdecode`) is logged once per distinct buffer (bounded), not once per process.
+  - Residual: the gate checks a path, then cv2 (and ultralytics YOLO in detect_bubbles) opens it again; a file
+    swapped between the reads needs local write access with precise timing (accepted).
+  - Tests: tests/test_cv2_decode_gate.py (W: the ANSI alias, Windows with a single-byte ANSI code page only;
+    R: `cv2_refusal`, `open_page_image`, the process_image refusal); tests/test_manga_editor_core.py EDITS
+    (six moved bodies + the render's `open_page_image`) and DESKTOP_EDITS
+    (ImageRenderer._render_with_manga_translator_thread_safe); src/mobile/tests_host/test_devfix_issue9.py
+    (the real manga job, editor steps and Import OCR on crafted pages).
+- **ICNS -> JPEG 2000.** Pillow's ICNS plugin (ICNS is in SAFE_IMAGE_FORMATS) decodes ic07-ic14 / icp4-icp6
+  JPEG 2000 sub-images through OpenJPEG whenever the codec is built in (desktop wheels, iOS).
+  `safe_image.harden_pillow()` sets `PIL.IcnsImagePlugin.enable_jpeg2k = False`: at import when Pillow is
+  already loaded, and in `open_image` before every open. Such an icon now raises ValueError ("Unsupported
+  icon subimage format") instead. PNG and legacy ICNS sub-images still open. The flag is process-wide.
+  Tests: tests/test_safe_image.py.
+- Not in this change (follow-ups from the same research): OpenCV's bundled libpng 1.6.57 still decodes
+  untrusted PNG; GIF is decoded by OpenCV's own GIF decoder (on the allowlist by the owner); the Android
+  Pillow flet-lib rebuild and the CPython 3.13.16 zipfile fix.
+
+### Quick Scan duplicate-check sample size on mobile (owner decision; desktop unchanged)
+
+- When config.json has no `qa_scanner_settings.quick_scan_sample_size`, mobile scans use 0 (duplicate check
+  off; `job_kinds.qa.MOBILE_QUICK_SAMPLE_SIZE`, applied inside the per-folder settings loader, config never
+  written). Settings › QA shows the same default (`ui/settings/schema_access.MOBILE_DISPLAY_DEFAULTS`), so
+  "Reset this section" means 0.
+- A saved value of exactly 1000 is turned into 0 once (`qa_model.migrate_quick_sample_size`, run at app start
+  by `SettingsFeature.load`, when Tools › QA Scanner opens and before a chat scan; flag in Prefs
+  `qa_quick_sample_size_mobile_default`). A 1000 typed later stays.
+- The Tools field shows 0 when nothing is saved and does not save an untouched default; the value stays
+  editable (Tools › QA Scanner, Settings › QA). Chat scans run Quick Scan with the same value.
+- The desktop default stays 1000 (`qa_scan_runtime.default_qa_scan_settings`, settings_schema_data). The
+  pipeline's failed-multipass-refinement QA scans (TransateKRtoEN, shared) read the migrated or saved value,
+  but with nothing saved they keep the desktop 1000.
+- Tests: tests_host/test_tools_ui.py `test_qa_adapter_mobile_sample_size_default_survives_the_per_folder_reload`,
+  `test_quick_sample_size_migration_runs_once_and_only_on_the_desktop_1000`,
+  `test_qa_screen_shows_the_mobile_sample_size_and_migrates_a_saved_1000_once`; tests_host/test_chat.py
+  `test_result_card_qa_scans_the_turn_workspace`.
+
+### Library auto-migrate (mobile automatic; desktop manual Migrate / Organize)
+
+- Desktop Direct Text keeps its manual Migrate (`_migrate_conversation_attachment`) and the Library keeps
+  Organize / Undo. On mobile a finished chat book is moved automatically by
+  `ui/chat/integration.ChatFeature.auto_migrate`, which calls the same shared `ChatStore.migrate_attachment`
+  unchanged; `direct_text_store.py` and `library_core.py` are byte-identical.
+- Mobile-only guards: book extensions only (`library_core.RAW_IMPORT_EXTENSIONS`); `translation_progress.json`
+  present; not while a job writes the workspace; not while the chat's last job offers Resume / Retry failed;
+  never scratch chats; the move holds `job_runner.JOB_LOCK` (non-blocking) with no active job, because
+  `_direct_text_migration_output_root` reads the live OUTPUT_DIRECTORY that a running job points at its temp
+  run root (a skeptic probe migrated into a run root that was then deleted).
+- The desktop always asks before merging; mobile merges silently only when the existing folder's
+  `source_epub.txt` points at the same raw (path or `_same_file_content`) AND any translation the folder
+  already holds is of the same chapters (at least half of the chapters either side translated share the
+  pipeline's `content_hash` in `translation_progress.json`; `ChatFeature._same_chapters`): FileBridge reuses
+  a freed Inbox name, so a different book can sit at the path a Library book points at. Otherwise it shows
+  the desktop dialog from a snackbar or the Attachments ⋯ "Merge into Library…".
+- The raw is only recorded in the registry (`record_library_raw_inputs`); it is not copied into Library/Raw.
+- The chat follows a moved workspace (`chat_ops.moved_workspace`: the nearest folder above a response's
+  output folder that holds `translation_progress.json`) for Compile, outputs, Reader, Progress, QA and
+  Jobs › job › Files.
+- Tests: tests_host/test_media_modes.py `test_finished_attachment_run_moves_into_the_library`,
+  `test_auto_migrate_waits_while_a_job_holds_the_lock`, `test_auto_migrate_merges_the_same_book_and_asks_for_another`,
+  `test_auto_migrate_leaves_resumable_scratch_and_non_book_workspaces`, `test_startup_sweep_moves_earlier_chat_books_once`;
+  tests_host/test_chat.py `test_open_in_library_action_and_moved_workspace_retry`; tests_host/test_devfix_issue4.py
+  (`test_a_different_book_at_the_same_inbox_path_is_not_merged_silently`).
+
+### Library home and Book page (mobile only, no desktop change)
+
+1. **Completed tap → Book page.** Desktop `_on_card_clicked` (epub_library.py:6548) opens TXT in an editor and a
+   PDF without a workspace in the system viewer. Mobile always opens the Book page; ⋯ › ↗ Share
+   (`LibraryContext.share_books`) hands the file to another app, and TXT reads in the Reader. For a PDF
+   without a workspace the Book page's "Start reading" is disabled with the card menus' reason ("opens in
+   another app (↗ Share)", `common.opens_in_another_app`).
+2. **No manual Organize (n) / Undo (n) / "Organize selected"** on mobile. Desktop keeps the manual buttons
+   (`_make_organize_button`, `_undo_organize_prompt`). `LibraryService` keeps the shelf plans as API.
+3. **Resolved workspace.** For Library/Translated rows, mobile resolves the workspace once per scan with
+   `library_core.resolve_book_output_folder` and keeps it only when `translation_progress.json` exists (desktop
+   `_card_has_reader_workspace`); desktop resolves at each use. Rows and book ids are unchanged. The Book
+   page, its Output / Chapters tabs, the metadata editor, compile, Files and the Tools targets
+   (`targets._book_target`) use it. A book without a workspace lists its EPUB's own chapters
+   (`BookDetailsModel.row_specs`, the desktop Book Details list) and never builds a Progress Manager view
+   (which would create `Output/<raw stem>`).
+4. **Output Folder Mismatch.** Mobile checks and applies only while `job_runner.JOB_LOCK` is free, because a
+   running job's OUTPUT_DIRECTORY is its run root. The desktop's '' (back to the default root) is applied as the
+   explicit default root, because the mobile env contract never leaves OUTPUT_DIRECTORY unset. config.json
+   `output_directory` is not written: the switch lasts for the session, and the next launch starts from the
+   app's output root (Settings › Storage).
+- Tests: tests_host/test_library_ui.py (`test_every_completed_card_opens_the_book_page`,
+  `test_library_menu_offers_no_organize_or_undo`, `test_organized_library_book_keeps_its_workspace`,
+  `test_output_root_mismatch_uses_the_shared_shelf_and_waits_for_jobs`, …), tests_host/test_book_page_workspace.py.
+
+### TXT in the Reader (mobile only, no desktop change)
+
+- Mobile reads TXT in the Reader (text mode / TXT workspace with Original / Translated / Bilingual); desktop
+  opens TXT in an external editor (`library_core.plan_open_reader` 'system'). No desktop module changed: the
+  reader is the mobile module `ui/reader/text_book.py`, reusing txt_processor's split cache and section
+  separator, the progress `content_hash` and `FileUtilities.create_chapter_filename`; src/reader_doc.py,
+  workspace_reader.py and txt_processor.py are byte-identical.
+- Tests: tests_host/test_reader_txt.py, tests_host/test_intents.py `test_shared_txt_opens_in_the_reader`.
+
+### Reader paging on the device (mobile only)
+
+- flet-webview 1.0.3 reads `url` only when the WebView is built, so the Reader navigates a built WebView with
+  `load_request` (`reader_view.navigate_webview`) and rebuilds it with its own key after a failed navigation.
+  The native fallback's text is no longer OS-selectable (long-press a paragraph for its actions), and its
+  edge taps open the next / previous chapter. No desktop counterpart (the desktop reader is Qt WebEngine).
+- Tests: tests_host/test_reader.py (`test_every_chapter_change_navigates_the_webview`,
+  `test_native_reader_edge_taps_turn_chapters`, …), tests_host/test_webview_bridge.py.
+
+### "Always accept generated glossaries" (mobile only; desktop unchanged)
+
+- Chat settings › Glossary › "Always accept generated glossaries" (default off = desktop parity), also
+  Settings › Notifications & background › Glossary review and the approval card's "Always accept". Its
+  All-chats value is in Prefs `chat_auto_accept_glossary` and the per-chat override in the sidecar chat entry
+  `auto_accept_glossary`. config.json gets no key, and the desktop has no such setting.
+- A chat send carries `params.auto_accept_glossary` (`run_request.job_params`, captured at Send).
+  `JobService._job_ask` answers the shared gate's question itself (translation_pipeline
+  `_await_direct_text_glossary_approval` → `_ui_request` → `host.ask`; both the Balanced/Full pre-pass and the
+  TransateKRtoEN callback go through it) with the desktop's own line "✅ Direct Text: generated glossary
+  accepted" + " (Always accept is on)" (tests_host/test_glossary_auto_accept.py checks translator_gui.py still
+  has the literal). The shared gate code is not copied or edited.
+- Divergence: an auto-accepted gate does not freeze the chat's request cards (`RunController.commit_gate` =
+  desktop `_commit_active_request_phase` runs only when the approval card is shown), so the glossary-phase and
+  translation-phase cards stay one live group until the run finishes.
+- The Library "Review glossary before translating" gate (job_kinds.translate, question `glossary_approval`)
+  never gets the flag. Async-batch questions always ask.
+- `is_glossary_question` / `GLOSSARY_QUESTION_KINDS` moved word for word from ui/chat/run_controller.py into
+  services/jobs.py (one home; run_controller and cards re-import it). The jobs notification text and strip
+  subtitle say "waiting for your answer" for non-glossary questions.
+
+### Job notifications (mobile only; the desktop has no OS notifications)
+
+The desktop switches the Direct Text dialog to the chat tab and sets the status "Glossary ready — choose Edit,
+Yes, or No" (translator_gui._present_glossary_approval_request). Mobile:
+- posts the `jobs.action` notification "Glossary ready: review needed" whenever the owning chat or Book page is
+  not on screen, including with the app open on another screen (plus a snackbar). On the chat home the chat
+  on screen is the chat view's own chat, not the route's cid ("New chat" and chat switches leave the shell
+  route behind). **Accept** answers Yes
+  through the card's own path (`ChatRuns.answer_glossary`, else `JobService.answer`); **Review** opens the
+  card. The notification is withdrawn when the question is answered (job event `question_resolved`). A
+  cold-start tap is routed once the app is ready (`app._after_ready` → `JobsFeature.route_launch_notification`).
+- gives Tools › Async batch questions "Answer needed: <question>" (→ /tools/async), never the glossary text.
+- keeps the ongoing job notification current while the app is hidden (a 1 s ticker in BackgroundExecution,
+  plus the trailing edge of the 1/s throttle). It posts the notification again when the user swipes it away
+  while a job runs (Android 14+; flutter_foreground_task's onNotificationDismissed → {'type': 'dismissed'}), at
+  most once per second: a swipe inside that second is kept and the ticker posts it once the second is over.
+- asks for the notification permission until it gets a definite answer, shows the real state on Settings ›
+  Notifications & background (read on every visit and again when the app comes back from the system
+  settings, `Screen.app_resumed`; Open system settings, Send a test notification), and on a long job says
+  once "Notifications are off …".
+- Tests: tests_host/test_jobs.py (`test_glossary_question_notifies_unless_its_surface_is_on_screen`,
+  `test_async_batch_question_gets_its_own_notification`, `test_notification_accept_answers_through_the_chat_controller`,
+  `test_answered_question_cancels_its_action_notification`, `test_launch_notification_is_routed_at_startup`,
+  `test_fgs_progress_updates_while_app_hidden`, `test_job_progress_sends_the_throttled_update_later`,
+  `test_prepare_for_run_marks_notification_asked_only_on_a_definite_status`,
+  `test_notifications_page_shows_real_permission_status`, `test_dismissed_fgs_notification_is_reposted_while_a_job_runs`).
+
+### Library books from the chat (mobile only)
+
+- ＋ › From Library (second tile), the empty-chat chip "From Library" and `/library [title]` open the in-chat
+  Library picker (the SourcePicker's Library mode). `targets.order_library_rows` (the Library home's
+  `models.visible_books` + the shared `library_core.sort_books` SORT_DATE / `book_matches_query`) is shared by
+  the picker and `/library <title>`. Desktop parity: the Library search + Date sort feeding "Load for
+  translation"; on mobile the picked raw is attached to the chat, and Send defaults to "Save to: Library"
+  (the book's own workspace), with the desktop "Output Folder Mismatch" question first. A long-press starts a
+  multi-selection (the Library shelves' long-press); "Use N" puts the books in one batch plan (one translate
+  job, each book in its own workspace, the desktop multi-file run). Rows are built a page at a time (the
+  Library's `epub_library_page_size`, Library home's paging helpers `models.next_page_end` /
+  `wants_next_page`). `/library`, `/model`, `/qa` and the other commands that send nothing to the model also
+  run from Send / Enter while Send is blocked (not signed in, no key).
+- Mobile-only sidecar data: `library_attachment` {bid, path} and `tool_jobs` (Library-job / QA card data keyed by
+  the message's `created_at`, because the desktop history drops unknown storage keys on its first save).
+- Tests: tests_host/test_source_picker_library.py, tests_host/test_u9_gaps.py
+  (`test_every_chat_library_entry_opens_the_in_chat_picker`, …), tests_host/test_chat.py
+  (`test_library_attachment_plan_defaults_to_library_destination`).
+
+### Log text size (mobile only)
+
+- Every log surface (LogConsole, the log-file viewer, Check environment lines, the Reader live Thinking pane)
+  uses `theme.log_text` at 8 sp (`tokens.LOG_STYLE`, line 11). The desktop live pane is 8.5 pt. Code, editors
+  and error text stay mono 13. Tests: tests_host/test_log_text.py.

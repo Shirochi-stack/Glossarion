@@ -38,6 +38,7 @@ from glossarion_mobile.ui.chat.output_modes import (
 
 __all__ = [
     "ATTACHMENT_PROMPT_ROLES",
+    "AUTO_ACCEPT_GLOSSARY_PREF",
     "DEFAULT_RENDERED_CARD_LIMIT",
     "DirectTextSettings",
     "effective_glossary_label",
@@ -51,6 +52,7 @@ __all__ = [
     "ManualGlossarySource",
     "PLAN_EXTENSIONS",
     "PLAN_TEXT_THRESHOLD",
+    "SIDECAR_META_FIELDS",
     "attachment_icon",
     "attachment_kind_label",
     "attachment_text_chars",
@@ -63,6 +65,7 @@ __all__ = [
     "history_window_bounds",
     "is_supported_attachment",
     "manual_glossary_source",
+    "merge_meta_overrides",
     "needs_plan",
     "normalize_glossary_override_mode",
     "normalize_rendered_card_limit",
@@ -359,6 +362,26 @@ def stream_render_interval_ms(active_characters: int, auto_scroll_disabled: bool
 ATTACHMENT_PROMPT_ROLES = (("User", "user"), ("System", "system"), ("Assistant", "assistant"))
 _ROLES = {value for _label, value in ATTACHMENT_PROMPT_ROLES}
 
+#: Prefs (``mobile_state.json``) key of the All-chats "Always accept generated glossaries" switch (mobile
+#: only, default off = desktop parity: the desktop always asks). Never a config.json key (UI_SPEC Appendix B).
+AUTO_ACCEPT_GLOSSARY_PREF = "chat_auto_accept_glossary"
+
+#: Mobile-only chat settings kept in the chat's sidecar entry itself (``ChatStoreAdapter.set_meta``), not in
+#: its ``overrides`` (those mirror desktop ``direct_text_*`` keys): "Skip plan for attachments" and "Always
+#: accept generated glossaries". Each is a DirectTextSettings field of the same name.
+SIDECAR_META_FIELDS = ("skip_plan", "auto_accept_glossary")
+
+
+def merge_meta_overrides(overrides: Optional[Mapping[str, Any]], meta: Optional[Mapping[str, Any]]) -> dict:
+    """A chat's overrides (``ChatStoreAdapter.overrides`` / ``own_overrides``) plus its sidecar-meta settings
+    (``SIDECAR_META_FIELDS``; unset = inherit): what ``DirectTextSettings.with_overrides`` takes."""
+    values = dict(overrides or {})
+    meta = meta if isinstance(meta, Mapping) else {}
+    for name in SIDECAR_META_FIELDS:
+        if meta.get(name) is not None:
+            values[name] = bool(meta.get(name))
+    return values
+
 
 @dataclass(frozen=True)
 class DirectTextSettings:
@@ -373,12 +396,21 @@ class DirectTextSettings:
     rendered_card_limit: int = DEFAULT_RENDERED_CARD_LIMIT
     output_mode: str = "text"
     skip_plan: bool = False
+    #: "Always accept generated glossaries" (mobile only): the send's job answers the glossary gate itself
+    #: (``run_request.job_params`` -> ``JobService._job_ask``). Global value in Prefs, per chat in the sidecar.
+    auto_accept_glossary: bool = False
 
     @classmethod
-    def from_config(cls, get: Callable[[str, Any], Any]) -> "DirectTextSettings":
+    def from_config(
+        cls,
+        get: Callable[[str, Any], Any],
+        prefs_get: Optional[Callable[[str, Any], Any]] = None,
+    ) -> "DirectTextSettings":
         """Read the global keys exactly as the desktop dialog initialises its widgets.
 
-        ``get(key, default)`` returns the raw config.json value (MobileConfigStore.get).
+        ``get(key, default)`` returns the raw config.json value (MobileConfigStore.get);
+        ``prefs_get(key, default)`` (``Prefs.get``) the mobile-only global values (``AUTO_ACCEPT_GLOSSARY_PREF``;
+        without it they keep their defaults).
         """
         legacy_simple_mode = bool(get('direct_text_force_simple_mode', True))
         skip_profile = get('direct_text_skip_prompt_profile', None)
@@ -390,6 +422,12 @@ class DirectTextSettings:
         role = str(get('direct_text_attachment_prompt_role', 'user') or 'user').strip().lower()
         parent_mode = get('output_mode', 'text')
         configured_mode = str(get('direct_text_output_mode', parent_mode) or parent_mode or 'text').strip().lower()
+        auto_accept = False
+        if prefs_get is not None:
+            try:
+                auto_accept = bool(prefs_get(AUTO_ACCEPT_GLOSSARY_PREF, False))
+            except Exception:
+                auto_accept = False
         return cls(
             attachment_prompt_role=role if role in _ROLES else 'user',
             glossary_override_mode=normalize_glossary_override_mode(get('direct_text_glossary_override_mode', '')),
@@ -401,10 +439,11 @@ class DirectTextSettings:
                 get('direct_text_rendered_card_limit', DEFAULT_RENDERED_CARD_LIMIT)
             ),
             output_mode=normalize_mode(configured_mode),
+            auto_accept_glossary=auto_accept,
         )
 
     def with_overrides(self, overrides: Optional[Mapping[str, Any]]) -> "DirectTextSettings":
-        """Apply per-chat overrides (sidecar ``overrides``; None/missing = inherit)."""
+        """Apply per-chat overrides (sidecar ``overrides`` + ``merge_meta_overrides``; None/missing = inherit)."""
         if not overrides:
             return self
         values = dict(self.__dict__)
@@ -414,8 +453,9 @@ class DirectTextSettings:
         ):
             if overrides.get(field_name) is not None:
                 values[field_name] = overrides[field_name]
-        if overrides.get("skip_plan") is not None:
-            values["skip_plan"] = bool(overrides["skip_plan"])
+        for field_name in SIDECAR_META_FIELDS:
+            if overrides.get(field_name) is not None:
+                values[field_name] = bool(overrides[field_name])
         values["glossary_override_mode"] = normalize_glossary_override_mode(values["glossary_override_mode"])
         role = str(values["attachment_prompt_role"] or "user").strip().lower()
         values["attachment_prompt_role"] = role if role in _ROLES else "user"
@@ -426,7 +466,8 @@ class DirectTextSettings:
         return DirectTextSettings(**values)
 
     def config_updates(self) -> dict:
-        """Global keys for these values (the desktop persists one key per control)."""
+        """Global keys for these values (the desktop persists one key per control); the mobile-only
+        ``SIDECAR_META_FIELDS`` are not config keys."""
         updates = {
             "direct_text_attachment_prompt_role": self.attachment_prompt_role,
             "direct_text_force_multipass_off": self.force_multipass_off,

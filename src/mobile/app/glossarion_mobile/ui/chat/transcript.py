@@ -40,11 +40,12 @@ EMPTY_BODY = (
     "Paste text into the composer below, or attach a supported file. "
     "Translations stream into this conversation as they are generated."
 )
-# (id, chip label) for the empty-chat suggestion chips (§2.13)
+# (id, chip label) for the empty-chat suggestion chips (§2.13); "From Library" opens the in-chat
+# Library picker (the book is attached here, never a trip to the Library screen)
 SUGGESTIONS = (
     ("paste_text", "Paste text"),
     ("attach_book", "Attach a book"),
-    ("open_library", "Open Library"),
+    ("from_library", "From Library"),
     ("manga_page", "Translate a manga page"),
 )
 EARLIER_TEMPLATE = "↑ Scroll for earlier messages ({n} hidden)"

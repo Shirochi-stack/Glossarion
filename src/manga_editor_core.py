@@ -7,12 +7,14 @@ Overlay (re-render) and the per-image editor state of the desktop manga tab
 Layout
 ------
 * **Moved verbatim from ImageRenderer.py** (module functions that take the manga tab as
-  ``self``): ``EDITOR_FUNCTIONS``. Five carry listed edits (``EDITED_FUNCTIONS``; Clean This
-  Rectangle has two, the others one):
+  ``self``): ``EDITOR_FUNCTIONS``. Nine carry listed edits (``EDITED_FUNCTIONS``):
   Qt-only lines became hooks (``_style_recognized_rectangle``,
-  ``_confirm_clean_excluded_rectangle``, ``_schedule_rendered_output_refresh``) and the editor
+  ``_confirm_clean_excluded_rectangle``, ``_schedule_rendered_output_refresh``), the editor
   OCR's ``from google.cloud import vision`` falls back to ``google_vision_rest`` when the SDK
-  is missing (``_import_google_vision``).
+  is missing (``_import_google_vision``), and the six page reads go through
+  ``safe_image.cv2_imread`` and the render's page open through ``safe_image.open_page_image``
+  (the owner-approved OpenCV decoder gate, 2026-10-08; ImageRenderer imports both, so the
+  re-bound bodies resolve them there).
   The desktop does not import these as plain names: ``bind_editor_namespace(globals())`` in
   ImageRenderer re-binds the same code objects to ImageRenderer's namespace, so on the desktop
   they still call ImageRenderer's Qt helpers (box drawing, pulses, overlays, button states) and
@@ -56,7 +58,7 @@ import mobile_runtime
 import manga_ocr_io
 # ImageStateManager's debug print (manga_integration's helper; manga_files_core holds it since U8)
 from manga_files_core import _manga_cmd_debug_print
-from safe_image import open_image
+from safe_image import open_image, open_page_image, cv2_imread
 
 # Same optional import as ImageRenderer (_manga_output_text and _translate_this_text_background use it).
 try:
@@ -617,7 +619,7 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
             return
         
         # Load and validate image
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
             self.update_queue.put(('detect_button_restore', None))
@@ -1445,7 +1447,7 @@ def _run_clean_background(self, image_path: str, regions: list):
         from local_inpainter import LocalInpainter
         
         # Load image
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
             self.update_queue.put(('clean_button_restore', None))
@@ -1926,7 +1928,7 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
             return []
         
         # Load and validate image
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             print(f"[DETECT_SYNC] Failed to load image: {os.path.basename(image_path)}")
             return []
@@ -2140,7 +2142,7 @@ def _run_inpainting_sync(
         from local_inpainter import LocalInpainter
         
         # Load image
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             print(f"[INPAINT_SYNC] Failed to load image: {os.path.basename(image_path)}")
             return None
@@ -2669,7 +2671,7 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
         import concurrent.futures
         
         # Load image
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             print(f"[OCR_REGIONS] Failed to load image: {os.path.basename(image_path)}")
             return []
@@ -5276,7 +5278,7 @@ def _handle_clean_this_rectangle(self, region_index: int, rect_item):
                     print(f"[CLEAN_RECT_THREAD] Using source image as base: {os.path.basename(base_image_path)}")
                 
                 # Load the base image in background thread
-                original_image = cv2.imread(base_image_path)
+                original_image = cv2_imread(base_image_path)
                 if original_image is None:
                     self.update_queue.put(('single_clean_error', {
                         'region_index': region_index,
@@ -6926,7 +6928,7 @@ def _render_with_manga_translator(
         # Prepare image as numpy BGR array
         if image_bgr is None:
             print(f"[RENDER] Loading image from path...")
-            pil_image = open_image(image_path)
+            pil_image = open_page_image(image_path)
             print(f"[RENDER] Image size: {pil_image.size}")
             image_rgb = np.array(pil_image.convert('RGB'))
             
@@ -8800,8 +8802,9 @@ EDITOR_FUNCTIONS = (
     '_persist_translation_text_edit',
     '_apply_inpaint_iterations',
 )
-#: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback).
-EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator',)
+#: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback, the
+#: safe_image page reads: cv2_imread, open_page_image).
+EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync',)
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).

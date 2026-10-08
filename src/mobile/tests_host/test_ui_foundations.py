@@ -1218,13 +1218,13 @@ def test_composer_header_transcript_and_plus_sheet():
     assert transcript.empty_state.title_text.value == EMPTY_TITLE == "What would you like to translate?"
     assert EMPTY_BODY.startswith("Paste text into the composer below, or attach a supported file.")
     assert [c.label.value for c in transcript.empty_state.suggestion_chips] == [
-        "Paste text", "Attach a book", "Open Library", "Translate a manga page"
+        "Paste text", "Attach a book", "From Library", "Translate a manga page"
     ]
     assert transcript.build_controls_on_demand is False and transcript.auto_scroll is False
 
     plus = PlusSheet()
     assert plus.dialog.show_drag_handle and plus.dialog.draggable and plus.dialog.scrollable
-    assert list(plus.tiles) == ["files", "photos", "camera", "library", "clipboard"]
+    assert list(plus.tiles) == ["files", "library", "photos", "camera", "clipboard"]
     camera = plus.tiles["camera"]
     assert camera.on_click is None and any(isinstance(c, ReasonChip) for c in camera.content.controls)
     assert len(plus.tool_tiles) == len(TOOLS) == 10

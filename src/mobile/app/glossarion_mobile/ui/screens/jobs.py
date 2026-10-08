@@ -20,7 +20,15 @@ after ``SettingsFeature.install`` so the config store and Prefs exist)
   * binds ``AppState.job_strip`` / ``jobs_badge`` to JobService (Done / Failed
     for 10 s after a job ends) and the global strip's Open / Stop;
   * forwards native events: share -> IntentRouter, foreground / background
-    task -> BackgroundExecution, notification taps -> routes / Share / Resume;
+    task -> BackgroundExecution, notification taps -> routes / Share / Resume /
+    Accept (``route_launch_notification`` routes the tap that cold-started the
+    app, once the app is ready);
+  * a job's blocking question (UI_SPEC §1.9, §2.11): a ``jobs.action``
+    notification ("Glossary ready: review needed" with Accept / Review, "Answer
+    needed: …" for Tools › Async batch) unless the surface that answers it (the
+    owning chat, the Book page, Tools › Async batch) is on screen; while the app
+    is visible on another screen also a snackbar with Review / Answer. The
+    notification is cancelled when the question is answered (``question_resolved``);
   * checkpoints ``active.state`` when the app goes to the background;
   * runs ``JobService.recover()`` on a worker thread and shows the launch
     banner "N interrupted jobs · Resume / Review".
@@ -49,12 +57,22 @@ from glossarion_mobile.services.jobs import (
     JobSpec,
     JobState,
     JobsView,
+    is_glossary_question,
     kind_icon,
     progress_line,
     status_key,
     strip_model_for,
 )
-from glossarion_mobile.services.notifications import ACTION_RESUME, ACTION_SHARE, JobNotifications, chat_of
+from glossarion_mobile.services.notifications import (
+    ACTION_ACCEPT,
+    ACTION_RESUME,
+    ACTION_SHARE,
+    JobNotifications,
+    action_notification_id,
+    chat_of,
+    question_route,
+    question_title,
+)
 from glossarion_mobile.services.wakelock import SharedWakelock
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components import surface
@@ -412,6 +430,7 @@ class JobsFeature:
             wakelock=self.wakelock,
             confirm=self._confirm,
             navigate_route=self._navigate_route,
+            notify=self._notify,
         )
         cache_dirs = [str(p) for p in (getattr(paths, "cache", None), getattr(paths, "temp", None)) if p]
         self.files = FileBridge(
@@ -432,6 +451,7 @@ class JobsFeature:
         self.banner: Any = None
         self.recovered: list = []
         self.screens_built: list[str] = []
+        self._launch_notification_routed = False
 
     def __getattr__(self, name: str) -> Any:
         """Everything else is the JobService API (``snapshot``, ``subscribe``, ``request_stop``,
@@ -485,6 +505,7 @@ class JobsFeature:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        self.background.close()
         self.service.close()
 
     # ---- helpers ------------------------------------------------------------------------------
@@ -834,12 +855,60 @@ class JobsFeature:
             self._ended = None
         self._on_view(self.service.view())
 
-    def _on_question(self, snap: JobSnapshot, question: Any) -> None:
+    def _shown_chat(self) -> Optional[str]:
+        """The chat the chat home (``/``, ``/chat/<cid>``) shows: the chat view's own chat."""
+        chat_view = getattr(self.app, "chat_view", None)
+        cid = getattr(chat_view, "cid", None)
+        if cid in (None, ""):
+            current = getattr(getattr(self.state, "current_chat", None), "value", None)
+            cid = current if current not in (None, "") else "1"
+        return str(cid)
+
+    def question_on_screen(self, snap: JobSnapshot) -> bool:
+        """The surface that answers ``snap``'s question is what the user looks at: the owning chat (its
+        approval card), the Book page of a Library job, Tools › Async batch."""
         if not self.background.app_visible:
+            return False
+        shell = getattr(self.app, "shell", None)
+        current = str(getattr(shell, "current_route", "") or "") if shell is not None else ""
+        if not current:
+            return False
+        try:
+            match = parse_route(current)
+        except Exception:
+            match = None
+        if getattr(match, "name", None) in ("home", "chat", "chat.message"):
+            # The chat home shows the chat view's chat, whatever cid the route names: "New chat" and
+            # the other chat switches change the chat without changing the shell route.
+            cid = chat_of(snap)
+            return cid is not None and self._shown_chat() == cid
+        return current.split("?", 1)[0] == question_route(snap)
+
+    def _on_question(self, snap: JobSnapshot, question: Any) -> None:
+        """A job blocks on a question (UI loop; also while the app is hidden, the question is posted):
+        notify unless its surface is on screen (UI_SPEC §1.9, §2.11)."""
+        if self.question_on_screen(snap):
+            return  # the approval card / sheet / dialog is already in front of the user
+        question = question if isinstance(question, dict) else {}
+        route = question_route(snap)
+        if is_glossary_question(question.get("kind")):
             self.spawn(self.notifications.glossary_review_needed(snap))
+            message, action = "Glossary ready: review needed", "Review"
+        else:
+            title = question_title(snap, question)
+            self.spawn(self.notifications.answer_needed(snap, title))
+            message, action = f"Answer needed: {title}", "Answer"
+        if self.background.app_visible:
+            self._notify(message, action, lambda: self._navigate_route(route))
 
     def _on_job_event(self, job_id: str, kind: str, data: Any) -> None:
         """Job events JobService does not consume itself (UI loop)."""
+        if kind == "question_resolved":
+            # answered in the app (card / sheet / dialog), from the notification, or given up by Stop: the
+            # "Glossary ready" / "Answer needed" notification has nothing left to answer (posted by JobService,
+            # so this also runs while the dispatcher's pump is parked with the app hidden).
+            self.spawn(self.notifications.cancel_action(job_id))
+            return
         if kind == "sign_in_required":
             # UI_SPEC §1.9: the job lost (or never had) its login (ChatGPT / Claude / Gemini / Grok)
             # and the backend falls back to the browser login or refuses it; point the user at that
@@ -898,10 +967,66 @@ class JobsFeature:
                 self._notify("Resumed · continues from the saved progress")
                 self._navigate("jobs")
                 return
+        if tap.action == ACTION_ACCEPT and self.accept_glossary_from_notification(tap):
+            self._notify("Glossary accepted · translating")
         if tap.route:
             navigate = getattr(self.app, "navigate", None)
             if navigate is not None:
                 await navigate(tap.route)
+
+    def accept_glossary_from_notification(self, tap: Any) -> bool:
+        """"Glossary ready" › **Accept**: answer the running job's glossary gate Yes. A chat job is answered
+        through its chat's run controller (the approval card's own ✓ Yes path, ``ChatRuns.answer_glossary``),
+        any other job (the Library review gate) through ``JobService.answer``. A stale tap (the job ended,
+        another job's notification, no glossary question pending) answers nothing: the caller only opens
+        the route."""
+        snap = self.service.snapshot()
+        if snap is None:
+            return False
+        notification_id = getattr(tap, "notification_id", None)
+        if notification_id is not None and notification_id != action_notification_id(snap.id):
+            return False
+        question = self.service.pending_question(snap.id)
+        if not question or not is_glossary_question(question.get("kind")):
+            return False
+        if getattr(tap, "route", None) and tap.route != question_route(snap):
+            return False
+        answered = False
+        cid = chat_of(snap)
+        runs = getattr(getattr(self.app, "chat_feature", None), "runs", None)
+        answer_glossary = getattr(runs, "answer_glossary", None)
+        if cid is not None and callable(answer_glossary):
+            try:
+                answered = bool(answer_glossary(cid, True))
+            except Exception:
+                log.exception("accepting the glossary of chat %s failed", cid)
+        if not answered:  # not a chat run (Library review gate, a chat's Library job): the job's question
+            answered = bool(self.service.answer(question.get("id"), True))
+        return answered
+
+    async def route_launch_notification(self) -> bool:
+        """The notification tap that cold-started the app (Android keeps it as the launch notification and
+        never sends it as an event; iOS likewise): handled once, like a tap while running. Called by the app
+        after its launch links are routed; a stale Accept only opens the route."""
+        if self._launch_notification_routed:
+            return False
+        self._launch_notification_routed = True
+        native = getattr(self.app, "native", None)
+        if native is None:
+            return False
+        try:
+            getter = getattr(native, "launch_notification", None)
+            if callable(getter):
+                event = await getter()
+            else:
+                event = await native.call("get_launch_notification", default=None)
+        except Exception as exc:
+            log.info("get_launch_notification failed: %s", exc)
+            return False
+        if not isinstance(event, dict) or not event.get("payload"):
+            return False
+        await self._on_notification(event)
+        return True
 
     def _present_imports(self, imports: list) -> Optional[ActionSheet]:
         files = [imp for imp in imports if imp.imported is not None]

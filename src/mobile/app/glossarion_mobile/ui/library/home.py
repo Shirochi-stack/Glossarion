@@ -1,7 +1,11 @@
 """Library home (``/library``; UI_SPEC §3.1-§3.4, §3.12).
 
 * App bar actions: search, filter sheet (``tune``), grid/list, ⋯ (Scan for raw (N) ·
-  Organize (n) · Undo (n) · Refresh · Library settings).
+  Refresh · Library settings). No manual Organize / Undo: finished chat books reach the
+  Library by themselves and imports are copied into Library/Raw (UI_SPEC §3.4).
+* Tap always opens the Book page (both shelves, every type, as for In progress); the card
+  ⋯ › ↗ Share sends the file to another app (the desktop opens TXT / a PDF without a
+  workspace in another program).
 * Shelf bar: ``SegmentedButton`` "In progress (N) · Completed (N)" (``epub_library_tab``
   0 / 1) + the teal "Scan for raw (N)" chip when N > 0.
 * Body: ``GridView(max_extent=card_w)`` for the density preset, or a 72 dp list;
@@ -14,7 +18,9 @@
   when the visible set changes (content-only changes do not re-sort, desktop rule).
 * Long-press -> selection mode: top bar "N selected · Select all · ✕" and the bulk
   bar Translate · Metadata · Compile · Delete N · More (Delete glossary files ·
-  Restore glossary backup · Clear saved raw link · Share · …).
+  Restore glossary backup · Clear saved raw link · Share · Add to Series).
+* Completed Library rows without a workspace of their own (Library/Translated EPUBs) use
+  the workspace the scan resolved (``LibraryService.workspace_for``) for Compile / Files.
 * Extended FAB: "Import EPUB" (In progress) / "Add translation" (Completed); files
   are copied into Library/Raw (Translated) and registered with
   ``library_core.import_paths`` (FileBridge).
@@ -34,8 +40,8 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.pull_to_refresh import PullToRefresh
 from glossarion_mobile.ui.components.skeleton import Skeleton
-from glossarion_mobile.ui.library.book_card import BookCard, BookListRow, LIST_ROW_HEIGHT
-from glossarion_mobile.ui.library.common import LibraryContext, icon_button
+from glossarion_mobile.ui.library.book_card import BookCard, BookListRow, CoverQueue, LIST_ROW_HEIGHT
+from glossarion_mobile.ui.library.common import OPENS_ELSEWHERE_REASON, LibraryContext, icon_button, opens_in_another_app
 from glossarion_mobile.ui.library.delete_confirm import DeleteFlow
 from glossarion_mobile.ui.library.filter_sheet import FilterSheet
 from glossarion_mobile.ui.library.models import (
@@ -44,13 +50,15 @@ from glossarion_mobile.ui.library.models import (
     DEFAULT_DENSITY,
     DENSITY_ORDER,
     FilterState,
-    build_card,
+    card_model_for,
     density_preset,
     effective_density,
+    next_page_end,
     page_size_value,
     visible_books,
+    wants_next_page,
 )
-from glossarion_mobile.ui.library.organize import clear_raw_link_flow, organize_flow, undo_flow
+from glossarion_mobile.ui.library.organize import clear_raw_link_flow
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.library.translate_sheet import open_translate_sheet
 from glossarion_mobile.ui.screens.base import Screen
@@ -78,7 +86,6 @@ PREF_SHOW_PROGRESS = "library_show_progress"
 GLOSSARY_FILES_REASON = "The Glossary Manager is not available in this session"
 SERIES_REASON = "Series are not available in this session"  # U9: the optional SeriesFeature is not installed
 RAW_IMPORT_EXTENSIONS = ["epub", "txt", "pdf", "html", "htm"]
-SCROLL_APPEND_PX = 600
 
 
 def _shelf_from_tab(value: Any) -> str:
@@ -86,11 +93,7 @@ def _shelf_from_tab(value: Any) -> str:
     return "completed" if text in ("1", "completed", "comp") else "progress"
 
 
-def _opens_in_another_app(book: Mapping[str, Any]) -> bool:
-    """A TXT file, or a PDF without a translation workspace: library_core's "system" open
-    decision (the desktop opens it in the system viewer; the Reader cannot show it)."""
-    kind = str(book.get("type") or "")
-    return kind == "txt" or (kind == "pdf" and not book.get("output_folder"))
+_opens_in_another_app = opens_in_another_app  # (moved to common: the Book page's read button uses it too)
 
 
 def _has_reader_workspace(book: Mapping[str, Any]) -> bool:
@@ -104,16 +107,19 @@ def reader_actions(book: Mapping[str, Any]) -> list:
     ``[(label, how, path)]`` with ``how`` "book" (the card itself: a raw EPUB, or a PDF's workspace in
     the EPUB reader) or "translated" (a compiled EPUB, path given).
 
-    * In progress: "📖 Open in Reader" for a raw EPUB on disk, "📖 Open Translated EPUB" for the
+    * In progress: "📖 Open in Reader" for a raw EPUB or TXT on disk (a TXT book opens in the
+      Reader's text mode, with or without a workspace), "📖 Open Translated EPUB" for the
       compiled EPUB (``output_epub_path`` / ``compiled_output_path``) on disk, "📖 Open in EPUB
       reader" for a raw PDF with a translation workspace;
-    * EPUB: "📖 Open in Reader"; a PDF with a workspace: "📖 Open in EPUB reader";
-    * anything else (TXT, a PDF without a workspace) opens in another app: no Reader item."""
+    * EPUB or TXT: "📖 Open in Reader"; a PDF with a workspace: "📖 Open in EPUB reader";
+    * a PDF without a workspace opens in another app (↗ Share): no Reader item.
+
+    Mobile reads TXT in the Reader; the desktop opens it in a text editor."""
     kind = str(book.get("type") or "")
     raw = str(book.get("raw_source_path") or "")
     out: list = []
     if kind == "in_progress":
-        if raw.lower().endswith(".epub") and os.path.isfile(raw):
+        if raw.lower().endswith((".epub", ".txt")) and os.path.isfile(raw):
             out.append(("\U0001f4d6 Open in Reader", "book", raw))
         for key in ("output_epub_path", "compiled_output_path"):
             compiled = str(book.get(key) or "")
@@ -122,7 +128,7 @@ def reader_actions(book: Mapping[str, Any]) -> list:
                 break
         if raw.lower().endswith(".pdf") and os.path.isfile(raw) and _has_reader_workspace(book):
             out.append(("\U0001f4d6 Open in EPUB reader", "book", raw))
-    elif kind == "epub":
+    elif kind in ("epub", "txt"):
         out.append(("\U0001f4d6 Open in Reader", "book", str(book.get("path") or raw)))
     elif kind == "pdf" and (book.get("output_folder") or _has_reader_workspace(book)):
         out.append(("\U0001f4d6 Open in EPUB reader", "book", str(book.get("path") or raw)))
@@ -160,8 +166,9 @@ class LibraryScreen(Screen):
         self.searching = False
         self.snapshot: ScanSnapshot = service.snapshot
         self._signatures: dict = {}
-        self._cover_queue: list = []
-        self._cover_running = False
+        # covers load one at a time on the io pool; a card that left the list is skipped
+        self.cover_queue = CoverQueue(service, self._on_cover, lookup=lambda key: self.books_by_key.get(key),
+                                      spawn=self.ctx.spawn)
         self._unsub: Any = None
         self._refresh_pending = False
         self._header_sig: Any = None  # what the shelf header last showed (_refresh_header)
@@ -205,10 +212,6 @@ class LibraryScreen(Screen):
         self.menu_items = {
             "scan": ft.PopupMenuItem(content="Scan for raw", icon=ft.Icons.SEARCH,
                                      on_click=lambda e: self.ctx.go("library.scan_raw")),
-            "organize": ft.PopupMenuItem(content="Organize", icon=ft.Icons.DRIVE_FILE_MOVE,
-                                         on_click=lambda e: self.ctx.spawn(organize_flow(self.ctx))),
-            "undo": ft.PopupMenuItem(content="Undo", icon=ft.Icons.UNDO,
-                                     on_click=lambda e: self.ctx.spawn(undo_flow(self.ctx))),
             "refresh": ft.PopupMenuItem(content="Refresh", icon=ft.Icons.REFRESH,
                                         on_click=lambda e: self.ctx.spawn(self.full_refresh())),
             "settings": ft.PopupMenuItem(content="Library settings", icon=ft.Icons.SETTINGS,
@@ -226,10 +229,6 @@ class LibraryScreen(Screen):
         snap = self.snapshot
         items["scan"].content = f"Scan for raw ({snap.missing_raw})"
         items["scan"].disabled = snap.missing_raw <= 0
-        items["organize"].content = f"Organize ({snap.organize_count})"
-        items["organize"].disabled = snap.organize_count <= 0
-        items["undo"].content = f"Undo ({snap.undo_count})"
-        items["undo"].disabled = snap.undo_count <= 0
 
     # ---- body ------------------------------------------------------------------------------------
 
@@ -365,9 +364,8 @@ class LibraryScreen(Screen):
                 self.service.covers.pop(key, None)
                 self._update_card(key)
                 if key in self.cards:
-                    self._cover_queue.append(key)
-            if self._cover_queue and not self._cover_running:
-                self.ctx.spawn(self._load_covers())
+                    self.cover_queue.add(key)
+            self.cover_queue.kick()
         if banner_changed:
             self.ctx.push(self.banner)
 
@@ -378,11 +376,11 @@ class LibraryScreen(Screen):
         return {}
 
     def _refresh_header(self) -> bool:
-        """Shelf counts, the Scan-for-raw chip and the ⋯ menu counts; pushed only when they change."""
+        """Shelf counts, the Scan-for-raw chip and the ⋯ menu count; pushed only when they change."""
         snap = self.snapshot
         segments = getattr(self.shelf_buttons, "segments", [])
         labels = tuple(self._shelf_label(segment.value) for segment in segments)
-        header = (labels, snap.missing_raw, snap.organize_count, snap.undo_count)
+        header = (labels, snap.missing_raw)
         if header == self._header_sig:
             return False
         self._header_sig = header
@@ -405,23 +403,21 @@ class LibraryScreen(Screen):
         self.books_by_key = {book_key(b): dict(b) for b in ordered}
         return [book_key(b) for b in ordered]
 
-    def _card_model(self, key: str) -> CardModel:
-        service = self.service
-        book = self.books_by_key.get(key) or self._book(key)
-        bid = service.bid_for(book)
-        has_continue = False
+    def _has_continue(self, book: Mapping[str, Any]) -> bool:
+        """▶ Continue: a saved reading position exists for the book (Prefs)."""
         prefs = self.ctx.prefs
-        if prefs is not None and hasattr(prefs, "reader_position"):
-            try:
-                has_continue = prefs.reader_position(bid) is not None
-            except Exception:
-                has_continue = False
-        badge, size = service.card_badge(book)
-        return build_card(
-            book, key=key, bid=bid, view=self.snapshot.views.get(key), raw_titles=self.raw_titles,
-            raw_title=service.raw_title(book) if self.raw_titles else None, compiling=service.is_compiling(book),
-            has_continue=has_continue, selected=key in self.selected[self.shelf],
-            signature=self.snapshot.signatures.get(key), dark=self.ctx.dark, badge_text=badge, size_label=size)
+        if prefs is None or not hasattr(prefs, "reader_position"):
+            return False
+        try:
+            return prefs.reader_position(self.service.bid_for(book)) is not None
+        except Exception:
+            return False
+
+    def _card_model(self, key: str) -> CardModel:
+        book = self.books_by_key.get(key) or self._book(key)
+        return card_model_for(self.service, book, key=key, views=self.snapshot.views,
+                              signatures=self.snapshot.signatures, raw_titles=self.raw_titles, dark=self.ctx.dark,
+                              selected=key in self.selected[self.shelf], has_continue=self._has_continue(book))
 
     def _make_card(self, key: str) -> Any:
         model = self._card_model(key)
@@ -491,25 +487,21 @@ class LibraryScreen(Screen):
         self._append_page()
         self._update_counts()
 
-    def _page_increment(self) -> int:
-        return self.page_size if self.page_size > 0 else len(self.visible_keys)
-
     def _append_page(self) -> int:
         if self.scroller is None:
             return 0
         start = self.rendered
-        end = min(len(self.visible_keys), start + self._page_increment())
+        end = next_page_end(start, len(self.visible_keys), self.page_size)
         controls = []
         for key in self.visible_keys[start:end]:
             card = self._make_card(key)
             self.cards[key] = card
             controls.append(card.control)
             if key not in self.service.covers:
-                self._cover_queue.append(key)
+                self.cover_queue.add(key)
         self.scroller.controls.extend(controls)
         self.rendered = end
-        if self._cover_queue and not self._cover_running:
-            self.ctx.spawn(self._load_covers())
+        self.cover_queue.kick()
         return end - start
 
     def _update_counts(self) -> None:
@@ -524,37 +516,20 @@ class LibraryScreen(Screen):
             text = f"{shown} of {total} {noun}{'s' if total != 1 else ''}"
         self.count_text.value = text
 
-    async def _load_covers(self) -> None:
-        self._cover_running = True
-        try:
-            while self._cover_queue:
-                key = self._cover_queue.pop(0)
-                book = self.books_by_key.get(key)
-                if book is None:
-                    continue
-                try:
-                    path = await self.ctx.io(self.service.cover_blocking, book)
-                except Exception:
-                    path = None
-                card = self.cards.get(key)
-                if card is not None and path:
-                    card.set_cover(path)
-                    card.update()
-        finally:
-            self._cover_running = False
+    def _on_cover(self, key: str, path: str) -> None:
+        """A cover resolved (``CoverQueue``): show it on the card when it is still mounted."""
+        card = self.cards.get(key)
+        if card is not None:
+            card.set_cover(path)
+            card.update()
 
     # ---- scrolling ---------------------------------------------------------------------------------
 
     def _on_scroll(self, e: Any) -> None:
         if self.pull.handle(e):  # a pull at the top: one full rescan (PullToRefresh)
             return
-        pixels = getattr(e, "pixels", None)
-        maximum = getattr(e, "max_scroll_extent", None)
-        if pixels is None or maximum is None:
-            return
-        if maximum - pixels < SCROLL_APPEND_PX and self.rendered < len(self.visible_keys):
-            if self._append_page():
-                self.ctx.push(self.scroller)
+        if wants_next_page(e, self.rendered, len(self.visible_keys)) and self._append_page():
+            self.ctx.push(self.scroller)
 
     async def _pull_refresh(self) -> None:
         self._refresh_pending = True
@@ -673,29 +648,12 @@ class LibraryScreen(Screen):
             self._book(k) for k in keys if k not in self.visible_keys and self._book(k)]
 
     def _on_card_tap(self, model: CardModel) -> None:
+        """Tap: the Book page, on both shelves and for every type (a Completed TXT / PDF / Library
+        EPUB like an In-progress book; UI_SPEC §3.3). ⋯ › ↗ Share sends the file to another app."""
         if self.selecting:
             self.toggle(model.key)
             return
-        book = self.books_by_key.get(model.key) or {}
-        if _opens_in_another_app(book):
-            # The Reader opens EPUBs and translation workspaces only (library_core's "system"
-            # decision): share the file to an external app (UI_SPEC §3.3), else the Book page.
-            self.ctx.spawn(self._share_or_open(book, model.bid))
-            return
         self.ctx.go("library.book", {"bid": model.bid})
-
-    async def _share_or_open(self, book: Mapping[str, Any], bid: str) -> bool:
-        """A TXT file / a PDF without a workspace: the share sheet; True when it was shown."""
-        path = str(book.get("path") or "")
-        files = self.ctx.files
-        if files is not None and path and os.path.isfile(path):
-            try:
-                if await files.share([path]):
-                    return True
-            except Exception:
-                log.exception("sharing %s failed", path)
-        self.ctx.go("library.book", {"bid": bid})
-        return False
 
     def _on_card_long_press(self, model: CardModel) -> None:
         if not self.selecting:
@@ -772,7 +730,7 @@ class LibraryScreen(Screen):
         service = self.service
         with_raw = [b for b in books if b.get("raw_source_path") and not b.get("missing_raw_file")]
         epubs = [b for b in with_raw if str(b.get("raw_source_path") or "").lower().endswith(".epub")]
-        workspaces = [b for b in books if b.get("output_folder")]
+        workspaces = [b for b in books if b.get("output_folder") or service.workspace_for(b)]
         metadata_reason = None if service.has_job_kind("metadata") else "Metadata translation is not available in this session"
         if not epubs:
             metadata_reason = "No raw EPUB resolves for the selection"
@@ -796,9 +754,6 @@ class LibraryScreen(Screen):
             BulkAction("clear_raw", f"Clear saved raw link (for {count} item{'s' if count != 1 else ''})",
                        "LINK_OFF", lambda: self.ctx.spawn(clear_raw_link_flow(self.ctx, books))),
             BulkAction("share", "Share", "IOS_SHARE", lambda: self.ctx.spawn(self.share_books(books))),
-            # UI_SPEC §3.3: Organize (n) narrowed to the selection (the shelf's plan, only these books' files)
-            BulkAction("organize", "Organize selected", "DRIVE_FILE_MOVE",
-                       lambda: self.ctx.spawn(organize_flow(self.ctx, books))),
             BulkAction("series", "Add to Series", "COLLECTIONS_BOOKMARK", lambda: self.add_to_series(books),
                        None if self._series() is not None else SERIES_REASON),
         ]
@@ -843,12 +798,14 @@ class LibraryScreen(Screen):
     # ---- actions ---------------------------------------------------------------------------------------
 
     def card_actions(self, book: Mapping[str, Any]) -> ActionSheet:
-        """The single-card ⋯ sheet: desktop context-menu labels and visibility rules (epub_library 12326)."""
+        """The single-card ⋯ sheet: desktop context-menu labels and visibility rules (epub_library 12326).
+        A Library row without a workspace of its own uses the one the scan resolved (desktop
+        ``_resolve_book_output_folder``) for Compile EPUB / PDF and Files."""
         service = self.service
         bid = service.bid_for(book)
         raw = str(book.get("raw_source_path") or "")
         has_raw = bool(raw) and not book.get("missing_raw_file")
-        folder = str(book.get("output_folder") or "")
+        folder = service.workspace_for(book) or str(book.get("output_folder") or "")
         has_progress = bool(book.get("progress_file")) or bool(folder and os.path.isfile(
             os.path.join(folder, "translation_progress.json")))
         readers = reader_actions(book)
@@ -863,9 +820,9 @@ class LibraryScreen(Screen):
             else:
                 items.append(ActionItem(label, lambda: self.ctx.open_reader(book, bid=bid), icon="AUTO_STORIES"))
         if not readers:
-            # TXT / a PDF without a workspace: the desktop "Open File" (here ↗ Share) instead of a Reader item
-            reason = ("A PDF without a translation workspace opens in another app (↗ Share)"
-                      if _opens_in_another_app(book) else "No EPUB or PDF workspace to read yet")
+            # a PDF without a workspace: the desktop "Open File" (here ↗ Share) instead of a Reader item
+            reason = (OPENS_ELSEWHERE_REASON if opens_in_another_app(book)
+                      else "No EPUB, TXT or PDF workspace to read yet")
             items.append(ActionItem("\U0001f4d6 Open in Reader", lambda: None, icon="AUTO_STORIES",
                                     disabled_reason=reason))
         items += [
@@ -938,7 +895,7 @@ class LibraryScreen(Screen):
         return copy(str(book.get("path") or ""))
 
     def open_files(self, book: Mapping[str, Any]) -> None:
-        folder = str(book.get("output_folder") or "")
+        folder = self.service.workspace_for(book) or str(book.get("output_folder") or "")
         prefs = self.ctx.prefs
         if not folder or prefs is None:
             self.ctx.go("tools.files", {"root": "output"})
@@ -979,28 +936,8 @@ class LibraryScreen(Screen):
         return await self.ctx.translate_metadata(list(books))
 
     async def share_books(self, books: Sequence[Mapping[str, Any]]) -> bool:
-        files = self.ctx.files
-        if files is None:
-            self.ctx.say("Sharing is not available in this session")
-            return False
-
-        def targets() -> list:
-            out = []
-            for book in books:
-                outputs = self.service.compiled_outputs_blocking(book)
-                if outputs:
-                    out.append(outputs[0][0])
-                elif book.get("path") and os.path.isfile(str(book.get("path"))):
-                    out.append(str(book.get("path")))
-                elif self.service.raw_source(book):
-                    out.append(self.service.raw_source(book))
-            return out
-
-        paths = await self.ctx.io(targets)
-        if not paths:
-            self.ctx.say("Nothing to share for the selection")
-            return False
-        return bool(await files.share(paths))
+        """↗ Share (``LibraryContext.share_books``, shared with the Book page)."""
+        return await self.ctx.share_books(books)
 
     # ---- delete ------------------------------------------------------------------------------------------
 

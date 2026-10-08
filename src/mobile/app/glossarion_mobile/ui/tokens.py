@@ -31,6 +31,7 @@ __all__ = [
     "TERTIARY_LIGHT",
     "SECONDARY_HINT",
     "TYPE_SCALE",
+    "LOG_STYLE",
     "MONO_STYLE",
     "RIBBON_STYLE",
     "TypeStyle",
@@ -177,7 +178,11 @@ TYPE_SCALE: dict[str, TypeStyle] = {
     "label_small": TypeStyle(11, 14, 500),
 }
 RIBBON_STYLE = TypeStyle(10, 12, 700, 0.6)  # caps
-MONO_STYLE = TypeStyle(13, 18, 400)
+MONO_STYLE = TypeStyle(13, 18, 400)  # code, editors, error text
+# log lines (owner, post-U8 device test): LogConsole, the log-file viewer, the env-check lines and
+# the Reader live thinking/log pane, in the mono family through ``theme.log_text``. A fixed sp
+# size: the system font scale still multiplies it, Appearance › Text size does not.
+LOG_STYLE = TypeStyle(8, 11, 400)
 
 MONO_FAMILIES = {
     "android": "monospace",

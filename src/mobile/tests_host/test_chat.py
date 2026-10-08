@@ -1625,3 +1625,553 @@ def test_repaints_read_the_cards_without_draining_the_backlog():
 ])
 def test_plan_card_shows_the_effective_glossary_mode(override, config, expected):
     assert rules.effective_glossary_label(override, lambda key, default=None: config.get(key, default)) == expected
+
+
+# ==========================================================================
+# Device fixes (owner report on the U8 APK, 2026-10-08): QA scan from the chat, "Open in Library"
+# for workspaces that moved into the Library by themselves, "Always accept" on the glossary card,
+# a Library book attached in the chat continues in its own workspace ("Save to: Library").
+# A real ChatView on the desktop-format history, a fake JobService; every path in pytest's tmp dir.
+# ==========================================================================
+
+
+class _Prefs:
+    """Prefs stand-in (``get`` / ``set`` / ``file_ref``)."""
+
+    def __init__(self):
+        self.values: dict = {}
+        self.refs: dict = {}
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+    def file_ref(self, path, kind=None):
+        rid = f"r{len(self.refs) + 1}"
+        self.refs[rid] = (str(path), kind)
+        return rid
+
+
+@pytest.fixture
+def isolated_env(tmp_path, monkeypatch):
+    """No test here reads or writes the user's Library, output folders, home or app data."""
+    for name, sub in (("HOME", "home"), ("USERPROFILE", "home"), ("APPDATA", "appdata"),
+                      ("GLOSSARION_LIBRARY_DIR", "Library"), ("GLOSSARION_DATA_DIR", "data")):
+        folder = tmp_path / sub
+        folder.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv(name, str(folder))
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(tmp_path / "Output"))  # where a workspace moves (migrate)
+    monkeypatch.setenv("GLOSSARION_HTTP_LOG", "0")
+    return tmp_path
+
+
+def _config_store(tmp_path):
+    from glossarion_mobile.state.config_store import MobileConfigStore
+    from glossarion_mobile.ui.settings.schema_access import SchemaAccess
+
+    path = tmp_path / "config.json"
+    path.write_text("{}", encoding="utf-8")
+    schema = SchemaAccess()
+    store = MobileConfigStore(path, debounce=10, defaults=schema.effective_default,
+                              reader=lambda p, decrypt=True: json.loads(Path(p).read_text(encoding="utf-8")),
+                              writer=lambda disk, p, backup=False: Path(p).write_text(json.dumps(disk),
+                                                                                       encoding="utf-8"))
+    store.load()
+    return store, schema
+
+
+def _chat_view(desktop_store_cls, tmp_path, *, cid="2", prefs=None, jobs=None, **env_fields):
+    """A real ChatView (call inside a running loop) on ``_desktop_history``; ``calls`` records
+    navigation, snackbars, sheets and the spawned tasks (``_settle`` waits for them)."""
+    from glossarion_mobile.state.app_state import AppState
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+    from glossarion_mobile.ui.chat.context import ChatEnv
+
+    jobs = jobs or FakeJobService()
+    adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
+    store, schema = _config_store(tmp_path)
+    calls = types.SimpleNamespace(nav=[], notes=[], dialogs=[], tasks=[])
+    page = types.SimpleNamespace(width=412, height=900, show_dialog=calls.dialogs.append, update=lambda *a: None)
+    env = ChatEnv(page=page, store=store, schema=schema, prefs=prefs, chats=adapter, runs=runs,
+                  jobs=JobsAdapter(jobs), **env_fields)
+
+    def spawn(coro):
+        task = asyncio.ensure_future(coro)
+        calls.tasks.append(task)
+        return task
+
+    env.spawn = spawn
+    state = AppState()
+    state.current_chat.set(cid)
+    view = ChatView(page, state=state, navigate=lambda name, params=None: calls.nav.append((name, params)),
+                    notify=lambda message, action_label=None, on_action=None: calls.notes.append(
+                        (message, action_label, on_action)), env=env)
+    return types.SimpleNamespace(view=view, adapter=adapter, runs=runs, jobs=jobs, calls=calls, store=store)
+
+
+async def _settle(calls):
+    """Wait for every task the view spawned (also the ones they spawn); re-raise a failure."""
+    while any(not task.done() for task in calls.tasks):
+        await asyncio.gather(*[t for t in calls.tasks if not t.done()], return_exceptions=True)
+    for task in calls.tasks:
+        if not task.cancelled() and task.exception() is not None:
+            raise task.exception()
+
+
+def _close(chat):
+    chat.adapter.close()
+    chat.store._saver.close()
+
+
+def _job_item(adapter, cid="2"):
+    return next(i for i in build_items(adapter.messages(cid)) if i.kind == "job" and i.index >= 0)
+
+
+def _cards(view, cls):
+    return [card for card in view.transcript.cards if isinstance(card, cls)]
+
+
+def test_transcript_gives_a_qa_scan_message_its_own_item():
+    from glossarion_mobile.ui.chat.transcript_model import LIBRARY_LABEL, QA_LABEL
+
+    messages = [
+        ("user_file", "book.epub", "/x/book.epub", 1, "", "user"),
+        ("assistant", "ch1", "", "", "/w/Attachments/book", "Request 1", {}),
+        ("assistant", "🔎 QA", "", "", "/w/Attachments/book", QA_LABEL, {"qa_job": "j1"}),
+        ("assistant", "ch2", "", "", "/w/Attachments/book", "Request 2", {}),  # a Resume after the scan
+        ("user", "hi"),
+        ("assistant", "🔎 QA", "", "", "/w/Book", QA_LABEL, {"qa_job": "j2"}),
+        ("user_file", "saga.epub", "/x/saga.epub", 1, "", "user"),
+        ("assistant", "📚", "", "", "", LIBRARY_LABEL, {"library_job": "j3"}),
+    ]
+    items = build_items(messages)
+    assert [(i.kind, i.index) for i in items] == [("user_file", 0), ("job", 0), ("qa", 2), ("user", 4), ("qa", 5),
+                                                   ("user_file", 6), ("job", 6)]
+    assert items[1].requests == [1, 3] and items[-1].library == 7
+
+
+@needs_flet
+def test_result_card_qa_scans_the_turn_workspace(desktop_store_cls, isolated_env):
+    """Result card › QA scan (owner #7): the turn's own workspace (never a finished run's deleted temp
+    root), Quick Scan through the shared scanner (``qa_model.chat_qa_job``); its "QA scan" card offers
+    Job · Report · Chapters, and the Result card's "N QA failed" chip re-reads the workspace after."""
+    import flet as ft
+
+    from glossarion_mobile.ui.chat import chat_view as cv
+    from glossarion_mobile.ui.chat.cards import ATTACHMENT_ACTION_REASONS, JobCard
+    from glossarion_mobile.ui.chat.transcript_model import QA_LABEL
+    from glossarion_mobile.ui.tools import qa_model
+
+    tmp_path = isolated_env
+    prefs = _Prefs()
+    opened: list = []
+    went: list = []
+    tools_ctx = types.SimpleNamespace(prefs=prefs, go=lambda name, params=None: went.append((name, params)),
+                                      say=lambda *a: went.append(("say",) + a))
+
+    async def open_progress(folder, source=""):
+        opened.append((folder, source))
+        return "progress"
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, prefs=prefs, tools_context=lambda: tools_ctx,
+                          open_progress=open_progress)
+        view, adapter, jobs, calls = chat.view, chat.adapter, chat.jobs, chat.calls
+        try:
+            await _settle(calls)
+            messages = adapter.messages("2")
+            item = _job_item(adapter)
+            workspace = Path(messages[3][4])
+            source = str(messages[2][2])
+            assert "qa" not in ATTACHMENT_ACTION_REASONS
+            result = next(c for c in _cards(view, JobCard) if c.title_text.value == "book.epub")
+            assert isinstance(result.action_buttons["qa"], ft.FilledTonalButton)
+            assert not result.action_buttons["qa"].disabled
+            # nothing translated in the workspace yet
+            view._on_job_action("qa", item)
+            await _settle(calls)
+            assert calls.notes[-1][0] == cv.NOTHING_TO_SCAN and not jobs.submitted
+            (workspace / "response_001_ch001.html").write_text("<p>Chapter one</p>", encoding="utf-8")
+            # a desktop 1000 saved by the U6-U9 QA screen: the one-time mobile move to 0 (owner decision)
+            chat.store.set(("qa_scanner_settings", "quick_scan_sample_size"), 1000)
+            # a finished run's temp root is deleted: the turn's workspace comes first (U9 Progress bug)
+            gone = tmp_path / "cache" / "glossarion_input_output_x" / "book"
+            view.env.runs.run_for = lambda cid: types.SimpleNamespace(output_dir=str(gone), output_folder=str(gone),
+                                                                      user_index=2, live=False)
+            view._run_turn = lambda run: 2
+            try:
+                assert view._reader_target(item) == (str(workspace), source)
+            finally:
+                del view.env.runs.run_for
+                del view._run_turn
+            view._on_job_action("qa", item)
+            await _settle(calls)
+            spec = jobs.submitted[-1]
+            assert str(getattr(spec.kind, "value", spec.kind)) == "qa_scan"
+            assert spec.inputs == (str(workspace),) and spec.params["mode"] == qa_model.CHAT_QA_MODE
+            target = spec.params["targets"][0]
+            assert target["folder"] == str(workspace) and target["source"] == source and target["direct_text"] is True
+            assert spec.origin["type"] == "chat" and spec.origin["cid"] == "2" and "chat_id" not in spec.params
+            last = adapter.messages("2")[-1]
+            assert last[5] == QA_LABEL and last[4] == str(workspace)
+            # the history's save keeps only the desktop storage keys: the card's data lives in the sidecar
+            stored = view._tool_storage(last)
+            assert stored["qa_job"] == "job1" and stored["source"] == source
+            assert adapter.meta("2")[cv.TOOL_JOBS_META][last[6]["created_at"]]["qa_job"] == "job1"
+            assert "duplicate check off (sample size 0)" in stored["summary"]  # the mobile default
+            assert chat.store.get(("qa_scanner_settings", "quick_scan_sample_size")) == 0
+            assert prefs.values[qa_model.QUICK_SAMPLE_MIGRATION_PREF] is True
+            assert calls.notes[-1][0] == "QA scan · book"
+            # its own card: Job · Report · Chapters
+            card = next(c for c in _cards(view, JobCard) if c.title_text.value == "QA scan · book")
+            buttons = {b.key: b for b in card.buttons.controls}
+            assert set(buttons) == {"qajob-job", "qajob-report", "qajob-chapters"}
+            buttons["qajob-report"].on_click(None)
+            await _settle(calls)
+            assert calls.notes[-1][0] == "The scan has not finished yet" and went == []
+            report = Path(qa_model.report_path_for(str(workspace)))
+            report.parent.mkdir(parents=True)
+            report.write_text("<html></html>", encoding="utf-8")
+            buttons["qajob-report"].on_click(None)
+            await _settle(calls)
+            assert went == [("tools.qa.report", {"rid": "r1"})] and prefs.refs["r1"] == (str(report), "qa_report")
+            buttons["qajob-chapters"].on_click(None)
+            await _settle(calls)
+            assert opened == [(str(workspace), source)]
+            buttons["qajob-job"].on_click(None)
+            assert calls.nav[-1] == ("jobs.detail", {"jid": "job1"})
+            # the scan marked two chapters: once the job ends the Result card's chip reads the workspace
+            assert not result.failed_chip.visible
+            (workspace / "translation_progress.json").write_text(json.dumps({"chapters": {
+                "1": {"status": "qa_failed"}, "2": {"status": "failed"}, "3": {"status": "completed"}}}),
+                encoding="utf-8")
+            snap = types.SimpleNamespace(id="job1", spec=spec, state="DONE", question=None, progress=None,
+                                         in_flight=0, last_line="", result={})
+            view._on_job_snapshot(snap)
+            await _settle(calls)
+            result = next(c for c in _cards(view, JobCard) if c.title_text.value == "book.epub")
+            assert result.failed_chip.visible and result.failed_chip.label.value == "2 QA failed"
+            assert not view._track_tool_job(snap)  # the same state again changes nothing
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_plus_sheet_and_slash_qa_scan_the_chats_latest_workspace(desktop_store_cls, isolated_env):
+    """＋ › QA scan and ``/qa`` scan the chat's latest book workspace (also one that moved into the
+    Library); a chat without one goes to Tools › QA Scanner."""
+    tmp_path = isolated_env
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path)
+        view, adapter, jobs, calls = chat.view, chat.adapter, chat.jobs, chat.calls
+        try:
+            await _settle(calls)
+            workspace = Path(adapter.messages("2")[3][4])
+            (workspace / "response_001_ch001.html").write_text("<p>x</p>", encoding="utf-8")
+            (workspace / "translation_progress.json").write_text(json.dumps({"chapters": {}}), encoding="utf-8")
+            view._on_tool("qa")
+            await _settle(calls)
+            assert jobs.submitted[-1].inputs == (str(workspace),)
+            assert view.run_slash("/qa") == "qa"
+            await _settle(calls)
+            assert len(jobs.submitted) == 2 and jobs.submitted[-1].inputs == (str(workspace),)
+            # the workspace moves into the Library (auto-migrate): the chat still scans it
+            moved = adapter.migrate_attachment("2", str(workspace), lambda target: True)
+            assert moved["ok"]
+            target = tmp_path / "Output" / "book"
+            assert target.is_dir() and not workspace.exists()
+            view.on_workspace_migrated("2", str(target), str(tmp_path / "book.epub"))
+            await _settle(calls)
+            assert await view.env.run_io(view._latest_workspace) == (str(target), str(tmp_path / "book.epub"))
+            view._on_tool("qa")
+            await _settle(calls)
+            assert jobs.submitted[-1].inputs == (str(target),)
+            assert not jobs.submitted[-1].params["targets"][0].get("direct_text")  # a Library book now
+            # a chat without a book workspace: Tools › QA Scanner
+            view.load_chat("5")
+            view._on_tool("qa")
+            await _settle(calls)
+            assert calls.nav[-1] == ("tools.qa", None) and len(jobs.submitted) == 3
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_open_in_library_action_and_moved_workspace_retry(desktop_store_cls, isolated_env):
+    """No Migrate on mobile (owner #4): the Result card's "Open in Library" waits (ReasonChip) while
+    the workspace is in Attachments/, then opens the Library book it became; Retry failed of a moved
+    workspace goes to the Library's translate sheet (``ChatEnv.library_translate``)."""
+    import flet as ft
+
+    from glossarion_mobile.ui.chat.cards import ATTACHMENT_ACTIONS, LIBRARY_WAIT_REASON, JobCard
+    from glossarion_mobile.ui.components.reason_chip import ReasonChip
+
+    tmp_path = isolated_env
+    looked: list = []
+    handed: list = []
+
+    async def library_book(folder):
+        looked.append(folder)
+        return "bid7" if folder == str(tmp_path / "Output" / "book") else None
+
+    async def library_translate(folder, source=""):
+        handed.append((folder, source))
+        return "sheet"
+
+    assert [a[0] for a in ATTACHMENT_ACTIONS if a[0] in ("migrate", "library")] == ["library"]
+    assert dict((a[0], a[1:3]) for a in ATTACHMENT_ACTIONS)["library"] == ("Open in Library", "LOCAL_LIBRARY")
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, library_book=library_book,
+                          library_translate=library_translate)
+        view, adapter, calls = chat.view, chat.adapter, chat.calls
+        try:
+            await _settle(calls)
+            item = _job_item(adapter)
+            workspace = Path(adapter.messages("2")[3][4])
+            (workspace / "translation_progress.json").write_text(json.dumps({"chapters": {}}), encoding="utf-8")
+            result = next(c for c in _cards(view, JobCard) if c.title_text.value == "book.epub")
+            waiting = result.action_buttons["library"]
+            assert isinstance(waiting, ft.Row) and isinstance(waiting.controls[1], ReasonChip)
+            assert waiting.controls[1].reason == LIBRARY_WAIT_REASON
+            assert await view.env.run_io(view._job_workspace_state, item) == (str(workspace), True)
+            # Resume / Retry of a workspace still in the chat: the chat's own run (nothing to resume here)
+            view._on_job_action("retry", item)
+            await _settle(calls)
+            assert handed == [] and calls.notes[-1][0] == "Nothing to resume in this chat"
+            # the workspace moves into the Library: the card links to the book
+            assert adapter.migrate_attachment("2", str(workspace), lambda target: True)["ok"]
+            target = tmp_path / "Output" / "book"
+            view.on_workspace_migrated("2", str(target), "")
+            await _settle(calls)
+            result = next(c for c in _cards(view, JobCard) if c.title_text.value == "book.epub")
+            button = result.action_buttons["library"]
+            assert isinstance(button, ft.FilledTonalButton) and not button.disabled
+            assert await view.env.run_io(view._job_workspace_state, item) == (str(target), False)
+            button.on_click(None)
+            await _settle(calls)
+            assert looked[-1] == str(target) and calls.nav[-1] == ("library.book", {"bid": "bid7"})
+            view._on_job_action("retry", item)
+            await _settle(calls)
+            assert handed == [(str(target), str(tmp_path / "book.epub"))]
+            # no book for a folder: the Library home
+            assert await view.open_in_library(types.SimpleNamespace(index=99, requests=[], report=None,
+                                                                    actions=None)) is None
+            assert calls.nav[-1] == ("library", None)
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_approval_card_always_accept_sets_pref_and_answers_yes(desktop_store_cls, isolated_env):
+    """Owner #6: "Always accept" on the chat's glossary card stores the All-chats switch (Prefs
+    ``chat_auto_accept_glossary``, never config.json) and answers this question Yes through the run
+    controller; the chat settings read the pref and the chat's own sidecar value."""
+    from glossarion_mobile.ui.chat.cards import GlossaryApprovalCard
+    from glossarion_mobile.ui.chat.direct_text_rules import AUTO_ACCEPT_GLOSSARY_PREF
+
+    tmp_path = isolated_env
+    answered: list = []
+    always: list = []
+    card = GlossaryApprovalCard(path="", on_answer=answered.append, on_always=lambda: always.append(True))
+    assert card.always_button.visible
+    assert card.always() and always == [True] and answered == []  # one answer: on_always answers
+    assert all(b.disabled for b in (card.edit_button, card.yes_button, card.no_button, card.always_button))
+    assert not card.always() and not card.answer(True) and always == [True]
+    plain = GlossaryApprovalCard(path="", on_answer=answered.append)  # the Library review gate's sheet
+    assert not plain.always_button.visible and not plain.always()
+
+    prefs = _Prefs()
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, cid="5", prefs=prefs)
+        view, adapter, runs, jobs, calls = chat.view, chat.adapter, chat.runs, chat.jobs, chat.calls
+        try:
+            await _settle(calls)
+            assert view.settings().auto_accept_glossary is False  # default off (desktop always asks)
+            book = tmp_path / "book.epub"
+            record = {"path": str(book), "name": "book.epub", "extension": ".epub", "size": 15}
+            run = await runs.send("5", text="", attachment=record, settings=DirectTextSettings(), output_mode="text")
+            jobs.publish("RUNNING", question={"id": "q1", "kind": "direct_text_glossary_approval",
+                                              "data": {"path": str(tmp_path / "glossary.csv")}})
+            assert run.awaiting_glossary
+            approval = view._approval_control(run)
+            assert approval.on_always is not None and approval.always_button.visible
+            approval.always()
+            assert jobs.answers == [("q1", True)] and not run.awaiting_glossary
+            assert prefs.values == {AUTO_ACCEPT_GLOSSARY_PREF: True}
+            assert calls.notes[-1][0] == "Generated glossaries are accepted automatically from now on"
+            assert "chat_auto_accept_glossary" not in json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+            assert view.settings().auto_accept_glossary is True
+            adapter.set_meta("5", "auto_accept_glossary", False)  # this chat asks (Chat settings › This chat)
+            assert view.settings().auto_accept_glossary is False
+            view._always_accept_glossary()  # tapped in this chat: its own "ask" gives way
+            assert "auto_accept_glossary" not in adapter.meta("5") and view.settings().auto_accept_glossary is True
+            sheet = view.open_chat_settings()
+            assert sheet.prefs is prefs
+            jobs.publish("CANCELLED")
+            _finish_all(runs)
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+def _library_book(tmp_path, name="Novel"):
+    raw = tmp_path / "Library" / "Raw" / f"{name}.epub"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"PK\x03\x04 raw")
+    return raw
+
+
+@needs_flet
+def test_library_attachment_plan_defaults_to_library_destination(desktop_store_cls, isolated_env, monkeypatch):
+    """Owner #8: a Library book attached in the chat sends with "Save to: Library" (its own workspace)
+    and the Plan card shows the book; a file picked from Files stays "This chat"; with the plan skipped
+    the book's Library job starts at once; Start asks the output-root question first and Cancel keeps
+    the plan; the Library-job card opens the book."""
+    from glossarion_mobile.ui.chat.chat_view import LIBRARY_ATTACHMENT_META
+    from glossarion_mobile.ui.chat.transcript_model import LIBRARY_LABEL
+    from glossarion_mobile.ui.library import translate_sheet
+    from glossarion_mobile.ui.tools.targets import ToolTarget
+
+    tmp_path = isolated_env
+    raw = _library_book(tmp_path)
+    other = tmp_path / "Inbox" / "Other.epub"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"PK")
+    answers: list = []
+    asked: list = []
+
+    async def confirm(ctx, books):
+        asked.append([dict(b) for b in books])
+        return answers.pop(0) if answers else True
+
+    monkeypatch.setattr(translate_sheet, "confirm_output_root", confirm)
+    book_row = {"name": "Novel", "type": "in_progress", "raw_source_path": str(raw)}
+    service = types.SimpleNamespace(book_for_bid=lambda bid: dict(book_row) if bid == "b1" else None)
+    tools_ctx = types.SimpleNamespace(service=service)
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, cid="5", tools_context=lambda: tools_ctx)
+        view, adapter, jobs, calls = chat.view, chat.adapter, chat.jobs, chat.calls
+        try:
+            await _settle(calls)
+            target = ToolTarget(title="Novel", source=str(raw), origin="library", kind="epub", bid="b1")
+            assert view.attach_library_book(target)
+            assert adapter.meta("5")[LIBRARY_ATTACHMENT_META] == {"bid": "b1", "path": str(raw)}
+            assert calls.notes[-1][0] == "Attached Novel.epub from the Library"
+            view.begin_send()
+            plan = adapter.meta("5")["pending_plan"]
+            assert plan["destination"] == "library" and plan["library_bid"] == "b1"
+            assert plan["attachment"]["path"] == str(raw)
+            await _settle(calls)
+            keys = {getattr(c, "key", None) for c in _plan_box(view)}
+            assert {"plan-library", "plan-facts"} <= keys
+            open_book = next(b for b in _plan_buttons(view) if b.key == "plan-open-book")
+            open_book.on_click(None)
+            assert calls.nav[-1] == ("library.book", {"bid": "b1"})
+            # Start: the output-root question first; Cancel keeps the plan
+            answers.append(False)
+            view.start_plan()
+            await _settle(calls)
+            assert asked and asked[-1][0]["name"] == "Novel" and not jobs.submitted
+            assert adapter.meta("5")["pending_plan"]["created"] == plan["created"]
+            view.start_plan()
+            await _settle(calls)
+            spec = jobs.submitted[-1]
+            assert str(getattr(spec.kind, "value", spec.kind)) == "translate" and spec.inputs == (str(raw),)
+            assert spec.origin["cid"] == "5" and spec.origin["bid"] == "b1"
+            assert "pending_plan" not in adapter.meta("5")
+            last = adapter.messages("5")[-1]
+            stored = view._tool_storage(last)
+            assert last[5] == LIBRARY_LABEL and stored["bid"] == "b1" and stored["source"] == str(raw)
+            assert stored["library_job"] == "job1"
+            library_button = _cards_with_key(view, "libjob-library")[0]
+            library_button.on_click(None)
+            assert calls.nav[-1] == ("library.book", {"bid": "b1"})
+            # a file picked from Files (another path) forgets the Library book: "This chat"
+            assert view.attach_file(str(other))
+            assert LIBRARY_ATTACHMENT_META not in adapter.meta("5")
+            view.begin_send()
+            plan = adapter.meta("5")["pending_plan"]
+            assert "destination" not in plan and "library_bid" not in plan
+            view.cancel_plan()
+            view.composer._remove_attachment()
+            # the plan skipped (Chat settings): the Library book's job starts at once
+            adapter.set_meta("5", "skip_plan", True)
+            view.attach_library_book(target)
+            submitted = len(jobs.submitted)
+            view.begin_send()
+            await _settle(calls)
+            assert len(jobs.submitted) == submitted + 1 and jobs.submitted[-1].inputs == (str(raw),)
+            assert jobs.submitted[-1].origin["bid"] == "b1" and "pending_plan" not in adapter.meta("5")
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+def _plan_card(view):
+    from glossarion_mobile.ui.chat.cards import JobCard
+
+    return next(c for c in _cards(view, JobCard) if c.phase.name == "plan")
+
+
+def _plan_box(view):
+    return list(_plan_card(view).plan_box.controls)
+
+
+def _plan_buttons(view):
+    import flet as ft
+
+    rows = [c for c in _plan_box(view) if isinstance(c, ft.Row)]
+    return [b for row in rows for b in row.controls if getattr(b, "key", "").startswith("plan-")]
+
+
+def _cards_with_key(view, key):
+    from glossarion_mobile.ui.chat.cards import JobCard
+
+    return [b for card in _cards(view, JobCard) for b in card.buttons.controls if getattr(b, "key", None) == key]
+
+
+@needs_flet
+def test_library_book_from_chat_runs_in_its_workspace(desktop_store_cls, isolated_env):
+    """The owner's flow end to end on the real chat store: pick a Library/Raw book in the chat, Send,
+    Start -> one ``translate`` job over the raw file (the book's own workspace, as Library ›
+    Translate… does), tied to the chat and the book."""
+    from glossarion_mobile.ui.tools.targets import ToolTarget
+
+    tmp_path = isolated_env
+    raw = _library_book(tmp_path, "Saga")
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, cid="5")
+        view, adapter, jobs, calls = chat.view, chat.adapter, chat.jobs, chat.calls
+        try:
+            await _settle(calls)
+            assert view.attach_library_book(ToolTarget(title="Saga", source=str(raw), origin="library", bid="b9"))
+            view.composer.set_text("keep the honorifics")
+            view.begin_send()
+            assert adapter.messages("5")[0][0] == "user_file" and adapter.messages("5")[0][2] == str(raw)
+            view._on_job_action("start", _job_item(adapter, "5"))
+            await _settle(calls)
+            assert len(jobs.submitted) == 1
+            spec = jobs.submitted[0]
+            assert str(getattr(spec.kind, "value", spec.kind)) == "translate" and spec.inputs == (str(raw),)
+            assert spec.origin["type"] == "chat" and spec.origin["cid"] == "5" and spec.origin["bid"] == "b9"
+            assert "chat_id" not in spec.params  # the chat's JobStrip shows it (no Job card run)
+            assert view.sent[-1][2]["path"] == str(raw)
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())

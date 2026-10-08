@@ -21,8 +21,15 @@ explains what is missing. With a ``ChatEnv`` it is the Direct Text chat:
   MediaViewer), "Generate from prompt (no input)" (a ``generate_media`` job), Refine's
   "Compare with original", message versions ‹2/3› (Edit & resend, Retranslate), Delete
   message, scratch chats (New / Send as scratch / Duplicate as scratch, Save / Discard), the
-  Attachments manager + Migrate, Jump to…, Search in chat, Export chat, and the ＋ sheet's
+  Attachments manager, Jump to…, Search in chat, Export chat, and the ＋ sheet's
   "Retranslate chapters" (the Progress manager's Chapters on this chat's workspace).
+
+Device fixes (2026-10-08): a finished book's workspace moves into the Library by itself (ChatFeature
+auto-migrate calls ``on_workspace_migrated``), so the Result card offers "Open in Library" instead of
+Migrate; a QA scan runs from the Result card, the ＋ sheet and ``/qa`` (Quick Scan, the job's card is a
+"QA scan" message, progress in the JobStrip); "Always accept" on the glossary card; a Library book is
+attached from inside the chat (＋ › From Library, the empty-chat chip, ``/library [title]``: the
+searchable picker) and Send then defaults to "Save to: Library" (the book's own workspace).
 
 U9: Chat settings › Text size (85–150 %, per chat, sidecar ``text_scale``) scales the
 transcript and composer text: the column sits in a Container whose nested theme carries the
@@ -48,6 +55,7 @@ import flet as ft
 from glossarion_mobile.services.background import IOS_BACKGROUND_NOTICE
 from glossarion_mobile.state.app_state import AppState, ChatContext, JobStripModel
 from glossarion_mobile.ui.chat.cards import (
+    LIBRARY_WAIT_REASON,
     GlossaryApprovalCard,
     GlossaryEditorView,
     JobCard,
@@ -68,8 +76,10 @@ from glossarion_mobile.ui.chat.chat_ops import (
     version_view,
     workspace_outputs,
 )
+from glossarion_mobile.ui.chat.chat_ops import moved_workspace as _moved_workspace
 from glossarion_mobile.ui.chat.composer import Composer, StatusCaption
 from glossarion_mobile.ui.chat.direct_text_rules import (
+    AUTO_ACCEPT_GLOSSARY_PREF,
     TOKEN_HINT_MIN_CHARS,
     DirectTextSettings,
     ManualGlossarySource,
@@ -77,6 +87,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     count_tokens,
     effective_glossary_label,
     is_supported_attachment,
+    merge_meta_overrides,
     needs_plan,
     token_hint,
 )
@@ -87,6 +98,7 @@ from glossarion_mobile.ui.chat.job_binding import (
     chat_id_of,
     ended_card,
     ended_kind,
+    job_kind,
     progress_counts,
     progress_line,
     running_label,
@@ -115,7 +127,14 @@ from glossarion_mobile.ui.chat.send_state import (
 )
 from glossarion_mobile.ui.chat.quick_chips import QuickChips
 from glossarion_mobile.ui.chat.transcript import Transcript
-from glossarion_mobile.ui.chat.transcript_model import ACTIONS_LABEL, REPORT_LABEL, build_items, slide_window, tail_window
+from glossarion_mobile.ui.chat.transcript_model import (
+    ACTIONS_LABEL,
+    QA_LABEL,
+    REPORT_LABEL,
+    build_items,
+    slide_window,
+    tail_window,
+)
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
@@ -159,6 +178,131 @@ _ATTACH_EXTENSIONS = [
 ]
 _IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif", "avif", "jxl"]
 COPIED_SECONDS = 1.6
+_TERMINAL_JOB_STATES = ("DONE", "FAILED", "STOPPED", "CANCELLED", "INTERRUPTED")
+NOTHING_TO_SCAN = "Nothing to scan in this turn's workspace"
+#: chat sidecar meta key: the Library book attached to this chat (``{"bid", "path"}``)
+LIBRARY_ATTACHMENT_META = "library_attachment"
+#: chat sidecar meta key: ``{created_at: data}`` of the chat's tool-job card messages (Library job, QA scan)
+TOOL_JOBS_META = "tool_jobs"
+
+
+def _same_path(a: Any, b: Any) -> bool:
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def library_attach_reason(target: Any) -> Optional[str]:
+    """Why a Library row cannot be attached to a chat (None: it can): its raw file must be on this
+    device and be a file the chat takes (blocking: the picker computes it on the io pool)."""
+    source = str(getattr(target, "source", "") or "")
+    if not source or not os.path.isfile(source):
+        return "No raw file on this device"
+    if not is_supported_attachment(source):
+        return "Not an attachable file type"
+    return None
+
+
+def library_matches(service: Any, query: str) -> list:
+    """Blocking: the attachable Library books (ToolTargets) whose title / raw title / tags match
+    ``query`` (the Library search: ``targets.order_library_rows``, newest first like the in-chat
+    picker); a single exact title match wins over the partial ones (``/library <title>``)."""
+    from glossarion_mobile.ui.tools import targets as tg
+
+    rows = [target for target in tg.library_targets(service) if library_attach_reason(target) is None]
+    found = tg.order_library_rows(service, rows, str(query or ""))
+    wanted = str(query or "").strip().casefold()
+
+    def name(target: Any) -> str:
+        book = (getattr(target, "extra", None) or {}).get("book")
+        return str((book or {}).get("name") or getattr(target, "title", "") or "").strip().casefold()
+
+    exact = [target for target in found if wanted and name(target) == wanted]
+    return exact if len(exact) == 1 else found
+
+
+def _library_plan_fields(view: Any, cid: str, record: Optional[dict]) -> dict:
+    """Plan fields of a send whose attachment is the chat's Library book (``library_attachment`` meta):
+    ``{"destination": "library", "library_bid": bid}`` (the book's own workspace), else {}."""
+    if not record:
+        return {}
+    env = getattr(view, "env", None)
+    meta_of = getattr(getattr(env, "chats", None), "meta", None)
+    if not callable(meta_of):
+        return {}
+    try:
+        attached = (meta_of(cid) or {}).get(LIBRARY_ATTACHMENT_META)
+    except Exception:
+        return {}
+    if not isinstance(attached, Mapping) or not _same_path(attached.get("path"), record.get("path")):
+        return {}
+    jobs = getattr(env, "jobs", None)
+    if jobs is None or not getattr(jobs, "has_kind", lambda _k: True)("translate"):
+        return {}
+    return {"destination": "library", "library_bid": str(attached.get("bid") or "")}
+
+
+def library_line(service: Any, bid: str) -> str:
+    """Blocking: the Plan card's "📚 Library · <pill>" for the attached Library book (its Library card's
+    progress pill, ``models.card_model_for``: the Library's own card model)."""
+    book = service.book_for_bid(bid) if service is not None and bid else None
+    if not book:
+        return "📚 Library"
+    from glossarion_mobile.ui.library.models import card_model_for
+
+    model = card_model_for(service, book, views=getattr(getattr(service, "snapshot", None), "views", None) or {},
+                           raw_titles=False, dark=False)
+    pill = " ".join(p for p in (model.pill_text or "", model.pct_text or "") if p).strip()
+    return f"📚 Library · {pill or model.title}"
+
+
+def append_tool_message(chats: Any, cid: str, body: str, folder: str, label: str, data: dict) -> None:
+    """Append the card message of a job a chat handed to a tool (``LIBRARY_LABEL`` / ``QA_LABEL``).
+
+    The desktop history keeps only its own storage keys (``ChatStore._normalize_message_storage``
+    drops a job id, source or book id on the first save), so ``data`` also goes into the chat's
+    sidecar (``TOOL_JOBS_META``) under the message's ``created_at``, which the history keeps
+    (microseconds make it unique); ``ChatView._tool_storage`` reads it back."""
+    from datetime import datetime
+
+    created = datetime.now().astimezone().isoformat(timespec="microseconds")
+    chats.append_messages(cid, [("assistant", body, "", "", folder, label, dict(data, created_at=created))])
+    meta_of = getattr(chats, "meta", None)
+    saved = meta_of(cid).get(TOOL_JOBS_META) if callable(meta_of) else None
+    saved = dict(saved) if isinstance(saved, dict) else {}
+    saved[created] = dict(data)
+    chats.set_meta(cid, TOOL_JOBS_META, saved)
+
+
+def _in_attachments(folder: str) -> bool:
+    """A chat's ``Attachments/<stem>`` workspace (not yet moved into the Library)."""
+    return bool(folder) and os.path.basename(os.path.dirname(os.path.normpath(folder))).lower() == "attachments"
+
+
+def qa_scannable(folder: str, source: str = "") -> bool:
+    """Blocking: the QA Scanner's folder check for a chat scan (text mode for a TXT / PDF source that
+    is still on disk, as the scan will run)."""
+    from glossarion_mobile.ui.tools import targets as tg
+
+    if not folder or not os.path.isdir(folder):
+        return False
+    text_mode = str(source or "").lower().endswith((".txt", ".pdf")) and os.path.isfile(str(source))
+    return tg.folder_has_scan_files(folder, text_mode=text_mode)
+
+
+def workspace_failed_count(folder: str) -> Optional[int]:
+    """Blocking: failed + QA-failed chapters in a workspace's ``translation_progress.json`` (the Result
+    card's "N QA failed" chip after a QA scan marked chapters); None without a progress file."""
+    path = os.path.join(str(folder or ""), "translation_progress.json")
+    if not folder or not os.path.isfile(path):
+        return None
+    import progress_core  # shared (U5)
+
+    chapters = progress_core.load_progress(path).get("chapters")
+    if not isinstance(chapters, Mapping):
+        return 0
+    return sum(1 for entry in chapters.values()
+               if isinstance(entry, Mapping) and str(entry.get("status") or "") in ("failed", "qa_failed"))
 
 
 class ChatView:
@@ -231,6 +375,9 @@ class ChatView:
         # change is passed again as the same object (Transcript.CardSlot: never a frozen copy).
         self._cards: dict = {}
         self._next_cards: dict = {}
+        self.library_picker: Any = None
+        self._tool_states: dict = {}  # chat QA job id -> last state seen (its card re-renders on a change)
+        self._library_starting: set = set()  # Plan "created" stamps whose Library start is under way
 
         chat = state.chats.get(state.current_chat.value)
         self.header = ChatHeader(
@@ -404,15 +551,17 @@ class ChatView:
     # ---- chat loading / settings ---------------------------------------------------
 
     def settings(self, cid: Optional[str] = None) -> DirectTextSettings:
+        """The chat's effective Direct Text settings: config.json, the mobile-only Prefs globals
+        ("Always accept generated glossaries"), then the chat's overrides and sidecar meta fields."""
         cid = str(cid or self.cid)
-        base = DirectTextSettings.from_config(self.env.config_get) if self.env is not None else DirectTextSettings()
+        if self.env is None:
+            return DirectTextSettings()
+        prefs = getattr(self.env, "prefs", None)
+        base = DirectTextSettings.from_config(self.env.config_get,
+                                              prefs_get=prefs.get if prefs is not None else None)
         if not self.bound:
             return base
-        overrides = dict(self.env.chats.overrides(cid))
-        meta = self.env.chats.meta(cid)
-        if meta.get("skip_plan") is not None:
-            overrides["skip_plan"] = meta.get("skip_plan")
-        return base.with_overrides(overrides)
+        return base.with_overrides(merge_meta_overrides(self.env.chats.overrides(cid), self.env.chats.meta(cid)))
 
     def chat_context_for(self, cid: str) -> ChatContext:
         env = self.env
@@ -558,6 +707,8 @@ class ChatView:
             return self._assistant_control(item.index, messages[item.index], expanded)
         if item.kind == "job":
             return self._job_control(item, messages, run)
+        if item.kind == "qa":
+            return self._qa_job_control(item, messages)
         return None
 
     def _card(self, key: Any, signature: Any, build: Callable[[], ft.Control]) -> Any:
@@ -711,6 +862,17 @@ class ChatView:
                item.actions, phase.name)
         self._io_extra(key, lambda it=item: self._outputs_for(it),
                        lambda files, c=card: c.set_outputs(files or []), card)
+        # "Open in Library" once the workspace left Attachments/ (auto-migrate); the "N QA failed" chip
+        # from the workspace's progress file, where a chat QA scan writes its marks
+        key = ("library", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
+               item.actions, phase.name)
+        self._io_extra(key, lambda it=item: self._library_reason(it),
+                       lambda reason, c=card: c.set_action_reason("library", reason), card)
+        if not phase.live and phase.name != "plan":
+            key = ("failed", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
+                   item.actions, phase.name)
+            self._io_extra(key, lambda it=item: workspace_failed_count(self._job_workspace(it)),
+                           lambda count, c=card, n=failed: c.set_failed(n if count is None else count), card)
         if item.requests:  # Vision: the run's cached OCR texts (its workspace's OCR folder)
             key = ("ocr", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report)
             self._io_extra(key, lambda it=item: self._ocr_for(it),
@@ -855,11 +1017,26 @@ class ChatView:
             info = glossary_preview(path)
         except Exception:
             info = None
+        prefs = getattr(self.env, "prefs", None) if self.env is not None else None
         self.approval_card = GlossaryApprovalCard(
             path=path, info=info, on_answer=self._answer_glossary, on_edit=self.open_glossary_editor,
+            on_always=self._always_accept_glossary if prefs is not None else None,
         )
         self._approval_key = key
         return self.approval_card
+
+    def _always_accept_glossary(self) -> None:
+        """The approval card's "Always accept": the All-chats switch of Chat settings ("Always accept
+        generated glossaries", Prefs ``chat_auto_accept_glossary``) turns on, then this question is
+        answered Yes like ✓ Yes (``RunController.answer_glossary``). Later sends carry it into their job."""
+        prefs = getattr(self.env, "prefs", None) if self.env is not None else None
+        if prefs is not None:
+            prefs.set(AUTO_ACCEPT_GLOSSARY_PREF, True)
+        if self.bound and self.env.chats.meta(self.cid).get("auto_accept_glossary") is False:
+            self.env.chats.set_meta(self.cid, "auto_accept_glossary", None)  # this chat's "ask" gives way too
+        self._answer_glossary(True)
+        self.notify("Generated glossaries are accepted automatically from now on", action_label="Chat settings",
+                    on_action=lambda: self.open_chat_settings("global"))
 
     # ---- live updates ----------------------------------------------------------------------
 
@@ -884,10 +1061,30 @@ class ChatView:
         if self.env is None:
             return
         self.refresh_send()
+        self._track_tool_job(snapshot)
         run = self.env.runs.live_run(self.cid) if self.env.runs is not None else None
         if run is not None and self.live_job_card is not None:
             self._update_live_job_card(run)
             self.live_job_card.push()
+
+    def _track_tool_job(self, snapshot: Any) -> bool:
+        """A chat's QA scan changed state: its "QA scan" card shows the new state, and once it ends the
+        Result cards re-read their workspaces ("N QA failed" from the progress file the scan marked)."""
+        if snapshot is None or job_kind(snapshot) != "qa_scan":
+            return False
+        origin = getattr(getattr(snapshot, "spec", None), "origin", None)
+        cid = str(origin.get("cid") or "") if isinstance(origin, Mapping) else ""
+        if not cid:
+            return False
+        job_id, state = str(getattr(snapshot, "id", "") or ""), state_name(snapshot)
+        if self._tool_states.get(job_id) == state:
+            return False
+        self._tool_states[job_id] = state
+        if state in _TERMINAL_JOB_STATES:
+            self._drop_extras(cid)
+        if cid == self.cid and self.bound:
+            self.render_transcript()
+        return True
 
     def _update_live_job_card(self, run: Any) -> None:
         card = self.live_job_card
@@ -1149,19 +1346,28 @@ class ChatView:
         anchor, self.version_anchor = self.version_anchor, None
         # §2.12.1 "a TXT/MD over 20,000 characters": the attached file's characters, not only the message
         chars = max(len(text), attachment_text_chars(record)) if record else len(text)
-        if record and needs_plan(record.get("extension") or "", chars, skip_plan=settings.skip_plan):
+        # A Library book attached in this chat continues its own workspace: "Save to: Library" (§2.5)
+        library = _library_plan_fields(self, cid, record)
+        planned = bool(record) and needs_plan(record.get("extension") or "", chars, skip_plan=settings.skip_plan)
+        if planned or library:
             from glossarion_mobile.ui.chat.run_request import user_turn
 
             index = env.chats.record_user_turn(
                 cid, user_turn(text, record, settings.attachment_prompt_role), record.get("name") or text
             )
             self._link_version(cid, anchor, index)
-            env.chats.set_meta(cid, "pending_plan", {
+            plan = {
                 "user_index": index, "text": text, "attachment": dict(record), "output_mode": output_mode,
                 "manual_glossary": manual.as_dict() if manual else None, "created": time.time(),
-                "once": dict(once) if once else None,
-            })
+                "once": dict(once) if once else None, **library,
+            }
+            if planned:
+                env.chats.set_meta(cid, "pending_plan", plan)
+                self._after_send_ui(output_mode)
+                return
+            # no Plan card for this send (Chat settings › skip the plan, a short TXT): the book's Library run
             self._after_send_ui(output_mode)
+            self._spawn(self._start_library_plan(plan))
             return
         self._after_send_ui(output_mode)
         self.sent.append((cid, text, dict(record) if record else None))
@@ -1237,7 +1443,7 @@ class ChatView:
         """What the Plan card is built from: Run options / range edits update the card in place (they
         are saved with the plan without rebuilding it), a destination change rebuilds it."""
         return (plan.get("user_index"), plan.get("output_mode"), plan.get("destination") or "chat",
-                plan.get("created"), str(plan.get("text") or ""))
+                plan.get("created"), str(plan.get("text") or ""), str(plan.get("library_bid") or ""))
 
     def _glossary_chip_text(self) -> str:
         """The Plan / Batch glossary chip: the effective mode and, when the main settings drive the run,
@@ -1344,7 +1550,22 @@ class ChatView:
         if loaded and self.glossary_table_opener is not None:
             buttons.append(ft.TextButton(content="Review glossary", icon=ft.Icons.EDIT_NOTE, key="plan-review",
                                          on_click=lambda e, g=str(loaded): self.glossary_table_opener(g)))
+        bid = str(plan.get("library_bid") or "")
+        library_line_text = ft.Text("📚 Library", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, color=ft.Colors.PRIMARY,
+                                    visible=bool(bid), key="plan-library")
+        if bid:
+            # the attached Library book: where it stands (its card's pill) and its Book page
+            buttons.append(ft.TextButton(content="Open book", icon=ft.Icons.LOCAL_LIBRARY, key="plan-open-book",
+                                         on_click=lambda e, b=bid: self.navigate("library.book", {"bid": b})))
+            if card is not None:
+                def apply_line(value: Any, t=library_line_text) -> None:
+                    t.value = str(value or "📚 Library")
+
+                service = self._library_service()
+                self._io_extra(("libplan", self.cid, bid), lambda b=bid, s=service: library_line(s, b), apply_line,
+                               card)
         controls: list = [
+            library_line_text,
             facts,
             conversion,
             ft.Row(chips, wrap=True, spacing=6, run_spacing=6),
@@ -1426,6 +1647,11 @@ class ChatView:
             return
         env = self.env
         cid = self.cid
+        record = plan.get("attachment") or None
+        if str(plan.get("destination") or "chat") == "library" and record:
+            # the output-root question comes first; Cancel there keeps this plan
+            self._spawn(self._start_library_plan(plan))
+            return
         env.chats.set_meta(cid, "pending_plan", None)
         manual_data = plan.get("manual_glossary")
         manual = None
@@ -1434,26 +1660,83 @@ class ChatView:
                 kind=str(manual_data.get("kind") or "content"), path=str(manual_data.get("path") or ""),
                 content=str(manual_data.get("content") or ""), extension=str(manual_data.get("extension") or ".txt"),
             )
-        record = plan.get("attachment") or None
-        panel = self.run_panels.get((cid, "plan", plan.get("created")))
-        if panel is not None:
-            run_config = panel.config_overrides()
-        else:
-            values = plan.get("run_config") if isinstance(plan.get("run_config"), dict) else {}
-            run_config = dict(values) if plan.get("only_this_run", True) else {}
-        self.run_panels.pop((cid, "plan", plan.get("created")), None)
+        run_config = self._take_run_config(cid, plan)
         self.sent.append((cid, plan.get("text") or "", record))
         once = plan.get("once") if isinstance(plan.get("once"), dict) else None
-        if str(plan.get("destination") or "chat") == "library" and record:
-            self._spawn(self._submit_library(cid, plan, dict(record), run_config))
-            return
         self._spawn(self._submit(cid, str(plan.get("text") or ""), record, self.settings(cid),
                                  str(plan.get("output_mode") or "text"), manual, int(plan.get("user_index") or 0),
                                  once, config_extra=run_config))
 
+    def _take_run_config(self, cid: str, plan: dict) -> dict:
+        """The Plan card's Run options for this start (its panel, else the values saved with the plan);
+        the panel is released."""
+        panel = self.run_panels.pop((cid, "plan", plan.get("created")), None)
+        if panel is not None:
+            return panel.config_overrides()
+        values = plan.get("run_config") if isinstance(plan.get("run_config"), dict) else {}
+        return dict(values) if plan.get("only_this_run", True) else {}
+
+    async def _start_library_plan(self, plan: dict) -> Any:
+        """Start with "Save to: Library": the desktop Load-for-translation output-root check first
+        (``translate_sheet.confirm_output_root``: the book's workspace lies under another output folder);
+        Cancel keeps the plan (a send without a Plan card shows one now), else the Library job starts."""
+        cid = self.cid
+        created = plan.get("created")
+        if created in self._library_starting:
+            return None  # a second Start tap while the first one asks
+        self._library_starting.add(created)
+        try:
+            if not await self._confirm_output_root(plan):
+                if self.bound and not isinstance(self.env.chats.meta(cid).get("pending_plan"), dict):
+                    self.env.chats.set_meta(cid, "pending_plan", plan)
+                    if self.cid == cid:
+                        self.render_transcript(follow=True)
+                return None
+            if self.bound:
+                self.env.chats.set_meta(cid, "pending_plan", None)
+            record = dict(plan.get("attachment") or {})
+            run_config = self._take_run_config(cid, plan)
+            self.sent.append((cid, plan.get("text") or "", record))
+            return await self._submit_library(cid, plan, record, run_config)
+        finally:
+            self._library_starting.discard(created)
+
+    def _library_service(self) -> Any:
+        """The Library's LibraryService (ChatEnv.library_service, else the Tools context's), or None."""
+        env = self.env
+        if env is None:
+            return None
+        getter = getattr(env, "library_service", None)
+        try:
+            service = getter() if callable(getter) else None
+        except Exception:
+            service = None
+        if service is None:
+            factory = getattr(env, "tools_context", None)
+            ctx = factory() if callable(factory) else None
+            service = getattr(ctx, "service", None) if ctx is not None else None
+        return service
+
+    async def _confirm_output_root(self, plan: dict) -> bool:
+        """The Library book's workspace is under another output folder than the current one: ask like
+        the desktop (``translate_sheet.confirm_output_root``); True when nothing needs asking."""
+        bid = str(plan.get("library_bid") or "")
+        factory = getattr(self.env, "tools_context", None) if self.env is not None else None
+        ctx = factory() if callable(factory) and bid else None
+        service = getattr(ctx, "service", None) if ctx is not None else None
+        if service is None:
+            return True
+        book = service.book_for_bid(bid)
+        if not book:
+            return True
+        from glossarion_mobile.ui.library.translate_sheet import confirm_output_root
+
+        return bool(await confirm_output_root(ctx, [book]))
+
     async def _submit_library(self, cid: str, plan: dict, record: dict, run_config: dict) -> Any:
         """Save to: Library - a ``translate`` job over the attachment (the normal pipeline: workspace in
-        the output root, Library shelf, post-QA scan per settings); the turn gets a "Library job" card."""
+        the output root, Library shelf, post-QA scan per settings); the turn gets a "Library job" card.
+        A Library book attached in the chat (``library_bid``) is tied to its book (origin / card bid)."""
         from glossarion_mobile.ui.chat.transcript_model import LIBRARY_LABEL
 
         from glossarion_mobile.state.setting_writes import output_mode_values
@@ -1472,18 +1755,27 @@ class ChatView:
         overrides.update(output_mode_values(plan.get("output_mode")))
         overrides.update(run_config or {})
         params: dict = {"config_overrides": overrides} if overrides else {}
+        bid = str(plan.get("library_bid") or "")
+        origin = {"type": "chat", "cid": cid, "label": f"Chat · {title}"}
+        if bid:
+            origin["bid"] = bid  # the Book page's last-run line matches on it
         try:
-            job_id = await self.env.jobs.submit("translate", name, (path,), params,
-                                                {"type": "chat", "cid": cid, "label": f"Chat · {title}"})
+            job_id = await self.env.jobs.submit("translate", name, (path,), params, origin)
         except Exception as exc:
             self.notify(f"Could not start: {exc}")
             self.env.chats.set_meta(cid, "pending_plan", plan)  # the plan stays, Start can be tapped again
             self.render_transcript()
             return None
-        body = (f"📚 **Translating in the Library:** {name}\n\nThe workspace goes to the output folder and the book "
-                "appears on the Library shelf (In progress). Follow it in Jobs.")
-        self.env.chats.append_messages(cid, [("assistant", body, "", "", "", LIBRARY_LABEL,
-                                              {"library_job": str(job_id), "source": path})])
+        if bid:
+            body = (f"📚 **Translating in the Library:** {name}\n\nThe book continues in its own workspace "
+                    "(its Library card and Book page follow it). Follow it in Jobs.")
+        else:
+            body = (f"📚 **Translating in the Library:** {name}\n\nThe workspace goes to the output folder and the "
+                    "book appears on the Library shelf (In progress). Follow it in Jobs.")
+        storage = {"library_job": str(job_id), "source": path}
+        if bid:
+            storage["bid"] = bid
+        append_tool_message(self.env.chats, cid, body, "", LIBRARY_LABEL, storage)
         self.render_transcript(follow=True)
         self.notify(f"Translating · {name}", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
         return job_id
@@ -1491,23 +1783,46 @@ class ChatView:
     def _library_job_control(self, item: Any, messages: list, record: Optional[dict]) -> Any:
         """A turn sent to the Library (Plan "Save to: Library"): where the run went, with Jobs / Library."""
         message = messages[item.library] if 0 <= item.library < len(messages) else None
-        storage = message[6] if message is not None and len(message) > 6 and isinstance(message[6], dict) else {}
+        storage = self._tool_storage(message)
         job_id = str(storage.get("library_job") or "")
+        bid = str(storage.get("bid") or "")
         record = self._follow_library_rename(item.library, message, storage, job_id, record)
 
         def build() -> JobCard:
-            card = JobCard(attachment=record, phase=CardPhase("done"),
-                           on_action=lambda a: self._on_library_action(a, job_id))
-            card.set_phase(CardPhase("done"), status="Sent to the Library · translating as a book")
-            card.buttons.controls = [
-                ft.FilledTonalButton(content="Job", icon=ft.Icons.WORK_HISTORY, key="libjob-job",
-                                     on_click=lambda e: self._on_library_action("job", job_id)),
-                ft.TextButton(content="Library", icon=ft.Icons.LOCAL_LIBRARY, key="libjob-library",
-                              on_click=lambda e: self._on_library_action("library", job_id)),
-            ]
-            return card
+            return self._tool_job_card(record, "Sent to the Library · translating as a book", [
+                ("Job", "WORK_HISTORY", "libjob-job", lambda: self._on_library_action("job", job_id), True),
+                ("Library", "LOCAL_LIBRARY", "libjob-library",
+                 lambda: self._on_library_action("library", job_id, bid), False),
+            ])
 
-        return self._card(f"job-{item.index}", ("library", self.cid, item.index, job_id, record), build)
+        return self._card(f"job-{item.index}", ("library", self.cid, item.index, job_id, bid, record), build)
+
+    def _tool_storage(self, message: Any) -> dict:
+        """A tool-job card message's data: its sidecar entry (``append_tool_message``) under what the
+        message still carries in memory."""
+        storage = message[6] if message is not None and len(message) > 6 and isinstance(message[6], dict) else {}
+        created = str(storage.get("created_at") or "")
+        saved = None
+        if created and self.bound:
+            jobs = self.env.chats.meta(self.cid).get(TOOL_JOBS_META)
+            saved = jobs.get(created) if isinstance(jobs, dict) else None
+        return {**(saved if isinstance(saved, dict) else {}), **storage}
+
+    @staticmethod
+    def _tool_job_card(record: Optional[dict], status: str, buttons: list, *, icon: Optional[str] = None,
+                       meta: Optional[str] = None) -> JobCard:
+        """The static card of a job this chat handed to a tool (a "Save to: Library" translation, a QA
+        scan): where it went and its buttons ``[(label, icon name, key, handler, primary)]``; its live
+        progress, Stop and "Done · Open" are the chat's JobStrip (``chat_card`` False)."""
+        card = JobCard(attachment=record, phase=CardPhase("done"), icon=icon, meta=meta)
+        card.set_phase(CardPhase("done"), status=status)
+        controls: list = []
+        for label, icon_name, key, handler, primary in buttons:
+            kind = ft.FilledTonalButton if primary else ft.TextButton
+            controls.append(kind(content=label, icon=getattr(ft.Icons, icon_name), key=key,
+                                 on_click=lambda e, h=handler: h()))
+        card.buttons.controls = controls
+        return card
 
     def _follow_library_rename(self, index: int, message: Any, storage: dict, job_id: str,
                                record: Optional[dict]) -> Optional[dict]:
@@ -1527,9 +1842,19 @@ class ChatView:
         try:
             updated = dict(storage, source=new)
             self.env.chats.replace_message(self.cid, index, tuple(message[:6]) + (updated,) + tuple(message[7:]))
+            created = str(storage.get("created_at") or "")
+            saved = self.env.chats.meta(self.cid).get(TOOL_JOBS_META)
+            if created and isinstance(saved, dict) and isinstance(saved.get(created), dict):
+                saved = dict(saved)
+                saved[created] = dict(saved[created], source=new)  # what survives the history's save
+                self.env.chats.set_meta(self.cid, TOOL_JOBS_META, saved)
             current = self.env.chats.attachment(self.cid)
             if isinstance(current, dict) and str(current.get("path") or "") == source:
                 self.env.chats.set_attachment(self.cid, dict(current, path=new, name=os.path.basename(new)))
+            attached = self.env.chats.meta(self.cid).get(LIBRARY_ATTACHMENT_META)
+            if isinstance(attached, dict) and _same_path(attached.get("path"), source):
+                # the chat's Library book follows its renamed raw file (the next Send still continues it)
+                self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, dict(attached, path=new))
         except Exception:
             log.debug("following the renamed Library input failed", exc_info=True)
             return record
@@ -1537,13 +1862,130 @@ class ChatView:
             record = dict(record, path=new, name=os.path.basename(new))
         return record
 
-    def _on_library_action(self, action: str, job_id: str = "") -> None:
+    def _on_library_action(self, action: str, job_id: str = "", bid: str = "") -> None:
         if action == "job" and job_id:
             self.navigate("jobs.detail", {"jid": job_id})
         elif action == "job":
             self.navigate("jobs")
+        elif bid:
+            self.navigate("library.book", {"bid": bid})  # the attached Library book's own page
         else:
             self.navigate("library")
+
+    # ---- QA scan from the chat (owner request 2026-10-08) -------------------------------------------
+
+    async def start_chat_qa(self, item: Any = None) -> Optional[str]:
+        """QA scan of a turn's workspace (Result card › QA scan) or of the chat's latest book workspace
+        (＋ › QA scan, ``/qa``; Tools › QA Scanner when the chat has none): the shared scan through a
+        ``qa_scan`` job (``qa_model.chat_qa_job``: Quick Scan, the mobile duplicate-check sample size).
+        Progress, Stop and "Done · Open" are the chat's JobStrip; the chat gets a "QA scan" card."""
+        if not self.bound or self.env.jobs is None:
+            self.navigate("tools.qa")
+            return None
+        if item is not None:
+            folder = await self.env.run_io(self._job_workspace, item)
+            source = self._turn_source(item)
+        else:
+            folder, source = await self.env.run_io(self._latest_workspace)
+            if not folder:
+                self.navigate("tools.qa")  # no book in this chat yet: pick one in Tools › QA Scanner
+                return None
+        if not folder or not await self.env.run_io(qa_scannable, folder, source):
+            self.notify(NOTHING_TO_SCAN)
+            return None
+        from glossarion_mobile.ui.tools import qa_model
+
+        # the one-time mobile move of a saved desktop 1000 to 0 (Tools › QA Scanner runs it too): a chat
+        # scan uses the same effective duplicate-check sample size the QA screen shows
+        store, prefs = getattr(self.env, "store", None), getattr(self.env, "prefs", None)
+        if store is not None and prefs is not None and callable(getattr(store, "set", None)):
+            qa_model.migrate_quick_sample_size(self.env.config_get, store.set, prefs)
+        cid = self.cid
+        chat_title = str((self.env.chats.session(cid) or {}).get("title") or "Chat")
+        job = qa_model.chat_qa_job(folder, source, cid=cid, chat_title=chat_title)
+        if isinstance(job, str):  # why this workspace cannot be scanned here
+            self.notify(job)
+            return None
+        try:
+            job_id = await self.env.jobs.submit(*job)
+        except Exception as exc:
+            self.notify(f"Could not start the QA scan: {exc}")
+            return None
+        name = os.path.basename(os.path.normpath(folder))
+        summary = self._qa_summary_line()
+        body = (f"🔎 **QA scan:** {name}\n\n{summary}. The bar above shows its progress; "
+                "open the report or the chapters here when it is done.")
+        # message[4] is the scanned workspace: a later move into the Library rewrites it with the cards
+        append_tool_message(self.env.chats, cid, body, folder, QA_LABEL,
+                            {"qa_job": str(job_id), "folder": folder, "source": source, "summary": summary})
+        self.render_transcript(follow=True)
+        self.notify(f"QA scan · {name}", action_label="Jobs",
+                    on_action=lambda j=str(job_id): self.navigate("jobs.detail", {"jid": j}))
+        return str(job_id)
+
+    def _qa_summary_line(self) -> str:
+        """``qa_model.chat_qa_summary_line``: the mode and the duplicate-check sample size a chat scan
+        runs with (the saved Tools › QA / Settings › QA value, else the mobile default 0)."""
+        from glossarion_mobile.ui.tools import qa_model
+
+        saved = self.env.config_get("qa_scanner_settings", None) if self.env is not None else None
+        return str(qa_model.chat_qa_summary_line({"qa_scanner_settings": saved} if isinstance(saved, Mapping) else {}))
+
+    def _qa_job_control(self, item: Any, messages: list) -> Any:
+        """A "QA scan" message: the scan's state and Job · Report · Chapters (the tool-job card)."""
+        message = messages[item.index] if 0 <= item.index < len(messages) else None
+        storage = self._tool_storage(message)
+        job_id = str(storage.get("qa_job") or "")
+        folder = str((message[4] if message is not None and len(message) > 4 else "") or storage.get("folder") or "")
+        source = str(storage.get("source") or "")
+        snap = self.env.jobs.snapshot_of(job_id) if (job_id and self.env.jobs is not None) else None
+        state = state_name(snap) if snap is not None else ""
+        status = {"QUEUED": "Queued · starts after the current job", "STARTING": "Scanning…",
+                  "RUNNING": "Scanning…", "STOPPING": "Stopping…", "FORCE_STOPPING": "Stopping…",
+                  "DONE": "Done", "FAILED": "Failed", "STOPPED": "Stopped", "CANCELLED": "Cancelled",
+                  "INTERRUPTED": "Interrupted"}.get(state, "Sent to Jobs")
+        name = os.path.basename(os.path.normpath(folder)) if folder else "workspace"
+        record = {"name": f"QA scan · {name}", "path": folder}
+        summary = str(storage.get("summary") or "") or self._qa_summary_line()  # what the scan ran with
+
+        def build() -> JobCard:
+            return self._tool_job_card(record, status, [
+                ("Job", "WORK_HISTORY", "qajob-job",
+                 lambda: self.navigate("jobs.detail", {"jid": job_id}) if job_id else self.navigate("jobs"), True),
+                ("Report", "ASSESSMENT", "qajob-report", lambda: self._spawn(self.open_qa_report(folder, job_id)), False),
+                ("Chapters", "CHECKLIST", "qajob-chapters",
+                 lambda: self._spawn(self._open_qa_chapters(folder, source)), False),
+            ], icon="FACT_CHECK", meta=summary)
+
+        return self._card(self._mid(item.index) or f"m-{item.index}",  # the Jump-to / search scroll key
+                          ("qa", self.cid, item.index, job_id, folder, status, summary), build)
+
+    async def open_qa_report(self, folder: str, job_id: str = "") -> Optional[str]:
+        """QA card › Report: the scan's ``validation_results.html`` in the QA report viewer."""
+        from glossarion_mobile.ui.tools import qa_model
+
+        path = qa_model.report_path_for(folder) if folder else ""
+        if not path or not await self.env.run_io(os.path.isfile, path):
+            snap = self.env.jobs.snapshot_of(job_id) if (job_id and self.env.jobs is not None) else None
+            ended = state_name(snap) in _TERMINAL_JOB_STATES if snap is not None else False
+            self.notify("This scan wrote no report" if ended else "The scan has not finished yet")
+            return None
+        factory = getattr(self.env, "tools_context", None)
+        ctx = factory() if callable(factory) else None
+        if ctx is None:
+            self.notify("Reports cannot be opened in this session")
+            return None
+        from glossarion_mobile.ui.tools.qa_screen import open_qa_report
+
+        return open_qa_report(ctx, path)
+
+    async def _open_qa_chapters(self, folder: str, source: str) -> Optional[str]:
+        """QA card › Chapters: the scanned workspace in the Progress manager (Retranslate the QA-failed)."""
+        opener = getattr(self.env, "open_progress", None) if self.env is not None else None
+        if not folder or opener is None:
+            self.notify("No output folder for this chat yet")
+            return None
+        return await self._await(opener(folder, source))
 
     def start_plan_async(self) -> None:
         """Start ▾ › Run as async batch (50% off): Tools › Async batch with this file as the source (its
@@ -1557,16 +1999,17 @@ class ChatView:
             return
         opener("tools.async", path)
 
-    def _open_progress(self, item: Any = None) -> None:
+    def _open_progress(self, item: Any = None) -> Any:
         """Job card › Progress: the turn's workspace in the Progress manager (Chapters)."""
-        folder, source = self._reader_target(item)
+        return self._spawn(self._open_progress_async(item))
+
+    async def _open_progress_async(self, item: Any = None) -> Optional[str]:
         opener = getattr(self.env, "open_progress", None) if self.env is not None else None
+        folder, source = await self.env.run_io(self._reader_target, item) if self.env is not None else ("", "")
         if not folder or opener is None:
             self.notify("No output folder for this chat yet")
-            return
-        result = opener(folder, source)
-        if hasattr(result, "__await__"):
-            self._spawn(result)
+            return None
+        return await self._await(opener(folder, source))
 
     def cancel_plan(self) -> None:
         """Cancel removes the plan and the unsent user_file turn (§2.12.1)."""
@@ -1609,16 +2052,50 @@ class ChatView:
             self._spawn(self._export_outputs(item))
         elif action == "compile":
             self._compile_menu(item)
-        elif action == "migrate":
-            self.migrate_job_workspace(item)
+        elif action == "library":
+            self._spawn(self.open_in_library(item))
+        elif action == "qa":
+            self._spawn(self.start_chat_qa(item))
         elif action in ("read", "open_reader"):
             self._spawn(self._open_reader(item))
         elif action == "open_output":
             self._spawn(self._open_job_output(item))
         elif action in ("resume", "retry"):
-            self._resume_last()
+            if item is None:
+                self._resume_last()
+            else:
+                self._spawn(self._resume_turn(item))
         else:
             self.notify("This action is not available here")
+
+    async def open_in_library(self, item: Any = None) -> Optional[str]:
+        """Result card › Open in Library: the Book page of the Library book this turn's workspace became
+        (auto-migrate, ChatEnv.library_book); the Library home when the book cannot be told."""
+        folder = await self.env.run_io(self._job_workspace, item) if self.env is not None else ""
+        finder = getattr(self.env, "library_book", None) if self.env is not None else None
+        bid = None
+        if folder and finder is not None:
+            try:
+                bid = await self._await(finder(folder))
+            except Exception:
+                log.debug("looking up the Library book failed", exc_info=True)
+                bid = None
+        if bid:
+            self.navigate("library.book", {"bid": str(bid)})
+            return str(bid)
+        self.navigate("library")
+        return None
+
+    async def _resume_turn(self, item: Any) -> Any:
+        """Resume / Retry failed of a Result card: a workspace that moved into the Library continues in
+        the Library's translate sheet (``ChatEnv.library_translate``: its own progress file); the chat's
+        run root otherwise (``ChatRuns.resubmit``)."""
+        folder, in_attachments = await self.env.run_io(self._job_workspace_state, item)
+        hand_off = getattr(self.env, "library_translate", None)
+        if folder and not in_attachments and hand_off is not None:
+            return await self._await(hand_off(folder, self._turn_source(item)))
+        self._resume_last()
+        return None
 
     async def _open_reader(self, item: Any = None) -> None:
         """Job card Read / Open reader (U5): the turn's workspace in the Reader."""
@@ -1626,7 +2103,7 @@ class ChatView:
         if opener is None:
             self.notify("The Reader is not available in this session")
             return
-        folder, source = self._reader_target(item)
+        folder, source = await self.env.run_io(self._reader_target, item)
         result = opener(folder, source)
         if hasattr(result, "__await__"):
             await result
@@ -1638,23 +2115,33 @@ class ChatView:
         fn = getattr(self.env.runs, "turn_index", None) if self.env is not None else None
         return fn(self.cid, run) if callable(fn) else getattr(run, "user_index", None)
 
-    def _reader_target(self, item: Any = None) -> tuple:
-        """(workspace folder, attachment path) of the job card's turn (default: the chat's run)."""
+    def _turn_source(self, item: Any = None) -> str:
+        """The attachment path of the job card's turn (default: the turn of the chat's run)."""
         runs = self.env.runs if self.bound else None
-        run = runs.run_for(self.cid) if runs is not None else None
-        run_turn = self._run_turn(run)
         index = getattr(item, "index", None)
-        if index is None and run is not None:
-            index = run_turn
-        source = ""
+        if index is None and runs is not None:
+            index = self._run_turn(runs.run_for(self.cid))
         messages = self._messages()
         if index is not None and 0 <= int(index) < len(messages):
             message = messages[int(index)]
             if message and len(message) > 2 and str(message[0]) == "user_file":
-                source = str(message[2] or "")
-        folder = ""
-        if run is not None and (index is None or run_turn == index):
-            folder = str(run.output_dir or run.output_folder or "")
+                return str(message[2] or "")
+        return ""
+
+    def _reader_target(self, item: Any = None) -> tuple:
+        """Blocking: (workspace folder, attachment path) of the job card's turn (default: the chat's run).
+
+        The turn's own workspace comes first (``_job_workspace``: its ``Attachments/<stem>`` folder, or the
+        Library folder it moved to); the run's pipeline folder only while it exists: a finished run's
+        temp root is deleted, which left Progress / the QA-failed chip on a missing folder (U9)."""
+        source = self._turn_source(item)
+        folder = self._job_workspace(item) if item is not None else ""
+        if not folder:
+            runs = self.env.runs if self.bound else None
+            run = runs.run_for(self.cid) if runs is not None else None
+            index = getattr(item, "index", None)
+            if run is not None and (index is None or self._run_turn(run) == index):
+                folder = next((str(c) for c in (run.output_dir, run.output_folder) if c and os.path.isdir(str(c))), "")
         return folder or self._last_output_folder(), source
 
     def _last_output_folder(self) -> str:
@@ -1875,8 +2362,18 @@ class ChatView:
     def _on_attachment_removed(self) -> None:
         if self.bound:
             self.env.chats.set_attachment(self.cid, None)
+            self._forget_library_attachment()
         self._set_mode(self.state.output_mode.value.attachment_changed(None))
         self.refresh_send()
+
+    def _forget_library_attachment(self, keep_path: str = "") -> None:
+        """The composer no longer holds the chat's Library book (removed, or another file attached)."""
+        if not self.bound:
+            return
+        attached = self.env.chats.meta(self.cid).get(LIBRARY_ATTACHMENT_META)
+        if attached is not None and not (keep_path and isinstance(attached, dict)
+                                         and _same_path(attached.get("path"), keep_path)):
+            self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, None)
 
     def attach_file(self, path: str) -> bool:
         """``_set_attachment``: one supported file per turn; images/CBZ switch to Vision · auto."""
@@ -1893,6 +2390,7 @@ class ChatView:
         self.composer.set_attachment(record)
         if self.bound:
             self.env.chats.set_attachment(self.cid, record)
+            self._forget_library_attachment(keep_path=str(record.get("path") or path))
         name = record["name"]
         self.caption.show(f"Attached {name} · Vision enabled" if is_vision_attachment(path) else f"Attached {name}")
         self.refresh_send()
@@ -2063,9 +2561,9 @@ class ChatView:
             f"\n- … +{len(files) - 50} more" if len(files) > 50 else "")
         self.env.chats.record_user_turn(cid, ("user", f"📚 Batch translation ({len(files)} files):\n{names}"),
                                         f"Batch · {len(files)} files")
-        self.env.chats.append_messages(cid, [("assistant", f"📚 **Batch started:** {len(files)} file(s) translate as "
-                                              "books in the output folder (Library shelf). Follow it in Jobs.",
-                                              "", "", "", LIBRARY_LABEL, {"library_job": str(job_id)})])
+        append_tool_message(self.env.chats, cid, f"📚 **Batch started:** {len(files)} file(s) translate as books in "
+                                                 "the output folder (Library shelf). Follow it in Jobs.", "",
+                            LIBRARY_LABEL, {"library_job": str(job_id)})
         self.render_transcript(follow=True)
         self.notify(f"Translating · {title}", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
         return job_id
@@ -2244,8 +2742,8 @@ class ChatView:
             self.notify("This chat action is not available here")
 
     def _on_suggestion(self, suggestion: str) -> None:
-        if suggestion == "open_library":
-            self.navigate("library")
+        if suggestion == "from_library":
+            self.open_library_picker()  # in-chat: the book is attached here
         elif suggestion == "manga_page":
             self.navigate("tools.manga")
         elif suggestion == "attach_book":
@@ -2634,10 +3132,14 @@ class ChatView:
         else:
             self.notify("This source is not available in this build")
 
-    def open_library_picker(self) -> Any:
-        """＋ › From Library (UI_SPEC §2.5 item 1): the Tools SourcePicker on Library books; the picked
-        book's raw file (its Library/Raw copy) is attached to this chat, so a translation reuses the
-        book's workspace. Without the Tools feature the Library opens instead."""
+    def open_library_picker(self, query: str = "") -> Any:
+        """＋ › From Library, the empty-chat "From Library" chip and ``/library`` (UI_SPEC §2.5 item 1):
+        the Library's books in the Tools SourcePicker, inside the chat - searchable (the Library search),
+        newest first, the Library's own rows with covers. The picked book is attached to this chat
+        (``attach_library_book``); Send then continues it in its own workspace ("Save to: Library").
+        A long-press starts a multi-selection (the Library shelves' long-press): "Use N" puts the books
+        in one batch plan (``set_batch``; its Start runs one translate job, each book in its own
+        workspace). Without the Tools feature the Library opens instead."""
         factory = getattr(self.env, "tools_context", None) if self.env is not None else None
         ctx = factory() if callable(factory) else None
         if ctx is None or self.page is None:
@@ -2645,23 +3147,56 @@ class ChatView:
             return None
         from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
-        def eligible(target: Any) -> Optional[str]:
-            source = str(getattr(target, "source", "") or "")
-            if not source or not os.path.isfile(source):
-                return "No raw file on this device"
-            if not is_supported_attachment(source):
-                return "Not an attachable file type"
-            return None
-
         def chosen(targets: list) -> None:
-            if targets:
-                self.attach_file(str(targets[0].source))
+            if len(targets) > 1:
+                self.set_batch([str(getattr(t, "source", "") or "") for t in targets])
+            elif targets:
+                self.attach_library_book(targets[0])
 
-        picker = SourcePicker(ctx, title="Attach from Library", multi=False, eligible=eligible, on_done=chosen,
-                              segment="library", find_folder=False, browse_label="Pick a file…")
-        picker.show(self.page)
+        # (the picker closes itself before its header action runs)
+        picker = SourcePicker(ctx, title="Attach from Library", multi=False, eligible=library_attach_reason,
+                              on_done=chosen, segment="library", segments=("library",), searchable=True,
+                              book_rows=True, include_unresolved=True, query=str(query or ""),
+                              header_action=("Open Library", lambda: self.navigate("library")), find_folder=False,
+                              long_press_selects=True)
         self.library_picker = picker
+        picker.show(self.page)
         return picker
+
+    def attach_library_book(self, target: Any) -> bool:
+        """Attach a Library book's raw file to this chat and remember it as the chat's Library book
+        (sidecar meta ``library_attachment`` ``{bid, path}``: the next Send defaults to "Save to:
+        Library"); a snackbar with Remove."""
+        source = str(getattr(target, "source", "") or "")
+        if not source or not self.attach_file(source):
+            return False
+        bid = str(getattr(target, "bid", "") or "")
+        if self.bound:
+            self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, {"bid": bid, "path": source})
+        self.notify(f"Attached {os.path.basename(source)} from the Library", action_label="Remove",
+                    on_action=self.composer._remove_attachment)
+        return True
+
+    async def attach_library_query(self, query: str) -> Optional[str]:
+        """``/library <title>``: one matching Library book is attached at once (an exact title wins over
+        partial matches); several open the picker with the query; none says so (with Open Library)."""
+        query = str(query or "").strip()
+        service = self._library_service()
+        if service is None or not query:
+            self.open_library_picker(query)
+            return None
+        snapshot = getattr(service, "snapshot", None)
+        if snapshot is not None and not getattr(snapshot, "scanned_at", None) and hasattr(service, "refresh"):
+            await service.refresh(quiet=True, reason="chat /library")  # first use: scan quietly
+        matches = await self.env.run_io(library_matches, service, query)
+        if len(matches) == 1:
+            return "attached" if self.attach_library_book(matches[0]) else None
+        if not matches:
+            self.notify(f"No Library book matches “{query}”", action_label="Open Library",
+                        on_action=lambda: self.navigate("library"))
+            return None
+        self.open_library_picker(query)
+        return "picker"
 
     async def _paste_clipboard(self) -> None:
         reader = getattr(self.env, "read_clipboard", None) if self.env is not None else None
@@ -2688,6 +3223,10 @@ class ChatView:
         self.composer.set_plus_open(False)
         if tool_id == "retranslate":
             self._spawn(self.open_retranslate())
+            return
+        if tool_id == "qa":
+            # this chat's latest book workspace (Tools › QA Scanner when it has none)
+            self._spawn(self.start_chat_qa())
             return
         route = TOOL_ROUTES.get(tool_id)
         if route is not None:
@@ -2756,7 +3295,12 @@ class ChatView:
             self._on_new_scratch()
         elif name == "export":
             self.open_export()
-        elif name in ("library", "jobs"):
+        elif name == "library":
+            if arg:
+                self._spawn(self.attach_library_query(arg))
+            else:
+                self.open_library_picker("")
+        elif name == "jobs":
             self.navigate(name)
         elif name == "settings":
             if arg:
@@ -2875,6 +3419,7 @@ class ChatView:
             on_changed=self.apply_settings_changed,
             on_choose_model=lambda scope: self.open_model_sheet("model", chat_scope=scope == "chat"),
             scope=scope,
+            prefs=getattr(self.env, "prefs", None),  # the mobile-only All-chats values (Always accept)
         )
         self.settings_sheet.show(self.page)
         return self.settings_sheet
@@ -3350,7 +3895,7 @@ class ChatView:
 
         return self._spawn(go())
 
-    # ---- U7: attachments / migrate / retranslate ------------------------------------------------------
+    # ---- U7: attachments / Library hand-off / retranslate -------------------------------------------
 
     def attachments_screen(self, match: Any = None) -> Any:
         from glossarion_mobile.ui.chat.attachments import AttachmentsScreen
@@ -3369,35 +3914,40 @@ class ChatView:
         )
 
     def _workspace_busy(self, cid: str, folder: str) -> bool:
-        """Attachments manager guard (UI_SPEC §2.17): chat ``cid``'s run, or an active / queued job
-        whose folder is the workspace or inside it (the job card's Compile, ＋ Retranslate chapters)."""
-        from glossarion_mobile.ui.chat.attachments import job_writes_into
+        """Attachments manager guard (UI_SPEC §2.17): ``attachments.workspace_busy`` (shared with the
+        Library auto-migrate): chat ``cid``'s run, or an active / queued job whose folder is the
+        workspace or inside it (the job card's Compile, ＋ Retranslate chapters)."""
+        from glossarion_mobile.ui.chat.attachments import workspace_busy
 
         env = self.env
         if env is None:
             return False
-        if env.runs is not None and env.runs.live_run(cid) is not None:
-            return True
-        pending = getattr(env.jobs, "pending", None) if env.jobs is not None else None
-        try:
-            snapshots = pending() if callable(pending) else []
-        except Exception:
-            snapshots = []
-        return any(job_writes_into(snap, folder) for snap in snapshots)
+        return workspace_busy(env.runs, env.jobs, cid, folder)
+
+    def on_workspace_migrated(self, cid: Any, target: str, source: str = "") -> None:
+        """A workspace of chat ``cid`` moved into the Library (ChatFeature's auto-migrate, on the UI
+        loop; it records the raw and shows "Added to the Library" itself): the turn's stored paths now
+        point at ``target``, so its cards look their workspace up again ("Open in Library" turns on)."""
+        self._drop_extras(cid)
+        if str(cid) != self.cid or not self.bound:
+            return
+        self.header.set_attachments(self._attachment_count(self.cid))
+        self.render_transcript()
+        self._push(self.header.wrapper)
 
     def _after_migrate(self, target: str, source: str) -> None:
-        self.render_transcript()  # the turn's stored paths now point at the migrated folder
+        """The Attachments manager moved a workspace (a name-collision merge it confirmed)."""
+        self.on_workspace_migrated(self.cid, target, source)
         hook = getattr(self.env, "after_migrate", None)
         if hook is not None:
             try:
                 result = hook(target, source)
                 if asyncio.iscoroutine(result):
-                    self._spawn(result)
+                    self._spawn(result)  # the hook's snackbar offers "Open book"
                     return
             except Exception:
                 log.exception("after-migrate hook failed")
-        self.notify("Attachment migrated")
-        self.header.set_attachments(self._attachment_count(self.cid))
+        self.notify("Added to the Library")
 
     async def _share_workspace(self, folder: str) -> None:
         def pick() -> list:
@@ -3413,51 +3963,81 @@ class ChatView:
         await self._export_document(documents[0])
 
     def _job_workspace(self, item: Any = None) -> str:
-        """The ``Attachments/<stem>`` workspace of a job card's turn (its request cards' folder)."""
+        """Blocking: the workspace of a job card's turn (``_job_workspace_state``)."""
+        return self._job_workspace_state(item)[0]
+
+    def _job_workspace_state(self, item: Any = None) -> tuple:
+        """Blocking: ``(folder, in_attachments)`` of a job card's turn: its ``Attachments/<stem>``
+        workspace (its request cards' folder, else the attachment's stem), or the Library folder the
+        workspace moved to (auto-migrate rewrote the cards' folders); ``("", True)`` without one."""
         messages = self._messages()
         indices = list(getattr(item, "requests", None) or []) + [getattr(item, "report", None), getattr(item, "actions", None)]
         folder = turn_workspace(messages, indices)
         if folder:
-            return folder
-        _folder, source = self._reader_target(item)
-        stem = os.path.splitext(os.path.basename(source))[0].lower()
+            return folder, True
+        moved = _moved_workspace(messages, indices)
+        if moved:
+            return moved, _in_attachments(moved)
+        stem = os.path.splitext(os.path.basename(self._turn_source(item)))[0].lower()
         for folder in self.env.chats.attachment_folders(self.cid) if self.bound else []:
             if os.path.basename(os.path.normpath(folder)).lower() == stem:
-                return folder
-        return ""
+                return folder, True
+        return "", True
+
+    def _library_reason(self, item: Any) -> Optional[str]:
+        """Blocking: why "Open in Library" is off for a turn (None: its workspace is a Library book)."""
+        try:
+            folder, in_attachments = self._job_workspace_state(item)
+        except Exception:
+            log.debug("workspace lookup failed", exc_info=True)
+            return LIBRARY_WAIT_REASON
+        if folder and not in_attachments:
+            return None
+        try:
+            import library_core  # shared (U5)
+
+            books = tuple(getattr(library_core, "RAW_IMPORT_EXTENSIONS", ()) or ())
+        except Exception:
+            books = ()
+        extension = os.path.splitext(self._turn_source(item))[1].lower()
+        if books and extension and extension not in books:
+            return "Only books (EPUB, TXT, PDF, HTML) are added to the Library"
+        return LIBRARY_WAIT_REASON
 
     def _latest_workspace(self) -> tuple:
-        """(the chat's most recently written ``Attachments/<stem>`` workspace, its attachment path)."""
-        folders = self.env.chats.attachment_folders(self.cid) if self.bound else []
-        if not folders:
+        """Blocking: (the chat's most recently written book workspace - an ``Attachments/<stem>`` folder or
+        one that moved into the Library -, its attachment path)."""
+        messages = self._messages()
+        candidates: dict = {}
+        for folder in self.env.chats.attachment_folders(self.cid) if self.bound else []:
+            candidates.setdefault(os.path.normcase(os.path.abspath(folder)), (folder, ""))
+        for item in build_items(messages, 0, len(messages)):
+            if item.kind != "job" or item.index < 0:
+                continue
+            moved = _moved_workspace(messages, list(item.requests) + [item.report, item.actions])
+            if moved and not _in_attachments(moved):
+                message = messages[item.index]
+                source = str(message[2] or "") if len(message) > 2 and str(message[0]) == "user_file" else ""
+                candidates[os.path.normcase(os.path.abspath(moved))] = (moved, source)
+        if not candidates:
             return "", ""
 
-        def written(path: str) -> float:
-            progress = os.path.join(path, "translation_progress.json")
+        def written(entry: tuple) -> float:
+            progress = os.path.join(entry[0], "translation_progress.json")
             try:
-                return os.path.getmtime(progress if os.path.isfile(progress) else path)
+                return os.path.getmtime(progress if os.path.isfile(progress) else entry[0])
             except OSError:
                 return 0.0
 
-        folder = max(folders, key=written)
-        stem = os.path.basename(os.path.normpath(folder)).lower()
-        source = ""
-        for message in reversed(self._messages()):
-            if message and str(message[0]) == "user_file" and len(message) > 2:
-                if os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower() == stem:
-                    source = str(message[2] or "")
-                    break
+        folder, source = max(candidates.values(), key=written)
+        if not source:
+            stem = os.path.basename(os.path.normpath(folder)).lower()
+            for message in reversed(messages):
+                if message and str(message[0]) == "user_file" and len(message) > 2:
+                    if os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower() == stem:
+                        source = str(message[2] or "")
+                        break
         return folder, source
-
-    def migrate_job_workspace(self, item: Any = None) -> Any:
-        """Job card › Migrate: the desktop Migrate of this turn's workspace (collision dialog first)."""
-        if not self.bound:
-            return None
-        folder = self._job_workspace(item)
-        if not folder:
-            self.notify("This turn has no attachment workspace to migrate")
-            return None
-        return self.attachments_screen().migrate(folder)
 
     async def open_retranslate(self, chapters: Optional[tuple] = None) -> Optional[str]:
         """＋ › Retranslate chapters: the Progress manager's Chapters on this chat's attachment workspace
@@ -3465,9 +4045,9 @@ class ChatView:
         if self.env is None or self.env.open_progress is None:
             self.navigate("tools.progress")
             return None
-        folder, source = self._latest_workspace()
+        folder, source = await self.env.run_io(self._latest_workspace)
         if not folder:
-            folder, source = self._reader_target(None)
+            folder, source = await self.env.run_io(self._reader_target, None)
         if not folder:
             self.notify("Attach a book and translate it first: Retranslate works on its chapters")
             return None

@@ -7,7 +7,8 @@ right after ``_install_chat()`` (it uses the chat feature's OAuthBridge and Chat
    slots, project picker), ``/settings/profiles`` (+ ``/<pid>``), ``/settings/prefill``,
    ``/settings/appearance``, ``/settings/storage``, ``/settings/backup``,
    ``/settings/import``, ``/settings/about``, ``/settings/danger``, ``/settings/notifications`` (U9:
-   permission, battery optimisation, iOS background note) and ``/welcome`` (the
+   the real permission state, Allow / Open system settings, a test notification, "Always accept generated
+   glossaries", battery optimisation, iOS background note) and ``/welcome`` (the
    chat feature's Welcome flow plus the step-2 sign-ins, the Endpoints link and the
    permission requests); every other route falls through;
 2. marks those pages implemented on the Settings home (no "Arrives in" chip) and
@@ -364,16 +365,10 @@ class AccountsProfilesFeature:
 
     @staticmethod
     async def request_notifications(background: Any) -> str:
-        """Welcome step 4: Android notification permission / iOS notification setup (BackgroundExecution)."""
-        from glossarion_mobile.services.background import PREF_NOTIFICATION_ASKED
-
-        if getattr(background, "is_ios", False):
-            notifications = getattr(background, "notifications", None)
-            if notifications is not None:
-                await notifications.ensure_init()
-            return "requested"
-        background._set_pref(PREF_NOTIFICATION_ASKED, True)
-        return await background._request_permission("NOTIFICATION")
+        """Welcome step 4 and Settings › Notifications & background: the same request as the first Run
+        (``BackgroundExecution.request_notification_permission``: Android notification permission, iOS
+        notification set-up; only a definite answer is remembered, so a failed request is asked again)."""
+        return await background.request_notification_permission()
 
     @staticmethod
     async def request_battery(background: Any) -> str:

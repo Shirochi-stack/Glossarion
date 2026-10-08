@@ -44,8 +44,14 @@ from glossarion_mobile.ui.settings.model import (
     plain_text,
     spec_attr,
 )
+from glossarion_mobile.job_kinds.qa import MOBILE_QUICK_SAMPLE_SIZE, QUICK_SAMPLE_KEY
 
-__all__ = ["SchemaAccess", "SearchHit", "SectionInfo", "UNAVAILABLE_REASON", "curate_sections"]
+__all__ = ["MOBILE_DISPLAY_DEFAULTS", "SchemaAccess", "SearchHit", "SectionInfo", "UNAVAILABLE_REASON",
+           "curate_sections"]
+
+#: Display defaults that differ on Glossarion Mobile (owner 2026-10-08); the QA job applies the same
+#: value when config.json has none, so Settings › QA shows what the scans use ("Reset" means 0).
+MOBILE_DISPLAY_DEFAULTS = {".".join(QUICK_SAMPLE_KEY): MOBILE_QUICK_SAMPLE_SIZE}
 
 log = logging.getLogger("glossarion.settings")
 
@@ -326,6 +332,8 @@ class SchemaAccess:
         returns None on the UI loop (``pending_defaults``); ``warm_defaults`` resolves them on a
         worker thread, because importing e.g. extract_glossary_from_epub takes seconds."""
         name = ".".join(key) if isinstance(key, tuple) else str(key)
+        if name in MOBILE_DISPLAY_DEFAULTS:
+            return copy.deepcopy(MOBILE_DISPLAY_DEFAULTS[name])
         with self._defaults_lock:
             if name in self._defaults:
                 return copy.deepcopy(self._defaults[name])

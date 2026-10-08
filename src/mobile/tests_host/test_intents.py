@@ -38,7 +38,9 @@ from glossarion_mobile.services.intents import (  # noqa: E402
     ACTION_ADD_TO_LIBRARY,
     ACTION_OPEN_IN_READER,
     ACTION_TRANSLATE_NEW_CHAT,
+    READER_EXTENSIONS,
     READER_REASON,
+    READER_TYPES_REASON,
     IntentRouter,
 )
 from glossarion_mobile.services.library import LibraryService, SharedCore  # noqa: E402
@@ -150,18 +152,24 @@ def bridge(tmp_path, platform="android"):
 # ==========================================================================
 
 
-def test_open_in_reader_needs_a_handler_and_an_epub(tmp_path, lib):
+def test_open_in_reader_needs_a_handler_and_an_epub_or_txt(tmp_path, lib):
     files, cache = bridge(tmp_path)
     bare = IntentRouter(files=files)
     epub = types.SimpleNamespace(imported=types.SimpleNamespace(extension=".epub"))
+    txt = types.SimpleNamespace(imported=types.SimpleNamespace(extension=".txt"))
     pdf = types.SimpleNamespace(imported=types.SimpleNamespace(extension=".pdf"))
     assert {a.id: a for a in bare.actions_for(epub)}[ACTION_OPEN_IN_READER].disabled_reason == READER_REASON
+    assert {a.id: a for a in bare.actions_for(txt)}[ACTION_OPEN_IN_READER].disabled_reason == READER_REASON
     router = IntentRouter(files=files, handlers={ACTION_OPEN_IN_READER: lambda imp: "bid"})
     actions = {a.id: a for a in router.actions_for(epub)}
     assert actions[ACTION_OPEN_IN_READER].disabled_reason is None
     assert actions[ACTION_ADD_TO_LIBRARY].disabled_reason is None
+    txt_actions = {a.id: a for a in router.actions_for(txt)}
+    assert txt_actions[ACTION_OPEN_IN_READER].disabled_reason is None  # device report: the Reader reads TXT
+    assert txt_actions[ACTION_ADD_TO_LIBRARY].disabled_reason is None
+    assert READER_EXTENSIONS == (".epub", ".txt")
     assert {a.id: a for a in router.actions_for(pdf)}[ACTION_OPEN_IN_READER].disabled_reason == \
-        "The Reader opens EPUB files"
+        READER_TYPES_REASON == "The Reader opens EPUB and TXT files"
 
 
 # ==========================================================================
@@ -272,3 +280,33 @@ def test_open_in_reader_prefers_the_reader_feature(tmp_path, lib):
     imp = types.SimpleNamespace(imported=types.SimpleNamespace(path=path, name="Book.epub", extension=".epub"))
     assert asyncio.run(intents.perform(ACTION_OPEN_IN_READER, imp)) == "abcdef123456"
     assert opened[-1][0] is None and opened[-1][1]["path"] == path and not navigated
+
+
+@needs_flet
+def test_shared_txt_opens_in_the_reader(tmp_path, lib):
+    """Device report issue 2: a .txt shared / opened with Glossarion gets an enabled "Open in Reader"
+    routed through ``LibraryFeature.open_shared_in_reader`` to ``/reader/<bid>`` with the Inbox copy."""
+    from glossarion_mobile.ui.library.feature import LibraryFeature
+
+    files, cache = bridge(tmp_path)
+    intents = IntentRouter(files=files, handlers={ACTION_TRANSLATE_NEW_CHAT: lambda imp: None})
+    app, navigated, notes = _app(tmp_path, files, intents)
+    feature = asyncio.run(LibraryFeature.install(app, service=LibraryService(
+        core=SharedCore({"library_core": lib}), prefs=app.prefs, files=files)))
+    assert intents.handlers[ACTION_OPEN_IN_READER] == feature.open_shared_in_reader
+    shared = write(cache / "shared" / "Story.txt", "첫 문단.\n\n둘째 문단.".encode("utf-8"))
+
+    async def scenario():
+        [imp] = await intents.handle([{"id": "t1", "kind": "file", "path": shared, "name": "Story.txt"}])
+        assert imp.imported.extension == ".txt"
+        assert {a.id: a for a in imp.actions}[ACTION_OPEN_IN_READER].disabled_reason is None
+        bid = await intents.perform(ACTION_OPEN_IN_READER, imp)
+        assert bid and navigated[-1][0] == "reader" and navigated[-1][1] == {"bid": bid}
+        assert feature.service.book_for_bid(bid)["path"] == os.path.abspath(imp.imported.path)
+        return imp
+
+    imp = asyncio.run(scenario())
+    from glossarion_mobile.ui.reader.session import SOURCE_TXT, plan_for_file
+
+    plan = plan_for_file(imp.imported.path)  # what the Reader opens for a path-only target
+    assert plan.source_kind == SOURCE_TXT and plan.mode == "plain" and plan.title == "Story"

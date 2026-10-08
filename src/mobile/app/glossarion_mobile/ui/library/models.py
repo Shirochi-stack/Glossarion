@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from glossarion_mobile.services.library import book_key
 from glossarion_mobile.ui.library.colors import type_badge
 
 __all__ = [
@@ -37,13 +38,17 @@ __all__ = [
     "SORTS",
     "STATE_FILTERS",
     "build_card",
+    "card_model_for",
     "card_progress",
     "density_preset",
     "effective_density",
     "info_line",
     "language_badge",
+    "next_page_end",
     "next_tristate",
     "page_size_value",
+    "SCROLL_APPEND_PX",
+    "wants_next_page",
     "size_text",
     "visible_books",
 ]
@@ -71,6 +76,8 @@ SORTS = (("date", "Date"), ("name", "A-Z"), ("size", "Size"))  # SORT_DATE / SOR
 FORMATS = (("all", "All"), ("epub", "EPUB"), ("txt", "TXT"), ("pdf", "PDF"), ("html", "HTML"), ("image", "IMG"))
 PAGE_SIZES = (("20", "20"), ("50", "50"), ("100", "100"), ("250", "250"), ("500", "500"), ("all", "All"))
 DEFAULT_PAGE_SIZE = 20
+#: A paged book list appends its next page when the scroll comes this close to the end.
+SCROLL_APPEND_PX = 600
 
 #: Tri-state shelf filters (UI_SPEC §3.1 Filter tab): id -> (label, predicate over the scanned row).
 STATE_FILTERS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {
@@ -114,6 +121,21 @@ def page_size_value(value: Any) -> int:
     except ValueError:
         return DEFAULT_PAGE_SIZE
     return number if number > 0 else 0
+
+
+def next_page_end(rendered: int, total: int, page_size: int) -> int:
+    """Library paging (Library home, the chat's Library picker): where the next page of ``total`` rows
+    ends when ``rendered`` are built; ``page_size`` 0 (``page_size_value`` of "All") builds them all."""
+    return min(int(total), int(rendered) + (int(page_size) if page_size > 0 else int(total)))
+
+
+def wants_next_page(e: Any, rendered: int, total: int) -> bool:
+    """An ``on_scroll`` event within ``SCROLL_APPEND_PX`` of the end while rows are still unbuilt."""
+    pixels = getattr(e, "pixels", None)
+    maximum = getattr(e, "max_scroll_extent", None)
+    if pixels is None or maximum is None:
+        return False
+    return maximum - pixels < SCROLL_APPEND_PX and rendered < total
 
 
 def size_text(size: Any) -> str:
@@ -318,6 +340,34 @@ def build_card(
         signature=signature,
         tooltip=name if not raw_titles else f"{title}\n{name}",
     )
+
+
+def card_model_for(
+    service: Any,
+    book: Mapping[str, Any],
+    *,
+    views: Optional[Mapping[str, Any]],
+    raw_titles: bool,
+    dark: bool,
+    selected: bool = False,
+    has_continue: bool = False,
+    key: Optional[str] = None,
+    signatures: Optional[Mapping[str, Any]] = None,
+) -> CardModel:
+    """The ``CardModel`` the Library renders for ``book``, from the ``LibraryService`` (route id, the
+    shared card badge / size label, the raw title when ``raw_titles`` is on, the compiling ribbon) and
+    the last scan's ``views`` (card progress views) / ``signatures`` (default: the service snapshot's),
+    both keyed by ``key`` (default ``book_key(book)``). The one card model of the Library home, the
+    chat's Library picker and any other Library list."""
+    key = key or book_key(book)
+    if signatures is None:
+        signatures = getattr(getattr(service, "snapshot", None), "signatures", None) or {}
+    badge, size = service.card_badge(book)
+    return build_card(
+        book, key=key, bid=service.bid_for(book), view=(views or {}).get(key), raw_titles=raw_titles,
+        raw_title=service.raw_title(book) if raw_titles else None, compiling=service.is_compiling(book),
+        has_continue=has_continue, selected=selected, signature=signatures.get(key), dark=dark,
+        badge_text=badge, size_label=size)
 
 
 # ---------------------------------------------------------------------------

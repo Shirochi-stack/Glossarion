@@ -1,7 +1,7 @@
 """Slash commands (UI_SPEC §2.7): "/" at the start of the composer field opens a popover of the
 matching commands (at most six rows visible) right above the composer; tapping one inserts it (a
-command that takes an argument) or runs it. Send / Enter on a complete command runs it instead of
-sending the text.
+command that takes an argument) or runs it (also a command whose argument is optional, e.g.
+``/library [title]``). Send / Enter on a complete command runs it instead of sending the text.
 
 ``SLASH_COMMANDS`` is the §2.7 table; :func:`match_commands` filters it for the typed prefix and
 :func:`parse_command` splits a complete command line into (command, argument). The chat view runs
@@ -44,6 +44,10 @@ class SlashCommand:
     name: str  # what follows the "/" ("compile epub" has a space)
     description: str
     arg: str = ""  # argument placeholder shown in the popover ("<range>", "text|vision|…")
+    optional: bool = False  # the argument may be left out: a popover tap runs the bare command
+    #: it sends text to the model (or opens a tool whose job does); the others also run from Send while
+    #: Send is blocked (not signed in, no key, ...): ``/library``, ``/model``, ``/qa`` need no model
+    uses_model: bool = False
 
     @property
     def label(self) -> str:
@@ -51,17 +55,17 @@ class SlashCommand:
 
 
 SLASH_COMMANDS: tuple[SlashCommand, ...] = (
-    SlashCommand("glossary", "Extract a glossary"),
-    SlashCommand("qa", "QA scan"),
+    SlashCommand("glossary", "Extract a glossary", uses_model=True),
+    SlashCommand("qa", "QA scan this chat's book (Quick Scan)"),
     SlashCommand("compile epub", "Compile an EPUB"),
     SlashCommand("compile pdf", "Compile a PDF"),
-    SlashCommand("headers", "Translate headers"),
-    SlashCommand("metadata", "Translate metadata"),
-    SlashCommand("manga", "Manga translator"),
-    SlashCommand("review", "Review generator"),
-    SlashCommand("async", "Async batch"),
+    SlashCommand("headers", "Translate headers", uses_model=True),
+    SlashCommand("metadata", "Translate metadata", uses_model=True),
+    SlashCommand("manga", "Manga translator", uses_model=True),
+    SlashCommand("review", "Review generator", uses_model=True),
+    SlashCommand("async", "Async batch", uses_model=True),
     SlashCommand("progress", "Progress manager"),
-    SlashCommand("retranslate", "Retranslate chapters", "<range>"),
+    SlashCommand("retranslate", "Retranslate chapters", "<range>", uses_model=True),
     SlashCommand("mode", "Switch the output mode", "|".join(MODE_ARGS)),
     SlashCommand("model", "Pick a model", "<query>"),
     SlashCommand("profile", "Prompt profile", "<name>"),
@@ -69,7 +73,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("policy", "Glossary policy of this chat", "|".join(POLICY_ARGS)),
     SlashCommand("scratch", "New scratch chat"),
     SlashCommand("export", "Export this chat"),
-    SlashCommand("library", "Open the Library"),
+    SlashCommand("library", "Attach a Library book", "[title]", optional=True),
     SlashCommand("jobs", "Open Jobs"),
     SlashCommand("settings", "Search settings", "<query>"),
 )

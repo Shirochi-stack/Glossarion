@@ -28,6 +28,8 @@ JSON-serialisable ``params`` built by :func:`job_params`:
         "options": {...},                          # DirectTextRunOptions(**options).apply_to(owner)
         "config_overrides": {"model": ..., ...},   # per-chat model/profile/target, applied to the
                                                    # config snapshot before HeadlessOwner is built
+        "auto_accept_glossary": False,             # "Always accept generated glossaries" (mobile);
+                                                   # JobService._job_ask answers the gate Yes when set
     }
 
 The job adapter then runs ``owner._translation_worker(owner._prepare_translation_run())``
@@ -45,6 +47,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
+from glossarion_mobile.services.jobs import AUTO_ACCEPT_GLOSSARY_PARAM
 from glossarion_mobile.ui.chat.direct_text_rules import (
     MOBILE_EXTRA_ATTACHMENT_EXTENSIONS,
     DirectTextSettings,
@@ -239,7 +242,11 @@ def job_params(
     settings: DirectTextSettings,
     overrides: Optional[Mapping[str, Any]] = None,
 ) -> dict:
-    """``JobSpec.params`` of a ``direct_text`` job (see the module docstring)."""
+    """``JobSpec.params`` of a ``direct_text`` job (see the module docstring).
+
+    ``auto_accept_glossary`` is the chat's "Always accept generated glossaries" value captured at Send
+    (a queued job, a Resume or a Retry keeps it): ``JobService._job_ask`` answers the glossary gate Yes
+    for the job instead of showing the approval card."""
     return {
         "chat_id": chat_id,
         "user_index": int(user_index),
@@ -249,6 +256,7 @@ def job_params(
         "run": run.as_dict(),
         "options": run_options_dict(run, settings),
         "config_overrides": config_overrides(overrides),
+        AUTO_ACCEPT_GLOSSARY_PARAM: bool(settings.auto_accept_glossary),
     }
 
 

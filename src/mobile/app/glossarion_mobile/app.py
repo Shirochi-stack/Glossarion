@@ -530,6 +530,11 @@ class GlossarionApp:
             items = []
         self.initial_shared = items
         await self._route_launch_links(items)
+        if self.jobs is not None:
+            try:
+                await self.jobs.route_launch_notification()  # a notification tap / Accept that cold-started the app
+            except Exception:
+                log.exception("routing the launch notification failed")
         shared = [i for i in items if not (isinstance(i, dict) and i.get("kind") == "url" and i.get("source") == "launch")]
         if shared and self.jobs is not None:
             try:
@@ -748,6 +753,14 @@ class GlossarionApp:
         self.lifecycle.append(f"{time.strftime('%H:%M:%S')} {name}")
         del self.lifecycle[:-12]
         log.info("lifecycle: %s", name)
+        if name == "resume":
+            screen = getattr(getattr(self, "shell", None), "top_screen", None)
+            resumed = getattr(screen, "app_resumed", None)
+            if callable(resumed):
+                try:
+                    resumed()
+                except Exception:
+                    log.exception("%s.app_resumed failed", type(screen).__name__)
         if self.spike is not None:
             await self.spike.on_lifecycle(e)
 

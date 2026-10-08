@@ -39,7 +39,7 @@ from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, status_color
+from glossarion_mobile.ui.theme import HIT_TARGET, log_text, mono_family, status_color
 
 __all__ = ["DiagnosticsScreen", "runtime_lines"]
 
@@ -379,10 +379,7 @@ class DiagnosticsScreen(Screen):
         self.env_check_status.color = ft.Colors.PRIMARY if result.passed else ft.Colors.ERROR
         shown = [line for line in result.lines if "[ENV_DEBUG]" in line and not line.startswith("✅")] or \
             result.lines[-12:]
-        self.env_check_lines.controls = [
-            ft.Text(line, theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True, font_family="monospace")
-            for line in shown[:80]
-        ]
+        self.env_check_lines.controls = [log_text(line, page=self.page) for line in shown[:80]]
         if self.copy_handler is not None and result.lines:
             self.env_check_lines.controls.append(ft.TextButton(
                 content=f"Copy all {len(result.lines)} lines (redacted)", icon=ft.Icons.COPY_ALL,
@@ -464,7 +461,7 @@ class DiagnosticsScreen(Screen):
         return items
 
     def view_log(self, path: str) -> Optional[ft.BottomSheet]:
-        """A monospace viewer over the last 200 KB of a log file."""
+        """A monospace viewer (log size) over the last 200 KB of a log file."""
         try:
             with open(path, "rb") as handle:
                 handle.seek(0, os.SEEK_END)
@@ -475,7 +472,7 @@ class DiagnosticsScreen(Screen):
             self._say(f"Could not open {os.path.basename(path)}: {exc}")
             return None
         sheet = scroll_sheet(os.path.basename(path), [
-            ft.Text(text or "(empty)", selectable=True, font_family=mono_family(self.page), size=12),
+            log_text(text or "(empty)", page=self.page),
         ], key="diag-log-viewer")
         if self.page is not None:
             self.page.show_dialog(sheet)

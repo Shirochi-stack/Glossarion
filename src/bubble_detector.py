@@ -15,6 +15,7 @@ from pathlib import Path
 import threading
 import time
 import mobile_runtime
+from safe_image import cv2_imread
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1105,7 +1106,7 @@ class BubbleDetector:
         
         try:
             # Load image
-            image = cv2.imread(image_path)
+            image = cv2_imread(image_path)
             if image is None:
                 logger.error(f"Failed to load image: {image_path}")
                 return []
@@ -1203,7 +1204,7 @@ class BubbleDetector:
         try:
             # Load image
             if image_path:
-                image = cv2.imread(image_path)
+                image = cv2_imread(image_path)
             elif image is None:
                 logger.error("No image provided")
                 if return_all_bubbles:
@@ -1502,7 +1503,7 @@ class BubbleDetector:
         Returns:
             Image with drawn bounding boxes
         """
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             logger.error(f"Failed to load image: {image_path}")
             return None
@@ -1839,7 +1840,7 @@ class BubbleDetector:
         Returns:
             Binary mask with bubble regions as white (255)
         """
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             return None
         
@@ -2148,7 +2149,7 @@ class BubbleDetector:
             # Acquire image
             if image_path is not None:
                 import cv2
-                image = cv2.imread(image_path)
+                image = cv2_imread(image_path)
                 if image is None:
                     raise RuntimeError(f"Failed to read image: {image_path}")
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

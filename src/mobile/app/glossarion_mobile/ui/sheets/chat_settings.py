@@ -7,7 +7,9 @@ the two legacy booleans exactly like ``_on_glossary_override_toggled``).
 
 Sections (desktop labels and descriptions): Model & prompt (model / profile / target
 language / default output mode overrides) · Glossary (No Override · No Override
-(Attachments Only) · Force No Glossary · Force Manual Glossary) · Run behaviour
+(Attachments Only) · Force No Glossary · Force Manual Glossary; mobile: "Always accept
+generated glossaries", All chats in Prefs ``chat_auto_accept_glossary``, This chat in the
+chat's sidecar meta, never config.json) · Run behaviour
 (Force Multipass off · Disable all thinking · Skip prompt profile · Attached-text
 prompt role · Skip plan for attachments) · Conversation (Disable conversation
 auto-scroll · Rendered conversation cards 4-200 · Text size). Footer: "Reset chat
@@ -37,12 +39,15 @@ import flet as ft
 
 from glossarion_mobile.ui.chat.direct_text_rules import (
     ATTACHMENT_PROMPT_ROLES,
+    AUTO_ACCEPT_GLOSSARY_PREF,
     GLOSSARY_OVERRIDE_LABELS,
     GLOSSARY_OVERRIDE_MODES,
     MAX_RENDERED_CARD_LIMIT,
     MIN_RENDERED_CARD_LIMIT,
+    SIDECAR_META_FIELDS,
     DirectTextSettings,
     glossary_override_updates,
+    merge_meta_overrides,
     normalize_rendered_card_limit,
 )
 from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
@@ -95,6 +100,9 @@ DESCRIPTIONS = {
         "text automatically."
     ),
     "skip_plan": "Start attachment runs immediately instead of showing a Plan card first (mobile).",
+    "auto_accept_glossary": (
+        "Skip the Edit / Yes / No card; translation starts with the generated glossary. Desktop always asks."
+    ),
 }
 
 #: DirectTextSettings field -> its global config key (glossary policy writes three keys).
@@ -116,7 +124,7 @@ def global_updates_for(field_name: str, value: Any) -> dict:
         return glossary_override_updates(value)
     if field_name == "rendered_card_limit":
         return {CHAT_SETTING_KEYS[field_name]: normalize_rendered_card_limit(value)}
-    if field_name == "skip_plan":
+    if field_name in SIDECAR_META_FIELDS:  # mobile-only: no config.json key (UI_SPEC Appendix B)
         return {}
     return {CHAT_SETTING_KEYS[field_name]: value}
 
@@ -135,10 +143,12 @@ class ChatSettingsSheet:
         scope: str = "chat",
         subject: str = "chat",  # "series": the sheet edits one series' defaults (U9)
         title: Optional[str] = None,
+        prefs: Any = None,  # Prefs-like (get / set): the mobile-only All-chats values (AUTO_ACCEPT_GLOSSARY_PREF)
     ) -> None:
         self.cid = str(cid)
         self.config = config
         self.chats = chats
+        self.prefs = prefs
         self.profiles = list(profiles)
         self.languages = list(languages)
         self.on_changed = on_changed
@@ -173,23 +183,23 @@ class ChatSettingsSheet:
     # ---- values ----------------------------------------------------------------------------
 
     def global_settings(self) -> DirectTextSettings:
-        return DirectTextSettings.from_config(self.config.get)
+        prefs_get = getattr(self.prefs, "get", None) if self.prefs is not None else None
+        return DirectTextSettings.from_config(self.config.get, prefs_get=prefs_get)
+
+    @property
+    def shows_auto_accept(self) -> bool:
+        """The "Always accept generated glossaries" row: chats only, and only with the Prefs store its
+        All-chats value lives in (the Series defaults sheet is built without it)."""
+        return self.subject == "chat" and self.prefs is not None
 
     def overrides(self) -> dict:
-        values = dict(self.chats.overrides(self.cid))
-        meta = self.chats.meta(self.cid)
-        if meta.get("skip_plan") is not None:
-            values["skip_plan"] = bool(meta.get("skip_plan"))
-        return values
+        return merge_meta_overrides(self.chats.overrides(self.cid), self.chats.meta(self.cid))
 
     def own_overrides(self) -> dict:
         """The chat's own values (no Series layer): what "custom" and ↺ act on."""
         own = getattr(self.chats, "own_overrides", None)
-        values = dict(own(self.cid) if callable(own) else self.chats.overrides(self.cid))
-        meta = self.chats.meta(self.cid)
-        if meta.get("skip_plan") is not None:
-            values["skip_plan"] = bool(meta.get("skip_plan"))
-        return values
+        return merge_meta_overrides(own(self.cid) if callable(own) else self.chats.overrides(self.cid),
+                                    self.chats.meta(self.cid))
 
     def effective(self) -> DirectTextSettings:
         return self.global_settings().with_overrides(self.overrides())
@@ -226,8 +236,8 @@ class ChatSettingsSheet:
 
     def set_value(self, field_name: str, value: Any) -> None:
         if self.scope == "chat":
-            if field_name == "skip_plan":
-                self.chats.set_meta(self.cid, "skip_plan", bool(value))
+            if field_name in SIDECAR_META_FIELDS:  # mobile-only chat settings live in the sidecar meta
+                self.chats.set_meta(self.cid, field_name, bool(value))
             else:
                 self.chats.set_override(self.cid, field_name, value)
         else:
@@ -236,6 +246,9 @@ class ChatSettingsSheet:
                 from glossarion_mobile.state.setting_writes import write_setting
 
                 write_setting(self.config, key, value)  # profile extraction method, language fan-out
+            elif field_name == "auto_accept_glossary":
+                if self.prefs is not None:  # Prefs (mobile_state.json), never config.json
+                    self.prefs.set(AUTO_ACCEPT_GLOSSARY_PREF, bool(value))
             else:
                 updates = global_updates_for(field_name, value)
                 if updates:
@@ -248,9 +261,10 @@ class ChatSettingsSheet:
     def reset(self, field_name: Optional[str] = None) -> None:
         if field_name is None:
             self.chats.reset_overrides(self.cid)
-            self.chats.set_meta(self.cid, "skip_plan", None)
-        elif field_name == "skip_plan":
-            self.chats.set_meta(self.cid, "skip_plan", None)
+            for name in SIDECAR_META_FIELDS:
+                self.chats.set_meta(self.cid, name, None)
+        elif field_name in SIDECAR_META_FIELDS:
+            self.chats.set_meta(self.cid, field_name, None)
         else:
             self.chats.set_override(self.cid, field_name, None)
         self.rebuild()
@@ -384,7 +398,12 @@ class ChatSettingsSheet:
             "glossary": ft.ExpansionTile(
                 title="Glossary",
                 expanded=self.expanded["glossary"],
-                controls=[ft.Row([ft.Container(expand=True), *self._badge("glossary_override_mode")]), glossary_group],
+                controls=[
+                    ft.Row([ft.Container(expand=True), *self._badge("glossary_override_mode")]),
+                    glossary_group,
+                    *([self._switch("auto_accept_glossary", "Always accept generated glossaries")]
+                      if self.shows_auto_accept else []),
+                ],
             ),
             "run": ft.ExpansionTile(
                 title="Run behaviour",

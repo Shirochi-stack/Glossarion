@@ -9,7 +9,9 @@ drawer content as a persistent 320 dp side panel to the right of the page instea
 Flow: resolve the route id (``LibraryService.book_for_bid`` or a file opened
 from Open-with) → ``session.plan_open`` → ``ReaderSession.load`` on the io
 pool → render the chapter (``document.DocumentBuilder`` → ``server.publish`` →
-``WebView.url``). The page reports ``ready`` / ``page`` / ``edge`` / ``tap`` /
+the first page is the new ``WebView``'s ``url``; every later page navigates that
+WebView with ``load_request``, see :func:`navigate_webview`). The page reports
+``ready`` / ``page`` / ``edge`` / ``tap`` /
 ``sel`` / ``pinch`` / ``scroll`` / ``link`` events (``bridge``); Python answers
 with ``run_javascript`` commands. Settings changes restyle live
 (``GLRDR.applyStyle``); layout, flavour and family switches re-render with the
@@ -33,6 +35,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import flet as ft
 
+from glossarion_mobile.services.intents import READER_EXTENSIONS
 from glossarion_mobile.services.library import CoreMissing
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
@@ -42,7 +45,7 @@ from glossarion_mobile.ui.reader import model as rm
 from glossarion_mobile.ui.reader.aa_sheet import SCOPE_ALL, SCOPE_BOOK, AaSheet
 from glossarion_mobile.ui.reader.chrome import ReaderChrome, SelectionChipRow
 from glossarion_mobile.ui.reader.document import EMPTY_CHAPTER_TEXT, DocumentBuilder, blocks_empty, build_native_blocks
-from glossarion_mobile.ui.reader.fallback_view import FallbackPage
+from glossarion_mobile.ui.reader.fallback_view import PAGE_EDGE, FallbackPage
 from glossarion_mobile.ui.reader.live import (
     RETRANSLATE_TITLE,
     LiveFeed,
@@ -66,7 +69,7 @@ from glossarion_mobile.ui.reader.toc_drawer import ChaptersDrawer, TocRow, toc_r
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 
-__all__ = ["ReaderDeps", "ReaderScreen", "webview_supported"]
+__all__ = ["ReaderDeps", "ReaderScreen", "navigate_webview", "webview_supported"]
 
 log = logging.getLogger("glossarion.reader")
 
@@ -99,6 +102,25 @@ def webview_supported(page: Any) -> bool:
     except Exception:
         return False
     return True
+
+
+async def navigate_webview(webview: Any, url: str) -> None:
+    """Load ``url`` in a ``flet_webview.WebView`` that is already built (the Reader's pages, the
+    hidden WebViewBridge pages).
+
+    flet-webview 1.0.3 reads ``url`` only when the control is built (``initState``; there is no
+    ``didUpdateWidget``), so a changed ``url`` property never navigates a WebView on screen: only
+    the ``load_request`` method does. The property follows along (sent before the request), so a
+    State that Flutter builds again, or a first load still waiting in ``initState``, gets this page.
+    Exceptions propagate: the caller rebuilds the control or reports the failure."""
+    webview.url = url
+    update = getattr(webview, "update", None)
+    if callable(update):
+        try:
+            update()
+        except Exception:  # not mounted yet: load_request below raises the real error
+            pass
+    await webview.load_request(url)
 
 
 @dataclass
@@ -213,6 +235,9 @@ class ReaderScreen(Screen):
         self.font_faces: dict = {}  # imported family -> URL served by ReaderServer (@font-face)
         self.scale_hint_shown = False  # UI_SPEC §7.5 "Text size in Aa" (once per Reader)
         self.webview: Any = None
+        self.webview_serial = 0  # per-build WebView keys (``_make_webview``)
+        self.fallback_chapter: Optional[int] = None  # the chapter the native page shows
+        self.fallback_generation = -1  # the render whose chapter the native page shows
         self.live: Optional[LiveRun] = None
         self.disposed = False
         self.aa_sheet: Optional[AaSheet] = None
@@ -575,7 +600,8 @@ class ReaderScreen(Screen):
         if book:
             return plan_open(book, raw_only=raw_only, engine=self.engine)
         path = str(target.get("path") or "")
-        if path and os.path.isfile(path) and path.lower().endswith(".epub"):
+        # A file from Open-with, the Converter or Files: the types the Reader opens (EPUB, TXT)
+        if path and os.path.isfile(path) and path.lower().endswith(tuple(READER_EXTENSIONS)):
             return plan_for_file(path)
         if path and os.path.isdir(path) and os.path.isfile(os.path.join(path, "translation_progress.json")):
             return plan_open({"path": path, "output_folder": path, "is_in_progress": True,
@@ -584,7 +610,7 @@ class ReaderScreen(Screen):
 
     async def open(self) -> None:
         """Resolve, load and show the first chapter."""
-        self._set_loading("Loading EPUB…")
+        self._set_loading("Loading book…")
         try:
             plan = await self._io(self._plan)
             show_special = bool(self._config_get(SPECIAL_FILES_KEY, False))
@@ -621,7 +647,9 @@ class ReaderScreen(Screen):
         self.renderer = self._choose_renderer()
         self.layout = self._effective_layout()
         start = self._start_chapter(session)
-        positions = rm.Position.from_pref(saved, session.filenames) if saved else None
+        positions = (await self._io(session.position_from_pref, saved)) if saved else None
+        if self.disposed:
+            return
         hint: Optional[dict] = None
         offer: Optional[rm.Position] = None
         if positions is not None and not positions.at_start:
@@ -717,11 +745,18 @@ class ReaderScreen(Screen):
 
     # ---- rendering ------------------------------------------------------------------------------
 
-    def _make_webview(self) -> Any:
+    def _make_webview(self, url: str) -> Any:
+        """A new page WebView; flet-webview loads ``url`` when the control is built (``initState``).
+
+        Each one gets its own key: Flet skips assigning a control equal to the current one (same
+        fields), so a rebuilt WebView for the same URL would otherwise never replace the old one,
+        and the new key gives it a fresh Flutter State (which loads the URL)."""
         import flet_webview as fwv
 
+        self.webview_serial += 1
         webview = fwv.WebView(
-            url="about:blank",
+            url=url,
+            key=f"reader-webview-{self.webview_serial}",
             expand=True,
             bgcolor=self.theme.get("bg"),
             on_console_message=self._on_console,
@@ -732,10 +767,36 @@ class ReaderScreen(Screen):
         )
         return webview
 
+    def _mount_webview(self, url: str) -> None:
+        """Put a WebView built with ``url`` into the page slot (it loads the page itself)."""
+        self.webview = self._make_webview(url)
+        self.page_slot.content = self.webview
+        self.page_slot.bgcolor = self.theme.get("bg")
+        self._update(self.page_slot)
+
+    async def _show_webview_page(self, url: str, generation: int) -> bool:
+        """Show a published page: the first one builds the WebView with its URL; later ones navigate
+        the same WebView with ``load_request`` (:func:`navigate_webview`). When navigating fails,
+        a new WebView is built with the URL. False when a newer render or dispose took over."""
+        webview = self.webview
+        if webview is None or self.page_slot.content is not webview:
+            self._mount_webview(url)
+            return True
+        webview.bgcolor = self.theme.get("bg")
+        try:
+            await navigate_webview(webview, url)
+        except Exception as exc:
+            if generation != self.render_generation or self.disposed:
+                return False
+            log.warning("navigating the reader WebView failed (%s); building a new one", exc)
+            self._mount_webview(url)
+            return True
+        return generation == self.render_generation and not self.disposed
+
     async def render(self, index: int, *, hint: Optional[Mapping[str, Any]] = None,
                      find: Optional[Mapping[str, Any]] = None, anchor: Optional[str] = None) -> None:
         session = self.session
-        if session is None or not session.count:
+        if session is None or not session.count or self.disposed:
             return
         index = max(0, min(int(index), session.count - 1))
         self.render_generation += 1
@@ -774,17 +835,10 @@ class ReaderScreen(Screen):
             url = server.publish(built.html, script_nonce=built.nonce or None) + (
                 f"#{built.fragment}" if built.fragment else "")
             self.current_doc = doc_id
+            # from here on the outgoing page's late events (its chapter, no doc) are dropped
             self.deduper.set_document(doc_id, None if layout == rm.LAYOUT_ALL else index)
-            if self.webview is None:
-                self.webview = self._make_webview()
-                self.page_slot.content = self.webview
-                self.page_slot.bgcolor = self.theme.get("bg")
-                self.webview.url = url
-                self._update(self.page_slot)
-            else:
-                self.webview.url = url
-                self.webview.bgcolor = self.theme.get("bg")
-                self._update(self.webview)
+            if not await self._show_webview_page(url, generation):
+                return
         else:
             try:
                 blocks = await self._io(build_native_blocks, session, index)
@@ -806,14 +860,24 @@ class ReaderScreen(Screen):
                 self.toc.set_current(index)
                 self.schedule_position_save()
                 return
+            # the list keeps its scroll offset when only its controls change: another chapter starts at
+            # its top (the end after a previous-chapter turn), a re-render of this one stays put
+            fresh = self.page_slot.content is not self.fallback.control or self.fallback_chapter != index
             if self.page_slot.content is not self.fallback.control:
                 self.page_slot.content = self.fallback.control
+            self.fallback_chapter = index
             self.fallback.set_size(*self._size())
-            self.fallback.render(blocks, theme=self.theme, settings=self.settings, images=images)
+            self.fallback.render(blocks, theme=self.theme, settings=self.settings, images=images,
+                                 keep_offset=not fresh)
+            self.fallback_generation = generation
             self.page_slot.bgcolor = self.theme.get("bg")
             self._update(self.page_slot)
             if self.last_page:
                 await self.fallback.scroll_to_fraction(1.0)
+            elif fresh:
+                await self.fallback.scroll_to_fraction(0.0)
+            if generation != self.render_generation or self.disposed:
+                return
         self.toc.set_current(index)
         self.schedule_position_save()
 
@@ -928,7 +992,7 @@ class ReaderScreen(Screen):
             return
         href = session.filenames[self.index] if self.index < len(session.filenames) else ""
         hint = rm.capture_hint(self.page_no, self.page_count)
-        self._set_loading("Loading EPUB…")
+        self._set_loading("Loading book…")
         builder, self.builder = self.builder, None
         if builder is not None:
             builder.close()
@@ -1039,10 +1103,7 @@ class ReaderScreen(Screen):
             self._refresh_chrome()
             self.schedule_position_save()
         elif kind == "edge":
-            if event.direction > 0 and self.session is not None and self.index + 1 < self.session.count:
-                self._spawn(self.go_chapter(self.index + 1))
-            elif event.direction < 0 and self.index > 0:
-                self._spawn(self.go_chapter(self.index - 1, last=True))
+            self._turn_chapter(event.direction)
         elif kind == "tap":
             if self.selection.visible:
                 self.selection.hide()
@@ -1139,13 +1200,34 @@ class ReaderScreen(Screen):
         if data:
             ImageViewer(data, height=self._size()[1]).show(self.page)
 
+    def _turn_chapter(self, direction: int) -> None:
+        """Past the last page: the next chapter; before the first: the previous chapter's last page
+        (the page's ``edge`` event and the native reader's edge taps; desktop
+        ``_advance_paginated_next`` / ``_prev_chapter``)."""
+        if direction > 0 and self.session is not None and self.index + 1 < self.session.count:
+            self._spawn(self.go_chapter(self.index + 1))
+        elif direction < 0 and self.index > 0:
+            self._spawn(self.go_chapter(self.index - 1, last=True))
+
     # ---- fallback events ---------------------------------------------------------------------------
 
     def _on_fallback_tap(self, zone: str) -> None:
         if zone == "centre" or not self.settings.tap_zones:
             self.chrome.toggle()
             return
-        self._spawn(self.fallback.page_by(-1 if zone == "prev" else 1))
+        self._spawn(self._fallback_page(-1 if zone == "prev" else 1))
+
+    async def _fallback_page(self, direction: int) -> None:
+        """An edge tap in the native reader scrolls a screen; at the end (start) of the chapter it
+        turns to the next (previous) chapter like the page's ``edge`` event."""
+        index, generation = self.index, self.render_generation
+        if self.fallback_generation != generation:
+            return  # the next chapter is still being drawn: a second quick tap must not skip it
+        result = await self.fallback.page_by(direction)
+        if (result != PAGE_EDGE or self.disposed or self.renderer != "native" or self.index != index
+                or self.render_generation != generation):
+            return  # it scrolled, or the reader moved on while the list was checked
+        self._turn_chapter(direction)
 
     def _on_fallback_scroll(self, fraction: float) -> None:
         self.fraction = fraction
@@ -1514,9 +1596,16 @@ class ReaderScreen(Screen):
             holder["sheet"].set_items(prefs.bookmarks(self.bid))
 
         def open_mark(mark: Mapping[str, Any]) -> None:
-            position = rm.Position.from_pref(mark, self.session.filenames if self.session else [])
-            if position is not None:
-                self._spawn(self.go_chapter(position.chapter, hint={"fraction": position.fraction}))
+            session = self.session
+            if session is None:
+                return
+
+            async def go() -> None:
+                position = await self._io(session.position_from_pref, mark)
+                if position is not None and not self.disposed:
+                    await self.go_chapter(position.chapter, hint={"fraction": position.fraction})
+
+            self._spawn(go())
 
         sheet = BookmarksSheet(prefs.bookmarks(self.bid), label_for=self._bookmark_label, on_open=open_mark,
                                on_remove=remove, on_add=add)

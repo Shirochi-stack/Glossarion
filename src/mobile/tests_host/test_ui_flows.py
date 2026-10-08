@@ -7,7 +7,8 @@ Android file picker is replaced by ``HostPicker`` (the device run drives Documen
 
 The chat flow is the full one: Settings › Import from desktop (a config.json pointing at the
 fake OpenAI server), a new chat, ＋ › Files with the 12-chapter self-test EPUB, Send, the job card
-reaches Done, Migrate, Library › the book › Chapters (12 completed chapters).
+reaches Done, the book moves into the Library by itself ("Added to the Library", no Migrate tap),
+Library › the book › Chapters (12 completed chapters).
 
 Run from src/mobile:
     python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic tests_host/test_ui_flows.py
@@ -138,6 +139,14 @@ def test_chat_epub_migrate_library_flow(app_env, tmp_path, monkeypatch):
             await flows.import_desktop_config(driver)
             assert app.config_store.get("openai_base_url") == server.url
             await flows.chat_translate_and_migrate(driver, timeout=300)
+            # the owner's device report #4: no Migrate step - the workspace left the chat's Attachments
+            # for the output folder by itself
+            chats = app.chat_feature.chats
+            cid = app.chat_view.cid
+            assert chats.attachment_folders(cid) == []
+            stem = Path(flows.EPUB_NAME).stem
+            assert any(Path(m[4]).name == stem for m in chats.messages(cid) if m[0] == "assistant" and len(m) > 4
+                       and m[4] and "Attachments" not in Path(m[4]).parts)
             await flows.library_book_chapters(driver)
             if os.environ.get("GLOSSARION_UI_DUMP"):
                 for row in tester.dump(600):

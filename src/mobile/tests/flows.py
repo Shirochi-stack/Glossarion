@@ -120,7 +120,8 @@ async def import_desktop_config(d: Any, name: str = CONFIG_NAME) -> None:
 
 
 async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: float = 900.0) -> None:
-    """A new chat, ＋ › Files with the EPUB, Send; the job card reaches Done; Migrate."""
+    """A new chat, ＋ › Files with the EPUB, Send; the job card reaches Done; the book moves into the
+    Library by itself ("Added to the Library"; there is no Migrate step)."""
     await go_home(d)
     await d.tap(tooltip="New chat")
     await d.tap(tooltip=ATTACH_TOOLTIP)
@@ -135,12 +136,12 @@ async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: flo
         await d.tap(text="Not now")
     index = await d.wait_any({"text": "Done"}, {"text": "Failed"}, {"text": "Stopped"}, timeout=timeout)
     assert index == 0, "the translation job did not finish"
-    await d.tap(text="Migrate", timeout=30, scroll=True)
-    await d.wait(contains="migrated", timeout=60)
+    await d.wait(contains="Added to the Library", timeout=60)
 
 
 async def library_book_chapters(d: Any, title: str = EPUB_TITLE) -> None:
-    """Library → Completed shelf → the migrated book → Chapters: none untranslated or failed."""
+    """Library → Completed shelf → the chat's book (moved in automatically) → Chapters: none
+    untranslated or failed."""
     await open_drawer(d)
     await d.tap(key="dest-library")
     await d.wait(key="shelf", timeout=60)

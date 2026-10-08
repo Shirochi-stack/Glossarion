@@ -1770,3 +1770,622 @@ def test_glossary_question_routes_to_the_owning_chat():
     assert question_route(plain) == f"/job/{plain.id}"
     tap = JobNotifications.parse_event({"payload": "glossarion://app/chat/7"})
     assert tap.route == "/chat/7" and tap.job_id is None and tap.action == "open"
+
+
+# ==========================================================================
+# Owner device report 6: glossary-review notification (Accept / Review, cancel on answer), progress while
+# the app is hidden, the real permission state, a swiped job notification posted again
+# ==========================================================================
+
+
+class _HiddenPage:
+    """The dispatcher's page (``test_ui_foundations._FakePage``): ``app_visible`` False parks the UI pump."""
+
+    def __init__(self) -> None:
+        self.app_visible = True
+        self._visible = asyncio.Event()
+        self._visible.set()
+        self.calls = []
+
+    def update(self, *controls):
+        self.calls.append(controls)
+
+    async def wait_until_visible(self):
+        await self._visible.wait()
+
+    def hide(self):
+        self.app_visible = False
+        self._visible.clear()
+
+    def show(self):
+        self.app_visible = True
+        self._visible.set()
+
+
+class Asker:
+    """A worker that reports chapter 1, waits for ``go``, reports ``steps``, pauses, then blocks on a question."""
+
+    def __init__(self, kind="direct_text_glossary_approval", steps=(), pause=0.0, **data) -> None:
+        self.kind = kind
+        self.steps = steps
+        self.pause = pause
+        self.data = data or {"path": "glossary.csv"}
+        self.go = threading.Event()
+        self.entered = threading.Event()
+        self.answers = []
+
+    def __call__(self, owner, request):
+        owner.host.emit("progress", total=10, completed=1, in_progress=1, failed=0)
+        self.entered.set()
+        self.go.wait(TIMEOUT)
+        for completed in self.steps:
+            owner.host.emit("progress", total=10, completed=completed, in_progress=1, failed=0)
+            time.sleep(0.02)
+        time.sleep(self.pause)
+        self.answers.append(owner.host.ask(self.kind, default=False, **self.data))
+        return True
+
+
+async def _until(predicate, timeout=TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return bool(predicate())
+
+
+async def _settle(rounds=5):
+    for _ in range(rounds):
+        await asyncio.sleep(0)
+
+
+def _jobs_feature(tmp_path, *, dispatcher=None, native=None, runs=None, platform="android"):
+    """The real JobsFeature over a real JobService (FakeBackend) with a fake app: snackbars -> ``notes``,
+    ``app.navigate`` -> ``routes``."""
+    from glossarion_mobile.ui.screens.jobs import JobsFeature
+
+    service, backend = make_service(tmp_path, dispatcher=dispatcher)
+    notes, routes = [], []
+
+    async def navigate(route):
+        routes.append(route)
+
+    app = types.SimpleNamespace(
+        page=None, dispatcher=dispatcher, state=None, prefs=FakePrefs(), native=native or FakeNative(),
+        paths=types.SimpleNamespace(data=str(tmp_path / "data"), logs=str(tmp_path / "logs")), shell=None,
+        notify=lambda message, label=None, action=None: notes.append((message, label, action)), navigate=navigate,
+        chat_feature=types.SimpleNamespace(runs=runs) if runs is not None else None)
+    feature = JobsFeature(app, service=service)
+    feature.platform = feature.background.platform = feature.notifications.platform = platform
+    feature.background.permissions = FakePermissions()
+    feature.attach(app)
+    return feature, app, backend, notes, routes
+
+
+def _service_texts(native):
+    return [c[2].get("text") or "" for c in native.calls if c[0] == "update_job_service"]
+
+
+def _posted(native, channel=None):
+    return [c for c in native.calls if c[0] == "show_notification" and channel in (None, c[2].get("channel_id"))]
+
+
+@needs_flet
+def test_fgs_progress_updates_while_app_hidden(tmp_path):
+    """Owner report: the ongoing notification froze once the app left the screen (the jobs view rides the UI
+    pump, which parks while hidden). The ticker keeps it current: chapters and the glossary question."""
+    from glossarion_mobile.services.dispatcher import UiDispatcher
+    from glossarion_mobile.state.store import LoopGuard
+
+    async def scenario():
+        page = _HiddenPage()
+        dispatcher = UiDispatcher(page, interval=0.01, guard=LoopGuard()).bind()
+        dispatcher.start()
+        native = FakeNative()
+        feature, app, backend, notes, routes = _jobs_feature(tmp_path, dispatcher=dispatcher, native=native)
+        background = feature.background
+        background.update_interval = 0.05
+        asker = Asker(steps=(2, 3, 4, 5), pause=0.4)
+        backend.behavior = asker
+        try:
+            job_id = await feature.submit(JobSpec("translate", "Book.epub", (epub(tmp_path),),
+                                                  origin={"type": "chat", "cid": "7"}))
+            assert await asyncio.to_thread(asker.entered.wait, TIMEOUT)
+            assert await _until(lambda: background.service_running)
+            # visible: the jobs view feeds the notification (the ticker only sends a held-back update)
+            assert await _until(lambda: not background.ticker_running)
+            # the user leaves the app: Flet parks the pump, the lifecycle reaches BackgroundExecution
+            page.hide()
+            background.on_lifecycle("hide")
+            assert background.ticker_running
+            asker.go.set()
+            assert await _until(lambda: any("waiting for your glossary decision" in t for t in _service_texts(native)))
+            texts = _service_texts(native)
+            assert any(t.endswith("5/10 chapters") or "5/10 chapters ·" in t for t in texts), texts
+            assert not page.app_visible  # all of it while the app was hidden
+            note = _posted(native, "jobs.action")[-1]  # hidden: the glossary question notified
+            assert note[1][1] == "Glossary ready: review needed" and note[2]["payload"] == "glossarion://app/chat/7"
+            assert [a["id"] for a in note[2]["actions"]] == ["accept", "open"]
+            question = feature.service.pending_question(job_id)
+            assert feature.service.answer(question["id"], True)
+            assert await _until(lambda: "stop_job_service" in native.names())
+            assert await _until(lambda: not background.ticker_running)  # stopped with the service
+            assert asker.answers == [True]
+            page.show()
+            background.on_lifecycle("resume")
+            assert not background.ticker_running
+        finally:
+            feature.close()
+            await dispatcher.stop()
+
+    asyncio.run(scenario())
+
+
+def test_job_progress_sends_the_throttled_update_later():
+    """A change inside the 1/s window (the first progress right after the start) was dropped until the next
+    change; now the ticker sends it once the window has passed (trailing edge)."""
+    background, native, clock, jobs = _background("android", update_interval=0.05)
+
+    async def scenario():
+        await background.job_started(_snap(state=JobState.STARTING))
+        first = _snap(progress=Progress(total=80, completed=1))
+        jobs.snap = first
+        clock.now += 0.01
+        assert not await background.job_progress(first)  # inside the window: held back, not dropped
+        assert background.ticker_running
+        await asyncio.sleep(0.2)  # ticks while the (fake) clock stands still: still held back
+        assert _service_texts(native) == []
+        clock.now += 0.1
+        assert await _until(lambda: _service_texts(native) == ["Translating Book.epub: 1/80 chapters"])
+        assert await _until(lambda: not background.ticker_running)  # visible app: nothing left to send
+        clock.now += 0.01
+        assert not await background.job_progress(first)  # an unchanged text is never queued
+        assert not background.ticker_running
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_glossary_question_notifies_unless_its_surface_is_on_screen(tmp_path):
+    """Owner report: no glossary notification while the app was open. Now: hidden -> the notification
+    (Accept / Review); visible elsewhere -> notification + snackbar; its chat / Book page on top -> nothing."""
+
+    async def scenario():
+        native = FakeNative()
+        feature, app, _backend, notes, routes = _jobs_feature(tmp_path, native=native)
+        question = {"id": "q1", "kind": "direct_text_glossary_approval", "data": {"path": "g.csv"}}
+        snap = _snap(question=question)
+        try:
+            feature.background.on_lifecycle("hide")
+            feature._on_question(snap, question)
+            await _settle()
+            note = _posted(native)[-1]
+            assert (note[1][1], note[2]["channel_id"], note[2]["payload"]) == (
+                "Glossary ready: review needed", "jobs.action", "glossarion://app/chat/7")
+            assert note[2]["actions"] == [{"id": "accept", "title": "Accept"}, {"id": "open", "title": "Review"}]
+            assert notes == []  # nobody sees a snackbar while hidden
+            # visible on another screen: the notification and a snackbar whose Review opens the chat
+            feature.background.on_lifecycle("resume")
+            app.shell = types.SimpleNamespace(current_route="/library")
+            feature._on_question(snap, question)
+            await _settle()
+            assert len(_posted(native)) == 2
+            assert notes[-1][:2] == ("Glossary ready: review needed", "Review")
+            notes[-1][2]()
+            await _settle()
+            assert routes == ["/chat/7"]
+            # the owning chat is on screen (its approval card): nothing
+            app.chat_view = types.SimpleNamespace(cid="7")
+            for current in ("/chat/7", "/chat/7/m/0123456789ab", "/chat/3", "/"):
+                # the chat view's own chat decides: "New chat" / chat switches leave the route behind
+                app.shell.current_route = current
+                feature._on_question(snap, question)
+            await _settle()
+            assert len(_posted(native)) == 2 and len(notes) == 1
+            app.chat_view = types.SimpleNamespace(cid="3")  # the home shows another chat
+            feature._on_question(snap, question)
+            await _settle()
+            assert len(_posted(native)) == 3
+            app.shell.current_route = "/chat/7"  # a stale route: chat 3 is what the user sees
+            feature._on_question(snap, question)
+            await _settle()
+            assert len(_posted(native)) == 4 and len(notes) == 3
+            # a Library job's review gate is answered on its Book page
+            library = _snap(spec=JobSpec("translate", "Book.epub", ("a",), origin={"type": "library", "bid": "b1"}),
+                            question=dict(question, kind="glossary_approval"))
+            app.shell.current_route = "/library/book/b1"
+            feature._on_question(library, library.question)
+            await _settle()
+            assert len(_posted(native)) == 4
+            app.shell.current_route = "/library"
+            feature._on_question(library, library.question)
+            await _settle()
+            assert _posted(native)[-1][2]["payload"] == "glossarion://app/library/book/b1"
+        finally:
+            feature.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_async_batch_question_gets_its_own_notification(tmp_path):
+    async def scenario():
+        native = FakeNative()
+        feature, app, _backend, notes, _routes = _jobs_feature(tmp_path, native=native)
+        question = {"id": "q2", "kind": "async_batch_question", "data": {"title": "Split the batch?"}}
+        snap = _snap(spec=JobSpec("async_batch", "Batch 3", (), origin={"type": "tools"}), question=question)
+        try:
+            feature.background.on_lifecycle("hide")
+            feature._on_question(snap, question)
+            await _settle()
+            note = _posted(native)[-1]
+            assert note[1][1] == "Answer needed: Split the batch?"
+            assert note[2]["payload"] == "glossarion://app/tools/async" and not note[2].get("actions")
+            assert not any("Glossary" in c[1][1] for c in _posted(native))
+            # visible on Tools › Async batch: its own dialog asks, nothing else
+            feature.background.on_lifecycle("resume")
+            app.shell = types.SimpleNamespace(current_route="/tools/async")
+            feature._on_question(snap, question)
+            await _settle()
+            assert len(_posted(native)) == 1 and notes == []
+            app.shell.current_route = "/jobs"
+            feature._on_question(snap, question)
+            await _settle()
+            assert len(_posted(native)) == 2 and notes[-1][:2] == ("Answer needed: Split the batch?", "Answer")
+            # the FGS text names the question kind (C1: notification_text per kind)
+            assert notification_text(snap).endswith("waiting for your answer")
+        finally:
+            feature.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_notification_accept_answers_through_the_chat_controller(tmp_path):
+    from glossarion_mobile.services.dispatcher import UiDispatcher
+    from glossarion_mobile.services.notifications import action_notification_id
+    from glossarion_mobile.state.store import LoopGuard
+
+    tap = JobNotifications.parse_event({"payload": "glossarion://app/chat/7", "action_id": "accept",
+                                        "notification_id": 41611})
+    assert (tap.action, tap.route, tap.notification_id) == ("accept", "/chat/7", 41611)
+    assert JobNotifications.parse_event({"payload": "glossarion://app/chat/7", "notification_id": -1}).notification_id is None
+
+    class Runs:
+        """``ChatRuns.answer_glossary``: the approval card's ✓ Yes path."""
+
+        def __init__(self):
+            self.calls = []
+            self.service = None
+
+        def answer_glossary(self, cid, accepted):
+            self.calls.append((cid, accepted))
+            question = self.service.pending_question()
+            return bool(question) and self.service.answer(question["id"], accepted)
+
+    async def scenario():
+        dispatcher = UiDispatcher(None, interval=0.01, guard=LoopGuard()).bind()
+        dispatcher.start()
+        runs = Runs()
+        feature, app, backend, notes, routes = _jobs_feature(tmp_path, dispatcher=dispatcher, runs=runs)
+        runs.service = feature.service
+        service = feature.service
+        accepted = ("Glossary accepted · translating", None, None)
+        try:
+            # a chat job: answered through the chat's run controller, then its chat opens
+            asker = Asker()
+            asker.go.set()
+            backend.behavior = asker
+            chat_job = service.submit(JobSpec("translate", "Book.epub", (epub(tmp_path),),
+                                              origin={"type": "chat", "cid": "7"}))
+            assert await _until(lambda: service.pending_question(chat_job) is not None)
+            event = {"payload": "glossarion://app/chat/7", "action_id": "accept",
+                     "notification_id": action_notification_id(chat_job), "launched_app": False}
+            await feature._on_notification(event)
+            assert runs.calls == [("7", True)] and notes.count(accepted) == 1 and routes == ["/chat/7"]
+            assert await _until(lambda: asker.answers == [True])
+            assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
+            # the same tap again: the job is gone, it only opens the chat
+            await feature._on_notification(event)
+            assert runs.calls == [("7", True)] and notes.count(accepted) == 1 and routes == ["/chat/7", "/chat/7"]
+
+            # a Library job's review gate: answered through JobService
+            library = Asker(kind="glossary_approval")
+            library.go.set()
+            backend.behavior = library
+            lib_job = service.submit(JobSpec("translate", "Lib.epub", (epub(tmp_path, "Lib.epub"),),
+                                             origin={"type": "library", "bid": "b1"}))
+            assert await _until(lambda: service.pending_question(lib_job) is not None)
+            stale = {"payload": "glossarion://app/library/book/b1", "action_id": "accept",
+                     "notification_id": action_notification_id(lib_job) + 1}  # another job's notification
+            await feature._on_notification(stale)
+            assert service.pending_question(lib_job) is not None and routes[-1] == "/library/book/b1"
+            await feature._on_notification(dict(stale, notification_id=action_notification_id(lib_job)))
+            assert await _until(lambda: library.answers == [True])
+            assert runs.calls == [("7", True)] and notes.count(accepted) == 2
+            assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
+
+            # not a glossary question: Accept answers nothing, it only opens the route
+            other = Asker(kind="async_batch_question", title="Split?")
+            other.go.set()
+            backend.behavior = other
+            tools_job = service.submit(JobSpec("translate", "Batch", (epub(tmp_path, "B.epub"),),
+                                               origin={"type": "tools"}))
+            assert await _until(lambda: service.pending_question(tools_job) is not None)
+            await feature._on_notification({"payload": "glossarion://app/tools/async", "action_id": "accept",
+                                            "notification_id": action_notification_id(tools_job)})
+            assert service.pending_question(tools_job) is not None and routes[-1] == "/tools/async"
+            assert notes.count(accepted) == 2
+            service.answer(service.pending_question(tools_job)["id"], False)
+            assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
+        finally:
+            feature.close()
+            await dispatcher.stop()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_answered_question_cancels_its_action_notification(tmp_path):
+    """Answered in the app (or given up), the "Glossary ready" notification goes away, also while the app is
+    hidden and the UI pump is parked (``question_resolved`` is posted, not a channel value)."""
+    from glossarion_mobile.services.dispatcher import UiDispatcher
+    from glossarion_mobile.services.notifications import action_notification_id
+    from glossarion_mobile.state.store import LoopGuard
+
+    async def scenario():
+        page = _HiddenPage()
+        dispatcher = UiDispatcher(page, interval=0.01, guard=LoopGuard()).bind()
+        dispatcher.start()
+        native = FakeNative()
+        feature, app, backend, notes, routes = _jobs_feature(tmp_path, dispatcher=dispatcher, native=native)
+        service = feature.service
+        cancel = ("cancel_notification", None, {})
+        try:
+            for hidden in (False, True):
+                asker = Asker()
+                asker.go.set()
+                backend.behavior = asker
+                job_id = service.submit(JobSpec("translate", "Book.epub", (epub(tmp_path),),
+                                                origin={"type": "chat", "cid": "7"}))
+                assert await _until(lambda: service.pending_question(job_id) is not None)
+                assert await _until(lambda: _posted(native, "jobs.action"))
+                cancel = ("cancel_notification", (action_notification_id(job_id),), {})
+                if hidden:
+                    page.hide()
+                    feature.background.on_lifecycle("hide")
+                assert cancel not in native.calls
+                service.answer(service.pending_question(job_id)["id"], True)  # the approval card's ✓ Yes
+                assert await _until(lambda: cancel in native.calls)
+                assert page.app_visible is (not hidden)  # delivered while the pump was parked
+                assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
+                page.show()
+                feature.background.on_lifecycle("resume")
+        finally:
+            feature.close()
+            await dispatcher.stop()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_launch_notification_is_routed_at_startup(tmp_path):
+    """A tap that cold-started the app is only kept as the launch notification (never sent as an event):
+    the app routes it once it is ready; a stale Accept (no job runs after a cold start) just opens it."""
+
+    async def scenario():
+        native = FakeNative()
+        native.results["get_launch_notification"] = {"notification_id": 41205, "action_id": None,
+                                                      "payload": "glossarion://app/job/abc123abc123",
+                                                      "launched_app": True}
+        feature, app, _backend, notes, routes = _jobs_feature(tmp_path / "a", native=native)
+        try:
+            assert await feature.route_launch_notification()
+            assert routes == ["/job/abc123abc123"]
+            assert not await feature.route_launch_notification()  # once per launch
+            assert routes == ["/job/abc123abc123"]
+        finally:
+            feature.close()
+        cold = FakeNative()
+        cold.results["get_launch_notification"] = {"notification_id": 41611, "action_id": "accept",
+                                                    "payload": "glossarion://app/chat/7", "launched_app": True}
+        feature, app, _backend, notes, routes = _jobs_feature(tmp_path / "b", native=cold)
+        try:
+            assert await feature.route_launch_notification()
+            assert routes == ["/chat/7"] and notes == []
+        finally:
+            feature.close()
+        nothing = FakeNative()
+        feature, app, _backend, notes, routes = _jobs_feature(tmp_path / "c", native=nothing)
+        try:
+            assert not await feature.route_launch_notification() and routes == []
+        finally:
+            feature.close()
+
+    asyncio.run(scenario())
+
+
+class _FlakyPermissions(FakePermissions):
+    """``request("NOTIFICATION")`` answers from ``answers`` (an exception is raised, like a timed-out invoke)."""
+
+    def __init__(self, answers) -> None:
+        super().__init__()
+        self.answers = list(answers)
+
+    async def request(self, name):
+        self.asked.append(name)
+        if name != "NOTIFICATION":
+            return "granted"
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def test_prepare_for_run_marks_notification_asked_only_on_a_definite_status():
+    """Owner report: no notifications at all. The 'asked' pref was set before the request, so a request that
+    failed or was dismissed was never repeated. Now only a definite answer counts."""
+    from glossarion_mobile.services.background import (
+        NOTIFICATIONS_OFF_HINT,
+        PREF_NOTIFICATION_ASKED,
+        PREF_NOTIFICATIONS_OFF_HINT,
+    )
+    from glossarion_mobile.ui.screens.pages_feature import AccountsProfilesFeature
+
+    notes, navigated = [], []
+    background, native, clock, jobs = _background("android", notify=lambda *a: notes.append(a),
+                                                   navigate_route=navigated.append)
+    background.permissions = _FlakyPermissions([asyncio.TimeoutError(), "None", "denied"])
+    spec = JobSpec("translate", "Book.epub", ("a",))
+
+    async def scenario():
+        await background.prepare_for_run(spec)  # the request timed out
+        assert PREF_NOTIFICATION_ASKED not in background.prefs and notes == []
+        await background.prepare_for_run(spec)  # the handler returned nothing
+        assert PREF_NOTIFICATION_ASKED not in background.prefs and notes == []
+        await background.prepare_for_run(spec)  # the user said no: remembered, and told once
+        assert background.permissions.asked.count("NOTIFICATION") == 3
+        assert background.prefs[PREF_NOTIFICATION_ASKED] is True and background.prefs[PREF_NOTIFICATIONS_OFF_HINT]
+        assert [n[:2] for n in notes] == [(NOTIFICATIONS_OFF_HINT, "Turn on")]
+        notes[0][2]()
+        assert navigated == ["/settings/notifications"]
+        await background.prepare_for_run(spec)
+        assert background.permissions.asked.count("NOTIFICATION") == 3 and len(notes) == 1
+        assert background.permissions.asked.count("IGNORE_BATTERY_OPTIMIZATIONS") == 1
+
+        # asked on an earlier launch and still off (the real state): the hint once, only for long jobs
+        later, later_native, _c, _j = _background("android", notify=lambda *a: notes.append(a),
+                                                  prefs=FakePrefs({PREF_NOTIFICATION_ASKED: True}))
+        later_native.results["get_platform_info"] = {"post_notifications_granted": False,
+                                                     "notifications_enabled": False}
+        await later.prepare_for_run(spec, long_job=False)
+        assert len(notes) == 1 and later.permissions.asked == []
+        await later.prepare_for_run(spec)
+        assert len(notes) == 2 and later.permissions.asked == ["IGNORE_BATTERY_OPTIMIZATIONS"]
+        # notifications on: no hint
+        on, on_native, _c, _j = _background("android", notify=lambda *a: notes.append(a),
+                                            prefs=FakePrefs({PREF_NOTIFICATION_ASKED: True}))
+        on_native.results["get_platform_info"] = {"post_notifications_granted": True, "notifications_enabled": True}
+        await on.prepare_for_run(spec)
+        assert len(notes) == 2
+
+        # Welcome step 4 / Settings › Notifications use the same request
+        page_path, _n, _c, _j = _background("android")
+        page_path.permissions = _FlakyPermissions([RuntimeError("no activity"), "granted"])
+        assert (await AccountsProfilesFeature.request_notifications(page_path)).startswith("error RuntimeError")
+        assert PREF_NOTIFICATION_ASKED not in page_path.prefs
+        assert await AccountsProfilesFeature.request_notifications(page_path) == "granted"
+        assert page_path.prefs[PREF_NOTIFICATION_ASKED] is True
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_notifications_page_shows_real_permission_status():
+    from glossarion_mobile.services.background import notification_state
+    from glossarion_mobile.ui.chat.direct_text_rules import AUTO_ACCEPT_GLOSSARY_PREF
+    from glossarion_mobile.ui.screens.notifications import NotificationsScreen
+    from glossarion_mobile.ui.screens.pages_feature import AccountsProfilesFeature
+
+    class PagePermissions(FakePermissions):
+        def __init__(self):
+            super().__init__()
+            self.current = "permanentlyDenied"
+            self.opened = 0
+
+        async def status(self, name):
+            return self.current
+
+        async def open_app_settings(self):
+            self.opened += 1
+            return True
+
+    background, native, _clock, _jobs = _background("android")
+    background.permissions = PagePermissions()
+    native.results["get_platform_info"] = {"post_notifications_granted": False, "notifications_enabled": False}
+    said = []
+
+    async def scenario():
+        assert await background.notification_status() == {"granted": False, "enabled": False,
+                                                          "status": "permanentlyDenied", "state": "blocked"}
+        screen = NotificationsScreen(None, types.SimpleNamespace(say=said.append), background=background,
+                                     request_notifications=lambda: AccountsProfilesFeature.request_notifications(
+                                         background))
+        screen.get_body()
+        assert not screen.open_settings_button.visible  # until the real state is read (did_show)
+        assert await screen.refresh_status() == "blocked"
+        assert screen.notification_status.value.startswith("Notifications: Blocked in system settings")
+        assert screen.open_settings_button.visible
+        assert await screen.open_system_settings() and background.permissions.opened == 1 and said == []
+        # the test notification posts on jobs.done
+        assert await screen.send_test()
+        note = _posted(native)[-1]
+        assert note[2]["channel_id"] == "jobs.done" and screen.test_status.value == "Test notification sent."
+        # turned on in the system settings: back in the app (lifecycle "resume") the page reads it again
+        native.results["get_platform_info"] = {"post_notifications_granted": True, "notifications_enabled": True}
+        background.permissions.current = "granted"
+        screen.app_resumed()
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if screen.permission_state == "on":
+                break
+        assert screen.permission_state == "on" and not screen.open_settings_button.visible
+        assert await screen.allow_notifications() == "granted"
+        assert screen.permission_state == "on" and screen.notification_status.value == "Notifications: On"
+        assert not screen.open_settings_button.visible
+        # Glossary review: the global "Always accept generated glossaries" (Prefs, never config.json)
+        assert screen.auto_accept.value is False
+        screen.auto_accept.value = True
+        screen._on_auto_accept(types.SimpleNamespace(control=screen.auto_accept))
+        assert background.prefs[AUTO_ACCEPT_GLOSSARY_PREF] is True
+        # the platform refuses a post: reported on the page and kept for diagnostics
+        native.results["show_notification"] = False
+        assert not await screen.send_test() and "did not show" in screen.test_status.value
+        assert background.notifications.last_result["ok"] is False
+
+    asyncio.run(scenario())
+    assert notification_state({"granted": False, "status": "permanentlyDenied"}) == "blocked"
+    assert notification_state({"granted": False, "status": "denied"}) == "off"
+    assert notification_state({"granted": True, "enabled": False, "status": "granted"}) == "blocked"
+    assert notification_state({"granted": True, "enabled": True, "status": ""}) == "on"
+    desktop, _n, _c, _j = _background("desktop")
+    assert asyncio.run(desktop.notification_status())["state"] == "unavailable"
+
+
+def test_dismissed_fgs_notification_is_reposted_while_a_job_runs():
+    """Owner: the job notification should stay like a VPN's. Android 14+ lets users swipe a foreground
+    service's notification away; while the job runs it is posted again (at most once per second)."""
+    background, native, clock, jobs = _background("android")
+
+    async def scenario():
+        starting = _snap(state=JobState.STARTING)
+        jobs.snap = starting
+        await background.on_transition(starting, JobState.QUEUED)
+        running = _snap(progress=Progress(total=80, completed=3))
+        jobs.snap = running
+        clock.now += 2
+        assert await background.job_progress(running)
+        sent = len(_service_texts(native))
+        await background.on_foreground_event({"type": "dismissed"})
+        assert _service_texts(native)[sent:] == ["Translating Book.epub: 3/80 chapters"]  # the same text again
+        await background.on_foreground_event({"type": "dismissed"})  # within a second: not at once ...
+        assert len(_service_texts(native)) == sent + 1
+        assert background._repost_wanted and background.ticker_running  # ... but the swipe is kept
+        assert not await background.tick() and len(_service_texts(native)) == sent + 1  # still in the second
+        clock.now += 1.0
+        assert await background.tick()  # the ticker posts it once the second is over (the text is unchanged)
+        assert _service_texts(native)[sent + 1:] == ["Translating Book.epub: 3/80 chapters"]
+        assert not background._repost_wanted
+        clock.now += 1.5
+        await background.on_foreground_event({"type": "dismissed"})
+        assert len(_service_texts(native)) == sent + 3 and jobs.stops == []  # a swipe never stops the job
+        # the job ended and the service stopped: nothing comes back
+        await background.on_transition(_snap(state=JobState.DONE, finished=200.0), JobState.RUNNING)
+        assert "stop_job_service" in native.names() and not background.service_running
+        clock.now += 5
+        await background.on_foreground_event({"type": "dismissed"})
+        assert len(_service_texts(native)) == sent + 3
+        assert not await background.tick() and not background.ticker_running
+
+    asyncio.run(scenario())

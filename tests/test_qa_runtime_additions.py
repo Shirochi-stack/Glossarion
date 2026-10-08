@@ -20,7 +20,10 @@ mirrors ``QA_USE_THREAD_EXECUTOR=1`` and a small ``AI_HUNTER_MAX_WORKERS``; desk
 Checks (legacy = ``git show U6_BASE_SHA``; legacy functions/methods are executed from that
 source, so no Qt is needed):
 
-* verbatim moves, the GUI / runtime / scanner changed only in the documented places;
+* verbatim moves, the GUI / runtime / scanner changed only in the documented places (since
+  2026-10-08 also the owner-approved chat-QA opt-in ``allow_direct_text=False`` of
+  ``run_qa_scan_path`` / ``run_bulk_qa_scan``: the default still refuses Direct Text, only the
+  keyword lets it through, and no desktop caller passes it);
 * differential fuzz (``PARITY_U6_QA_STATES``, default 500 seeded states per function) of the
   pure helpers, the OCR-source resolver and ``open_latest_qa_report`` on random trees
   (``PARITY_U6_QA_FS_STATES``, default 150), ``apply_qa_scan_env_from_settings`` /
@@ -95,6 +98,10 @@ RUNTIME_NEW_NAMES = {"MOBILE_QA_MAX_WORKERS", "mobile_qa_forcing_active", "mobil
 #: U7 additions (QA_Scanner_GUI's bulk loop / loader / reset and translator_gui's QA stop flags;
 #: pinned against the frozen code by tests/test_u7_tool_cores.py)
 U7_BASE_SHA = "41814faa95e273e956870bd3aac5a2c6fb7d66b1"
+#: U9 on main, the last commit before the owner-approved chat-QA opt-in (2026-10-08):
+#: ``allow_direct_text=False`` on run_qa_scan_path / run_bulk_qa_scan, passed only by Glossarion
+#: Mobile's chat QA job (tests/parity/DISCREPANCIES.md "Chat QA of Direct Text workspaces").
+DEVFIX_BASE_SHA = "cddd73a4f5d057a03810d00b5787f37c14017130"
 RUNTIME_U7_NAMES = {"load_current_qa_settings", "reset_qa_cancel_flags", "next_qa_stop_phase",
                     "apply_qa_graceful_stop_flags", "apply_qa_force_stop_flags", "clear_qa_stop_flags",
                     "run_bulk_qa_scan"}
@@ -320,16 +327,38 @@ def test_gui_changed_only_in_the_documented_places(legacy_gui_tree, new_gui_tree
     assert "os.walk" not in opener and "is_direct_text_qa_path" not in opener
 
 
+def _without_direct_text_opt_in(fn):
+    """``run_qa_scan_path`` with the owner-approved chat-QA opt-in (2026-10-08) taken out again: the
+    trailing ``allow_direct_text=False`` parameter and the ``not allow_direct_text and (...)`` wrapper
+    around the Direct Text guard. Asserts the opt-in has exactly that shape."""
+    import copy
+
+    fn = copy.deepcopy(fn)
+    assert fn.args.args[-1].arg == "allow_direct_text"
+    assert ast.unparse(fn.args.defaults[-1]) == "False"
+    del fn.args.args[-1], fn.args.defaults[-1]
+    guards = [s for s in fn.body if isinstance(s, ast.If) and "allow_direct_text" in ast.unparse(s.test)]
+    assert len(guards) == 1
+    test = guards[0].test
+    assert isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) and len(test.values) == 2
+    assert ast.unparse(test.values[0]) == "not allow_direct_text"
+    guards[0].test = test.values[1]
+    assert "allow_direct_text" not in ast.unparse(fn)
+    return fn
+
+
 def test_runtime_changed_only_in_the_documented_places(legacy_runtime):
     legacy_tree = ast.parse(git_text("src/qa_scan_runtime.py"))
     new_tree = ast.parse(src_text("qa_scan_runtime.py"))
     legacy, new = _top_defs(legacy_tree), _top_defs(new_tree)
     assert set(new) - set(legacy) == RUNTIME_NEW_NAMES | set(MOVED_HELPERS) | RUNTIME_U7_NAMES
     assert not set(legacy) - set(new)
-    edited = {"apply_qa_scan_env_from_settings", "prepare_qa_scan_settings"}
+    edited = {"apply_qa_scan_env_from_settings", "prepare_qa_scan_settings", "run_qa_scan_path"}
     for name, node in legacy.items():
         if name not in edited:
             assert ast.dump(node) == ast.dump(new[name]), name
+    # run_qa_scan_path: only the owner-approved chat-QA opt-in (2026-10-08, DISCREPANCIES)
+    assert ast.dump(_without_direct_text_opt_in(new["run_qa_scan_path"])) == ast.dump(legacy["run_qa_scan_path"])
     # apply: one statement before the snapshot of the previous values
     old_apply, new_apply = legacy["apply_qa_scan_env_from_settings"], new["apply_qa_scan_env_from_settings"]
     inserted = [ast.unparse(s) for s in new_apply.body if ast.dump(s) not in {ast.dump(o) for o in old_apply.body}]
@@ -348,6 +377,106 @@ def test_runtime_changed_only_in_the_documented_places(legacy_runtime):
     new_imports = [ast.unparse(n) for n in new_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     assert [i for i in new_imports if i not in old_imports] == ["import re", "import mobile_runtime"]
     assert all(i in new_imports for i in old_imports)
+
+
+# ---- owner-approved desktop-shared edit (2026-10-08): the chat-QA Direct Text opt-in -------------
+
+_DIRECT_TEXT_SKIP_LOG = ("⏭️ QA scan skipped: Direct Text folders and temporary Direct Text "
+                         "outputs are excluded from automatic QA scanning.")
+
+
+def test_runtime_changed_only_by_the_direct_text_opt_in_since_u9():
+    """Against the last commit before it, only run_qa_scan_path (the parameter + the guard condition)
+    and run_bulk_qa_scan (the keyword-only parameter, handed to its single run_qa_scan_path call)
+    changed; every other statement of qa_scan_runtime is the same."""
+    import copy
+
+    base_tree = ast.parse(git_text("src/qa_scan_runtime.py", DEVFIX_BASE_SHA))
+    new_tree = ast.parse(src_text("qa_scan_runtime.py"))
+    edited = ("run_qa_scan_path", "run_bulk_qa_scan")
+
+    def rest(tree):
+        return [ast.dump(n) for n in tree.body if not (isinstance(n, ast.FunctionDef) and n.name in edited)]
+
+    assert rest(new_tree) == rest(base_tree)
+    base, new = _top_defs(base_tree), _top_defs(new_tree)
+    assert ast.dump(_without_direct_text_opt_in(new["run_qa_scan_path"])) == ast.dump(base["run_qa_scan_path"])
+    bulk = copy.deepcopy(new["run_bulk_qa_scan"])
+    assert bulk.args.kwonlyargs[-1].arg == "allow_direct_text"
+    assert ast.unparse(bulk.args.kw_defaults[-1]) == "False"
+    del bulk.args.kwonlyargs[-1], bulk.args.kw_defaults[-1]
+    calls = [n for n in ast.walk(bulk) if isinstance(n, ast.Call) and ast.unparse(n.func) == "run_qa_scan_path"]
+    assert len(calls) == 1
+    assert ast.unparse(calls[0].keywords[-1]) == "allow_direct_text=allow_direct_text"
+    del calls[0].keywords[-1]
+    assert ast.dump(bulk) == ast.dump(base["run_bulk_qa_scan"])
+
+
+def test_direct_text_guard_refuses_by_default_and_scans_only_with_the_opt_in(tmp_path, monkeypatch):
+    scanned = []
+    fake = types.ModuleType("scan_html_folder")
+    fake.configure_qa_cache = lambda config: None
+
+    def scan_html_folder(folder, **kw):
+        scanned.append((folder, kw.get("epub_path"), kw.get("mode")))
+        return ["scanned"]
+
+    fake.scan_html_folder = scan_html_folder
+    monkeypatch.setitem(sys.modules, "scan_html_folder", fake)
+    chat = tmp_path / "Output" / "Direct Text" / "Novel - chat" / "Attachments" / "Book"
+    chat.mkdir(parents=True)
+    plain = tmp_path / "Output" / "Book"
+    plain.mkdir(parents=True)
+    chat_source = str(chat.parent / "Book.epub")
+    # a Direct Text folder, and a Library-style folder whose source is a Direct Text file
+    for folder, epub in ((str(chat), None), (str(plain), chat_source)):
+        logs = []
+        assert qa_scan_runtime.run_qa_scan_path(folder, log=logs.append, epub_path=epub, config={}) is None
+        assert logs == [_DIRECT_TEXT_SKIP_LOG] and not scanned
+        logs = []
+        assert qa_scan_runtime.run_qa_scan_path(folder, log=logs.append, epub_path=epub, config={},
+                                                allow_direct_text=False) is None
+        assert logs == [_DIRECT_TEXT_SKIP_LOG] and not scanned
+        assert qa_scan_runtime.run_qa_scan_path(folder, log=logs.append, epub_path=epub, config={},
+                                                allow_direct_text=True) == ["scanned"]
+        assert scanned == [(folder, epub, "quick-scan")] and logs.count(_DIRECT_TEXT_SKIP_LOG) == 1
+        scanned.clear()
+    assert qa_scan_runtime.run_qa_scan_path(str(plain), log=lambda m: None, config={}) == ["scanned"]
+
+
+def test_bulk_scan_hands_the_opt_in_to_each_folder_scan(tmp_path, monkeypatch):
+    seen = []
+
+    def recorder(folder, **kw):
+        seen.append((os.path.basename(folder), kw["allow_direct_text"]))
+
+    monkeypatch.setattr(qa_scan_runtime, "run_qa_scan_path", recorder)
+    folders = []
+    for name in ("Book", "Other"):
+        folder = tmp_path / "Output" / "Direct Text" / "chat" / "Attachments" / name
+        folder.mkdir(parents=True)
+        folders.append(str(folder))
+    common = dict(mode="quick-scan", epub_path=None, qa_settings={}, load_settings=dict,
+                  selected_mode_value="quick-scan", disable_word_count_for_run=False, epub_basename_map={},
+                  global_selected_files=None, log=lambda message: None, stop_flag=lambda: False)
+    qa_scan_runtime.run_bulk_qa_scan(folders[:1], **common)
+    qa_scan_runtime.run_bulk_qa_scan(folders, allow_direct_text=True, **common)
+    assert seen == [("Book", False), ("Book", True), ("Other", True)]
+
+
+def test_desktop_callers_never_pass_the_direct_text_opt_in():
+    """Only Glossarion Mobile's chat QA job opts in: QA_Scanner_GUI's bulk scan and TransateKRtoEN's
+    multipass scan keep the Direct Text refusal, and no other desktop module names the keyword."""
+    for name in ("QA_Scanner_GUI.py", "TransateKRtoEN.py"):
+        tree = ast.parse(src_text(name))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", getattr(n.func, "attr", "")) in ("run_bulk_qa_scan", "run_qa_scan_path")]
+        assert calls, name
+        for call in calls:
+            assert all(kw.arg is not None and kw.arg != "allow_direct_text" for kw in call.keywords), name
+    mentions = sorted(p.name for p in SRC.glob("*.py") if p.name != "qa_scan_runtime.py"
+                      and "allow_direct_text" in p.read_text(encoding="utf-8", errors="replace"))
+    assert mentions == []
 
 
 def _drop_local_hashlib_import(tree):
@@ -1065,6 +1194,9 @@ def test_quick_scan_report_desktop_path_equals_mobile_path(e2e_workspace, tmp_pa
             "HOME": str(root / "home"), "USERPROFILE": str(root / "home"), "APPDATA": str(root / "appdata"),
             "LOCALAPPDATA": str(root / "localappdata"), "TEMP": str(root / "tmp"), "TMP": str(root / "tmp"),
             "OUTPUT_DIRECTORY": str(root / "Output"), "GLOSSARION_LIBRARY_DIR": str(root / "Library"),
+            # unified_api_client logs every request (the scanner's tiktoken download too) into src/
+            # http_requests unless this is off; the filter above dropped the caller's value
+            "GLOSSARION_HTTP_LOG": "0",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONPATH": os.pathsep.join(p for p in (str(seed_dir), os.environ.get("PYTHONPATH", "")) if p),
         })

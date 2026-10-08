@@ -3,8 +3,11 @@
 ImageRenderer's GUI-free editor functions (Detect / Clean / Recognize / Translate / Translate All,
 the per-box actions, Save & Update Overlay re-render, per-image state) moved verbatim into
 ``manga_editor_core``; ImageRenderer re-binds the same code objects to its own namespace
-(``bind_editor_namespace``), so on the desktop they keep calling its Qt helpers. Five moved
-bodies carry listed edits (Qt lines -> hooks, the google_vision_rest fallback); five
+(``bind_editor_namespace``), so on the desktop they keep calling its Qt helpers. Nine moved
+bodies carry listed edits (Qt lines -> hooks, the google_vision_rest fallback, and the six page
+reads through ``safe_image.cv2_imread``: the owner-approved OpenCV decoder gate of 2026-10-08,
+which also changed one line of ImageRenderer's own ``_render_with_manga_translator_thread_safe``,
+``DESKTOP_EDITS``); five
 helpers were split out of ImageRenderer's Qt dialogs and two out of manga_image_preview's Stop
 button; ``ImageStateManager`` moved out of manga_integration with its spawn worker gated by
 ``mobile_runtime.processes_available()``. The oracle is the desktop at ``U8_BASE_SHA`` (main
@@ -199,6 +202,35 @@ EDITS = (
      "            QTimer.singleShot(0, lambda: _load_rendered_image_to_output_tab(self, rendered_pil, output_path, switch_tab))\n",
      "        if refresh_preview:\n"
      "            _schedule_rendered_output_refresh(self, rendered_pil, output_path, switch_tab)\n"),
+    # Owner-approved decoder hardening (2026-10-08, DISCREPANCIES "Image decoder hardening"): page
+    # reads go through safe_image.cv2_imread, which gives OpenCV only PNG / JPEG / WEBP / BMP / GIF
+    # bytes (tests/test_cv2_decode_gate.py). ImageRenderer imports cv2_imread, so the re-bound
+    # bodies resolve it on the desktop as well.
+    ("_run_detect_background",
+     "        image = cv2.imread(image_path)\n", "        image = cv2_imread(image_path)\n"),
+    ("_run_clean_background",
+     "        image = cv2.imread(image_path)\n", "        image = cv2_imread(image_path)\n"),
+    ("_run_detection_sync",
+     "        image = cv2.imread(image_path)\n", "        image = cv2_imread(image_path)\n"),
+    ("_run_inpainting_sync",
+     "        image = cv2.imread(image_path)\n", "        image = cv2_imread(image_path)\n"),
+    ("_run_ocr_on_regions",
+     "        image = cv2.imread(image_path)\n", "        image = cv2_imread(image_path)\n"),
+    ("_handle_clean_this_rectangle",
+     "                original_image = cv2.imread(base_image_path)\n",
+     "                original_image = cv2_imread(base_image_path)\n"),
+    # ... and the render opens its page with safe_image.open_page_image: the gate's formats only, so
+    # a page OpenCV may not decode is not decoded by Pillow either (tests/test_cv2_decode_gate.py)
+    ("_render_with_manga_translator",
+     "            pil_image = open_image(image_path)\n", "            pil_image = open_page_image(image_path)\n"),
+)
+
+#: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen
+#: text, new text). Only the owner-approved decoder gate (2026-10-08) so far.
+DESKTOP_EDITS = (
+    ("_render_with_manga_translator_thread_safe",
+     "        base_image_array = cv2.imread(base_image_path)\n",
+     "        base_image_array = cv2_imread(base_image_path)\n"),
 )
 
 #: Split helpers: (helper, source function, start marker, end marker, in-block substitutions,
@@ -372,7 +404,12 @@ def test_desktop_image_renderer_keeps_everything_else():
                 indent = len(code[0]) - len(code[0].lstrip(" "))
                 lines = lines[:s] + [" " * indent + c for c in call.split("\n")] + lines[e + 1:]
             text = "\n".join(lines)
+        for func, old, new in DESKTOP_EDITS:
+            if func == name:
+                assert text.count(old) == 1, (name, old)
+                text = text.replace(old, new)
         assert current[name] == text, name
+    assert {e[0] for e in DESKTOP_EDITS} <= set(frozen) - set(MOVED)
     added = set(current) - set(frozen)
     assert added == set(core.DESKTOP_HOOKS)
     for name, body in DESKTOP_HOOK_BODIES.items():

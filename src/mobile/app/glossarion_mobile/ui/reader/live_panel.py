@@ -4,10 +4,10 @@ A half-height draggable ``BottomSheet`` over the Reader, never inside the
 WebView: the status line ("🛰️ Translating “f” — waiting for stream…"), the
 streamed chapter rendered as ``Markdown`` (fed by ``live.LiveFeed``; it follows
 the stream unless the reader scrolls up), a "🧠 Thinking (n)" ``ExpansionTile``
-holding the thinking text and the pipeline log, "⏹ Stop" and "✕ Hide" (the
-job keeps running; the Reader's 🌐 becomes "🛰️ Live view" and reopens this
-sheet). States: ``waiting`` · ``streaming`` · ``finished`` · ``stopped`` ·
-``failed``.
+holding the thinking text and the pipeline log (at the log size, ``theme.log_text``),
+"⏹ Stop" and "✕ Hide" (the job keeps running; the Reader's 🌐 becomes
+"🛰️ Live view" and reopens this sheet). States: ``waiting`` · ``streaming`` ·
+``finished`` · ``stopped`` · ``failed``.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
-from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.reader.live import LiveFeed, status_stopping, status_waiting, thinking_label
+from glossarion_mobile.ui.theme import log_text
 
 __all__ = ["LivePanel"]
 
@@ -64,8 +64,7 @@ class LivePanel:
                                       key="live-content")
         self.content_column = ft.Column([self.content_md], scroll=ft.ScrollMode.AUTO, auto_scroll=True,
                                         expand=True, on_scroll=self._on_scroll, key="live-scroll")
-        self.side_text = ft.Text("", font_family=mono_family, size=tokens.MONO_STYLE.size - 1, selectable=True,
-                                 color=ft.Colors.ON_SURFACE_VARIANT, key="live-side")
+        self.side_text = log_text("", family=mono_family, color=ft.Colors.ON_SURFACE_VARIANT, key="live-side")
         self.thinking_tile = ft.ExpansionTile(
             title=ft.Text(thinking_label(0), theme_style=ft.TextThemeStyle.LABEL_LARGE),
             controls=[ft.Container(content=ft.Column([self.side_text], scroll=ft.ScrollMode.AUTO, auto_scroll=True,

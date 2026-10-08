@@ -133,9 +133,12 @@ def fake_qa_runtime(*, defaults=None, match=None):
         os.path.join(kw.get("output_root") or "", os.path.splitext(os.path.basename(source))[0])]
 
     def run_qa_scan_path(folder, log=print, stop_flag=None, mode="quick-scan", qa_settings=None, epub_path=None,
-                         selected_files=None, text_file_mode=None, progress_path=None, owner=None, config=None):
+                         selected_files=None, text_file_mode=None, progress_path=None, owner=None, config=None,
+                         allow_direct_text=False, **kw):
+        # devfix 2026-10-08: the shared loop hands on the chat-QA opt-in (allow_direct_text)
         module.calls.append({"folder": folder, "mode": mode, "settings": dict(qa_settings or {}),
-                             "epub": epub_path, "owner": owner, "stopped": bool(stop_flag and stop_flag())})
+                             "epub": epub_path, "owner": owner, "stopped": bool(stop_flag and stop_flag()),
+                             "allow_direct_text": allow_direct_text})
         report = qa_kind.report_path_for(folder)
         os.makedirs(os.path.dirname(report), exist_ok=True)
         Path(report).write_text("<html><body>report</body></html>", encoding="utf-8")
@@ -319,6 +322,56 @@ def test_qa_adapter_runs_the_real_shared_scanner(tmp_path, monkeypatch):
     assert ctx.logs[-1] == "✅ QA scan completed successfully."
 
 
+def test_chat_qa_scans_a_direct_text_workspace_with_the_real_scanner(tmp_path, monkeypatch):
+    """Owner device report #7: a QA scan from the chat runs Quick Scan with the duplicate check off (sample
+    size 0) on the chat's own Direct Text workspace, through the shared scanner (threads, isolated env)."""
+    try:
+        import qa_scan_runtime  # noqa: F401
+        import scan_html_folder  # noqa: F401
+    except Exception as exc:  # pragma: no cover - a bundle without the scanner's dependencies
+        pytest.skip(f"the shared scanner is not importable ({exc})")
+    for name, value in (("GLOSSARION_NO_PROCESSES", "1"), ("CONFIG_FILE", str(tmp_path / "config.json")),
+                        ("HOME", str(tmp_path / "home")), ("USERPROFILE", str(tmp_path / "home")),
+                        ("APPDATA", str(tmp_path / "appdata")), ("GLOSSARION_HTTP_LOG", "0"),
+                        ("OUTPUT_DIRECTORY", str(tmp_path / "Output")),
+                        ("GLOSSARION_LIBRARY_DIR", str(tmp_path / "Library"))):
+        monkeypatch.setenv(name, value)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    text = "The knight walked into the hall and greeted everyone warmly. " * 30
+
+    def workspace(folder: Path) -> Path:
+        folder.mkdir(parents=True)
+        for index in range(1, 4):
+            (folder / f"response_{index:04d}_ch{index}.html").write_text(
+                f"<html><head><title>Chapter {index}</title></head><body><h1>Chapter {index}</h1><p>{text}</p>"
+                f"</body></html>", encoding="utf-8")
+        return folder
+
+    chat = workspace(tmp_path / "Output" / "Direct Text" / "Novel - c1" / "Attachments" / "Book")
+    saved = {"qa_scanner_settings": {"check_missing_header_tags": False}, "output_language": "English"}
+    kind, _title, inputs, params, _origin = qm.chat_qa_job(str(chat), None, cid="c1", chat_title="Novel")
+    owner = types.SimpleNamespace(config=dict(saved))
+    ctx = FakeCtx(owner, params=params, inputs=inputs, config=saved)
+    result = qa_kind.run(ctx)
+    report = qa_kind.report_path_for(str(chat))
+    assert kind == "qa_scan" and result["ok"] is True and result["outputs"] == [report] and os.path.isfile(report)
+    assert report == str(chat / "Book_Scan Report" / "validation_results.html")
+    assert any("duplicate detection disabled (sample size set to 0)" in line for line in ctx.logs)
+    assert not any("QA scan skipped" in line or "Skipping Direct Text" in line for line in ctx.logs)
+    assert qm.load_report_summary(report).total == 3
+    # the same folder through the inputs fallback (never flagged): the desktop Direct Text rule
+    ctx2 = FakeCtx(owner, params={"mode": "quick-scan"}, inputs=(str(chat),), config=saved)
+    assert qa_kind.run(ctx2)["ok"] is False
+    # a chat book the Library already holds (auto-migrated): no flag, and a saved 1000 runs the duplicate pass
+    library = workspace(tmp_path / "Output" / "Book2")
+    _k, _t, lib_inputs, lib_params, _o = qm.chat_qa_job(str(library), None, cid="c1", chat_title="Novel")
+    assert "direct_text" not in lib_params["targets"][0]
+    with_1000 = {**saved, "qa_scanner_settings": {**saved["qa_scanner_settings"], "quick_scan_sample_size": 1000}}
+    ctx3 = FakeCtx(owner, params=lib_params, inputs=lib_inputs, config=with_1000)
+    assert qa_kind.run(ctx3)["ok"] is True and os.path.isfile(qa_kind.report_path_for(str(library)))
+    assert not any("duplicate detection disabled" in line for line in ctx3.logs)
+
+
 def test_qa_scan_through_the_job_service(tmp_path, monkeypatch):
     tj = _load("_glossarion_tools_jobs_helpers", "test_jobs.py")
     fake = fake_qa_runtime()
@@ -333,6 +386,182 @@ def test_qa_scan_through_the_job_service(tmp_path, monkeypatch):
     assert snap.result["qa_mode"] == "ai-hunter" and ("reset", "translation") in backend.events
     assert fake.calls[-1]["owner"] is backend.owners[-1]
     service.close()
+
+
+# ---- devfix 2026-10-08 (owner device report #7): QA scan from the chat, Quick Scan, sample size 0 ----
+
+
+def _chat_workspace(tmp_path: Path, chat="Novel - c1", name="Book") -> Path:
+    """``<output root>/Direct Text/<chat>/Attachments/<book>`` (direct_text_store's attachment workspace)."""
+    folder = tmp_path / "Output" / "Direct Text" / chat / "Attachments" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "response_ch001.html").write_text("<html><body><p>one</p></body></html>", encoding="utf-8")
+    return folder
+
+
+def test_qa_adapter_scans_flagged_chat_workspaces_only(tmp_path, monkeypatch):
+    fake = fake_qa_runtime()
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake)
+    chat = _chat_workspace(tmp_path)
+    source = make_epub(chat.parent / "Book.epub")  # the chat's attachment copy (a Direct Text path too)
+    other = _chat_workspace(tmp_path, "Novel - c2", "Other")
+    kind, _title, inputs, params, _origin = qm.chat_qa_job(str(chat), source, cid="c1", chat_title="Novel")
+    params["targets"].append({"folder": str(other), "source": None})  # an unflagged Direct Text folder
+    ctx = FakeCtx(object(), params=params, inputs=inputs + (str(other),), config={"output_language": "English"})
+    result = qa_kind.run(ctx)
+    assert kind == "qa_scan" and result["ok"] is True
+    # only the flagged chat workspace is scanned, with its source and the shared loop's opt-in
+    assert [os.path.basename(c["folder"]) for c in fake.calls] == ["Book"]
+    assert fake.calls[0]["allow_direct_text"] is True and fake.calls[0]["epub"] == os.path.abspath(source)
+    assert fake.calls[0]["mode"] == "quick-scan"
+    assert any(line == f"⏭️ Skipping Direct Text folder during QA scan: {other}" for line in ctx.logs)
+    assert result["outputs"] == [qa_kind.report_path_for(str(chat))]
+    # the inputs fallback is never flagged: the desktop skip and its log line
+    ctx2 = FakeCtx(object(), params={"mode": "quick-scan"}, inputs=(str(chat),))
+    assert qa_kind.run(ctx2)["ok"] is False and len(fake.calls) == 1
+    assert any("Skipping Direct Text folder during QA scan" in line for line in ctx2.logs)
+    assert ctx2.logs[-1] == "⏭️ QA scan skipped: no non-Direct-Text output folders were selected."
+    # a flag on a folder the Library holds (an auto-migrated chat book) needs no opt-in
+    library = tool_target(tmp_path, "Lib")
+    ctx3 = FakeCtx(object(), params={"targets": [{"folder": library.folder, "source": library.source,
+                                                  "direct_text": True}]})
+    assert qa_kind.run(ctx3)["ok"] is True and fake.calls[-1]["allow_direct_text"] is False
+    # Tools › QA Scanner specs are unchanged: no flag, no opt-in
+    assert qm.qa_spec([library], "quick-scan").params["targets"] == [library.to_param()]
+    assert qa_kind.normalize_targets(params, ()) == [(str(chat), os.path.abspath(source)), (str(other), None)]
+    assert qa_kind.normalize_targets(params, (), with_flags=True)[0][2] is True
+
+
+def test_qa_adapter_mobile_sample_size_default_survives_the_per_folder_reload(tmp_path, monkeypatch):
+    """Owner: Quick Scan sample size 0 (duplicate check off) on mobile, not the desktop 1000; a saved value
+    (Tools › QA Scanner / Settings) still wins. The per-folder settings reload keeps it; config is never written."""
+    fake = fake_qa_runtime(defaults={"quick_scan_sample_size": 1000, "check_word_count_ratio": False})
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake)
+    a, b = tool_target(tmp_path, "A"), tool_target(tmp_path, "B")
+    config = {"qa_scanner_settings": {"check_ai_truncation_detection": False}, "output_language": "English"}
+    before = json.loads(json.dumps(config))
+    ctx = FakeCtx(object(), params={"mode": "quick-scan", "targets": [a.to_param(), b.to_param()]}, config=config)
+    assert qa_kind.run(ctx)["ok"] is True
+    assert [c["settings"]["quick_scan_sample_size"] for c in fake.calls] == [0, 0]
+    assert ctx.config == before and "quick_scan_sample_size" not in ctx.config["qa_scanner_settings"]
+    assert ("⚡ Quick Scan duplicate check sample size: 0 (duplicate check off) · Glossarion Mobile default"
+            in ctx.logs)
+    for saved in (1000, 250, -1):
+        fake.calls.clear()
+        ctx = FakeCtx(object(), params={"mode": "quick-scan", "targets": [a.to_param(), b.to_param()]},
+                      config={"qa_scanner_settings": {"quick_scan_sample_size": saved}})
+        qa_kind.run(ctx)
+        assert [c["settings"]["quick_scan_sample_size"] for c in fake.calls] == [saved, saved]
+        assert f"⚡ Quick Scan duplicate check sample size: {saved}" in ctx.logs
+    # other modes scan with the same settings and no Quick Scan line
+    fake.calls.clear()
+    ctx = FakeCtx(object(), params={"mode": "aggressive", "targets": [a.to_param()]}, config={})
+    qa_kind.run(ctx)
+    assert fake.calls[0]["settings"]["quick_scan_sample_size"] == 0
+    assert not any("Quick Scan duplicate check" in line for line in ctx.logs)
+    assert qa_kind.with_mobile_qa_defaults({"quick_scan_sample_size": 1000}, {}) == {"quick_scan_sample_size": 0}
+    assert qa_kind.with_mobile_qa_defaults({"quick_scan_sample_size": 1000},
+                                           {"qa_scanner_settings": {"quick_scan_sample_size": 1000}}) == {
+        "quick_scan_sample_size": 1000}
+
+
+def test_chat_qa_job_parts_summary_and_the_job_service(tmp_path, monkeypatch):
+    tj = _load("_glossarion_tools_jobs_helpers", "test_jobs.py")
+    fake = fake_qa_runtime()
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake)
+    chat = _chat_workspace(tmp_path)
+    parts = qm.chat_qa_job(str(chat), None, cid="c1", chat_title="Novel")
+    kind, title, inputs, params, origin = parts
+    assert (kind, title, inputs) == ("qa_scan", "Book", (str(chat),))
+    # Quick Scan; the sample size is the saved / mobile one the job reads (no per-run override)
+    assert params == {"mode": qm.CHAT_QA_MODE, "disable_word_count": True,
+                      "targets": [{"folder": str(chat), "source": None, "direct_text": True}]}
+    assert qm.CHAT_QA_MODE == "quick-scan" and qm.CHAT_QA_SAMPLE_SIZE == 0 == qa_kind.MOBILE_QUICK_SAMPLE_SIZE
+    # a chat origin without params["chat_id"]: the chat's JobStrip shows the job (no chat card)
+    assert origin == {"type": "chat", "cid": "c1", "label": "Chat · Novel"} and "chat_id" not in params
+    library = tool_target(tmp_path, "Lib")
+    _k, _t, _i, lib_params, lib_origin = qm.chat_qa_job(library.folder, library.source, cid="c1", chat_title="")
+    assert lib_params == {"mode": "quick-scan", "targets": [library.to_param()]} and lib_origin["label"] == "Chat"
+    assert qm.chat_qa_job("", None, cid="c1", chat_title="Novel") == "No output folder to scan"
+    assert qm.chat_qa_summary_line() == "Quick Scan · duplicate check off (sample size 0)"
+    assert qm.chat_qa_summary_line({}) == "Quick Scan · duplicate check off (sample size 0)"
+    assert (qm.chat_qa_summary_line({"qa_scanner_settings": {"quick_scan_sample_size": 1000}})
+            == "Quick Scan · duplicate check sample size 1000")
+    assert qm.sample_size_text(-1) == "duplicate check on the full text (sample size -1)"
+    # the parts run through the real JobService (the chat's env.jobs.submit builds this JobSpec)
+    from glossarion_mobile.services.jobs import JobSpec
+
+    service, _backend = tj.make_service(tmp_path)
+    job_id = service.submit(JobSpec(kind=kind, title=title, inputs=inputs, params=params, origin=origin))
+    assert service.wait_idle(tj.TIMEOUT)
+    snap = service.snapshot(job_id)
+    assert snap.state is JobState.DONE and snap.outputs == (qa_kind.report_path_for(str(chat)),)
+    assert fake.calls[-1]["allow_direct_text"] is True and fake.calls[-1]["settings"]["check_word_count_ratio"] is False
+    service.close()
+    # a build whose shared scanner lacks the opt-in: a chat workspace waits for the Library
+    old = fake_qa_runtime()
+
+    def old_loop(folders_to_scan, *, mode, epub_path, qa_settings, load_settings, selected_mode_value,
+                 disable_word_count_for_run, epub_basename_map, global_selected_files, log, stop_flag,
+                 owner=None, on_report=None):  # the U9 signature: no opt-in
+        return 0, 0
+
+    old.run_bulk_qa_scan = old_loop
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", old)
+    assert qm.chat_qa_job(str(chat), None, cid="c1", chat_title="Novel") == qm.CHAT_QA_UNAVAILABLE
+    assert isinstance(qm.chat_qa_job(library.folder, None, cid="c1", chat_title="Novel"), tuple)
+    # a wrapper that forwards **kwargs (instrumentation, a decorator without functools.wraps) passes it on
+    wrapped = fake_qa_runtime()
+    inner = wrapped.run_bulk_qa_scan
+    wrapped.run_bulk_qa_scan = lambda *args, **kwargs: inner(*args, **kwargs)
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", wrapped)
+    assert isinstance(qm.chat_qa_job(str(chat), None, cid="c1", chat_title="Novel"), tuple)
+
+
+def test_quick_sample_size_migration_runs_once_and_only_on_the_desktop_1000(tmp_path):
+    from glossarion_mobile.state.config_store import MobileConfigStore
+    from glossarion_mobile.state.prefs import Prefs
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"model": "m", "qa_scanner_settings": {"quick_scan_sample_size": 1000,
+                                                                           "min_file_length": 5}}),
+                           encoding="utf-8")
+    store = MobileConfigStore(config_path, debounce=0.01)
+    prefs = Prefs(tmp_path / "mobile_state.json")
+    store.load()
+    prefs.load()
+    try:
+        assert qm.migrate_quick_sample_size(store.get, store.set, prefs) is True
+        assert store.get(qm.QUICK_SAMPLE_KEY) == 0 and qm.quick_sample_size(store.snapshot()) == 0
+        assert prefs.get(qm.QUICK_SAMPLE_MIGRATION_PREF) is True
+        store.set(qm.QUICK_SAMPLE_KEY, 1000)  # the owner types 1000 again later: it stays
+        assert qm.migrate_quick_sample_size(store.get, store.set, prefs) is False
+        assert store.get(qm.QUICK_SAMPLE_KEY) == 1000
+        store.flush()
+        prefs.flush()
+    finally:
+        store.close()
+        prefs.close()
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved == {"model": "m", "qa_scanner_settings": {"quick_scan_sample_size": 1000, "min_file_length": 5}}
+    assert json.loads((tmp_path / "mobile_state.json").read_text(encoding="utf-8"))[qm.QUICK_SAMPLE_MIGRATION_PREF]
+    # only exactly 1000 is migrated; nothing saved stays unsaved (the job uses the mobile default)
+    for value in (500, -1, 0, "1000", 1000.5, True, None):
+        data = {} if value is None else {"qa_scanner_settings": {"quick_scan_sample_size": value}}
+        flags = FakePrefs()
+
+        def get(key, default=None, data=data):
+            return (data.get(key[0]) or {}).get(key[1], default)
+
+        def put(key, value, data=data):
+            data.setdefault(key[0], {})[key[1]] = value
+
+        assert qm.migrate_quick_sample_size(get, put, flags) is False, value
+        assert data == ({} if value is None else {"qa_scanner_settings": {"quick_scan_sample_size": value}})
+        assert flags.get(qm.QUICK_SAMPLE_MIGRATION_PREF) is True
+    assert qm.migrate_quick_sample_size(lambda k, d=None: 1000, lambda k, v: None, None) is False  # no Prefs
+    assert qm.quick_sample_size({}) == 0 and qm.quick_sample_size(None) == 0
+    assert qm.quick_sample_size({"qa_scanner_settings": {"quick_scan_sample_size": 300}}) == 300
 
 
 # ==========================================================================
@@ -967,6 +1196,65 @@ def test_qa_screen_modes_sources_prechecks_and_job(tmp_path, monkeypatch):
 
 
 @needs_flet
+def test_qa_screen_shows_the_mobile_sample_size_and_migrates_a_saved_1000_once(tmp_path, monkeypatch):
+    """Owner device report #7 (2026-10-08): the sample size field shows 0 (duplicate check off), not the
+    desktop 1000; a 1000 an earlier build saved becomes 0 once; the field stays editable."""
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake_qa_runtime())
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.qa_screen import QaScannerScreen, open_qa_report
+
+    tb = _tb()
+    target = tool_target(tmp_path, "Alpha")
+
+    async def scenario():
+        _conn, session = tb._fake_session("android")
+        page = session.page
+        # nothing saved: 0 shown; Start leaves the untouched default unsaved (the job applies it)
+        fresh: dict = {"qa_scanner_settings": {"check_word_count_ratio": False}}
+        ctx = _ctx(page, store=fresh)
+        screen = QaScannerScreen(parse_route("/tools/qa"), ctx)
+        _mount(page, screen.get_body())
+        assert screen.sample_field.value == "0" and screen.mode == "quick-scan"
+        assert ctx.prefs.get(qm.QUICK_SAMPLE_MIGRATION_PREF) is True
+        screen.set_targets([target])
+        assert await screen.start() and fresh["qa_scanner_settings"] == {"check_word_count_ratio": False}
+        assert ctx.jobs.specs[-1].params == {"mode": "quick-scan", "targets": [target.to_param()]}
+        # a config an earlier build saved with the desktop default: 0 after the one-time migration
+        saved = {"qa_scanner_settings": {"quick_scan_sample_size": 1000, "check_word_count_ratio": False}}
+        _conn2, session2 = tb._fake_session("android")  # a fresh page per screen (same control keys)
+        ctx2 = _ctx(session2.page, store=saved)
+        screen2 = QaScannerScreen(parse_route("/tools/qa"), ctx2)
+        _mount(session2.page, screen2.get_body())
+        assert screen2.sample_field.value == "0"
+        assert saved["qa_scanner_settings"] == {"quick_scan_sample_size": 0, "check_word_count_ratio": False}
+        # still editable, and the migration never runs again: a 1000 typed now stays
+        screen2.sample_field.value = "1000"
+        assert screen2._on_sample() and saved["qa_scanner_settings"]["quick_scan_sample_size"] == 1000
+        _conn3, session3 = tb._fake_session("android")
+        ctx2.page = session3.page
+        screen3 = QaScannerScreen(parse_route("/tools/qa"), ctx2)
+        _mount(session3.page, screen3.get_body())
+        assert screen3.sample_field.value == "1000" and saved["qa_scanner_settings"]["quick_scan_sample_size"] == 1000
+        # the report opener the chat's QA card shares with the screen
+        report = qa_kind.report_path_for(target.folder)
+        rid = open_qa_report(ctx2, report)
+        assert ctx2.navigated[-1] == ("tools.qa.report", {"rid": rid}, None)
+        assert ctx2.prefs.resolve_file_ref(rid) == os.path.abspath(report)
+        assert open_qa_report(ctx2, "") is None and ctx2.notes[-1] == "Reports cannot be opened in this session"
+        # the ChatView shape: navigate / notify, Prefs on its env
+        went, said = [], []
+        chat_view = types.SimpleNamespace(env=types.SimpleNamespace(prefs=FakePrefs()), notify=said.append,
+                                          navigate=lambda name, params=None: went.append((name, params)))
+        rid = open_qa_report(chat_view, report)
+        assert went == [("tools.qa.report", {"rid": rid})] and chat_view.env.prefs.resolve_file_ref(rid)
+        assert open_qa_report(types.SimpleNamespace(env=None, notify=said.append,
+                                                    navigate=lambda *a: None), report) is None
+        assert said == ["Reports cannot be opened in this session"]
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 def test_qa_custom_mode_saves_first_then_scans_and_row_actions(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake_qa_runtime())
     from glossarion_mobile.ui.router import parse_route
@@ -1173,8 +1461,19 @@ def test_converter_screen_compile_validate_rename_and_options(tmp_path):
         page.update()
         assert screen.result_card.visible and len(screen.result_column.controls) == 2
         sheet = screen.output_actions(pdf)
-        assert sheet.item("Open in Reader").disabled_reason == "EPUB files only"
+        assert sheet.item("Open in Reader").disabled_reason == "EPUB and TXT files only"
         assert sheet.item("Add to Library").disabled_reason
+        # devfix 2026-10-08 (owner #2): the Reader opens TXT books, so a compiled _translated.txt opens there too
+        txt = os.path.join(target.folder, "Conv_translated.txt")
+        Path(txt).write_text("Chapter 1\n\ntext", encoding="utf-8")
+        txt_sheet = screen.output_actions(txt)
+        assert txt_sheet.item("Open in Reader").disabled_reason is None
+        assert txt_sheet.item("Add to Library").disabled_reason  # the Completed shelf stays EPUB-only
+        assert screen.output_actions(epub).item("Open in Reader").disabled_reason is None
+        job_txt = await screen.compile("epub")
+        ctx.jobs.finish(job_txt, outputs=[txt])
+        page.update()
+        assert [c.title.value for c in screen.result_column.controls] == ["Conv_translated.txt"]
         await screen.add_to_library(epub)
         assert files.added == [(epub, True)]
         job_v = await screen.validate()

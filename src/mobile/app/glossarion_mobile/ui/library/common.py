@@ -26,8 +26,10 @@ from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, resolve_color, sta
 
 __all__ = [
     "LibraryContext",
+    "OPENS_ELSEWHERE_REASON",
     "icon_button",
     "mode_badge",
+    "opens_in_another_app",
     "pill",
     "section_title",
     "stat_chip",
@@ -116,7 +118,9 @@ class LibraryContext:
         if not service.has_job_kind("metadata"):
             self.say("Metadata translation is not available in this session")
             return None
-        folders = [str(book.get("output_folder") or "") for book in books]
+        workspace_for = getattr(service, "workspace_for", None)
+        folders = [(workspace_for(book) if callable(workspace_for) else "") or str(book.get("output_folder") or "")
+                   for book in books]
         try:
             warning = await self.io(hm.existing_metadata_warning, folders)
         except Exception:
@@ -133,6 +137,35 @@ class LibraryContext:
         except Exception as exc:
             self.say(f"Could not start: {exc}")
             return None
+
+    async def share_books(self, books: Any) -> bool:
+        """↗ Share (Library card ⋯, selection › More, Book page ⋯): each book's first compiled output
+        (``compiled_outputs_blocking``), else its own file, else its raw source, through the FileBridge
+        share sheet (the desktop "Open File" for a phone). True when the sheet was shown."""
+        files = self.files
+        if files is None:
+            self.say("Sharing is not available in this session")
+            return False
+        service = self.service
+        books = [dict(book) for book in books or ()]
+
+        def targets() -> list:
+            out = []
+            for book in books:
+                outputs = service.compiled_outputs_blocking(book)
+                if outputs:
+                    out.append(outputs[0][0])
+                elif book.get("path") and os.path.isfile(str(book.get("path"))):
+                    out.append(str(book.get("path")))
+                elif service.raw_source(book):
+                    out.append(service.raw_source(book))
+            return out
+
+        paths = await self.io(targets)
+        if not paths:
+            self.say("Nothing to share for the selection")
+            return False
+        return bool(await files.share(paths))
 
     def go(self, name: str, params: Optional[dict] = None, query: Optional[dict] = None) -> None:
         navigate = self.navigate
@@ -163,7 +196,8 @@ class LibraryContext:
         if bid is None and book is not None:
             bid = self.service.bid_for(book)
         if bid is None and path:
-            bid = self.service.bid_for({"path": path, "type": "epub",
+            kind = "txt" if str(path).lower().endswith(".txt") else "epub"  # the Reader opens EPUB and TXT
+            bid = self.service.bid_for({"path": path, "type": kind,
                                         "name": os.path.splitext(os.path.basename(path))[0]})
         if not bid:
             return None
@@ -200,6 +234,19 @@ class LibraryContext:
 
     def color(self, status: str) -> str:
         return status_color(status, self.dark)
+
+
+#: Why a PDF without a translation workspace has no Reader action (card menus, the Book page).
+OPENS_ELSEWHERE_REASON = "A PDF without a translation workspace opens in another app (↗ Share)"
+
+
+def opens_in_another_app(book: Mapping[str, Any]) -> bool:
+    """A PDF without a translation workspace: library_core's "system" open decision (the desktop
+    opens it in the system viewer; the Reader cannot show it). The card menus offer no Reader item
+    and the Book page's read button is disabled (``OPENS_ELSEWHERE_REASON`` names ↗ Share): a tap
+    opens the Book page for every card. TXT books open in the Reader (its text mode)."""
+    kind = str(book.get("type") or "")
+    return kind == "pdf" and not book.get("output_folder")
 
 
 def tinted(color: str, opacity: float = 0.16) -> str:

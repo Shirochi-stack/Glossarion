@@ -267,6 +267,76 @@ def test_chat_settings_sections_keep_their_expanded_state_after_a_change():
     assert sheet.value_of("force_multipass_off") is True
 
 
+class _Prefs:
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+
+def _auto_accept_row(sheet):
+    return next((c for c in _tile(sheet, "Glossary").controls if getattr(c, "key", None) == "setting-auto_accept_glossary"),
+                None)
+
+
+def _flip(row, value):
+    """A tap on the row's Switch (its on_change with the new value)."""
+    switch = _find(row, lambda c: type(c).__name__ == "Switch")
+    switch.on_change(types.SimpleNamespace(control=types.SimpleNamespace(value=value)))
+
+
+@needs_flet
+@needs_backend
+def test_chat_settings_auto_accept_switch_writes_prefs_and_chat_meta():
+    """Owner report #6: "a toggle to always auto-accept the generated glossary". Chat settings › Glossary ›
+    "Always accept generated glossaries": All chats writes Prefs ``chat_auto_accept_glossary`` (never
+    config.json), This chat the chat's sidecar meta; ↺ / Reset chat overrides clear the chat's value."""
+    from glossarion_mobile.ui.chat.direct_text_rules import AUTO_ACCEPT_GLOSSARY_PREF
+    from glossarion_mobile.ui.sheets.chat_settings import DESCRIPTIONS, ChatSettingsSheet
+
+    prefs, config, chats = _Prefs(), _Config(), _Chats()
+    sheet = ChatSettingsSheet(cid="2", config=config, chats=chats, prefs=prefs)
+    row = _auto_accept_row(sheet)
+    assert row is not None and sheet.value_of("auto_accept_glossary") is False  # default off (desktop: always asks)
+    switch = _find(row, lambda c: type(c).__name__ == "Switch")
+    assert switch.label == "Always accept generated glossaries" and switch.value is False
+    assert _find(row, lambda c: getattr(c, "value", None) == DESCRIPTIONS["auto_accept_glossary"]) is not None
+    assert "Desktop always asks" in DESCRIPTIONS["auto_accept_glossary"]
+
+    # This chat: the sidecar meta, nothing global
+    _flip(row, True)
+    assert chats.metas == {"auto_accept_glossary": True} and chats.values == {}
+    assert prefs.data == {} and dict(config) == {}
+    assert sheet.value_of("auto_accept_glossary") is True and sheet.is_overridden("auto_accept_glossary")
+    assert _find(_auto_accept_row(sheet), lambda c: getattr(c, "value", None) == "custom") is not None
+    sheet.reset("auto_accept_glossary")  # ↺
+    assert chats.metas.get("auto_accept_glossary") is None and sheet.value_of("auto_accept_glossary") is False
+
+    # All chats: Prefs only
+    sheet.scope = "global"
+    sheet.rebuild()
+    _flip(_auto_accept_row(sheet), True)
+    assert prefs.data == {AUTO_ACCEPT_GLOSSARY_PREF: True} and dict(config) == {}
+    assert chats.metas.get("auto_accept_glossary") is None
+    sheet.scope = "chat"
+    sheet.rebuild()
+    assert sheet.value_of("auto_accept_glossary") is True and not sheet.is_overridden("auto_accept_glossary")
+    assert _find(_auto_accept_row(sheet), lambda c: str(getattr(c, "value", "")).startswith("Inherited from")) is not None
+    _flip(_auto_accept_row(sheet), False)  # this chat asks again
+    assert chats.metas["auto_accept_glossary"] is False and sheet.effective().auto_accept_glossary is False
+    sheet.reset()  # Reset chat overrides
+    assert chats.metas.get("auto_accept_glossary") is None and sheet.effective().auto_accept_glossary is True
+
+    # Series defaults (built without Prefs) and a sheet without Prefs: no row
+    series = ChatSettingsSheet(cid="s1", config=_Config(), chats=_Chats(), prefs=prefs, subject="series")
+    assert _auto_accept_row(series) is None
+    assert _auto_accept_row(ChatSettingsSheet(cid="2", config=_Config(), chats=_Chats())) is None
+
+
 # ==========================================================================
 # the same scroll bug in other sheets
 # ==========================================================================

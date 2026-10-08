@@ -387,7 +387,10 @@ class WebViewPage:
             self.webview = self.bridge.make_webview(self, url)
             self.entry = self.bridge.host.add(self.webview, size=self.viewport, key=f"glwvb-{self.id}")
         else:
-            await self.webview.load_request(url)
+            # the Reader's helper (one place for the rule); a failed load raises out of load()
+            from glossarion_mobile.ui.reader.reader_view import navigate_webview
+
+            await navigate_webview(self.webview, url)
 
     async def _title_on_loop(self) -> str:
         if self.webview is None:

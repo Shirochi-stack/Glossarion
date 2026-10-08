@@ -381,20 +381,91 @@ def test_plus_from_library_attaches_a_library_books_raw_file(tmp_path, monkeypat
     monkeypatch.setattr(source_picker, "SourcePicker", FakePicker)
     attached: list = []
     fake = types.SimpleNamespace(env=types.SimpleNamespace(tools_context=lambda: object()), page=object(),
-                                 navigate=lambda *a: attached.append(("nav", a)), attach_file=attached.append)
+                                 navigate=lambda *a: attached.append(("nav",) + a),
+                                 attach_library_book=attached.append)
     ChatView.open_library_picker(fake)
+    # device fixes 2026-10-08: the in-chat Library picker (one segment, search, the Library's rows with
+    # covers, the books without a raw file listed but disabled, "Open Library" in its header)
     assert shown["shown"] and shown["segment"] == "library" and shown["find_folder"] is False
+    assert shown["segments"] == ("library",) and shown["searchable"] is True and shown["book_rows"] is True
+    assert shown["include_unresolved"] is True and shown["query"] == "" and not shown["multi"]
+    label, open_library = shown["header_action"]
+    assert label == "Open Library"
+    open_library()
+    assert attached[-1] == ("nav", "library")
     eligible = shown["eligible"]
     assert eligible(ToolTarget(title="Book", source=str(raw), origin="library", kind="epub")) is None
     assert "No raw file" in eligible(ToolTarget(title="Gone", source=str(tmp_path / "gone.epub"), origin="library",
                                                kind="epub"))
-    shown["on_done"]([ToolTarget(title="Book", source=str(raw), origin="library", kind="epub")])
-    assert attached == [str(raw)]
+    assert "No raw file" in eligible(ToolTarget(title="Shelf", origin="library", bid="b9"))  # unresolved row
+    book = ToolTarget(title="Book", source=str(raw), origin="library", kind="epub", bid="b1")
+    shown["on_done"]([book])
+    assert attached[-1] is book
+    ChatView.open_library_picker(fake, "novel")  # /library novel with several matches: prefilled
+    assert shown["query"] == "novel"
     # without the Tools feature the Library opens instead
     fallback = types.SimpleNamespace(env=types.SimpleNamespace(tools_context=lambda: None), page=object(),
                                      navigate=lambda *a: attached.append(("nav",) + a))
     ChatView.open_library_picker(fallback)
     assert attached[-1] == ("nav", "library")
+
+
+@needs_flet
+def test_library_book_attaches_with_its_meta_and_forgets_it(tmp_path):
+    """The picked Library book is attached and remembered as the chat's Library book (sidecar meta
+    ``library_attachment``); removing it or attaching another file forgets it; Remove in the snackbar."""
+    from glossarion_mobile.ui.chat.chat_view import LIBRARY_ATTACHMENT_META, ChatView
+    from glossarion_mobile.ui.tools.targets import ToolTarget
+
+    raw = tmp_path / "Book.epub"
+    raw.write_bytes(b"PK")
+    other = tmp_path / "Other.txt"
+    other.write_text("hello", encoding="utf-8")
+    meta: dict = {}
+    notes: list = []
+    removed: list = []
+
+    class Chats:
+        available = True
+
+        def meta(self, cid):
+            return dict(meta)
+
+        def set_meta(self, cid, key, value):
+            if value is None:
+                meta.pop(key, None)
+            else:
+                meta[key] = value
+
+        def set_attachment(self, cid, record):
+            meta["_attachment"] = record
+
+    attached: list = []
+    view = types.SimpleNamespace(env=types.SimpleNamespace(chats=Chats()), bound=True, cid="3",
+                                 notify=lambda message, **k: notes.append((message, k)),
+                                 composer=types.SimpleNamespace(_remove_attachment=lambda: removed.append(True)))
+    view.attach_file = lambda path: attached.append(path) or True
+    target = ToolTarget(title="Book", source=str(raw), origin="library", kind="epub", bid="b1")
+    assert ChatView.attach_library_book(view, target)
+    assert attached == [str(raw)] and meta[LIBRARY_ATTACHMENT_META] == {"bid": "b1", "path": str(raw)}
+    message, kwargs = notes[-1]
+    assert message == "Attached Book.epub from the Library" and kwargs["action_label"] == "Remove"
+    kwargs["on_action"]()
+    assert removed == [True]
+    assert not ChatView.attach_library_book(view, ToolTarget(title="Shelf", origin="library", bid="b2"))
+    # another file (or the same one again) on the real view helpers
+    view._forget_library_attachment = lambda keep_path="": ChatView._forget_library_attachment(view, keep_path)
+    ChatView._forget_library_attachment(view, keep_path=str(raw))
+    assert LIBRARY_ATTACHMENT_META in meta  # the same book stays the chat's Library book
+    ChatView._forget_library_attachment(view, keep_path=str(other))
+    assert LIBRARY_ATTACHMENT_META not in meta
+    meta[LIBRARY_ATTACHMENT_META] = {"bid": "b1", "path": str(raw)}
+    view.state = types.SimpleNamespace(output_mode=types.SimpleNamespace(value=types.SimpleNamespace(
+        attachment_changed=lambda path: "mode")))
+    view._set_mode = lambda mode: None
+    view.refresh_send = lambda: None
+    ChatView._on_attachment_removed(view)
+    assert LIBRARY_ATTACHMENT_META not in meta and meta["_attachment"] is None
 
 
 # ==========================================================================
@@ -773,7 +844,8 @@ def test_library_card_reader_items_on_real_in_progress_rows(tmp_path, monkeypatc
     gone = reader_actions(rows["Gone"])
     assert [(label.split(" ", 1)[1], how) for label, how, _p in gone] == [("Open Translated EPUB", "translated")]
     assert gone[0][2] == rows["Gone"]["output_epub_path"]
-    assert reader_actions({"type": "txt", "path": "x.txt"}) == []
+    # device fixes 2026-10-08: the Reader opens TXT books (text mode), so a TXT card has the Reader item
+    assert reader_actions({"type": "txt", "path": "x.txt"}) == [("\U0001f4d6 Open in Reader", "book", "x.txt")]
     assert reader_actions({"type": "epub", "path": "b.epub"})[0][0].endswith("Open in Reader")
 
 

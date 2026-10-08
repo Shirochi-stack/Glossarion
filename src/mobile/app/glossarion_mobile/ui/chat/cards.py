@@ -12,8 +12,9 @@ cards (``Requests (N)``); Result groups the persisted request cards, the desktop
 "Extraction report", the output chips of the turn's own workspace (compiled EPUB / PDF,
 ``*_translated.txt``, subtitles, SDLXLIFF, glossary; ``set_outputs``) and the "Attachment
 actions" (Read · Share/Export · Compile ▾ EPUB / PDF · QA scan · Open output · Retry failed ·
-Migrate (the desktop Migrate, U7); an action that cannot run is shown disabled with a ReasonChip,
-nothing hidden).
+Open in Library: a finished book's workspace moves into the Library by itself, so the card links
+to its Library book); an action that cannot run is shown disabled with a ReasonChip, nothing
+hidden (``set_action_reason`` sets a reason the chat works out on the io pool).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.services.jobs import GLOSSARY_QUESTION_KINDS, is_glossary_question
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.chat_ops import OUTPUT_KINDS
 from glossarion_mobile.ui.chat.direct_text_rules import (
@@ -38,7 +40,9 @@ from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = [
     "ATTACHMENT_ACTIONS",
+    "ATTACHMENT_ACTION_REASONS",
     "GLOSSARY_QUESTION_KINDS",
+    "LIBRARY_WAIT_REASON",
     "GlossaryApprovalCard",
     "GlossaryEditorView",
     "GlossaryReviewSheet",
@@ -62,14 +66,15 @@ ATTACHMENT_ACTIONS = (
     ("open_output", "Open output", "FOLDER_OPEN", None),
     ("progress", "Progress", "TIMELINE", None),
     ("retry", "Retry failed", "REPLAY", None),
-    ("migrate", "Migrate", "DRIVE_FILE_MOVE", None),
+    ("library", "Open in Library", "LOCAL_LIBRARY", None),
 )
-#: Attachment actions that stay disabled for a reason other than a later milestone.
+#: "Open in Library" while the turn's workspace is still in the chat's Attachments folder: the
+#: chat moves a finished book into the Library by itself (no Migrate step on mobile).
+LIBRARY_WAIT_REASON = "Added to the Library when the translation finishes"
+#: Attachment actions that start disabled for a reason other than a later milestone (the chat view
+#: replaces a default through ``JobCard.set_action_reason`` once it knows better).
 ATTACHMENT_ACTION_REASONS = {
-    # The desktop QA scan skips Direct Text workspaces ("⏭️ Excluding Direct Text source from QA
-    # scan"; qa_scan_runtime.is_direct_text_qa_path), and a chat attachment workspace is one.
-    "qa": "Chat workspaces are not QA-scanned (desktop: Direct Text is excluded); "
-          "use Migrate (moves it to the Library), then Tools › QA Scanner",
+    "library": LIBRARY_WAIT_REASON,
 }
 
 
@@ -143,6 +148,7 @@ class GlossaryApprovalCard(ft.Container):
         info: Optional[dict] = None,
         on_answer: Optional[Callable[[bool], Any]] = None,
         on_edit: Optional[Callable[[str], Any]] = None,
+        on_always: Optional[Callable[[], Any]] = None,
         dark: bool = False,
         key: Any = "approval-card",
     ) -> None:
@@ -152,7 +158,11 @@ class GlossaryApprovalCard(ft.Container):
                              "entries": 0, "preview": []}
         self.on_answer = on_answer
         self.on_edit = on_edit
+        # "Always accept" (chat cards only): remember the choice (the chat's Prefs key), then answer Yes;
+        # the owner of ``on_always`` does both. The Library review gate's sheet has no such button.
+        self.on_always = on_always
         self.answered: Optional[bool] = None
+        self.always_accepted = False
         success = semantic("success", dark)
         exists = bool(self.info.get("exists"))
         body: list[ft.Control] = [
@@ -189,23 +199,42 @@ class GlossaryApprovalCard(ft.Container):
             style=ft.ButtonStyle(color=ft.Colors.ERROR, side=ft.BorderSide(width=1, color=ft.Colors.ERROR)),
         )
         body.append(ft.Row([self.edit_button, self.yes_button, self.no_button], wrap=True, spacing=8, run_spacing=8))
+        self.always_button = ft.TextButton(
+            content="Always accept", icon=ft.Icons.DONE_ALL, on_click=lambda e: self.always(),
+            tooltip="Accept this glossary and every generated glossary from now on (Chat settings to change)",
+            visible=on_always is not None, key="approval-always",
+        )
+        body.append(self.always_button)
         self.content = ft.Column(body, spacing=6, tight=True)
         self.bgcolor = ft.Colors.TERTIARY_CONTAINER
         self.border_radius = tokens.RADII["plan_card"]
         self.padding = ft.Padding.all(14)
 
-    def answer(self, accepted: bool) -> bool:
-        if self.answered is not None:
-            return False
-        self.answered = bool(accepted)
-        for button in (self.edit_button, self.yes_button, self.no_button):
+    def _disable(self) -> None:
+        for button in (self.edit_button, self.yes_button, self.no_button, self.always_button):
             button.disabled = True
         try:
             self.update()
         except Exception:
             pass
+
+    def answer(self, accepted: bool) -> bool:
+        if self.answered is not None:
+            return False
+        self.answered = bool(accepted)
+        self._disable()
         if self.on_answer is not None:
             self.on_answer(bool(accepted))
+        return True
+
+    def always(self) -> bool:
+        """"Always accept": ``on_always`` stores the choice and answers Yes (one answer, never two)."""
+        if self.answered is not None or self.on_always is None:
+            return False
+        self.answered = True
+        self.always_accepted = True
+        self._disable()
+        self.on_always()
         return True
 
     def _edit(self, e: Any = None) -> None:
@@ -213,14 +242,14 @@ class GlossaryApprovalCard(ft.Container):
             self.on_edit(self.path)
 
 
-#: Blocking job questions the approval card answers (the chat run's and the Library review gate's).
-GLOSSARY_QUESTION_KINDS = ("glossary_approval", "direct_text_glossary_approval")
-
-
 def glossary_question(snapshot: Any) -> Optional[dict]:
-    """The pending glossary-approval question of a job snapshot (``{id, kind, data}``), else None."""
+    """The pending glossary-approval question of a job snapshot (``{id, kind, data}``), else None.
+
+    Blocking job questions the approval card answers (the chat run's and the Library review gate's):
+    ``services.jobs.is_glossary_question`` (``GLOSSARY_QUESTION_KINDS``), the one predicate the job
+    service, the chat runs and the notifications use."""
     question = getattr(snapshot, "question", None) if snapshot is not None else None
-    if not isinstance(question, dict) or str(question.get("kind") or "") not in GLOSSARY_QUESTION_KINDS:
+    if not isinstance(question, dict) or not is_glossary_question(question.get("kind")):
         return None
     return question
 
@@ -442,6 +471,8 @@ class JobCard(ft.Container):
         on_open_output: Optional[Callable[[str, str], Any]] = None,
         key: Any = None,
         dark: bool = False,
+        icon: Optional[str] = None,
+        meta: Optional[str] = None,
     ) -> None:
         super().__init__(key=key)
         self.attachment = dict(attachment or {})
@@ -451,6 +482,10 @@ class JobCard(ft.Container):
         self.on_open_output = on_open_output
         self.outputs: list = []
         self.dark = dark
+        self.status = ""
+        # action id -> disabled reason (None: enabled) set by the chat (``set_action_reason``); it wins
+        # over the static ATTACHMENT_ACTION_REASONS default
+        self.action_reasons: dict = {}
         self.title_text = ft.Text("", theme_style=ft.TextThemeStyle.TITLE_SMALL, expand=True, max_lines=2,
                                   overflow=ft.TextOverflow.ELLIPSIS)
         self.state_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM)
@@ -480,9 +515,11 @@ class JobCard(ft.Container):
         self.outputs_row = ft.Row([], wrap=True, spacing=6, run_spacing=4, visible=False, key="job-outputs")
         self.buttons = ft.Row([], wrap=True, spacing=8, run_spacing=4)
         self.action_buttons: dict = {}
-        icon_name = attachment_icon(str(self.attachment.get("extension") or ""))
+        # ``icon`` / ``meta``: a tool job's card (a QA scan) names its own icon and summary line
+        icon_name = icon or attachment_icon(str(self.attachment.get("extension") or ""))
         ext = str(self.attachment.get("extension") or "")
-        meta = f"{attachment_kind_label(ext)} · {format_attachment_size(self.attachment.get('size'))}" if self.attachment else ""
+        if meta is None:
+            meta = f"{attachment_kind_label(ext)} · {format_attachment_size(self.attachment.get('size'))}" if self.attachment else ""
         self.content = ft.Column(
             [
                 ft.Row(
@@ -533,8 +570,17 @@ class JobCard(ft.Container):
         self.action_buttons[action_id] = button
         return button
 
+    def set_action_reason(self, action_id: str, reason: Optional[str]) -> None:
+        """Enable a Result action (``reason`` None) or disable it with a ReasonChip; the buttons are
+        rebuilt for the current phase."""
+        if action_id in self.action_reasons and self.action_reasons[action_id] == reason:
+            return
+        self.action_reasons[action_id] = reason
+        self.set_phase(self.phase, status=self.status)
+
     def set_phase(self, phase: CardPhase, *, status: str = "") -> None:
         self.phase = phase
+        self.status = status
         name = phase.name
         live = phase.live
         self.ring.visible = live
@@ -565,7 +611,10 @@ class JobCard(ft.Container):
             for action_id, label, _icon, milestone in ATTACHMENT_ACTIONS:
                 if action_id == "retry" and name == "done" and "failed" not in (status or ""):
                     continue
-                reason = ATTACHMENT_ACTION_REASONS.get(action_id) or (f"Arrives in {milestone}" if milestone else None)
+                if action_id in self.action_reasons:
+                    reason = self.action_reasons[action_id]
+                else:
+                    reason = ATTACHMENT_ACTION_REASONS.get(action_id) or (f"Arrives in {milestone}" if milestone else None)
                 buttons.append(self._button(action_id, label, disabled_reason=reason))
             if name in ("stopped", "interrupted"):
                 buttons.insert(0, self._button("resume", "Resume", "filled"))

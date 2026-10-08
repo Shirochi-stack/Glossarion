@@ -493,8 +493,16 @@ class Composer(ft.Container):
     def _on_send_action(self, action: SendAction) -> None:
         if action in (SendAction.SEND, SendAction.QUEUE) and self.run_slash_text():
             return
+        if action is SendAction.EXPLAIN_BLOCK and not self._engine_blocked() and self.run_slash_text(model_free=True):
+            return  # /library, /model, /qa ... send nothing to the model: they run whatever blocks Send
         if self.on_send_action is not None:
             self.on_send_action(action)
+
+    def _engine_blocked(self) -> bool:
+        """Send is blocked because the engine is still loading or failed: no command runs then."""
+        machine = getattr(self.send_button, "machine", None)
+        block = getattr(getattr(machine, "inputs", None), "block", None)
+        return str(getattr(block, "code", "") or "").startswith("engine_")
 
     # ---- slash commands (UI_SPEC §2.7) ---------------------------------------------------------
 
@@ -507,9 +515,11 @@ class Composer(ft.Container):
         elif self.slash.visible:
             self.slash.hide()
 
-    def run_slash_text(self) -> bool:
-        """Run the field's text as a command when it is a complete one (Send / Enter); False otherwise."""
-        if not self._slash_eligible() or parse_command(self.text) is None:
+    def run_slash_text(self, *, model_free: bool = False) -> bool:
+        """Run the field's text as a command when it is a complete one (Send / Enter; ``model_free``:
+        only a command that sends nothing to the model); False otherwise."""
+        parsed = parse_command(self.text) if self._slash_eligible() else None
+        if parsed is None or (model_free and parsed[0].uses_model):
             return False
         text = self.text.strip()
         self.set_text("")
@@ -520,10 +530,11 @@ class Composer(ft.Container):
 
     def _on_slash_pick(self, command: SlashCommand) -> None:
         """A popover tap: a command that takes an argument goes into the field (with the typed
-        argument kept); one without runs."""
+        argument kept); one without runs, and so does one whose argument is optional (``/library``
+        opens the in-chat Library picker at once)."""
         parsed = parse_command(self.text)
         has_arg = parsed is not None and parsed[0] == command and bool(parsed[1])
-        if command.arg and not has_arg:
+        if command.arg and not has_arg and not command.optional:
             self.set_text(completion(command))
             try:
                 self.text_field.focus()

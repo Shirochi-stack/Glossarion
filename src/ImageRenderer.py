@@ -1,5 +1,5 @@
 
-from safe_image import open_image
+from safe_image import open_image, open_page_image, cv2_imread
 import sys
 import os
 import json
@@ -4945,7 +4945,7 @@ def _render_with_manga_translator_thread_safe(self, base_image_path, regions, ou
             return False
         
         # Load the base image for rendering
-        base_image_array = cv2.imread(base_image_path)
+        base_image_array = cv2_imread(base_image_path)
         if base_image_array is None:
             raise ValueError(f"Failed to load base image: {base_image_path}")
         

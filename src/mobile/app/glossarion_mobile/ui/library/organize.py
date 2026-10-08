@@ -1,14 +1,16 @@
-"""Organize (n) / Undo (n) / Clear saved raw link flows (UI_SPEC §3.4; epub_library ``_organize_into_library``,
-``_undo_organize_prompt``, ``_clear_saved_raw_link``).
+"""Clear saved raw link flow and the Library's choice dialogs (UI_SPEC §3.4; epub_library
+``_clear_saved_raw_link``, ``_ask_collision_policy``).
 
-The plans, prompts, moves and summaries are ``library_core.LibraryShelf``'s
-(``plan_organize`` / ``execute_organize``, ``plan_undo`` / ``undo_collisions`` /
-``execute_undo``, ``plan_clear_raw_link`` / ``execute_clear_raw_link``, through
-``LibraryService``). This module only asks the desktop questions: the Organize
-preview (Yes / No), the one-time collision policy (Replace / Keep Both / Skip,
-"… All" for several, Cancel), the Undo category (Raw / Translated / All) and the
-Clear-saved-raw-link confirmation. Since mobile imports copy files into the
-Library, these mostly apply to imported desktop data and migrated workspaces.
+The plan, prompt and execution are ``library_core.LibraryShelf``'s
+(``plan_clear_raw_link`` / ``execute_clear_raw_link``, through ``LibraryService``).
+This module only asks the desktop questions: the Clear-saved-raw-link confirmation
+and the one-time collision policy (Replace / Keep Both / Skip, "… All" for several,
+Cancel: ``collision_text`` / ``collision_choices``).
+
+The mobile Library has no manual Organize (n) / Undo (n): finished chat books reach
+the Library by themselves and imports are copied into Library/Raw, so the desktop
+counters would only move imported copies around (UI_SPEC §3.4 "Automatic"). The
+shelf plans stay ``LibraryService`` API (``plan_organize_blocking`` …).
 """
 
 from __future__ import annotations
@@ -28,8 +30,6 @@ __all__ = [
     "clear_raw_link_flow",
     "collision_choices",
     "collision_text",
-    "organize_flow",
-    "undo_flow",
 ]
 
 
@@ -92,77 +92,6 @@ def collision_text(collisions: Sequence[Any], dest_label: str = "the Library") -
 def collision_choices(n: int) -> list:
     suffix = " All" if n > 1 else ""
     return [("replace", "Replace" + suffix), ("keep_both", "Keep Both" + suffix), ("skip", "Skip" + suffix)]
-
-
-def _summary(result: Any, fallback: str) -> str:
-    if isinstance(result, dict) and result.get("summary"):
-        return str(result["summary"])
-    return fallback
-
-
-async def organize_flow(ctx: Any, books: Optional[Sequence[Any]] = None) -> Optional[Any]:
-    """Organize (n); ``books``: the selection bar's "Organize selected" (only their files move)."""
-    service = ctx.service
-    try:
-        if books is None:
-            plan = await ctx.io(service.plan_organize_blocking)
-        else:
-            selected = [dict(b) for b in books]
-            plan = await ctx.io(lambda: service.plan_organize_blocking(selected))
-    except CoreMissing as exc:
-        ctx.say(f"Organize is not available in this build ({exc.name})")
-        return None
-    if not plan.get("raw_moves") and not plan.get("translated_moves"):
-        ctx.say("All resolvable files are already in Library/Raw or Library/Translated. Nothing to move."
-                if books is None else "The selected books' files are already in the Library. Nothing to move.")
-        return None
-    body = ("Move the following files into the Library?\n\n"
-            + "\n".join("  • " + line for line in plan.get("preview") or ())
-            + "\n\nThis is reversible via the Undo Move button.")
-    if await ChoiceDialog("Organize Files into Library", body, [("yes", "Yes")], cancel_label="No"
-                          ).choose(ctx.page) != "yes":
-        return None
-    collisions = list(plan.get("collisions") or ())
-    policy = "keep_both"
-    if collisions:
-        policy = await ChoiceDialog("Duplicate files", collision_text(collisions),
-                                    collision_choices(len(collisions))).choose(ctx.page)
-        if policy is None:
-            return None
-    result = await ctx.io(service.execute_organize_blocking, plan, policy)
-    ctx.say(_summary(result, "Organized the Library"))
-    await service.refresh(reason="organize")
-    return result
-
-
-async def undo_flow(ctx: Any) -> Optional[Any]:
-    service = ctx.service
-    try:
-        plan = await ctx.io(service.plan_undo_blocking)
-    except CoreMissing as exc:
-        ctx.say(f"Undo Move is not available in this build ({exc.name})")
-        return None
-    if not plan.get("raw_map") and not plan.get("trans_map"):
-        ctx.say("No files to undo — Library/Raw and Library/Translated are both empty and the origins "
-                "registry is clean.")
-        return None
-    kind = await ChoiceDialog("Undo Move", str(plan.get("prompt") or ""),
-                              [("raw", "Raw"), ("translated", "Translated"), ("all", "All")]).choose(ctx.page)
-    if kind is None:
-        return None
-    restore_raw = kind in ("raw", "all")
-    restore_trans = kind in ("translated", "all")
-    collisions = await ctx.io(service.undo_collisions_blocking, plan, restore_raw, restore_trans)
-    policy = "keep_both"
-    if collisions:
-        policy = await ChoiceDialog("Duplicate files", collision_text(collisions, "the original location"),
-                                    collision_choices(len(collisions))).choose(ctx.page)
-        if policy is None:
-            return None
-    result = await ctx.io(service.execute_undo_blocking, plan, restore_raw, restore_trans, policy, collisions)
-    ctx.say(_summary(result, "Undo Move finished"))
-    await service.refresh(reason="undo")
-    return result
 
 
 async def clear_raw_link_flow(ctx: Any, books: Sequence[Any]) -> Optional[Any]:

@@ -61,7 +61,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 
 | # | Feature | Mobile surface | Notes |
 |---|---|---|---|
-| 0 | Input File(s) field + drag & drop | Composer › ＋ sheet (Files / Photos / Camera / From Library / Clipboard) → FileChip; Share / Open-with → IntentRouter action sheet | Adapted: files are copied into Inbox or Library/Raw; user originals are never renamed. External drag & drop is replaced by Share / Open-with (Flet `DragTarget` accepts only in-app Draggables) |
+| 0 | Input File(s) field + drag & drop | Composer › ＋ sheet (Files / From Library / Photos / Camera / Clipboard) → FileChip; Share / Open-with → IntentRouter action sheet; ＋ › From Library / the empty-chat chip / `/library [title]` open the in-chat Library picker (search, newest first, covers); the picked raw is attached and Send defaults to Save to: Library (desktop Load for translation + Run) | Adapted: files are copied into Inbox or Library/Raw; user originals are never renamed. External drag & drop is replaced by Share / Open-with (Flet `DragTarget` accepts only in-app Draggables) |
 | 1 | Browse menu: Select Files | ＋ sheet › Files (multi-select) | Several files give a BatchPlanCard |
 | 2 | Browse menu: Select Folder (+ include subfolders) | ＋ sheet › Files long-press › "Pick folder…"; BatchPlanCard "Include subfolders" switch | Android SAF failure falls back to a ZIP |
 | 3 | Browse menu: Glossary Parallel EPUB Pair | Glossaries ⋯ › Parallel EPUB pair (`/glossary/parallel-pair`) | Glossary-only job |
@@ -505,7 +505,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 77 | Translation-time glossary application | Automatic (no control); the per-message "Glossary terms used" sheet shows what was applied | Automatic |
 | 78 | Glossary storage layout / legacy migration / book rename | Automatic (no control); glossary files appear in Glossaries and Book › Output | Automatic |
 | 79 | Glossary Progress manager (cross-area) | Book › Glossary tab; Tools › Glossary progress |  |
-| 80 | Direct Text glossary policy and approval (cross-area) | Chat settings › Glossary; GlossaryApprovalCard; ManualGlossarySheet |  |
+| 80 | Direct Text glossary policy and approval (cross-area) | Chat settings › Glossary; GlossaryApprovalCard (+ Always accept); ManualGlossarySheet; `jobs.action` "Glossary ready" notification (Accept / Review) whenever the chat is not on screen; Settings › Notifications & background › Glossary review | New: the notification's Accept action and "Always accept generated glossaries" (mobile only; Prefs `chat_auto_accept_glossary` + sidecar `auto_accept_glossary`; `JobService._job_ask` answers the shared gate; tests_host/test_glossary_auto_accept.py). The desktop always asks (DISCREPANCIES "Device fixes 2026-10-08") |
 
 ## 7. other-settings (175)
 
@@ -761,18 +761,18 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 
 | # | Feature | Mobile surface | Notes |
 |---|---|---|---|
-| 0 | QA Scan launcher (toolbar 'QA Scan' button) | Tools › QA Scanner; ＋ sheet › QA scan; `/qa`; Book ⋯; Job card |  |
+| 0 | QA Scan launcher (toolbar 'QA Scan' button) | Tools › QA Scanner; ＋ sheet › QA scan; `/qa`; Book ⋯; Job card; chat Result card › QA scan (Quick Scan of the chat workspace, `qa_model.chat_qa_job`) |  |
 | 1 | Detection mode: AI Hunter | QA mode card | Threads |
 | 2 | Detection mode: Aggressive | Mode card |  |
 | 3 | Detection mode: Quick Scan | Mode card (Recommended) |  |
 | 4 | Detection mode: Custom + Custom Mode Settings dialog | Mode card → Custom settings sheet |  |
-| 5 | Quick Scan duplicate sample size | QA home field |  |
+| 5 | Quick Scan duplicate sample size | QA home field; Settings › QA | Adapted: mobile default 0 (duplicate check off) when unset + one-time migration of a saved 1000; desktop keeps 1000; chat scans use the same value |
 | 6 | Open QA Report | QA › Reports → QA report viewer `/tools/qa/report/<rid>` (WebView on Android/iOS; Markdown + "Open in browser" fallback on Windows/Linux dev) |  |
 | 7 | Auto-search output folder | QA home switch |  |
 | 8 | Source file selection for word-count/resource checks | SourcePicker; Settings › QA › Word count |  |
 | 9 | Source/folder name mismatch warning | Dialog + setting |  |
 | 10 | Bulk multi-folder scan | SourcePicker multi-select |  |
-| 11 | Direct Text exclusion | Automatic (no control); Direct Text workspaces are skipped by post-translation QA | Automatic |
+| 11 | Direct Text exclusion | Automatic (no control); Direct Text workspaces are skipped by post-translation QA; Tools › QA Scanner does not pick them; the chat's own QA scan opts in (`allow_direct_text`, owner 2026-10-08) | Automatic |
 | 12 | Post-translation scanning phase | Settings › Processing; Plan card |  |
 | 13 | Foreign character detection: source/target language, threshold | Settings › QA › Foreign characters |  |
 | 14 | Whitelist emoticon patterns + phrase editor | QA › Foreign characters (ListEditor) |  |
@@ -943,11 +943,11 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 11 | Book card rendering | BookCard (exact ribbons, pills, badges) |  |
 | 12 | Cover extraction & caching | Cover thumbs in `cache/covers` |  |
 | 13 | Card selection (multi-select) | Long-press selection mode (`Container.on_long_press`) | Adapted |
-| 14 | Open card (double-click) | Tap → Book page |  |
-| 15 | Context menu: Open Book Details / Open in Reader / Open Translated EPUB / Open in EPUB reader / Open File | Card ⋯ ActionSheet (custom bottom sheet) |  |
-| 16 | Load for translation (single / N files) | Bulk "Translate" / ⋯ › Load for translation → TranslateSheet |  |
+| 14 | Open card (double-click) | Tap → Book page (both shelves, every type) | Adapted: desktop opens TXT in an editor and a PDF without a workspace in the system viewer; mobile shows the Book page, and ⋯ › ↗ Share hands the file to another app |
+| 15 | Context menu: Open Book Details / Open in Reader / Open Translated EPUB / Open in EPUB reader / Open File | Card ⋯ ActionSheet (custom bottom sheet); Open File → ↗ Share; 📖 Open in Reader also for TXT books |  |
+| 16 | Load for translation (single / N files) | Bulk "Translate" / ⋯ › Load for translation → TranslateSheet; in a chat: ＋ › From Library / "From Library" chip / `/library [title]` attach the book, Send → Plan "Save to: Library" (in-chat picker: `targets.order_library_rows`, the Library search + Date sort) | Output Folder Mismatch question first, as on desktop (`translate_sheet.confirm_output_root`, like `_ensure_output_override_matches`) |
 | 17 | Translate Metadata (single / N EPUBs) | Bulk "Metadata"; Book › Overview |  |
-| 18 | Compile EPUB / Compile PDF | Bulk "Compile"; Book › Overview / Output |  |
+| 18 | Compile EPUB / Compile PDF | Bulk "Compile"; Book › Overview / Output; Book page Compile uses the resolved workspace (organized books too) |  |
 | 19 | Reveal source file / Reveal Translated File / Open Output Folder / Open Library Folder | FileBrowser; Share | Adapted |
 | 20 | Copy Path | ⋯ Copy Path (developer setting) |  |
 | 21 | Clear saved raw link | Bulk More; Book ⋯ |  |
@@ -955,15 +955,15 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 23 | Import EPUB (raw, register in place) | In Progress FAB "Import EPUB" | Adapted: copies into Raw |
 | 24 | Add Translation (register compiled EPUB) | Completed FAB "Add translation" | Adapted: copies into Translated |
 | 25 | Drag-and-drop import | Share / Open-with → "Add to Library" | Adapted |
-| 26 | Organize (N) | ⋯ Organize (n) |  |
-| 27 | Undo (N) Raw / Translated / All | ⋯ Undo (n) |  |
+| 26 | Organize (N) | Automatic (no control): finished chat books move into the Library (auto-migrate); imports copy into Library/Raw | Automatic |
+| 27 | Undo (N) Raw / Translated / All | No control: there is no manual move to undo (see #26) | Automatic |
 | 28 | Legacy layout & registry migration | Automatic (no control); Library shows the migrated layout | Automatic |
 | 29 | Scan for Raw (pair missing raws) | Chip "Scan for raw (N)" → `/library/scan-raw` |  |
 | 30 | Library loading spinner / toast / F11 fullscreen | Skeletons, snackbars | F11 n/a |
 | 31 | Book Details hero page | Book › Overview hero |  |
 | 32 | Start reading / Read raw source | Overview primary / tonal buttons |  |
-| 33 | Edit metadata.json | Overview › Edit → metadata form; ⋯ Edit raw JSON (CodeEditor) |  |
-| 34 | Chapter list (Book Details) | Book › Chapters (PM parity; filters persisted via `epub_details_*` incl. rows per page) |  |
+| 33 | Edit metadata.json | Overview › Edit → metadata form; ⋯ Edit raw JSON (CodeEditor) (the resolved workspace; an organized book edits its workspace's metadata.json) |  |
+| 34 | Chapter list (Book Details) | Book › Chapters (PM parity; filters persisted via `epub_details_*` incl. rows per page); a book without a workspace lists its EPUB's own chapters (`BookDetailsModel.row_specs`) |  |
 | 35 | Translate / Retranslate this chapter (Book Details) | Chapters row ⋯ (SINGLE_CHAPTER job) |  |
 | 36 | Reader: open modes (plain / overlay / dual-path / PDF workspace) | Reader (plain / overlay / dual-path / PDF workspace) |  |
 | 37 | Reader: EPUB loading & cache | Reader "Loading EPUB…"; reader cache |  |
@@ -1049,14 +1049,14 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 1 | Dark Material theme + CJK font registration | M3 theme (System / Light / Dark / AMOLED); system CJK fallback | Replaced |
 | 2 | Config persistence (config_android.json) | Shared config.json | Replaced |
 | 3 | Storage permission request | No storage permissions (SAF / FilePicker) | Replaced |
-| 4 | Notifications (progress + completion) | Native extension channels (spec §1.9) | Replaced |
+| 4 | Notifications (progress + completion) | Native extension channels (spec §1.9): progress kept current while hidden, re-posted when swiped (Android 14+), glossary Accept / Review, real permission state on Settings › Notifications & background | Replaced |
 | 5 | Open-with / Share intent import | IntentRouter | Replaced |
 | 6 | Native file picker (SAF) with copy-to-Library | FileBridge | Replaced |
 | 7 | SD card / external volume detection | Data › Storage | Adapted: SAF is used for picking only; the output root is app storage / iOS Documents (+ Android mirror to Downloads/Glossarion) |
 | 8 | Library: scan and list books | Library | Replaced |
 | 9 | Library: EPUB cover thumbnails | BookCard covers | Replaced |
 | 10 | Library: import file FAB and add scan folder | Library FAB + Scan for raw | Replaced |
-| 11 | Reader: EPUB/TXT loading | Reader | Replaced |
+| 11 | Reader: EPUB/TXT loading | Reader; TXT: `ui/reader/text_book.py` (text mode + TXT workspace), device-fix batch 2026-10-08 | Replaced |
 | 12 | Reader: chapter navigation + TOC | Reader bottom bar + Chapters drawer | Replaced |
 | 13 | Reader: bookmarks | Reader ⋯ › Bookmarks | Carried forward |
 | 14 | Reader: reading progress save/restore | `reader_positions` in `mobile_state.json` (Prefs) + Resume snackbar | Carried forward |
@@ -1161,7 +1161,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 |---|---|---|---|
 | 0 | Direct Text: chat sessions, sidebar and history persistence | ChatDrawer (Pinned / Series / Recents; Series is U9, optional: `mobile_series.json` + `series_id` in the sidecar), header rename, `direct_text_chats.json` v2 via ChatStore, per-chat drafts, auto-title | Sidecar for extras |
 | 1 | Direct Text: file attachments that run the full pipeline | Composer attach → Plan card → Job card; attached-text prompt role; Vision / Image auto-switch |  |
-| 2 | Direct Text: attachment workspace manager with Migrate | `/chat/<cid>/attachments`; Job card "Migrate to Library" |  |
+| 2 | Direct Text: attachment workspace manager with Migrate | Automatic: a finished chat book moves into the Library by itself (`ChatFeature.auto_migrate`, the desktop Migrate); `/chat/<cid>/attachments` lists workspaces still waiting (⋯ Merge into Library… on a name clash); job card "Open in Library" | Automatic |
 | 3 | Direct Text: per-chat settings panel and glossary override | Chat settings sheet (This chat / All chats) + ManualGlossarySheet |  |
 | 4 | Direct Text: output editing, media playback, bookmarks and zoom | Output editor route; Image / Video / Audio cards (AudioCard volume 75% + Open externally); Jump-to sheet (▲/▼ steppers, Input / Output counters); Chat ⋯ › Text size; token hint |  |
 | 5 | SDLXLIFF reviewer: machine-translation provider choice, credentials, Inject MT and score threshold | Tools › SDLXLIFF › MT sheet + Flag threshold | Argos shown disabled with a ReasonChip (ctranslate2 is native-impossible) |

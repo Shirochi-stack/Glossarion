@@ -14,7 +14,8 @@
   visibility rules, Image & vision key pools, EPUB contents, the Context mode combo, Direct Text read-only,
   Reader & Library types, the FFT / manga worker notes, the Vision OCR prepass choices;
 * Library / Reader / Tools: the windowed Glossary Progress list, image-folder Refresh, 📂 Open file,
-  Organize selected, the empty chapter, the Review ErrorCard, the manga worker cap;
+  the shelf Organize plan narrowed to books (``LibraryService`` API only since the device fixes: the
+  Library has no manual Organize control), the empty chapter, the Review ErrorCard, the manga worker cap;
 * no ReasonChip under a disabled control (UI_SPEC §5.2).
 
 Real data is never touched: HOME / USERPROFILE / GLOSSARION_LIBRARY_DIR / OUTPUT_DIRECTORY /
@@ -799,6 +800,8 @@ def test_empty_chapters_are_detected():
 
 
 def test_organize_selected_narrows_the_shelf_plan(tmp_path):
+    """``LibraryService.plan_organize_blocking(books)`` (service API; device fix #4 removed the Library's
+    "Organize selected" / Organize (n) / Undo (n) controls)."""
     from glossarion_mobile.services.library import LibraryService
 
     raw_dir = tmp_path / "Library" / "Raw"

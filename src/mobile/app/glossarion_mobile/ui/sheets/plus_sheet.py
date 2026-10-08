@@ -38,9 +38,10 @@ __all__ = ["ATTACH_TILES", "PlusSheet", "THIS_CHAT", "TOOLS"]
 # (id, label, icon, disabled reason)
 ATTACH_TILES = (
     ("files", "Files", "ATTACH_FILE", None),
+    # second: one tap away without scrolling the row on a phone (owner 2026-10-08, device fix #8)
+    ("library", "From Library", "LOCAL_LIBRARY", None),
     ("photos", "Photos", "PHOTO_LIBRARY", None),
     ("camera", "Camera", "PHOTO_CAMERA", "Needs flet-camera"),
-    ("library", "From Library", "LOCAL_LIBRARY", None),
     ("clipboard", "Clipboard", "CONTENT_PASTE", None),
 )
 

@@ -8,11 +8,18 @@ warning chips · the pill pinned to the bottom. List row: 72 dp, 48 x 72 cover.
 
 Tap / long-press / ▶ / ⋯ are callbacks; ``set_model`` updates the controls in
 place (the home screen's diff replaces only cards whose signature changed).
+``BookListRow(show_more=False)`` drops the ⋯ button (the chat's Library picker).
+
+``CoverQueue``: the covers of a list of cards, looked up one at a time on the io
+pool (``LibraryService.cover_blocking``) - the Library home and the chat's
+Library picker.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+import asyncio
+import logging
+from typing import Any, Callable, Mapping, Optional
 
 import flet as ft
 
@@ -23,7 +30,9 @@ from glossarion_mobile.ui.library.common import tinted
 from glossarion_mobile.ui.library.models import CardModel
 from glossarion_mobile.ui.theme import HIT_TARGET, resolve_color
 
-__all__ = ["BookCard", "BookListRow", "LIST_ROW_HEIGHT"]
+__all__ = ["BookCard", "BookListRow", "CoverQueue", "LIST_ROW_HEIGHT"]
+
+log = logging.getLogger("glossarion.library.ui")
 
 LIST_ROW_HEIGHT = 72
 _LIST_COVER = (48, 72)
@@ -215,10 +224,12 @@ class BookCard(_CardBase):
 
 
 class BookListRow(_CardBase):
-    """List row (72 dp, 48 x 72 cover) with a trailing ⋯ for the single-card action sheet."""
+    """List row (72 dp, 48 x 72 cover) with a trailing ⋯ for the single-card action sheet
+    (``show_more=False``: no ⋯, e.g. a picker row)."""
 
-    def __init__(self, model: CardModel, **kwargs: Any) -> None:
+    def __init__(self, model: CardModel, *, show_more: bool = True, **kwargs: Any) -> None:
         super().__init__(model, **kwargs)
+        self.show_more = show_more
         self.control = ft.Container(
             on_click=self._tap,
             on_long_press=self._long,
@@ -256,13 +267,73 @@ class BookListRow(_CardBase):
         extras.extend(_warning_chip(w.text, w.role, w.tooltip, self.dark) for w in model.warnings)
         if extras:
             lines.append(ft.Row(extras, spacing=4, wrap=True, run_spacing=2, key="extras"))
-        more = ft.IconButton(icon=ft.Icons.MORE_VERT, tooltip="Book actions", on_click=self._more,
-                             size_constraints=HIT_TARGET, key="more")
+        row: list[ft.Control] = [
+            ft.Stack(cover_stack, width=width, height=height),
+            ft.Column(lines, spacing=2, expand=True, tight=True),
+        ]
+        if self.show_more:
+            row.append(ft.IconButton(icon=ft.Icons.MORE_VERT, tooltip="Book actions", on_click=self._more,
+                                     size_constraints=HIT_TARGET, key="more"))
         self.control.content = ft.Semantics(
-            content=ft.Row([
-                ft.Stack(cover_stack, width=width, height=height),
-                ft.Column(lines, spacing=2, expand=True, tight=True),
-                more,
-            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            content=ft.Row(row, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             label=model.semantics, selected=model.selected, button=True)
         self.control.bgcolor = ft.Colors.SECONDARY_CONTAINER if model.selected else None
+
+
+class CoverQueue:
+    """Card covers, looked up one at a time on the io pool (``LibraryService.cover_blocking``: the shared
+    ``library_covers`` chain and the cover cache).
+
+    ``add(key, book)`` queues a card and ``kick()`` starts draining the queue when it is idle (through
+    ``spawn``, else ``asyncio.ensure_future``). Each entry's row is ``lookup(key)`` at its turn when a
+    lookup is given (None: the card has left the list and is skipped), else the row given to ``add``.
+    ``on_cover(key, path)`` runs on the UI loop for each cover that resolved (a book without one keeps
+    the placeholder)."""
+
+    def __init__(self, service: Any, on_cover: Callable[[str, str], Any], *,
+                 lookup: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
+                 spawn: Optional[Callable[[Any], Any]] = None) -> None:
+        self.service = service
+        self.on_cover = on_cover
+        self.lookup = lookup
+        self.spawn = spawn
+        self.pending: list = []  # [(key, book)]
+        self.running = False
+
+    def __len__(self) -> int:
+        return len(self.pending)
+
+    def add(self, key: str, book: Optional[Mapping[str, Any]] = None) -> None:
+        self.pending.append((key, book))
+
+    def kick(self) -> Any:
+        """Start a run when the queue has work and none is running; returns the task (or None)."""
+        if not self.pending or self.running:
+            return None
+        coro = self.run()
+        if self.spawn is not None:
+            return self.spawn(coro)
+        try:
+            return asyncio.ensure_future(coro)
+        except RuntimeError:  # no running loop
+            coro.close()
+            return None
+
+    async def run(self) -> None:
+        self.running = True
+        try:
+            while self.pending:
+                key, book = self.pending.pop(0)
+                if self.lookup is not None:
+                    book = self.lookup(key)
+                if book is None:
+                    continue
+                try:
+                    path = await self.service.io(self.service.cover_blocking, book)
+                except Exception:
+                    log.debug("cover lookup failed", exc_info=True)
+                    path = None
+                if path:
+                    self.on_cover(key, path)
+        finally:
+            self.running = False

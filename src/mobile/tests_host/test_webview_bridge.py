@@ -389,6 +389,41 @@ def test_page_calls_time_out_refuse_the_loop_and_cap_pages(ui_loop, mobile_env):
         page.run_js("1")
 
 
+@needs_flet  # navigate_webview lives in the Reader module (it imports flet)
+def test_later_loads_navigate_through_load_request_and_failures_raise(ui_loop, mobile_env):
+    """The page's first load builds its WebView with the URL; later loads go through the Reader's
+    ``navigate_webview`` (``load_request``; the url property follows), and a refused navigation
+    still raises out of ``WebViewPage.load`` (authnd/ and search/gemini report it)."""
+    bridge, host, views = _bridge(ui_loop, NvidiaSite)
+    page = bridge.open_page(owner="authnd")
+    page.load(PAGE_URL)
+    second = PAGE_URL + "?again=1"
+    page.load(second)
+    (view,) = views
+    assert view.loads == [PAGE_URL, second] and view.url == second and host.added == 1
+    page.close()
+
+    class RefusingWebView(FakeWebView):
+        async def load_request(self, url):
+            raise RuntimeError("the platform view refused the navigation")
+
+    refusing = []
+
+    def factory(page_, url):
+        view_ = RefusingWebView(page_, url, NvidiaSite())
+        refusing.append(view_)
+        return view_
+
+    bridge.webview_factory = factory
+    other = bridge.open_page(owner="gemini_free")
+    other.load(PAGE_URL)  # the first load builds the WebView: no load_request
+    with pytest.raises(RuntimeError, match="refused the navigation"):
+        other.load(second)
+    assert refusing[0].loads == [PAGE_URL]
+    other.close()
+    assert _wait_for(lambda: not host.entries) and bridge.open_pages == 0
+
+
 async def _call_on_loop(page):
     try:
         page.run_js("1")

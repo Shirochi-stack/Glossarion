@@ -18,10 +18,15 @@ SecureStorage keys, and the settings feature provides ``app.config_store``):
    sheet; ``/chat/<cid>`` selects that chat; ``/oauth/return?p=authgpt`` reaches the
    bridge; the drawer's chat long-press gets Rename / Pin / Delete;
 5. lifecycle INACTIVE / HIDE / PAUSE / DETACH flush the chat history;
-6. U7: ``/chat/<cid>/attachments`` (the Attachments manager + Migrate), the drawer row's
+6. U7: ``/chat/<cid>/attachments`` (the Attachments manager), the drawer row's
    Attachments / Export chat / Duplicate as scratch (Save / Discard for a scratch chat), scratch
    chats under ``<cache>/Direct Text Scratch``, and the chat's hooks for the Progress manager
-   (Retranslate chapters), Open externally and the Library hand-off after Migrate.
+   (Retranslate chapters), Open externally and the Library hand-off after a move;
+7. device fixes: a finished chat book moves into the Library by itself (``auto_migrate``, the
+   desktop Migrate run for the user, UI_SPEC §2.17): when its run finishes (``ChatRuns``
+   ``subscribe_finished``), whenever the job queue goes idle and once after install (books from
+   earlier versions and runs whose app was killed before the move). The env gets the Library
+   hooks the chat UI uses (``library_service`` / ``library_book`` / ``library_translate``).
 
 ``maybe_show_welcome()`` opens ``/welcome`` on a first run (no
 ``glossary_mode_dialog_shown`` in config.json and no completed mobile welcome); the
@@ -31,23 +36,71 @@ app calls it after its initial route.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import threading
+import time
 from typing import Any, Callable, Optional
 
-from glossarion_mobile.state.chat_store_adapter import SCRATCH_DIR_NAME, ChatStoreAdapter, default_history_path
+from glossarion_mobile.state.chat_store_adapter import (
+    SCRATCH_DIR_NAME,
+    ChatStoreAdapter,
+    default_history_path,
+    is_scratch_cid,
+)
 from glossarion_mobile.ui.chat.context import ChatEnv
-from glossarion_mobile.ui.chat.job_binding import JobsAdapter
-from glossarion_mobile.ui.chat.run_controller import ChatRuns
+from glossarion_mobile.ui.chat.job_binding import TERMINAL_STATES, JobsAdapter, state_name
+from glossarion_mobile.ui.chat.run_controller import RESUMABLE_ENDINGS, ChatRuns
 from glossarion_mobile.ui.router import RouteMatch
 
-__all__ = ["ChatFeature", "FLUSH_LIFECYCLE_STATES", "SCREEN_ROUTES"]
+__all__ = ["ADDED_TO_LIBRARY", "COLLISION_TEXT", "ChatFeature", "FLUSH_LIFECYCLE_STATES", "MIGRATE_COLLISION",
+           "MIGRATE_DEFERRED", "MIGRATE_FAILED", "MIGRATE_MOVED", "MIGRATE_SKIPPED", "SCREEN_ROUTES"]
 
 log = logging.getLogger("glossarion.chat")
 
 FLUSH_LIFECYCLE_STATES = ("inactive", "hide", "pause", "detach")
 SCREEN_ROUTES = ("settings.accounts", "welcome", "chat.message.edit", "chat.attachments", "chat.compose")
 WELCOME_PREF = "welcome_completed"
+
+#: ``auto_migrate`` outcomes: moved into the Library; left where it is for good (not a book, a run that
+#: can still be resumed, ...); left for the next idle sweep (a job is running or writing it); left
+#: because a different Library book has its name (the merge dialog); the shared Migrate refused.
+MIGRATE_MOVED, MIGRATE_SKIPPED, MIGRATE_DEFERRED, MIGRATE_COLLISION, MIGRATE_FAILED = (
+    "moved", "skipped", "deferred", "collision", "failed")
+ADDED_TO_LIBRARY = "Added to the Library"
+COLLISION_TEXT = "A Library book named {name} already exists"
+#: How long the startup sweep waits for the Library feature (installed after the chat).
+STARTUP_LIBRARY_WAIT = 30.0
+
+
+def _norm(path: Any) -> str:
+    try:
+        return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+    except Exception:
+        return str(path or "")
+
+
+def _chapter_hashes(folder: Any) -> set:
+    """The ``content_hash`` of every chapter in ``<folder>/translation_progress.json`` (the pipeline
+    hashes each chapter's source text); empty when there is no readable progress."""
+    try:
+        with open(os.path.join(str(folder), "translation_progress.json"), encoding="utf-8") as stream:
+            progress = json.load(stream)
+    except (OSError, ValueError):
+        return set()
+    chapters = progress.get("chapters") if isinstance(progress, dict) else None
+    if not isinstance(chapters, dict):
+        return set()
+    return {str(entry["content_hash"]) for entry in chapters.values()
+            if isinstance(entry, dict) and entry.get("content_hash")}
+
+
+def _inside(path: Any, root: Any) -> bool:
+    try:
+        return os.path.commonpath([_norm(path), _norm(root)]) == _norm(root)
+    except ValueError:  # another drive
+        return False
 
 
 def _target_languages() -> tuple:
@@ -146,6 +199,15 @@ class ChatFeature:
         self.welcome_shown = False
         #: Extra long-press sheet rows after Pin (U9 Series' "Move to Series…"): ``chat -> [ActionItem]``.
         self.chat_action_providers: list = []
+        # auto-migrate (UI_SPEC §2.17): one move at a time; workspaces the user agreed to merge into a
+        # same-named Library folder; name clashes already announced (once per session); the sweep task
+        self._migrate_lock = threading.Lock()
+        self._merge_approved: set = set()
+        self._collisions_shown: set = set()
+        self._migrate_hooked = False
+        self._sweeping = False
+        self._sweep_again = False
+        self.startup_task: Any = None
 
     # ---- threading -------------------------------------------------------------------------
 
@@ -170,6 +232,9 @@ class ChatFeature:
         await feature._run_io(feature.chats.load)
         feature.attach()
         app.chat_feature = feature
+        # Chat books finished before this launch (earlier versions, or the app was killed between the
+        # finish and the move) join the Library once the Library feature is installed.
+        feature.startup_task = feature._spawn(feature.startup_sweep())
         return feature
 
     def _settings_ctx_fields(self) -> dict:
@@ -212,6 +277,9 @@ class ChatFeature:
             open_progress=self.open_progress,
             open_external=self.open_external,
             after_migrate=self.after_migrate,
+            library_service=self.library_service,
+            library_book=self.library_book,
+            library_translate=self.library_translate,
             temp_dir=self._temp_dir,
             languages=_target_languages(),
             mono=mono_family(self.page),
@@ -247,6 +315,7 @@ class ChatFeature:
                 extras.setdefault("actions", {})["chat_settings_global"] = (
                     lambda: chat_view.open_chat_settings(scope="global"))
         self.runs.attach()
+        self._hook_auto_migrate()
         shell = getattr(app, "shell", None)
         if shell is not None and self._fallback_factory is None:
             self._fallback_factory = shell.screen_factory
@@ -641,7 +710,7 @@ class ChatFeature:
         decision (``library_core.plan_open_reader``: overlay for an EPUB workspace, workspace mode
         for PDF / TXT); the raw file is the chat attachment, else the shared resolvers
         (``LibraryService.raw_source``: registry, ``source_epub.txt``). Without a workspace yet, an
-        EPUB attachment opens on its own (raw). Returns the Reader's route id.
+        EPUB or TXT attachment opens on its own (raw). Returns the Reader's route id.
         """
         app = self.app
         reader = getattr(app, "reader", None)
@@ -666,7 +735,7 @@ class ChatFeature:
                 if raw:
                     book["raw_source_path"] = raw
                 return {"book": book}
-            if source and os.path.isfile(str(source)) and str(source).lower().endswith(".epub"):
+            if source and os.path.isfile(str(source)) and str(source).lower().endswith((".epub", ".txt")):
                 return {"path": str(source)}
             return None
 
@@ -736,49 +805,435 @@ class ChatFeature:
             log.info("open externally failed (%s); sharing instead", exc)
             return await self.share_files([path])
 
-    async def after_migrate(self, target: str, source: str = "") -> None:
-        """After the desktop Migrate: the raw file is recorded in the Library (the run set-up's
-        ``library_core.record_library_raw_inputs``) and the snackbar offers "Open book"."""
-        app = self.app
-        library = getattr(app, "library", None)
-        notify = getattr(app, "notify", None)
-        navigate = getattr(app, "navigate_to", None)
+    @staticmethod
+    def _record_raw_blocking(source: str) -> None:
+        """The raw file of a book that moved into the Library goes into the raw-inputs registry (the run
+        set-up's ``library_core.record_library_raw_inputs``), so the Library always finds it. The file
+        stays where it is (a copy into Library/Raw would rename it and break the raw-stem -> workspace
+        rule Translate / Resume use)."""
+        if not source or not os.path.isfile(str(source)):
+            return
+        try:
+            import library_core  # shared (U5)
 
-        def record() -> None:
-            if not source or not os.path.isfile(str(source)):
-                return
+            library_core.record_library_raw_inputs([str(source)])
+        except Exception:
+            log.debug("recording the raw input failed", exc_info=True)
+
+    async def after_migrate(self, target: str, source: str = "") -> None:
+        """After a move the user confirmed (the Attachments merge dialog): the raw file is recorded in
+        the Library and the snackbar offers "Open book"."""
+        await self._run_io(self._record_raw_blocking, source)
+        self._announce_moved(target, source)
+
+    # ---- auto-migrate (UI_SPEC §2.17: finished chat books join the Library by themselves) -------
+
+    def library_service(self) -> Any:
+        """The LibraryService (``app.library``; installed after the chat), or None."""
+        return getattr(self.app, "library", None)
+
+    def _hook_auto_migrate(self) -> None:
+        if self._migrate_hooked:
+            return
+        self._migrate_hooked = True
+        self._unsubs.append(self.runs.subscribe_finished(self._on_run_finished))
+        service = self.jobs.jobs
+        on_transition = getattr(service, "on_transition", None) if service is not None else None
+        if callable(on_transition):
+            try:
+                self._unsubs.append(on_transition(self._on_job_transition))
+            except Exception:
+                log.exception("subscribing to job transitions failed")
+
+    def _on_run_finished(self, cid: str, run: Any, state: str) -> None:
+        """ChatRuns finish thread, once the run is committed: a run that finished moves its book."""
+        folder = str(getattr(run, "output_folder", "") or "")
+        if str(state or "").upper() != "DONE" or not folder:
+            return
+        outcome = self.auto_migrate_blocking(cid, folder)
+        if outcome["status"] in (MIGRATE_MOVED, MIGRATE_COLLISION):
+            self._post(self._announce, outcome)
+
+    def _on_job_transition(self, snap: Any, previous: Any = None) -> Any:
+        """A job ended: once nothing runs, sweep (moves that waited for the jobs, and workspaces a job
+        was writing). Returns the sweep task (None when there is nothing to do yet)."""
+        if state_name(snap) not in TERMINAL_STATES or self._active_job() is not None:
+            return None
+        return self._spawn(self.sweep("idle"))
+
+    async def startup_sweep(self, wait: float = STARTUP_LIBRARY_WAIT) -> list:
+        """Once after install: waits (bounded) for the Library feature, then sweeps every chat."""
+        deadline = time.monotonic() + max(0.0, float(wait))
+        while self.library_service() is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        return await self.sweep("startup")
+
+    async def sweep(self, reason: str = "") -> list:
+        """Move every eligible ``Attachments/<stem>`` workspace of every chat (idempotent); a sweep
+        asked for while one runs runs again after it. Returns the outcomes."""
+        if self._sweeping:
+            self._sweep_again = True
+            return []
+        self._sweeping = True
+        outcomes: list = []
+        try:
+            while True:
+                self._sweep_again = False
+                batch = await self._run_io(self.sweep_blocking)
+                moved = [o for o in batch if o.get("status") == MIGRATE_MOVED]
+                for outcome in batch:
+                    # several books at once (the first launch after an update): one summary snackbar
+                    self._announce(outcome, quiet=len(moved) > 1)
+                if len(moved) > 1:
+                    self._announce_many(len(moved))
+                outcomes.extend(batch)
+                if not self._sweep_again:
+                    break
+        except Exception:
+            log.exception("the Library auto-migrate sweep failed (%s)", reason or "sweep")
+        finally:
+            self._sweeping = False
+        return outcomes
+
+    def sweep_blocking(self) -> list:
+        """Blocking: ``auto_migrate_blocking`` over every saved chat's attachment workspaces."""
+        outcomes: list = []
+        try:
+            rows = list(self.chats.all() or [])
+        except Exception:
+            log.debug("listing the chats failed", exc_info=True)
+            return outcomes
+        for row in rows:
+            cid = str(getattr(row, "cid", "") or "")
+            if not cid or is_scratch_cid(cid):
+                continue
+            try:
+                folders = list(self.chats.attachment_folders(cid) or [])
+            except Exception:
+                continue
+            for folder in folders:
+                outcome = self.auto_migrate_blocking(cid, folder)
+                outcomes.append(outcome)
+                if outcome["status"] == MIGRATE_DEFERRED and outcome.get("jobs_running"):
+                    return outcomes  # nothing else can move before the jobs end either
+        return outcomes
+
+    def _job_lock(self) -> Any:
+        """``JobService.backend.job_lock`` (``job_runner.JOB_LOCK``): every job holds it for its whole
+        run, while its ``OUTPUT_DIRECTORY`` points at the job's own temporary run root."""
+        service = self.jobs.jobs
+        backend = getattr(service, "backend", None) if service is not None else None
+        lock = getattr(backend, "job_lock", None) if backend is not None else None
+        if lock is None:
+            from glossarion_mobile.ui.chat.attachments import jobs_lock
+
+            lock = jobs_lock()
+        return lock
+
+    def _active_job(self) -> Any:
+        """``JobService.view().active`` (a job that has not ended, for services without ``view``)."""
+        service = self.jobs.jobs
+        view = getattr(service, "view", None) if service is not None else None
+        if callable(view):
+            try:
+                return getattr(view(), "active", None)
+            except Exception:
+                return None
+        snap = self.jobs.snapshot()
+        return snap if snap is not None and state_name(snap) not in TERMINAL_STATES else None
+
+    def _resumable_here(self, cid: str, folder: str) -> bool:
+        """The chat's last job (the one Resume / Retry failed resubmit) ended resumable on ``folder``:
+        moving it would leave the job card's Resume / Retry failed working on a folder that is gone."""
+        ending, snapshot, workspace, source = self.runs.last_job_ending(cid)
+        if ending not in RESUMABLE_ENDINGS:
+            return False
+        if not workspace and snapshot is not None:
+            try:
+                workspace = self.job_workspace(snapshot)
+            except Exception:
+                workspace = ""
+        if workspace:
+            return _norm(workspace) == _norm(folder)
+        stem = os.path.splitext(os.path.basename(source))[0]
+        return bool(stem) and stem.casefold() == os.path.basename(os.path.normpath(folder)).casefold()
+
+    @staticmethod
+    def _same_book(target: str, folder: str, source: str) -> bool:
+        """The Library folder ``target`` is this book's own workspace: its ``source_epub.txt`` points at
+        the attachment (same file, or the same content), and the translation it already holds is of the
+        same chapters (``_same_chapters``). A path alone proves nothing: FileBridge reuses a freed Inbox
+        name, so a different book can sit at the path a Library book's pointer names."""
+        try:
+            import library_core  # shared (U5)
+        except Exception:
+            return False
+        read_pointer = getattr(library_core, "_read_source_epub_pointer", None)
+        same_content = getattr(library_core, "_same_file_content", None)
+        if read_pointer is None:
+            return False
+        pointed = read_pointer(target)
+        if not pointed:
+            return False
+        for raw in (source, read_pointer(folder)):
+            if not raw or not os.path.isfile(raw):
+                continue
+            if _norm(raw) == _norm(pointed) or (same_content is not None and same_content(raw, pointed)):
+                return ChatFeature._same_chapters(folder, target)
+        return False
+
+    @staticmethod
+    def _same_chapters(folder: str, target: str) -> bool:
+        """``target`` holds no translation yet, or at least half of the chapters either workspace
+        translated carry the same pipeline ``content_hash`` (``translation_progress.json``): the two
+        translations are of the same book, so merging replaces nothing of another book's."""
+        theirs = _chapter_hashes(target)
+        if not theirs:
+            return True
+        mine = _chapter_hashes(folder)
+        shared = len(mine & theirs)
+        return bool(mine) and shared > 0 and shared * 2 >= min(len(mine), len(theirs))
+
+    def auto_migrate_blocking(self, cid: Any, folder: str) -> dict:
+        """Blocking: move one chat book's ``Attachments/<stem>`` workspace into the Library when it is
+        safe (the desktop Migrate, ``ChatStoreAdapter.migrate_attachment``). Returns the outcome dict
+        (``status`` one of the ``MIGRATE_*`` values, ``reason``, ``target``, ``source``).
+
+        Only a managed attachment workspace of a saved chat that holds a translation of a book
+        (``library_core.RAW_IMPORT_EXTENSIONS``) moves, while no job writes into it and the chat's last
+        job does not offer Resume / Retry failed on it. The move itself runs with the jobs' process
+        lock taken without waiting and no job active: the shared Migrate picks its destination from the
+        live ``OUTPUT_DIRECTORY``, which a running job points at its temporary run root (deleted when
+        that run ends). An existing Library folder of the same name is merged into only when it is the
+        same book (its ``source_epub.txt`` points at the same raw file and any translation it holds is of
+        the same chapters, ``_same_book``); otherwise the workspace stays
+        and the user decides (the desktop "Attachment folder already exists" dialog).
+        """
+        cid = str(cid)
+        folder = str(folder or "")
+        outcome = {"cid": cid, "folder": folder, "status": MIGRATE_SKIPPED, "reason": "", "target": "", "source": ""}
+
+        def done(status: str, reason: str = "", **extra: Any) -> dict:
+            outcome.update(status=status, reason=reason, **extra)
+            return outcome
+
+        if not folder:
+            return done(MIGRATE_SKIPPED, "no workspace")
+        if is_scratch_cid(cid):
+            return done(MIGRATE_SKIPPED, "a scratch chat is never saved implicitly")
+        with self._migrate_lock:
+            session = self.chats.session(cid)
+            if session is None:
+                return done(MIGRATE_SKIPPED, "the chat no longer exists")
+            try:
+                managed = self.chats.binding_for(cid).is_managed_attachment_workspace(session, folder)
+            except Exception:
+                managed = False
+            if not managed:
+                return done(MIGRATE_SKIPPED, "not an attachment workspace of this chat")
+            if not os.path.isfile(os.path.join(folder, "translation_progress.json")):
+                return done(MIGRATE_SKIPPED, "no translation in this workspace")
+            from glossarion_mobile.ui.chat.attachments import attachment_source, workspace_busy
+
             try:
                 import library_core  # shared (U5)
-
-                library_core.record_library_raw_inputs([str(source)])
             except Exception:
-                log.debug("recording the raw input failed", exc_info=True)
+                return done(MIGRATE_SKIPPED, "the Library is not available")
+            source = attachment_source(self.chats.messages(cid), folder)
+            if not source:
+                read_pointer = getattr(library_core, "_read_source_epub_pointer", None)
+                source = str((read_pointer(folder) if read_pointer is not None else "") or "")
+            outcome["source"] = source
+            book_extensions = tuple(getattr(library_core, "RAW_IMPORT_EXTENSIONS", ()) or ())
+            if not source or os.path.splitext(source)[1].lower() not in book_extensions:
+                return done(MIGRATE_SKIPPED, "not a book")
+            if workspace_busy(self.runs, self.jobs, cid, folder):
+                return done(MIGRATE_DEFERRED, "a job is writing this workspace")
+            if self._resumable_here(cid, folder):
+                return done(MIGRATE_SKIPPED, "its run can still be resumed")
+            lock = self._job_lock()
+            if lock is not None and not lock.acquire(blocking=False):
+                return done(MIGRATE_DEFERRED, "a job is running", jobs_running=True)
+            try:
+                if self._active_job() is not None:
+                    return done(MIGRATE_DEFERRED, "a job is running", jobs_running=True)
+                target = self.chats.migration_target(cid, folder)
+                outcome["target"] = target
+                if not target:
+                    return done(MIGRATE_SKIPPED, "no Library output folder")
+                run_roots = [r for r in (self.runs.temp_dir, self._temp_dir) if r]
+                if any(_inside(target, root) for root in run_roots):
+                    # OUTPUT_DIRECTORY still names a run root: not the real output folder
+                    return done(MIGRATE_DEFERRED, "the output folder points at a run root", jobs_running=True)
+                merge = os.path.exists(target)
+                if merge and _norm(folder) not in self._merge_approved and not self._same_book(target, folder, source):
+                    return done(MIGRATE_COLLISION, "a different Library book has this name")
+                result = self.chats.migrate_attachment(cid, folder, (lambda _target: True) if merge else None)
+            finally:
+                if lock is not None:
+                    lock.release()
+            if not result.get("ok"):
+                notices = list(result.get("notices") or [])
+                text = f"{notices[-1].get('title')}: {notices[-1].get('text')}" if notices else "the move failed"
+                return done(MIGRATE_FAILED, text)
+            from glossarion_mobile.ui.chat.attachments import migrated_target
 
-        await self._run_io(record)
-        bid = None
-        if library is not None and target and hasattr(library, "bid_for"):
+            target = migrated_target(result) or target
+            self._merge_approved.discard(_norm(folder))
+            self._record_raw_blocking(source)
+            self.runs.relocate_output(cid, folder, target)
+            return done(MIGRATE_MOVED, "merged" if merge else "moved", target=target)
+
+    async def auto_migrate(self, cid: Any, folder: str) -> dict:
+        """``auto_migrate_blocking`` on the io pool, then its snackbar."""
+        outcome = await self._run_io(self.auto_migrate_blocking, cid, folder)
+        self._announce(outcome)
+        return outcome
+
+    def _announce(self, outcome: dict, *, quiet: bool = False) -> None:
+        """UI loop: a moved book's snackbar ("Added to the Library" · Open book; ``quiet``: the chat and
+        the Library are refreshed but the caller shows one summary), a name clash's (its action opens
+        the merge dialog; once per workspace and session)."""
+        status = outcome.get("status")
+        if status == MIGRATE_MOVED:
+            self._announce_moved(outcome.get("target", ""), outcome.get("source", ""), outcome.get("cid"),
+                                 quiet=quiet)
+        elif status == MIGRATE_COLLISION:
+            key = _norm(outcome.get("folder", ""))
+            if key in self._collisions_shown:
+                return
+            self._collisions_shown.add(key)
+            notify = getattr(self.app, "notify", None)
+            name = os.path.basename(os.path.normpath(str(outcome.get("target") or outcome.get("folder") or "")))
+            if notify is not None:
+                cid, folder = outcome.get("cid"), outcome.get("folder")
+                notify(COLLISION_TEXT.format(name=name), "Merge…", lambda: self.open_merge_dialog(cid, folder))
+
+    def _workspace_bid(self, target: str, source: str = "") -> Optional[str]:
+        library = self.library_service()
+        if library is None or not target or not hasattr(library, "bid_for"):
+            return None
+        name = os.path.basename(os.path.normpath(target))
+        return library.bid_for({"name": name, "folder_name": name, "path": target, "output_folder": target,
+                                "type": "in_progress", "is_in_progress": True, "in_library": True,
+                                **({"raw_source_path": str(source)} if source else {})})
+
+    def _announce_many(self, count: int) -> None:
+        notify = getattr(self.app, "notify", None)
+        navigate = getattr(self.app, "navigate_to", None)
+        if notify is None:
+            return
+        text = f"Added {count} books to the Library"
+        if navigate is not None:
+            notify(text, "Library", lambda: navigate("library"))
+        else:
+            notify(text)
+
+    def _announce_moved(self, target: str, source: str = "", cid: Any = None, *, quiet: bool = False) -> None:
+        app = self.app
+        library = self.library_service()
+        notify = getattr(app, "notify", None)
+        navigate = getattr(app, "navigate_to", None)
+        if library is not None:
             try:
                 library.mark_dirty()
             except Exception:
                 pass
-            name = os.path.basename(os.path.normpath(target))
-            bid = library.bid_for({"name": name, "folder_name": name, "path": target, "output_folder": target,
-                                   "type": "in_progress", "is_in_progress": True, "in_library": True,
-                                   **({"raw_source_path": str(source)} if source else {})})
-        if notify is not None:
-            if bid and navigate is not None:
-                notify("Attachment migrated", "Open book", lambda: navigate("library.book", {"bid": bid}))
-            else:
-                notify("Attachment migrated")
+        try:
+            bid = self._workspace_bid(target, source)
+        except Exception:
+            log.debug("the Library id of %s failed", target, exc_info=True)
+            bid = None
         chat_view = getattr(app, "chat_view", None)
         if chat_view is not None:
-            chat_view.header.set_attachments(chat_view._attachment_count(chat_view.cid))
+            hook = getattr(chat_view, "on_workspace_migrated", None) if cid is not None else None
+            try:
+                if callable(hook):
+                    hook(str(cid), target, source)
+                else:
+                    if cid is not None and str(getattr(chat_view, "cid", "")) == str(cid):
+                        chat_view.render_transcript()  # the turn's stored paths now point into the Library
+                    chat_view.header.set_attachments(chat_view._attachment_count(chat_view.cid))
+            except Exception:
+                log.debug("refreshing the chat after a move failed", exc_info=True)
+        if notify is not None and not quiet:
+            if bid and navigate is not None:
+                notify(ADDED_TO_LIBRARY, "Open book", lambda: navigate("library.book", {"bid": bid}))
+            else:
+                notify(ADDED_TO_LIBRARY)
+
+    def open_merge_dialog(self, cid: Any, folder: str) -> Any:
+        """The name-clash snackbar's action: the desktop "Attachment folder already exists" dialog."""
+        from glossarion_mobile.ui.chat.attachments import show_merge_dialog
+
+        target = self.chats.migration_target(cid, folder)
+        return show_merge_dialog(self.page, target, lambda: self.merge_into_library(cid, folder))
+
+    async def merge_into_library(self, cid: Any, folder: str) -> dict:
+        """"Merge and replace": the workspace moves into the same-named Library folder (now, or when
+        the running jobs end)."""
+        self._merge_approved.add(_norm(folder))
+        outcome = await self._run_io(self.auto_migrate_blocking, cid, folder)
+        notify = getattr(self.app, "notify", None)
+        if outcome["status"] == MIGRATE_MOVED:
+            self._announce(outcome)
+        elif notify is not None:
+            if outcome["status"] == MIGRATE_DEFERRED:
+                notify("The book joins the Library when the running job finishes")
+            else:
+                notify(f"Not added to the Library: {outcome.get('reason') or 'unknown reason'}")
+        return outcome
+
+    async def library_book(self, folder: str) -> Optional[str]:
+        """The Library id of the book whose workspace is ``folder`` (its ``output_folder``, or the one
+        ``LibraryService.workspace_for`` resolves); a quiet rescan first when the Library is stale."""
+        library = self.library_service()
+        if library is None or not folder or not hasattr(library, "bid_for"):
+            return None
+        snap = getattr(library, "snapshot", None)
+        if getattr(library, "dirty", False) or not getattr(snap, "scanned_at", 0):
+            try:
+                await library.refresh(quiet=True, reason="chat")
+            except Exception:
+                log.debug("refreshing the Library failed", exc_info=True)
+            snap = getattr(library, "snapshot", None)
+        workspace_for = getattr(library, "workspace_for", None)
+        wanted = _norm(folder)
+        for book in (snap.all_books() if snap is not None else ()):
+            workspace = str(book.get("output_folder") or "")
+            if not workspace and callable(workspace_for):
+                try:
+                    workspace = str(workspace_for(book) or "")
+                except Exception:
+                    workspace = ""
+            if workspace and _norm(workspace) == wanted:
+                return library.bid_for(book)
+        return None
+
+    async def library_translate(self, folder: str, source: str = "") -> Any:
+        """Resume / Retry failed of a chat book that moved into the Library: the Library translate sheet
+        for it (the Library resumes from the moved workspace's progress file)."""
+        notify = getattr(self.app, "notify", None)
+        library = self.library_service()
+        feature = getattr(self.app, "library_feature", None)
+        bid = await self.library_book(folder)
+        book = library.book_for_bid(bid) if bid and library is not None and hasattr(library, "book_for_bid") else None
+        if book is None or feature is None or not hasattr(feature, "context"):
+            if notify is not None:
+                notify("This book is not in the Library yet")
+            return None
+        if source and not book.get("raw_source_path") and os.path.isfile(str(source)):
+            book = dict(book, raw_source_path=str(source))
+        from glossarion_mobile.ui.library.translate_sheet import open_translate_sheet
+
+        return await open_translate_sheet(feature.context(), [book])
 
     def job_workspace(self, snap: Any) -> str:
         """A chat job's persisted ``Direct Text/<chat>/Attachments/<stem>`` workspace (Jobs › job › Files): the
         folder of the responses of the job's user turn (``params['user_index']``, ``chat_ops.turn_workspace``),
-        else the chat's attachment folder named after the attachment; '' when there is none."""
-        from glossarion_mobile.ui.chat.chat_ops import turn_span, turn_workspace
+        or the Library folder it moved to (auto-migrate, ``chat_ops.moved_workspace``), else the chat's
+        attachment folder named after the attachment; '' when there is none."""
+        from glossarion_mobile.ui.chat.chat_ops import moved_workspace, turn_span, turn_workspace
 
         env = self.env
         chats = getattr(env, "chats", None) if env is not None else None
@@ -797,7 +1252,7 @@ class ChatFeature:
         except (TypeError, ValueError):
             user_index = -1
         span = turn_span(messages, user_index) if 0 <= user_index < len(messages) else []
-        folder = turn_workspace(messages, span[1:])
+        folder = turn_workspace(messages, span[1:]) or moved_workspace(messages, span[1:])
         if folder:
             return folder
         if span:

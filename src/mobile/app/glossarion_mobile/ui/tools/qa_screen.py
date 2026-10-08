@@ -4,10 +4,13 @@
   mode dialog's cards (``qa_model.MODE_CARDS``); Custom opens the Custom Mode Settings sheet.
 * **Fields**: "Quick Scan duplicate check sample size (characters)" and "Auto-search
   output" (``qa_scanner_settings.quick_scan_sample_size`` / ``qa_auto_search_output``,
-  saved like the desktop dialog saves them).
+  saved like the desktop dialog saves them). On mobile the sample size shows 0 (duplicate
+  check off) when none is saved and a saved desktop 1000 is turned into 0 once (owner
+  2026-10-08, ``qa_model.migrate_quick_sample_size``); the chat's scans use the same value.
 * **Source**: the SourcePicker (multi-select = bulk scan). Library rows carry the output
   folder and the raw source; Browse finds a picked file's folder with the auto-search.
-  Direct Text workspaces are listed but never scanned (desktop rule).
+  Direct Text workspaces are listed but not picked here (desktop rule); a chat scans its own
+  workspace from the chat (``qa_model.chat_qa_job``).
 * **Start**: the desktop pre-run questions with their texts (word count without a source:
   continue without word count / pick a source; source/folder name mismatch), then a
   ``qa_scan`` job (``job_kinds.qa``). While it runs: phase, Stop (the JobService stop:
@@ -41,7 +44,7 @@ from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card
 from glossarion_mobile.ui.tools.qa_custom import CustomModeSheet
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
-__all__ = ["QaScannerScreen", "qa_eligibility"]
+__all__ = ["QaScannerScreen", "open_qa_report", "qa_eligibility"]
 
 log = logging.getLogger("glossarion.tools.qa")
 
@@ -57,6 +60,28 @@ def qa_eligibility(target: tg.ToolTarget) -> Optional[str]:
     if not target.folder:
         return "No output folder to scan"
     return None
+
+
+def open_qa_report(ctx: Any, path: str) -> Optional[str]:
+    """Open a ``validation_results.html`` in the QA report viewer (``/tools/qa/report/<rid>``).
+
+    ``ctx`` needs ``prefs`` (the FileRef registry: a route never carries a path; also found as
+    ``ctx.env.prefs``), ``go`` / ``navigate(name, params)`` and ``say`` / ``notify(message)`` - a
+    ToolsContext / LibraryContext, or the ChatView: the QA screen's report rows and the chat's QA
+    card use it. Returns the FileRef id, or None (no Prefs, or no path).
+    """
+    prefs = getattr(ctx, "prefs", None)
+    if prefs is None:
+        prefs = getattr(getattr(ctx, "env", None), "prefs", None)
+    go = getattr(ctx, "go", None) or getattr(ctx, "navigate", None)
+    say = getattr(ctx, "say", None) or getattr(ctx, "notify", None)
+    if prefs is None or not path or go is None:
+        if say is not None:
+            say("Reports cannot be opened in this session")
+        return None
+    rid = prefs.file_ref(path, kind="qa_report")
+    go("tools.qa.report", {"rid": rid})
+    return rid
 
 
 def _when(mtime: float) -> str:
@@ -98,9 +123,13 @@ class QaScannerScreen(Screen):
     def build_body(self) -> ft.Control:
         self.mode_row = ft.ResponsiveRow(spacing=8, run_spacing=8, key="qa-modes")
         self._render_modes()
-        sample = self.ctx.cfg(("qa_scanner_settings", "quick_scan_sample_size"), None)
+        # owner 2026-10-08: a saved desktop 1000 becomes 0 once (also done at app start); nothing
+        # saved shows the mobile default 0 (duplicate check off) - the value the job scans with
+        if self.ctx.store is not None:
+            qm.migrate_quick_sample_size(self.ctx.cfg, self.ctx.set_cfg, self.ctx.prefs)
+        sample = self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None)
         if sample is None:
-            sample = qm.effective_settings(self.ctx.config_snapshot()).get("quick_scan_sample_size", 1000)
+            sample = qm.MOBILE_QUICK_SAMPLE_SIZE
         self.sample_field = ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(sample), dense=True,
                                          keyboard_type=ft.KeyboardType.NUMBER, helper=qm.QUICK_SAMPLE_HINT,
                                          on_blur=self._on_sample, on_submit=self._on_sample, key="qa-sample")
@@ -308,7 +337,11 @@ class QaScannerScreen(Screen):
         self.sample_field.error = None
         self.ctx.push(self.sample_field)
         # Desktop: the mode handler persists ONLY this key (never the whole settings snapshot).
-        self.ctx.set_cfg(("qa_scanner_settings", "quick_scan_sample_size"), value)
+        # Mobile: the untouched default (nothing saved, 0 shown) stays unsaved, so config.json gets
+        # no value the owner never chose.
+        if self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None) is None and value == qm.MOBILE_QUICK_SAMPLE_SIZE:
+            return True
+        self.ctx.set_cfg(qm.QUICK_SAMPLE_KEY, value)
         return True
 
     def _on_auto_search(self, e: Any = None) -> None:
@@ -547,13 +580,7 @@ class QaScannerScreen(Screen):
         self.ctx.push(self.reports_column)
 
     def open_report(self, path: str) -> Optional[str]:
-        prefs = self.ctx.prefs
-        if prefs is None or not path:
-            self.ctx.say("Reports cannot be opened in this session")
-            return None
-        rid = prefs.file_ref(path, kind="qa_report")
-        self.ctx.go("tools.qa.report", {"rid": rid})
-        return rid
+        return open_qa_report(self.ctx, path)
 
     async def open_latest(self) -> Optional[str]:
         """Desktop "📁 Open QA Report": the newest ``validation_results.html`` under the output root."""

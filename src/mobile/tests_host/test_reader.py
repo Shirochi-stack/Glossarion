@@ -115,6 +115,28 @@ def server():
     srv.stop()
 
 
+def test_server_keeps_dropped_connections_off_stderr(server, capsys, caplog):
+    """The WebView drops keep-alive connections on every chapter turn: a debug line, never
+    socketserver's traceback on stderr; another error is still logged."""
+    import logging
+
+    srv = server._server
+    with caplog.at_level(logging.DEBUG, logger="glossarion.reader.server"):
+        for error in (ConnectionResetError(10054, "reset"), BrokenPipeError(32, "pipe"), TimeoutError()):
+            try:
+                raise error
+            except OSError:
+                srv.handle_error(None, ("127.0.0.1", 5555))
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            srv.handle_error(None, ("127.0.0.1", 5555))
+    assert capsys.readouterr().err == ""
+    records = [r for r in caplog.records if r.name == "glossarion.reader.server"]
+    assert [r.levelno for r in records] == [logging.DEBUG] * 3 + [logging.ERROR]
+    assert records[-1].exc_info and records[-1].exc_info[0] is ValueError
+
+
 def test_server_binds_loopback_only():
     with pytest.raises(ValueError):
         ReaderServer(host="0.0.0.0")
@@ -1371,9 +1393,13 @@ def _ui_helpers():
     return _UF
 
 
-@needs_flet
-@pytest.mark.skipif(not _has("msgpack"), reason="msgpack not installed")
-def test_reader_in_app_shell_with_webview_and_server(novel, monkeypatch):
+@pytest.fixture
+def android_shell(novel, monkeypatch):
+    """The real app on the fake Flet session as Android (storage under tmp), with the Reader
+    feature installed over ``novel``'s book: ``await android_shell.open(route)`` gives the
+    ``ReaderScreen`` once its first page is up."""
+    if not (_has("flet") and _has("msgpack")):
+        pytest.skip("flet / msgpack not installed")
     helpers = _ui_helpers()
     tb = helpers._TB
     storage_dirs = {}
@@ -1392,27 +1418,71 @@ def test_reader_in_app_shell_with_webview_and_server(novel, monkeypatch):
         {"ok": True, "modules": 0, "secs": 0.0, "failed": {}, "requested": []}))
     (storage_dirs["data"] / "mobile_state.json").write_text(json.dumps({"welcome_completed": True}), encoding="utf-8")
     book = dict(novel.book)
+    shell = types.SimpleNamespace(helpers=helpers, conn=None, page=None, app=None, feature=None)
 
-    async def scenario():
+    async def open_reader(route="/reader/ab12cd34ef56?ch=1"):
         from glossarion_mobile.ui.reader.feature import ReaderFeature
         from glossarion_mobile.ui.reader.reader_view import ReaderScreen
 
-        main_module, conn, session, page, app = await helpers._start("android")
-        feature = None
+        _main, shell.conn, _session, shell.page, shell.app = await helpers._start("android")
+        shell.app.library = types.SimpleNamespace(
+            book_for_bid=lambda bid: dict(book) if bid == "ab12cd34ef56" else None, bid_for=lambda b: "ab12cd34ef56")
+        shell.feature = await ReaderFeature.install(shell.app)
+        await shell.app.navigate(route)
+        screen = shell.feature.active
+        assert isinstance(screen, ReaderScreen)
+        assert await helpers._wait(lambda: screen.state == "ready" and screen.webview is not None, 20)
+        return screen
+
+    async def close():
+        if shell.feature is not None:
+            shell.feature.detach()
+        if shell.app is not None:
+            await helpers._stop(shell.app)
+
+    shell.open, shell.close = open_reader, close
+    yield shell
+    tb._join_app_io_threads()
+    tb.secure_keys.reset()
+    tb.rb.reset(restore_env=True)
+
+
+def _load_requests(conn) -> list:
+    """The URLs of every WebView ``load_request`` the app sent to the (fake) client, in order."""
+    from flet.messaging.protocol import MessageAction
+
+    return [(m.body.args or {}).get("url") for m in conn.messages
+            if m.action == MessageAction.INVOKE_METHOD and m.body.name == "load_request"]
+
+
+@needs_flet
+@pytest.mark.skipif(not _has("msgpack"), reason="msgpack not installed")
+def test_reader_in_app_shell_with_webview_and_server(android_shell, monkeypatch):
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    built = []  # (url passed in, the control's url right after it was built)
+    make_webview = ReaderScreen._make_webview
+
+    def recording_make_webview(self, url):
+        control = make_webview(self, url)
+        built.append((url, control.url, control))
+        return control
+
+    monkeypatch.setattr(ReaderScreen, "_make_webview", recording_make_webview)
+
+    async def scenario():
         try:
-            app.library = types.SimpleNamespace(book_for_bid=lambda bid: dict(book) if bid == "ab12cd34ef56" else None,
-                                                bid_for=lambda b: "ab12cd34ef56")
-            feature = await ReaderFeature.install(app)
-            await app.navigate("/reader/ab12cd34ef56?ch=1")
-            screen = feature.active
-            assert isinstance(screen, ReaderScreen)
-            assert await helpers._wait(lambda: screen.state == "ready" and screen.webview is not None, 20)
+            screen = await android_shell.open()
+            conn, page, feature, app = android_shell.conn, android_shell.page, android_shell.feature, android_shell.app
             view = page.views[-1]
             assert view.route == "/reader/ab12cd34ef56?ch=1" and view.appbar is None
             assert view.end_drawer is screen.toc.drawer
             assert screen.renderer == "webview" and feature.server is not None and feature.server.running
             url = screen.webview.url
             assert url.startswith(feature.server.base_url)
+            # the first page: the WebView is built with its URL (flet-webview loads it in initState), no load_request
+            assert [(u, c) for u, c, _ in built] == [(url, url)] and built[0][2] is screen.webview
+            assert screen.page_slot.content is screen.webview and _load_requests(conn) == []
             status, _h, body = await asyncio.to_thread(_get, url)
             assert status == 200 and b"window.GLRDR" in body and b"__GLRDR_CFG" in body
             # console bridge: the first event narrows the shell to the console transport
@@ -1425,25 +1495,410 @@ def test_reader_in_app_shell_with_webview_and_server(novel, monkeypatch):
             payload = json.dumps({"type": "page", "seq": 2, "page": 3, "count": 4, "chapter": 1}).encode()
             assert (await asyncio.to_thread(_get, feature.server.origin + feature.server.event_path, data=payload,
                                             method="POST", headers={"Content-Type": "application/json"}))[0] == 204
-            assert await helpers._wait(lambda: screen.page_no == 3, 5)
+            assert await android_shell.helpers._wait(lambda: screen.page_no == 3, 5)
             assert screen.chrome.page_text.value == "Page 4/4"
-            doc = screen.current_doc
+            doc, webview = screen.current_doc, screen.webview
+            # owner's device report #1: past the last page the next chapter must really load in the WebView
             screen.handle_payload({"type": "edge", "seq": 3, "edge": "end", "chapter": 1})
-            assert await helpers._wait(lambda: screen.index == 2 and screen.current_doc != doc, 10)
+            assert await android_shell.helpers._wait(lambda: screen.index == 2 and screen.current_doc != doc, 10)
+            assert await android_shell.helpers._wait(lambda: len(_load_requests(conn)) == 1, 5)
+            (loaded,) = _load_requests(conn)
+            assert loaded == screen.webview.url != url and "?v=" in loaded
+            assert screen.webview is webview and len(built) == 1  # navigated, not rebuilt
+            status, _h, body = await asyncio.to_thread(_get, loaded)
+            cfg = json.loads(body.decode("utf-8").split("window.__GLRDR_CFG=", 1)[1].split(";</script>", 1)[0])
+            assert status == 200 and cfg["doc"] == screen.current_doc
             screen.chrome.set_visible(True)
             await screen._on_confirm_pop()
             assert not screen.chrome.visible
             screen.dispose()
             assert app.prefs.reader_position("ab12cd34ef56")["href"] == "chapter0003.xhtml"
         finally:
-            if feature is not None:
-                feature.detach()
-            await helpers._stop(app)
+            await android_shell.close()
 
     asyncio.run(scenario())
-    tb._join_app_io_threads()
-    tb.secure_keys.reset()
-    tb.rb.reset(restore_env=True)
+
+
+@needs_flet
+@pytest.mark.skipif(not _has("msgpack"), reason="msgpack not installed")
+def test_every_chapter_change_navigates_the_webview(android_shell):
+    """Owner's device report #1: flet-webview reads ``url`` only when the control is built, so every
+    chapter change (◀ / ▶, slider, Chapters, mode, Aa layout, search, a page edge) must send exactly
+    one ``load_request`` with the newly published page to the same WebView; the outgoing page's late
+    events are dropped and the new page's are handled."""
+    from glossarion_mobile.ui.reader.aa_sheet import SCOPE_ALL
+
+    async def scenario():
+        try:
+            screen = await android_shell.open("/reader/ab12cd34ef56?ch=1")
+            conn, wait = android_shell.conn, android_shell.helpers._wait
+            webview = screen.webview
+            seen = [webview.url]
+
+            async def navigated(action, index):
+                before = len(_load_requests(conn))
+                doc = screen.current_doc
+                result = action()
+                if asyncio.iscoroutine(result):
+                    await result
+                assert await wait(lambda: len(_load_requests(conn)) > before and screen.current_doc != doc, 10)
+                await asyncio.sleep(0.2)  # nothing else follows
+                loads = _load_requests(conn)[before:]
+                assert len(loads) == 1, loads
+                assert loads[0] == screen.webview.url and "?v=" in loads[0] and loads[0] not in seen
+                assert screen.webview is webview and screen.page_slot.content is webview
+                assert screen.index == index
+                seen.append(loads[0])
+
+            await navigated(lambda: screen.chrome.next_button.on_click(None), 2)            # ▶
+            # the outgoing chapter's late tap is dropped; the new page's tap toggles the chrome
+            screen.chrome.set_visible(True)
+            assert screen.handle_payload({"type": "tap", "seq": 40, "zone": "center", "chapter": 1}) is None
+            assert screen.chrome.visible
+            assert screen.handle_payload({"type": "tap", "seq": 41, "zone": "center", "chapter": 2}) is not None
+            assert not screen.chrome.visible
+            await navigated(lambda: screen.chrome.prev_button.on_click(None), 1)            # ◀
+            screen.chrome.slider.value = 0
+            await navigated(lambda: screen.chrome._on_slider(types.SimpleNamespace(control=screen.chrome.slider)), 0)
+            await navigated(lambda: screen._on_toc_row(rm.TocRow(2, "Three", 3)), 2)         # Chapters
+            await navigated(lambda: screen.set_mode(rm.ORIGINAL), 2)                         # Original
+            await navigated(lambda: screen._apply_settings({"layout": "scroll"}, SCOPE_ALL, save=False), 2)
+            await navigated(lambda: screen._on_search_pick({"chapter_idx": 0, "text": "의",
+                                                            "local_occurrence": 0}), 0)       # search hit
+            await navigated(lambda: screen.handle_payload({"type": "edge", "seq": 90, "edge": "end",
+                                                           "chapter": 0}), 1)                # page edge
+            screen.dispose()
+        finally:
+            await android_shell.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+@pytest.mark.skipif(not _has("msgpack"), reason="msgpack not installed")
+def test_webview_navigation_failure_races_and_dispose(android_shell, monkeypatch):
+    """A failed ``load_request`` builds a new WebView with the page URL; two quick chapter changes
+    load only the last page; nothing navigates after the Reader is gone."""
+    import flet_webview as fwv
+
+    async def scenario():
+        try:
+            screen = await android_shell.open("/reader/ab12cd34ef56?ch=1")
+            conn = android_shell.conn
+            old, first_url = screen.webview, screen.webview.url
+
+            async def refused(self, url, method=None):
+                raise RuntimeError("WebView must be added to page first.")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(fwv.WebView, "load_request", refused)
+                await screen.go_chapter(0)
+            assert screen.index == 0 and screen.webview is not old
+            assert screen.webview.key != old.key  # a per-build key: Flet would skip an equal control
+            assert screen.page_slot.content is screen.webview
+            assert screen.webview.url.startswith(android_shell.feature.server.base_url) and "?v=" in screen.webview.url
+            assert screen.webview.url != first_url and _load_requests(conn) == []
+            # two quick changes: the first build is superseded before it publishes
+            before = len(_load_requests(conn))
+            await asyncio.gather(screen.go_chapter(1), screen.go_chapter(2))
+            loads = _load_requests(conn)[before:]
+            assert loads == [screen.webview.url] and screen.index == 2
+            # Back while the next chapter builds: no navigation for a disposed Reader
+            before = len(_load_requests(conn))
+            current = screen.webview.url
+            task = asyncio.ensure_future(screen.go_chapter(1))
+            await asyncio.sleep(0)
+            screen.dispose()
+            await task
+            await asyncio.sleep(0.2)
+            assert len(_load_requests(conn)) == before and screen.webview.url == current
+        finally:
+            await android_shell.close()
+
+    asyncio.run(scenario())
+
+
+def test_only_navigate_webview_sets_a_webview_url():
+    """Guard: a ``url`` property change never navigates a built flet-webview WebView, so the
+    Reader and the WebViewBridge assign ``.url`` and call ``load_request`` only inside
+    ``navigate_webview`` (the first page goes into ``_make_webview``'s constructor)."""
+    import ast
+
+    class Finder(ast.NodeVisitor):
+        def __init__(self, name):
+            self.name, self.stack, self.hits = name, [], []
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def _hit(self, node, what):
+            self.hits.append((self.name, self.stack[-1] if self.stack else "<module>", what))
+
+        def visit_Assign(self, node):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "url":
+                    self._hit(node, "url =")
+            self.generic_visit(node)
+
+        def visit_AugAssign(self, node):
+            if isinstance(node.target, ast.Attribute) and node.target.attr == "url":
+                self._hit(node, "url =")
+            self.generic_visit(node)
+
+        visit_AnnAssign = visit_AugAssign
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "load_request":
+                self._hit(node, "load_request")
+            if isinstance(node.func, ast.Name) and node.func.id == "setattr" and len(node.args) > 1 \
+                    and isinstance(node.args[1], ast.Constant) and node.args[1].value == "url":
+                self._hit(node, "url =")
+            self.generic_visit(node)
+
+    files = sorted((APP_DIR / "glossarion_mobile" / "ui" / "reader").glob("*.py"))
+    files.append(APP_DIR / "glossarion_mobile" / "services" / "webview_bridge.py")
+    hits = []
+    for path in files:
+        finder = Finder(path.name)
+        finder.visit(ast.parse(path.read_text(encoding="utf-8")))
+        hits.extend(finder.hits)
+    assert sorted(hits) == [("reader_view.py", "navigate_webview", "load_request"),
+                            ("reader_view.py", "navigate_webview", "url =")]
+
+
+@needs_flet
+def test_plan_routes_reader_files_through_plan_for_file(novel, monkeypatch):
+    """Open-with / Converter / Files hand the Reader a file path: EPUB and TXT (C6:
+    ``intents.READER_EXTENSIONS``) go through ``session.plan_for_file``; other files are refused."""
+    from glossarion_mobile.services import intents
+    from glossarion_mobile.ui.reader import reader_view
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    base = _screen(novel)
+    planned = []
+    monkeypatch.setattr(reader_view, "plan_for_file", lambda path: planned.append(path) or ("plan", path))
+    txt = novel.tmp / "Story.txt"
+    txt.write_text("첫 문단\n\n둘째 문단", encoding="utf-8")
+    pdf = novel.tmp / "Doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    assert ".txt" in intents.READER_EXTENSIONS and ".epub" in intents.READER_EXTENSIONS
+    for path in (txt, novel.raw):
+        screen = ReaderScreen(base.match, base.deps, args={"path": str(path)})
+        assert screen._plan() == ("plan", str(path))
+    assert planned == [str(txt), str(novel.raw)]
+    for gone in (pdf, novel.tmp / "missing.txt"):
+        with pytest.raises(LookupError):
+            ReaderScreen(base.match, base.deps, args={"path": str(gone)})._plan()
+
+
+@needs_flet
+def test_reader_opens_a_txt_file_from_a_path(novel):
+    """Owner's device report #2 at the Reader: a .txt handed over by Open-with / the Converter / Files
+    opens (C6: ``plan_for_file`` reads TXT) and its text is on the page."""
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    async def scenario():
+        base = _screen(novel)
+        story = novel.tmp / "Story.txt"
+        story.write_text("첫 문단입니다.\n\n둘째 문단입니다.\n", encoding="utf-8")
+        screen = ReaderScreen(base.match, base.deps, args={"path": str(story)})
+        await screen.open()
+        assert screen.state == "ready" and screen.session.count >= 1 and screen.renderer == "native"
+        texts = [t for c in screen.fallback.list_view.controls for t in _all_texts(c)]
+        shown = " ".join(str(t.value or "") + "".join(s.text for s in (t.spans or [])) for t in texts)
+        assert "첫 문단입니다." in shown and "둘째 문단입니다." in shown
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+def _all_texts(control) -> list:
+    import flet as ft
+
+    found = [control] if isinstance(control, ft.Text) else []
+    for name in ("content", "controls"):
+        child = getattr(control, name, None)
+        for item in (child if isinstance(child, list) else [child] if child is not None else []):
+            if hasattr(item, "__dict__"):
+                found.extend(_all_texts(item))
+    return found
+
+
+@needs_flet
+def test_fallback_text_is_not_selectable_so_taps_and_long_press_arrive():
+    """A SelectableText wins the gesture arena: with it the tap zones and the paragraph long-press
+    sheet never fire. Every fallback text is plain, with tap zones on or off."""
+    from glossarion_mobile.ui.reader.fallback_view import FallbackPage
+
+    paragraphs = []
+    page = FallbackPage(on_tap_zone=lambda z: None, on_pinch=lambda s: None, on_pinch_end=lambda: None,
+                        on_paragraph=paragraphs.append, on_scroll=lambda f: None)
+    blocks = rb.html_to_blocks("<h1>Title</h1><p>one <i>two</i></p><blockquote>q</blockquote><ul><li>i</li></ul>")
+    for zones in (True, False):
+        page.render(blocks, theme=DESKTOP_THEMES[0], settings=rm.ReaderSettings(tap_zones=zones))
+        texts = [t for c in page.list_view.controls for t in _all_texts(c)]
+        assert len(texts) >= 4 and all(t.selectable is False for t in texts)
+    page.list_view.controls[1].on_long_press(None)
+    assert paragraphs == ["one two"]
+
+
+@needs_flet
+def test_fallback_page_by_reports_the_chapter_edges(monkeypatch):
+    import flet as ft
+
+    from glossarion_mobile.ui.reader import fallback_view as fv
+
+    monkeypatch.setattr(fv, "PAGE_SCROLL_MS", 5)
+    monkeypatch.setattr(fv, "PAGE_SETTLE", 0.01)
+    page = fv.FallbackPage(on_tap_zone=lambda z: None, on_pinch=lambda s: None, on_pinch_end=lambda: None,
+                           on_paragraph=lambda t: None, on_scroll=lambda f: None)
+    page.set_size(400, 800)
+    page.render(rb.html_to_blocks("<p>a</p>"), theme=DESKTOP_THEMES[0], settings=rm.ReaderSettings())
+    list_state = {"extent": 0.0, "pixels": 0.0, "fail": False, "calls": []}
+
+    async def scroll_to(self, offset=None, delta=None, scroll_key=None, duration=0, curve=None):
+        list_state["calls"].append((offset, delta))
+        if list_state["fail"]:
+            raise RuntimeError("ListView Control must be added to the page first")
+        extent = list_state["extent"]
+        if not extent:
+            return  # shorter than the screen: Flutter cannot scroll it, no notification
+        target = list_state["pixels"] + delta if delta is not None else (extent + offset + 1 if offset < 0 else offset)
+        list_state["pixels"] = max(0.0, min(extent, target))  # clamped: at a bound it only overscrolls
+        page._on_scroll(types.SimpleNamespace(pixels=list_state["pixels"], min_scroll_extent=0.0,
+                                              max_scroll_extent=extent))
+
+    monkeypatch.setattr(ft.ListView, "scroll_to", scroll_to)
+
+    async def scenario():
+        assert page.at_edge(1) is None and page.at_edge(-1) is None   # nothing known after a render
+        assert await page.page_by(1) == fv.PAGE_EDGE                   # short chapter: never moves
+        assert await page.page_by(-1) == fv.PAGE_EDGE
+        list_state["extent"] = 3000.0
+        page.render(rb.html_to_blocks("<p>long</p>"), theme=DESKTOP_THEMES[0], settings=rm.ReaderSettings())
+        assert await page.page_by(1) == fv.PAGE_SCROLLED and list_state["pixels"] == 720.0
+        list_state["pixels"] = 3000.0
+        page._on_scroll(types.SimpleNamespace(pixels=3000.0, min_scroll_extent=0.0, max_scroll_extent=3000.0))
+        calls = len(list_state["calls"])
+        assert page.at_edge(1) is True and await page.page_by(1) == fv.PAGE_EDGE
+        assert len(list_state["calls"]) == calls                      # known end: no scroll at all
+        page.max_extent = 4000.0                                      # stale extent at the real end:
+        assert page.at_edge(1) is False                               # the scroll only overscrolls,
+        assert await page.page_by(1) == fv.PAGE_EDGE                   # the list stays put
+        assert len(list_state["calls"]) == calls + 1
+        assert await page.page_by(-1) == fv.PAGE_SCROLLED and list_state["pixels"] == 2280.0
+        # the same chapter drawn again (an Aa change) at its end: the list kept its offset, so the
+        # first right tap turns (it only overscrolls); the extent is unknown until the next event
+        list_state["pixels"] = 3000.0
+        page._on_scroll(types.SimpleNamespace(pixels=3000.0, min_scroll_extent=0.0, max_scroll_extent=3000.0))
+        page.render(rb.html_to_blocks("<p>long</p>"), theme=DESKTOP_THEMES[0], settings=rm.ReaderSettings(),
+                    keep_offset=True)
+        assert page.pixels == 3000.0 and page.at_edge(1) is None
+        assert await page.page_by(1) == fv.PAGE_EDGE
+        # known metrics in the middle of a chapter but the scroll events are late (a busy phone):
+        # never a chapter turn that would skip the rest of the chapter
+        list_state["pixels"] = 1000.0
+        page._on_scroll(types.SimpleNamespace(pixels=1000.0, min_scroll_extent=0.0, max_scroll_extent=3000.0))
+        real_on_scroll = page._on_scroll
+        page._on_scroll = lambda e: None  # the events of this turn arrive after the settle time
+        assert await page.page_by(1) == fv.PAGE_SCROLLED
+        page._on_scroll = real_on_scroll
+        list_state["fail"] = True
+        assert await page.page_by(1) == fv.PAGE_SCROLLED               # a failed scroll never turns
+        list_state.update(fail=False, extent=0.0)
+        page.render(rb.html_to_blocks("<p>short</p>"), theme=DESKTOP_THEMES[0], settings=rm.ReaderSettings())
+        later = asyncio.get_running_loop().call_later(
+            0.001, lambda: page.render(rb.html_to_blocks("<p>next</p>"), theme=DESKTOP_THEMES[0],
+                                       settings=rm.ReaderSettings()))
+        assert await page.page_by(1) == fv.PAGE_SCROLLED               # another chapter was drawn meanwhile
+        later.cancel()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_native_reader_edge_taps_turn_chapters(novel, monkeypatch):
+    """Owner's device report #1, the Lightweight reader / WebView-failure path: an edge tap scrolls a
+    screen and at the end (start) of the chapter opens the next (previous: its last page) chapter;
+    a short chapter turns on the first tap, a long one scrolls first; the centre toggles the chrome."""
+    import flet as ft
+
+    from glossarion_mobile.ui.reader import fallback_view as fv
+
+    monkeypatch.setattr(fv, "PAGE_SCROLL_MS", 5)
+    monkeypatch.setattr(fv, "PAGE_SETTLE", 0.01)
+    list_state = {"extent": 0.0, "pixels": 0.0, "calls": []}
+    holder = {}
+
+    async def scroll_to(self, offset=None, delta=None, scroll_key=None, duration=0, curve=None):
+        list_state["calls"].append((offset, delta))
+        extent = list_state["extent"]
+        if not extent:
+            return
+        target = list_state["pixels"] + delta if delta is not None else (extent + offset + 1 if offset < 0 else offset)
+        list_state["pixels"] = max(0.0, min(extent, target))
+        holder["screen"].fallback._on_scroll(types.SimpleNamespace(pixels=list_state["pixels"], min_scroll_extent=0.0,
+                                                                   max_scroll_extent=extent))
+
+    monkeypatch.setattr(ft.ListView, "scroll_to", scroll_to)
+
+    async def settle(predicate):
+        for _ in range(100):
+            if predicate():
+                return True
+            await asyncio.sleep(0.02)
+        return predicate()
+
+    def shown(index):  # that chapter is drawn (render finished)
+        screen = holder["screen"]
+        return lambda: screen.index == index and screen.fallback_generation == screen.render_generation
+
+    async def scenario():
+        screen = _screen(novel, route="/reader/ab12cd34ef56?ch=0")
+        holder["screen"] = screen
+        await screen.open()
+        assert screen.renderer == "native" and screen.index == 0 and screen.settings.tap_zones
+        screen._on_fallback_tap("next")                     # a short chapter: the first tap turns it
+        assert await settle(shown(1))
+        assert (None, 0.9 * 860) in list_state["calls"]
+        # a second quick tap while the next chapter is still being drawn never skips that chapter
+        task = asyncio.ensure_future(screen.go_chapter(2))
+        await asyncio.sleep(0)
+        assert screen.index == 2 and screen.fallback_generation != screen.render_generation
+        calls = len(list_state["calls"])
+        await screen._fallback_page(1)
+        assert len(list_state["calls"]) == calls            # ignored: no scroll, no turn
+        await task
+        assert await settle(shown(2))
+        await screen.go_chapter(1)
+        assert await settle(shown(1))
+        list_state["extent"] = 5000.0                       # a long chapter: the tap scrolls a screen
+        screen._on_fallback_tap("next")
+        await asyncio.sleep(0.2)
+        assert screen.index == 1 and list_state["pixels"] == pytest.approx(774.0)
+        list_state["pixels"] = 5000.0                       # the reader reached its end
+        screen.fallback._on_scroll(types.SimpleNamespace(pixels=5000.0, min_scroll_extent=0.0,
+                                                         max_scroll_extent=5000.0))
+        screen._on_fallback_tap("next")
+        assert await settle(shown(2))
+        assert list_state["calls"][-1] == (0, None)         # another chapter opens at its top
+        screen._on_fallback_tap("prev")                     # at its top: the previous chapter's end
+        assert await settle(shown(1))
+        assert screen.last_page and list_state["calls"][-1] == (-1, None)
+        screen.chrome.set_visible(True)
+        screen._on_fallback_tap("centre")
+        assert not screen.chrome.visible
+        screen.settings = screen.settings.with_changes(tap_zones=False)
+        calls = len(list_state["calls"])
+        screen._on_fallback_tap("next")                     # tap zones off: every tap is the chrome
+        assert screen.chrome.visible and screen.index == 1 and len(list_state["calls"]) == calls
+        screen.dispose()
+
+    asyncio.run(scenario())
 
 
 # =====================================================================================

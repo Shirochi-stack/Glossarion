@@ -75,6 +75,14 @@ def test_slash_commands_match_and_parse():
     assert slash.parse_command("/compile") is None and slash.parse_command("translate this") is None
     assert slash.completion(cmd) == "/model "
     assert slash.POLICY_ARGS["off"] == "no_glossary" and slash.POLICY_ARGS["attachments"] == "attachments_only"
+    # device fixes 2026-10-08: /library [title] attaches a Library book in the chat (the title is optional)
+    library = next(c for c in slash.SLASH_COMMANDS if c.name == "library")
+    assert library.optional and library.arg == "[title]" and library.label == "/library [title]"
+    assert library.description == "Attach a Library book"
+    assert slash.parse_command("/library Solo Leveling") == (library, "Solo Leveling")
+    assert slash.parse_command("/library") == (library, "")
+    assert [c.name for c in slash.match_commands("/library sol")] == ["library"]
+    assert not any(c.optional for c in slash.SLASH_COMMANDS if c.name != "library")
 
 
 @needs_flet
@@ -99,6 +107,14 @@ def test_composer_runs_complete_slash_commands():
     composer.handle_text("/model gemini")
     composer._on_slash_pick(model)
     assert ran == ["/model gemini"] and composer.text == "" and not composer.slash.visible
+    # a command whose argument is optional runs on a tap (/library opens the in-chat picker at once)
+    library = next(c for c in slash.SLASH_COMMANDS if c.name == "library")
+    composer.handle_text("/lib")
+    composer._on_slash_pick(library)
+    assert ran[-1] == "/library" and composer.text == ""
+    composer.handle_text("/library saga")
+    composer._on_slash_pick(library)
+    assert ran[-1] == "/library saga" and composer.text == ""
     # Send on a complete command runs it instead of sending
     composer.handle_text("/qa")
     composer._on_send_action(SendAction.SEND)
@@ -142,6 +158,8 @@ def test_chat_view_runs_slash_commands_through_the_button_handlers():
         open_export=lambda: calls.append(("export",)),
         navigate=lambda name, *a: calls.append(("nav", name)),
         open_settings_search=lambda q: calls.append(("search", q)),
+        open_library_picker=lambda query="": calls.append(("picker", query)),
+        attach_library_query=lambda query: (calls.append(("library_query", query)), _coro())[1],
     )
     fake.env = types.SimpleNamespace(chats=types.SimpleNamespace(
         set_override=lambda cid, key, value: overrides.__setitem__((cid, key), value)))
@@ -170,6 +188,11 @@ def test_chat_view_runs_slash_commands_through_the_button_handlers():
     assert calls[-1] == ("scratch",)
     run("/jobs")
     assert calls[-1] == ("nav", "jobs")
+    # /library: the in-chat Library picker; /library <title>: the fuzzy attach (never the Library screen)
+    run("/library")
+    assert calls[-1] == ("picker", "")
+    run("/library  Novel A ")
+    assert calls[-2:] == [("library_query", "Novel A"), ("spawn", "retranslate")]  # (the fake _spawn's label)
     run("/settings temperature")
     assert calls[-1] == ("search", "temperature")
     run("/settings")
@@ -183,6 +206,105 @@ def test_chat_view_runs_slash_commands_through_the_button_handlers():
 
 async def _coro():
     return None
+
+
+def _library_service(tmp_path, monkeypatch):
+    """A real LibraryService over a fake ``library_core`` that carries the REAL shared ``sort_books`` /
+    ``book_matches_query`` (the snapshot is set directly; every path in pytest's tmp dir)."""
+    for name, sub in (("HOME", "home"), ("USERPROFILE", "home"), ("APPDATA", "home"),
+                      ("GLOSSARION_LIBRARY_DIR", "Library"), ("OUTPUT_DIRECTORY", "Output")):
+        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv(name, str(tmp_path / sub))
+    monkeypatch.setenv("GLOSSARION_HTTP_LOG", "0")
+    try:
+        import library_core as real
+    except Exception as exc:  # pragma: no cover - backend not importable
+        pytest.skip(f"library_core not importable: {exc}")
+    from glossarion_mobile.services.library import LibraryService, ScanSnapshot, SharedCore
+
+    def raw(name):
+        path = tmp_path / "Library" / "Raw" / f"{name}.epub"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"PK")
+        return str(path)
+
+    rows = [
+        {"name": "Novel A", "type": "in_progress", "raw_source_path": raw("Novel A"), "mtime": 100.0,
+         "is_in_progress": True},
+        {"name": "Novel B", "type": "in_progress", "raw_source_path": raw("Novel B"), "mtime": 300.0,
+         "is_in_progress": True},
+        {"name": "Saga", "type": "in_progress", "raw_source_path": raw("Saga"), "mtime": 200.0, "is_in_progress": True,
+         "subjects": ["Fantasy"]},
+    ]
+    shelf = {"name": "Shelf", "type": "epub", "in_library": True, "path": str(tmp_path / "Library" / "Translated" /
+                                                                               "Shelf.epub"), "mtime": 50.0}
+    core = types.ModuleType("library_core")
+    core.sort_books = real.sort_books
+    core.book_matches_query = real.book_matches_query
+    service = LibraryService(core=SharedCore({"library_core": core}), config={})
+    service.set_snapshot(ScanSnapshot(in_progress=tuple(rows), completed=(shelf,), scanned_at=1.0))
+    return service
+
+
+@needs_flet
+def test_library_title_attaches_one_match_and_offers_the_picker_for_several(tmp_path, monkeypatch):
+    """``/library <title>`` (owner #8: the Library one step away inside the chat): one attachable match
+    is attached at once (an exact title wins over partial ones), several open the in-chat picker with
+    the query, none says so with "Open Library"; a book without a raw file never matches."""
+    import asyncio
+
+    from glossarion_mobile.ui.chat.chat_view import ChatView, library_matches
+
+    service = _library_service(tmp_path, monkeypatch)
+    assert [t.title for t in library_matches(service, "novel")] == ["Novel B", "Novel A"]  # newest first
+    assert [t.title for t in library_matches(service, "Novel A")] == ["Novel A"]
+    assert [t.title for t in library_matches(service, "fantasy")] == ["Saga"]  # the Library search: tags too
+    assert library_matches(service, "shelf") == []  # no raw file on this device
+
+    calls: list = []
+
+    async def run_io(fn, *args):
+        return fn(*args)
+
+    fake = types.SimpleNamespace(
+        _library_service=lambda: service, env=types.SimpleNamespace(run_io=run_io),
+        attach_library_book=lambda target: calls.append(("attach", target.title)) or True,
+        open_library_picker=lambda query="": calls.append(("picker", query)),
+        notify=lambda message, action_label=None, on_action=None: calls.append(("notify", message, action_label,
+                                                                                 on_action)),
+        navigate=lambda name, *a: calls.append(("nav", name)),
+    )
+    query = lambda text: asyncio.run(ChatView.attach_library_query(fake, text))  # noqa: E731
+    assert query("saga") == "attached" and calls[-1] == ("attach", "Saga")
+    assert query("novel a") == "attached" and calls[-1] == ("attach", "Novel A")
+    assert query("novel") == "picker" and calls[-1] == ("picker", "novel")
+    assert query("zzz") is None
+    kind, message, label, action = calls[-1]
+    assert (kind, message, label) == ("notify", "No Library book matches “zzz”", "Open Library")
+    action()
+    assert calls[-1] == ("nav", "library")
+    # no Library in this session: the picker (its fallback opens the Library)
+    fake._library_service = lambda: None
+    assert query("saga") is None and calls[-1] == ("picker", "saga")
+
+
+@needs_flet
+def test_every_chat_library_entry_opens_the_in_chat_picker():
+    """The owner: "I should be able to just directly [use] my epub library from direct chat, not
+    manually do clicks" - the empty-chat chip, ＋ › From Library and ``/library`` all open the in-chat
+    picker (one tap), none of them leaves the chat for the Library screen."""
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+    from glossarion_mobile.ui.chat.transcript import SUGGESTIONS
+
+    assert ("from_library", "From Library") in SUGGESTIONS and all(sid != "open_library" for sid, _l in SUGGESTIONS)
+    opened: list = []
+    fake = types.SimpleNamespace(open_library_picker=lambda query="": opened.append(query),
+                                 navigate=lambda *a: opened.append(("nav",) + a),
+                                 composer=types.SimpleNamespace(set_plus_open=lambda value: None))
+    ChatView._on_suggestion(fake, "from_library")
+    ChatView._on_attach(fake, "library")
+    assert ChatView.run_slash(fake, "/library") == "library"
+    assert opened == ["", "", ""]  # the in-chat picker each time, never the Library screen
 
 
 # ==========================================================================

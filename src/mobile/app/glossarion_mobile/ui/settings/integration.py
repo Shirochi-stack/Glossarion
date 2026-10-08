@@ -137,6 +137,15 @@ class SettingsFeature:
                     self.prefs.load()
                 except Exception:
                     log.exception("loading mobile_state.json failed")
+            # owner 2026-10-08: a Quick Scan sample size saved as the desktop 1000 becomes the mobile 0, once
+            # (the chat's QA scans read config.json directly, so this runs at app start, not only in Tools)
+            try:
+                from glossarion_mobile.ui.tools.qa_model import migrate_quick_sample_size
+
+                if self.store.loaded and not self.store.read_only:
+                    migrate_quick_sample_size(self.store.get, self.store.set, self.prefs)
+            except Exception:
+                log.exception("the QA sample size migration failed")
 
         dispatcher = self.dispatcher
         if dispatcher is not None and getattr(dispatcher, "bound", False):

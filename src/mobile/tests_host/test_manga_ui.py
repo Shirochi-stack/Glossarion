@@ -904,7 +904,7 @@ def test_quick_chips_for_attachments():
     assert chips_for_attachment("a/page.png") == ["translate", "manga"]
     assert chips_for_attachment("a/vol.CBZ") == ["translate", "manga"]
     assert chips_for_attachment("a/book.epub") == ["translate", "extract_glossary", "open_reader"]
-    assert chips_for_attachment("a/notes.txt") == ["translate", "extract_glossary"]
+    assert chips_for_attachment("a/notes.txt") == ["translate", "extract_glossary", "open_reader"]
 
 
 @needs_flet

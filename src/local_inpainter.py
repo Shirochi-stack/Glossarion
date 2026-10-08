@@ -19,6 +19,7 @@ import time
 import multiprocessing as mp
 from queue import Queue, Empty
 import mobile_runtime
+from safe_image import cv2_imdecode, cv2_imread
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3479,7 +3480,7 @@ class LocalInpainter:
                 out_bytes = base64.b64decode(str(image_value))
 
             out_arr = np.frombuffer(out_bytes, dtype=np.uint8)
-            out_bgr = cv2.imdecode(out_arr, cv2.IMREAD_COLOR)
+            out_bgr = cv2_imdecode(out_arr, cv2.IMREAD_COLOR)
             if out_bgr is None:
                 raise RuntimeError("Custom image edit endpoint returned unreadable image bytes")
             if self._custom_image_edit_force_stopped():
@@ -5490,7 +5491,7 @@ class LocalInpainter:
     def inpaint_with_bubble_detection(self, image_path: str, confidence: float = 0.5,
                                      expand_pixels: int = 5, refinement: str = 'normal') -> np.ndarray:
         """Inpaint using automatic bubble detection"""
-        image = cv2.imread(image_path)
+        image = cv2_imread(image_path)
         if image is None:
             logger.error(f"Failed to load image: {image_path}")
             return None

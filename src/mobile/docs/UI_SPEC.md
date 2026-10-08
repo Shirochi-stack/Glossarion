@@ -294,7 +294,7 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 **Job detail**
 - **Header:** title, origin link, state, progress, elapsed, ETA.
 - **Request cards:** live per-API-request cards from the classified log stream (shared `direct_text_store` classifier), sorted by spine order.
-- **LogConsole:** filter chips All / Errors / Thinking / API; search; follow toggle; Copy; Share log.
+- **LogConsole:** filter chips All / Errors / Thinking / API; search; follow toggle; Copy; Share log. Lines are selectable text in the mono family at the log size (§6.2, 8/11).
 - **Outputs** as `FileChip`s.
 - **Buttons:** Open origin, Stop, Resume.
 
@@ -304,11 +304,21 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 
 | Channel | Importance | Content | Actions / tap |
 |---|---|---|---|
-| `jobs.progress` | low, ongoing (Android FGS) | "Translating *Book*: 12/80 chapters · 3 in flight" (updated at most once per second) | **Stop** (graceful, then force on a second tap) · **Open** → `glossarion://app/job/<jid>` |
+| `jobs.progress` | low, ongoing (Android FGS) | "Translating *Book*: 12/80 chapters · 3 in flight"; "…: waiting for your glossary decision" (the glossary gates only) / "…: waiting for your answer" (any other question) while the job asks (at most once per second; a change the throttle holds back is sent on the next tick) | **Stop** (graceful, then force on a second tap) · **Open** → `glossarion://app/job/<jid>` |
 | `jobs.done` | default | "Done: *Book*" / "Stopped: *Book* (12/80)" / "Failed: *Book*" | tap → origin; actions **Open** · **Share** (when there is one compiled output) |
-| `jobs.action` | high | "Glossary ready: review needed" / "Sign-in required for ChatGPT #2" / "Paused (system limit): tap to resume" | tap → the approval card / LoginSheet / Jobs |
+| `jobs.action` | high | "Glossary ready: review needed" (**Accept** · **Review**) / "Answer needed: *question*" (Tools › Async batch) / "Sign-in required for ChatGPT #2" / "Paused (system limit): tap to resume" | tap / Review → the approval card (owning chat, or a Library book's page) / Tools › Async batch / LoginSheet / Jobs; **Accept** answers the glossary gate Yes |
 
-On iOS the same text goes to local notifications, plus the `BGContinuedProcessingTask` progress on iOS 26+.
+**When a job asks** (glossary approval, the Library review gate, an Async batch question), the `jobs.action` notification is posted whenever the screen that answers it is not showing: the owning chat, the Book page, or Tools › Async batch. That covers the app hidden and the app open on another screen; in the second case a snackbar also appears ("Glossary ready: review needed" · **Review**, or "Answer needed: …" · **Answer**). Nothing is posted while that screen is on top. The notification is withdrawn as soon as the question is answered or given up (job event `question_resolved` {id, kind}, delivered while the app is hidden too). With "Always accept generated glossaries" on (§2.11, §2.14), the gate is answered on the job thread and nothing is posted.
+
+**Accept** answers the running job's pending glossary question Yes. Android action buttons always bring the app forward, so there is no background accept. A chat run is answered through the chat's run controller (the card's ✓ Yes); any other job through `JobService.answer`. Then the snackbar "Glossary accepted · translating" shows and the route opens. A stale Accept (the job ended, another job's notification, no glossary question pending) only opens the route. A tap that cold-started the app (the launch notification) is routed once the app is ready (`JobsFeature.route_launch_notification`, called by `app._after_ready`), with the same rules.
+
+**While the app is hidden**, the UI dispatcher parks the jobs view, so `BackgroundExecution` runs a 1 s ticker that keeps the ongoing notification current: on Android while the foreground service is up, on iOS while continued processing is up. It stops when the app is visible again or the queue drains.
+
+**Swiped away.** Android 14+ lets users dismiss a foreground-service notification. While a job runs, the job notification is posted again (at most once per second), like a VPN's; nothing comes back after the service stops.
+
+**Permission.** Android 13+ asks for `POST_NOTIFICATIONS` on the first Run, at Welcome step 4 and from Settings › Notifications & background. It is one request (`BackgroundExecution.request_notification_permission`), and "asked" is remembered only for a definite answer, so a failed or dismissed request is asked again by the next Run. The first long job started while notifications are off shows once: "Notifications are off: you won't see progress, finished jobs or glossary reviews" · **Turn on** → `/settings/notifications`. A post the system refuses is logged.
+
+On iOS the same text goes to local notifications (action category Accept / Review), plus the `BGContinuedProcessingTask` progress on iOS 26+.
 
 ---
 
@@ -538,7 +548,7 @@ The button never reads `os.environ`. It only observes JobService signals.
 
 Every tap triggers `HapticFeedback.light_impact`.
 
-1. **Attach tiles.** A `Row` of 72 dp tiles, radius 14, tonal. Each tile is a `Container` with `on_click` and `on_long_press`.
+1. **Attach tiles.** A `Row` of 72 dp tiles, radius 14, tonal. Each tile is a `Container` with `on_click` and `on_long_press`. Order: Files · From Library · Photos · Camera · Clipboard (From Library second, so it needs no scrolling on a phone; device fix 2026-10-08).
    - **Files:** `FilePicker.pick_files(allow_multiple=True, allowed_extensions=…)`.
      - Long-press offers "Pick folder…" (`FilePicker.get_directory_path`).
      - On Android, a SAF failure falls back to "Pick a .zip instead".
@@ -546,7 +556,7 @@ Every tap triggers `HapticFeedback.light_impact`.
    - **Camera:** `flet-camera`, when the package resolves for both platforms (Appendix C).
      - A multi-capture "Scan pages" mode produces a set of images. When there is more than one, they can be zipped into a CBZ.
      - If the package is not in the build, the tile is disabled with a `ReasonChip`, and Photos remains available.
-   - **From Library:** opens a `SourcePicker` of Library books. The raw file is attached; if a workspace already exists, the Plan card reuses it.
+   - **From Library:** opens the in-chat Library picker (the SourcePicker's Library mode: one list, no segments; the Library's "Filter title or tag…" search over titles, raw titles and tags, filtering on every keystroke; newest first, the Library's Date sort; each row is the Library's own list row with its 48 × 72 cover, type badge, size, progress pill and warning chips, no ⋯; "Open Library" in its header closes the picker and opens the Library). A Completed book with neither a workspace nor a raw file on this device is listed but disabled with the ReasonChip "No raw file on this device". One tap attaches the book's raw file to this chat (snackbar "Attached <name> from the Library" · Remove) and remembers it (sidecar meta `library_attachment` {bid, path}); Send then defaults to "Save to: Library" (§2.12.1). The empty-chat chip "From Library" (§2.13) and `/library [title]` (§2.7) open the same picker: attaching a Library book never leaves the chat. A long-press on a row starts a multi-selection (as on the Library shelves): further taps add or remove books and "Use N" puts them in one batch plan (§2.12; Start runs one translate job, each book in its own Library workspace). Rows are built a page at a time (the Library's page size; the next page when the list nears its end).
    - **Clipboard:** pastes clipboard text (`Clipboard.get()`) as a chip or into the field.
 
    Files are imported through FileBridge. It copies them into `Inbox/`, or into `Library/Raw/` when "Add to Library" is chosen in the chip menu.
@@ -556,7 +566,7 @@ Every tap triggers `HapticFeedback.light_impact`.
    | Tool | Action |
    |---|---|
    | Extract glossary | Glossary job card |
-   | QA scan | QA job card for the chat workspace or a picked book |
+   | QA scan | Quick Scan of the chat's latest book workspace (its `Attachments/<stem>` folder, or the Library folder it moved to) as a `qa_scan` job (`qa_model.chat_qa_job`) with the mobile duplicate-check sample size (the saved Tools › QA value; mobile default 0 = off). The chat gets a "QA scan" card; progress, Stop and Done · Open are in the chat's JobStrip. A chat without a book workspace opens Tools › QA Scanner |
    | Compile EPUB / PDF | Uses the last attachment workspace |
    | Translate headers / metadata | |
    | Manga translator | Opens Tools › Manga with the attached images or CBZ |
@@ -610,12 +620,12 @@ Every tap triggers `HapticFeedback.light_impact`.
 ### 2.7 Slash commands and quick-action chips
 
 **Slash popover.** Typing "/" at the start of the field opens a `Container` overlay above the composer (inside the root `Stack`), containing a `ListView` of matching commands (max 6 visible). Tapping a command inserts it or runs it.
-- U9 (`ui/chat/slash.py`): the popover sits in the chat column directly above the composer card. A command with an argument goes into the field on tap ("/model "); Send / Enter on a complete command runs it instead of sending. Each command runs the handler its button uses (＋ sheet tools, ModelSheet tabs, Chat settings, drawer). `/lang` and `/profile` with an argument apply it directly; `/policy manual` opens Chat settings (it needs a glossary file); `/settings <query>` opens the shared settings search prefilled.
+- U9 (`ui/chat/slash.py`): the popover sits in the chat column directly above the composer card. A command with an argument goes into the field on tap ("/model "); Send / Enter on a complete command runs it instead of sending; a command that sends nothing to the model (`/library`, `/model`, `/qa`, `/mode`, `/settings`, ...: every command except `/glossary`, `/headers`, `/metadata`, `/manga`, `/review`, `/async`, `/retranslate`) also runs while Send is blocked (not signed in, no API key; not while the engine loads). Each command runs the handler its button uses (＋ sheet tools, ModelSheet tabs, Chat settings, drawer). `/lang` and `/profile` with an argument apply it directly; `/policy manual` opens Chat settings (it needs a glossary file); `/settings <query>` opens the shared settings search prefilled. A command whose argument is optional (`/library`) runs on a tap.
 
 | Command | Effect |
 |---|---|
 | `/glossary` | extract glossary |
-| `/qa` | QA scan |
+| `/qa` | QA scan of this chat's book (Quick Scan, as ＋ › QA scan) |
 | `/compile epub` / `/compile pdf` | compile |
 | `/headers` / `/metadata` | Translate headers / metadata |
 | `/manga` | Manga translator |
@@ -630,11 +640,13 @@ Every tap triggers `HapticFeedback.light_impact`.
 | `/policy none\|attachments\|off\|manual` | glossary policy |
 | `/scratch` | scratch chat |
 | `/export` | export chat |
-| `/library` · `/jobs` · `/settings <query>` | settings search |
+| `/library [title]` | the in-chat Library picker (§2.5); with a title, one attachable match is attached at once (an exact title wins), several open the picker with the query, none says "No Library book matches “title”" · Open Library |
+| `/jobs` | Jobs |
+| `/settings <query>` | settings search |
 
 **Quick-action chips** (a scrolling `Row` of `Chip`s directly above the composer; at most 5; dismissible):
-- **With an attachment in the composer:** "Translate" · "Extract glossary first" · "Translate as manga" (images/CBZ) · "Open in Reader" (EPUB).
-- **After a Result card:** "Read" · "Compile EPUB" · "QA scan" · "Retry failed".
+- **With an attachment in the composer:** "Translate" · "Extract glossary first" · "Translate as manga" (images/CBZ) · "Open in Reader" (EPUB / TXT; a TXT with no workspace yet opens in the Reader's text mode).
+- **After a Result card:** "Read" · "Compile EPUB" · "QA scan" (that turn's workspace, §2.12.4) · "Retry failed".
 - **On an empty chat:** the suggestion chips listed in §2.13.
 
 ### 2.8 Transcript (`Transcript`: `ListView(build_controls_on_demand=False, spacing=12, padding=12)` over a Python-side window)
@@ -772,7 +784,9 @@ Each one re-runs the same source text with a fixed instruction passed through th
 
 **When.** A chat run's automatic glossary generation finishes, and the worker blocks on the shared approval `threading.Event` (desktop 45687–45726). The card renders at the tail.
 
-**Notification.** If the app is backgrounded, a `jobs.action` notification is sent: "Glossary ready: review needed".
+**Notification.** Whenever this chat is not on screen (app hidden, or open on another screen), a `jobs.action` notification "Glossary ready: review needed" with **Accept** / **Review** is sent. With the app open elsewhere, a snackbar with **Review** also appears (§1.9). Nothing is sent while this chat is on screen, and the notification is withdrawn once the card is answered.
+
+**Always accept generated glossaries** (mobile only; the desktop always asks). Chat settings › Glossary › "Always accept generated glossaries" (default off; All chats = Prefs `chat_auto_accept_glossary`, This chat = sidecar `auto_accept_glossary`). The effective value is captured at Send into the job (`params.auto_accept_glossary`; Resume / Retry keep it). The job answers the glossary gate Yes on its own thread (`JobService._job_ask`) and logs "✅ Direct Text: generated glossary accepted (Always accept is on)"; no card or notification is shown, and it works with the screen off. The request cards are not frozen at the gate (mobile divergence, Appendix C). A Stop before the gate declines it. The Library "Review glossary before translating" gate is never auto-accepted, and Async batch questions always ask.
 
 **Anatomy** (`Card`, `tertiaryContainer` tint, radius 16):
 - Header "GLOSSARION · ACTION REQUIRED" (labelSmall, tertiary).
@@ -787,6 +801,7 @@ Each one re-runs the same source text with a fixed instruction passed through th
   - "Save" is atomic and keeps the BOM.
 - **✓ Yes** (`FilledButton`, success colour) continues the run.
 - **■ No** (`OutlinedButton`, error colour) rejects and calls `stop_translation()`.
+- **Always accept** (`TextButton`, chat cards only): turns on the All-chats "Always accept generated glossaries" (Prefs `chat_auto_accept_glossary`; this chat's own "ask" override in its sidecar is cleared) and answers this question Yes like ✓ Yes; snackbar "Generated glossaries are accepted automatically from now on" · Chat settings. The Library review gate's sheet has no such button.
 
 **No file.** Edit is disabled and the body reads "No editable glossary file was found. You can continue or stop this run."
 
@@ -821,7 +836,11 @@ A Plan card is created when you send an attachment that is an EPUB, PDF, CBZ, ZI
   - a tap opens the `PlanGlossarySheet` (below);
 - "📝 Text" output mode (opens the `ModeOptionsSheet`, scoped to this run);
 - range: "All chapters" / "Ch 1–50";
-- **destination:** "Save to: This chat" (default, Direct Text semantics) or "Save to: Library". The Library option runs the normal pipeline: workspace in the output root, registered in the Library, post-QA scan per settings, and a `LibraryLinkCard` in the chat.
+- **destination:** "Save to: This chat" (default for files from Files / Photos / Clipboard; Direct Text semantics) or "Save to: Library" (normal pipeline: workspace in the output root, registered in the Library, post-QA scan per settings, a Library-job card in the chat).
+  - A Library book attached from the chat (§2.5 From Library) defaults to "Save to: Library" and continues its own workspace. Its Plan card shows "📚 Library · <the book card's pill>" and "Open book".
+  - Start first asks the desktop "Output Folder Mismatch" question when the book's workspace lies under another output root (`translate_sheet.confirm_output_root`); Cancel keeps the plan.
+  - With "Skip plan for attachments" (or a short TXT) such a send starts the Library job at once.
+  - The job's origin and the Library-job card carry the book id, so its "Library" button opens the Book page. The card's data is also kept in the sidecar meta `tool_jobs` (Appendix B), because the desktop history drops unknown storage keys.
 
 **Run options** (`ExpansionTile`, collapsed; summary "Batch 10 · Temp 0.3 · Rolling summary"). These are schema tiles bound to:
 - chapter range (N or N-M) + spine order + 🔍 preview list;
@@ -911,10 +930,18 @@ When failures exist, a pinned error chip **"3 failed – Retry"** sits at the to
 - **Progress**
 - **Retry failed**
 - **Glossary** (Book page Glossary tab equivalent for the workspace)
-- **Open in Library** (when the workspace is already registered) / **Migrate to Library**
+- **Open in Library**
 - **Files**
 
-**Migrate to Library** uses the desktop Migrate (`direct_text_store.migrate_attachment`): it moves the workspace to the output root, keeps only the newest top-level EPUB/PDF, and rewrites stored paths. On mobile it also records the raw file in the Library. A name collision opens the dialog "Attachment folder already exists" → **Merge and replace** / **Cancel**. Success: snackbar "Attachment migrated" · **Open book**.
+**Library hand-off (automatic; device report #4).** There is no Migrate action. When a chat run of a book attachment (`library_core.RAW_IMPORT_EXTENSIONS`) finishes Done, `ChatFeature.auto_migrate` runs the desktop Migrate (`direct_text_store.migrate_attachment`): the workspace moves to the output root, only the newest top-level EPUB/PDF is kept, stored paths are rewritten, and the raw file is recorded in the Library registry. The raw stays where it is (no Library/Raw copy), so the raw-stem → workspace rule keeps working.
+- The move waits while a job is running or writing the workspace: it needs the jobs' `JOB_LOCK`, taken without waiting, and no active job; the next idle transition retries it.
+- It leaves alone workspaces whose job card still offers Resume or Retry failed, scratch chats, workspaces with no `translation_progress.json`, and non-book attachments.
+- A same-named Library folder is merged into silently only when it is the same book: its `source_epub.txt` points at the same raw file or identical content, and any translation it already holds is of the same chapters (pipeline `content_hash`; a freed Inbox name can hold another book). Otherwise the workspace stays and the snackbar "A Library book named X already exists" · **Merge…** opens "Attachment folder already exists" → **Merge and replace** / **Cancel** (also in the Attachments manager's ⋯, §2.17).
+- Success: snackbar "Added to the Library" · **Open book**; several in one sweep: "Added N books to the Library" · **Library**. Sweeps also run once after launch (books finished by earlier versions, or before the app was killed) and whenever the job queue goes idle.
+
+**Open in Library** opens the Book page of the Library book the workspace became. Until the move the action is disabled with the ReasonChip "Added to the Library when the translation finishes" (non-book attachments: "Only books (EPUB, TXT, PDF, HTML) are added to the Library"). Resume / Retry failed of a workspace that moved into the Library open the Library's translate sheet (`ChatEnv.library_translate`).
+
+**QA scan** runs a Quick Scan of the turn's own workspace (never the run's deleted temp root; a workspace that moved into the Library is followed). It shows "Nothing to scan in this turn's workspace" when there is no HTML (or TXT for a TXT/PDF source). The scan gets its own "QA scan" card with the scan state, its settings line ("Quick Scan · duplicate check off (sample size 0)") and Job · Report (QA report viewer; "The scan has not finished yet" / "This scan wrote no report") · Chapters (Progress manager). A Direct Text workspace goes through the shared scan path's `allow_direct_text` opt-in (`qa_model.chat_qa_job`; owner-approved). When a chat QA job ends, Result cards re-read their workspace's failed + QA-failed chapters for the "N QA failed" chip.
 
 #### 2.12.5 Batch (several files)
 - One `BatchPlanCard` lists the files as FileChips, each with a per-file glossary chip ("Map glossaries" sheet; desktop "Map Glossaries to EPUBs").
@@ -926,7 +953,7 @@ When failures exist, a pinned error chip **"3 failed – Retry"** sits at the to
 
 | Situation | UI (exact copy) | Actions |
 |---|---|---|
-| Empty chat | Halgakos (64 dp), "What would you like to translate?", "Paste text into the composer below, or attach a supported file. Translations stream into this conversation as they are generated." | suggestion chips: Paste text · Attach a book · Open Library · Translate a manga page |
+| Empty chat | Halgakos (64 dp), "What would you like to translate?", "Paste text into the composer below, or attach a supported file. Translations stream into this conversation as they are generated." | suggestion chips: Paste text · Attach a book · From Library (opens the in-chat Library picker, §2.5) · Translate a manga page |
 | Start failure | ErrorCard: "**Translation could not be started.**" + `ExcType: msg` (mono) | Retry · Copy error · View log |
 | Empty result | "*No translated output was produced for this message.*" (or per request "*No translated output was emitted for this request.*") | Retranslate · View log |
 | File-only result | "**Translation completed.** The translated EPUB file is available from the output chips below." | output chips |
@@ -966,6 +993,8 @@ Sections are `ExpansionTile`s. The labels are exact desktop labels.
    - "Use glossary".
    
    It is asked **before every send** (desktop parity) and prefilled with the last glossary.
+
+   - "Always accept generated glossaries" (mobile; All chats → Prefs `chat_auto_accept_glossary`, This chat → sidecar `auto_accept_glossary`; never config.json; default off). Help: "Skip the Edit / Yes / No card; translation starts with the generated glossary. Desktop always asks." Not shown on the Series defaults sheet (§2.11).
 3. **Run behaviour:**
    - "Force Multipass off" (`direct_text_force_multipass_off`, default from legacy `direct_text_force_simple_mode`)
    - "Disable all thinking" (`direct_text_disable_thinking`)
@@ -1013,16 +1042,15 @@ Series is a mobile-only grouping stored in `mobile_series.json`. It is not a des
 - **Leaving unsaved:** the confirm sheet "Discard scratch chat?" (Discard / Save). It is not shown when the chat is empty (an empty scratch chat is discarded silently).
 - Entry points: drawer / header "New scratch chat", long-press Send › "Send as scratch", the drawer row's "Duplicate as scratch" (the messages are copied, off the UI loop; the copy gets its own copies of the original's `Chat Messages` body files, because Delete message or an edit in the original renames or rewrites those; attachment outputs and generated media stay shared by absolute path).
 
-### 2.17 Attachments manager and Migrate (`/chat/<cid>/attachments`)
+### 2.17 Attachments manager (`/chat/<cid>/attachments`)
 
 - **Title:** "Attachments — {title}".
-- **Intro:** "Saved attachment workspaces for this conversation. Migrating one moves its complete output tree beside the Direct Text folder, or into the configured output override."
+- **Intro:** "Workspaces waiting to be added to the Library (running, resumable, or a name already in the Library)". Finished books move into the Library by themselves (§2.12.4); there is no Migrate button.
 - **Cards** (one per `Attachments/<stem>`):
   - icon, name, size, and a mini progress line ("48/48 · EPUB ready"). As built (U7, `chat/chat_ops.workspace_summary`): a read-only count of the workspace's `translation_progress.json` chapter statuses plus the compiled EPUB / PDF Migrate keeps (`_preferred_attachment_compiled_documents`); `progress_core.compute_stats` needs the full Progress Manager view build, which may seed the workspace, so a list card does not run it (⋯ › Progress opens it);
-  - **Migrate** (`FilledTonalButton`; long-press shows the destination);
-  - ⋯ (`ActionSheet`): Open in Reader · Progress · Share output · Delete workspace (confirm).
+  - ⋯ (`ActionSheet`): Open in Reader · Progress · Share output · Merge into Library… (only when a different Library book already has the name; the desktop merge dialog) · Delete workspace (confirm).
 - **Empty state:** "No attachment workspaces remain in this conversation."
-- Migrating is blocked while a job is writing that workspace. As built (U7 review): Migrate and Delete workspace are disabled (ReasonChip) on a workspace while this chat's run is live or an active / queued job's folder is that workspace or inside it (the job card's Compile, ＋ › Retranslate chapters), and checked again when the collision / delete question is answered.
+- Delete workspace and Merge into Library… are disabled (ReasonChip) on a workspace while this chat's run is live, or while an active or queued job's folder is that workspace or inside it (`attachments.workspace_busy`, shared with the auto-migrate and `ChatView._workspace_busy`). They are checked again when the question is answered. Every move runs only while no job owns the process environment (`migrate_when_idle`); otherwise "Wait for the running job to finish, then try again".
 
 ### 2.18 Jump-to, search in chat, export, text size
 
@@ -1081,7 +1109,7 @@ Paths in the JSON are relative to the history file's folder, with an absolute fa
 
 **App bar**
 - back (phone), title "Library", search `IconButton` (expands into a `SearchBar` with placeholder "Filter title or tag…"), `tune` (Filter sheet), grid/list toggle.
-- ⋯ menu: Scan for raw (N) · Organize (n) · Undo (n) · Refresh · Library settings.
+- ⋯ menu: Scan for raw (N) · Refresh · Library settings. There is no Organize / Undo (see §3.4).
 
 **Shelf bar**
 - `SegmentedButton` "In progress (N) · Completed (N)" (persisted as `epub_library_tab`).
@@ -1170,17 +1198,17 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 
 ### 3.3 Selection and bulk actions
 
-- **Tap** opens the Book page. TXT files, or a PDF without a workspace, open in the Reader's simple mode or are shared to an external app.
+- **Tap** always opens the Book page, on both shelves and for every type. A finished TXT book, a PDF without a workspace and a Library/Translated EPUB open it the same way an In-progress book does. ⋯ › ↗ Share sends the file to another app (`LibraryContext.share_books`). TXT books read in the Reader (📖 Open in Reader).
 - **Long-press** (`Container.on_long_press`) enters selection mode with a medium haptic. A **contextual top bar** shows "N selected", Select all (current shelf), and Close. Selection is kept per shelf, keyed by path.
 - **Bottom action bar** (`BottomAppBar` with icon+label buttons):
   - **Translate** ("Load N for translation"; opens a TranslateSheet / BatchPlan);
   - **Metadata** ("Translate Metadata for N EPUBs");
   - **Compile** (EPUB / PDF);
   - **Delete N**;
-  - **More**: Delete glossary files (N) · Restore glossary backup · Clear saved raw link (for N items) · Share · Organize selected · Add to Series (U9).
+  - **More**: Delete glossary files (N) · Restore glossary backup · Clear saved raw link (for N items) · Share · Add to Series (U9).
 - **Single-card ⋯** (from list rows, or long-press when only one card is selected) is an `ActionSheet` (custom bottom sheet, §5.2) with the desktop labels and visibility rules:
   - 📑 Open Book Details
-  - 📖 Open in Reader / Open Translated EPUB / Open in EPUB reader
+  - 📖 Open in Reader (EPUB and TXT) / Open Translated EPUB / Open in EPUB reader (a PDF with a workspace)
   - 🔁 Load for translation
   - 🌐 Translate Metadata
   - 📘 Compile EPUB / 📄 Compile PDF
@@ -1189,13 +1217,11 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
   - 🗑️ Delete glossary files / ↩️ Restore glossary backup
   - 🗑️ Delete
   - "Reveal …", "Open Output Folder" and "Open Library Folder" are replaced by "Files" (FileBrowser) and "Share".
+  - A Library/Translated EPUB uses the workspace the scan resolved (`LibraryService.workspace_for`, desktop `_resolve_book_output_folder`, kept only when it holds `translation_progress.json`) for 📘 Compile EPUB / 📄 Compile PDF and Files.
 
 ### 3.4 File-changing actions (all through `library_core.actions` plan/execute; nothing deletes outside the Library or output roots)
 
-- **Organize (n) / Undo (n)** are in the ⋯ menu with counters.
-  - Collision policy dialog: Replace / Keep Both (adds " (2)") / Skip / Cancel.
-  - Undo asks: Raw / Translated / All.
-  - Since mobile imports copy files, these mostly apply to imported desktop data and migrated workspaces.
+- **Organize / Undo**: automatic, with no control (device fix 2026-10-08). Finished chat books move into the Library by themselves (chat auto-migrate, §2.12.4), and imports are copied into Library/Raw. On mobile the desktop Organize (n) / Undo (n) would only move imported copies around, because Undo counts every file in Library/Raw and Library/Translated. `LibraryService` keeps `plan_organize_blocking` / `execute_organize_blocking` / `plan_undo_blocking` as API. The collision policy dialog (Replace / Keep Both / Skip / Cancel; `organize.collision_text`) stays available to other flows.
 - **Delete**
   - If every target is Not started: a simple `ConfirmDialog`.
   - Otherwise, a **full-screen DeleteConfirm View**:
@@ -1225,7 +1251,9 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 - an output-mode badge ("Mode: Text");
 - while a job for this book runs: "⏳ Translating · 12/48" with Stop.
 
-**⋯ menu.** Translate… · Compile EPUB / PDF · Translate Metadata · QA scan · Edit metadata.json (CodeEditor, `JSON`) · Files · Clear saved raw link · Add to Series (U9) · Delete.
+**⋯ menu.** Translate… · Compile EPUB / PDF · Translate Metadata · QA scan · Edit metadata.json (CodeEditor, `JSON`) · Files · ↗ Share (`LibraryContext.share_books`, as the card ⋯) · ⟳ Refresh · Clear saved raw link · Add to Series (U9) · Delete.
+
+**Workspace.** Every workspace action (Compile EPUB/PDF, Edit metadata.json, Files, the Output tab, the running-job match, the ⋯ QA scan target) uses the book's resolved workspace, `LibraryService.workspace_for`, like desktop BookDetailsDialog resolving `_resolve_book_output_folder` at each use. A Completed book filed in Library/Translated keeps the workspace actions of the folder it came from, and its row and id stay the card's. A later Library scan that resolves the workspace rebuilds the ⋯ menu. Opening the page never creates a folder.
 
 ### 3.6 Overview tab
 
@@ -1260,6 +1288,7 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 - The stats chip row (same as Chapters; tap jumps to the filtered Chapters tab).
 - A glossary progress summary ("Glossary 72/80 · 1,234 entries"; tap opens the Glossary tab).
 - The last job (link).
+- No workspace: "📖 N chapters" (the EPUB's chapters; tap opens Chapters) instead of the error.
 
 ### 3.7 Chapters tab (Progress Manager parity; `progress_core.build_book_progress`)
 
@@ -1366,6 +1395,8 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 
 **Empty state.** "No chapters found yet" / "Start a translation to see chapter progress." and a **Translate…** button.
 
+**No workspace** (an "Add translation" EPUB, or an organized book whose workspace is gone): the tab lists the EPUB's own chapters from `load_book_details` (`BookDetailsModel.row_specs`, the desktop Book Details list). Header "📖 Chapters in this EPUB · N"; rows "Ch.NNN · title" / file name / desktop badge; tap opens the Reader at that chapter. Search, Show special files, Show raw titles and Rows per page apply; selection and the bulk bar are off. With no chapters either: "This book has no output workspace yet". The Progress Manager is never built for such a book, so no folder is created.
+
 ### 3.8 Glossary tab (Glossary Progress parity; `glossary_progress_core`)
 
 **Header**
@@ -1422,15 +1453,16 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
   - Review (📝; open in Review)
 - **Raw source row:** file name, Share, "Re-link…" (Scan for raw).
 - **Storage line:** "Workspace 84 MB", with a "Files" link.
+- The workspace is the resolved one (§3.5): an organized book lists its workspace's compiled outputs plus the Library EPUB itself, and Compile writes into that workspace.
 
 ### 3.10 TranslateSheet (Library-origin Plan)
 
 The TranslateSheet is the same `PlanCard` component, presented as a `BottomSheet` (90%). Its glossary chip opens the `PlanGlossarySheet` (§2.12.1). It adds:
 - **"Review glossary before translating"** switch. It defaults to off, because desktop has no gate for book-origin jobs. When it is on, the run pauses after glossary generation exactly like a chat run:
-  - a `jobs.action` notification "Glossary ready: review needed";
+  - a `jobs.action` notification "Glossary ready: review needed" (Accept / Review) unless the Book page is on screen (§1.9);
   - an approval sheet over the Book page, built from the `GlossaryApprovalCard` content: ✏️ Edit / ✓ Yes / ■ No.
 - "Open in chat instead": creates a chat with the attachment and a plan.
-- **Start**.
+- **Start**: when a book's workspace lies under a different output root than the current one, the desktop question "Output Folder Mismatch" comes first (Cancel / Yes; the shared `LibraryShelf.output_root_mismatch` prompt). Yes switches the process output root (`OUTPUT_DIRECTORY`; config.json `output_directory` is not written, so it lasts for the session). The check runs only while no job holds the process environment. The chat's Library attach asks the same question before Start (`translate_sheet.confirm_output_root`).
 
 The job has origin = book. Progress shows on the Book page summary strip, the JobStrip and Jobs.
 
@@ -1441,9 +1473,10 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 - Book content never runs code in the page: chapter HTML loses `<script>`, frames, objects, `<base>`, meta refresh, `on*` handlers and `javascript:` URLs (`document.sanitize_book_html`), the book's CSS cannot close its `<style>` (`inert_css`), and the page's own scripts carry a per-page nonce that the document CSP (`script-src 'nonce-…'`) allows exclusively. `/img/<id>` serves only bytes that are an image by content, events are accepted only as JSON `POST`s, and a book's external link opens after an "Open link?" confirmation (http/https/mailto only).
 - Mobile additions: a viewport meta tag, `-webkit-column-break-*`, 16–20 dp padding, safe-area insets, `100dvh`.
 - Pagination uses CSS columns. Tap zones (left / right thirds) and swipes are handled in page JS.
+- Chapter changes navigate the existing WebView with `load_request` (`reader_view.navigate_webview`; flet-webview reads `url` only when the control is built). The first page builds the WebView with its URL, and a WebView whose navigation fails is rebuilt with the page URL (each build gets its own key, `reader-webview-N`). Device fix 2026-10-08: before it, no chapter after the first one loaded on Android/iOS.
 - Events reach Python as console messages `GLRDR:{json}` (`reader_doc.MOBILE_EVENT_PREFIX`, read through `on_console_message`) and, as a twin, `fetch` POSTs to `/<token>/__ev` (`MOBILE_EVENT_PATH`). Every event carries `{type, seq, chapter, …}`; `seq` de-duplicates the two transports and `GLRDR.setTransport('console'|'fetch'|'both')` narrows them. The Reader's own extras (`ui/reader/bridge.py`) add find / anchor / live restyle, a cleared-selection event and the selection rectangle.
 
-**Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls, scroll only. It is used:
+**Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls. It scrolls; edge taps scroll a screen and at the end/start of the list open the next/previous chapter (previous: at its end; `fallback_view.page_by`: a list known to be able to move never turns on late scroll events; a chapter shorter than the screen turns on the first tap); text is not OS-selectable (long-press a paragraph for its actions); another chapter opens at its top, the same chapter drawn again (Aa) keeps its offset. It is used:
 - automatically on Windows/Linux dev, because flet-webview raises outside Android, iOS and macOS;
 - for the "Lightweight reader" setting;
 - on WebView failures.
@@ -1457,7 +1490,7 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
   - chapter `Slider` with haptic ticks, plus "Ch 12/48 · 43%" and "Page 3/9" in paged mode;
   - icons ◀ prev chapter · ☰ **Chapters** · **Aa** · 🌐 **Translate** · ▶ next chapter.
 
-**Modes** (from `library_core.plan_open_reader`, the desktop Book Details decision): plain · overlay (in-progress raw + translated response files; refreshed every 3 s only while a job for this book runs) · dual-path (compiled + raw) · PDF workspace.
+**Modes** (from `library_core.plan_open_reader`, the desktop Book Details decision): plain · overlay (in-progress raw + translated response files; refreshed every 3 s only while a job for this book runs) · dual-path (compiled + raw) · PDF workspace · text (`.txt`, mobile `ui/reader/text_book.py`: the sections of a compiled `_translated.txt`, split on the translation's separator, or ~20k-character paragraph-bounded sections; decoded by BOM, else strict UTF-8, else the CJK code page chardet / charset_normalizer pick among the ones that read it: CP949, GB18030 / GBK, Shift-JIS / CP932, Big5, EUC-JP) · TXT workspace (the translation split's `word_count` sections + their translated response files paired by content hash; Original / Translated / Bilingual; an untranslated section shows "This section has not been translated yet." above its raw text). A saved position or bookmark from the other TXT section layout restores at the same book percent (`ReaderSession.position_from_pref`). The desktop opens TXT in an external editor (DISCREPANCIES "Device fixes 2026-10-08").
 
 **Toggle availability.**
 - **Original** and **Translated** are available when an overlay, dual path or raw workspace content exists.
@@ -1496,7 +1529,7 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 3. A native **LivePanel** opens: a half-height draggable sheet, *not* inside the WebView.
    - Status line "🛰️ Translating “f” — waiting for stream…".
    - Content is a `Markdown` / `Text` column fed by `LiveLineClassifier` (90 ms drain).
-   - Buttons "🧠 Thinking (n)" (expands the thinking log), "⏹ Stop", "✕ Hide" (the job continues; the 🌐 icon becomes "🛰️ Live view").
+   - Buttons "🧠 Thinking (n)" (expands the thinking log, at the log size §6.2), "⏹ Stop", "✕ Hide" (the job continues; the 🌐 icon becomes "🛰️ Live view").
 4. The outcome uses the exact strings:
    - "✅ Translation finished — loading the translated chapter…"
    - "⏹ Translation stopped — incomplete output cleared."
@@ -1603,9 +1636,9 @@ Each tool picks its input through the **SourcePicker** sheet, with segments: Rec
 ### 4.4 QA Scanner (`/tools/qa`)
 
 - **Mode cards** (`RadioGroup` of 4 tonal cards with descriptions): **Quick Scan** (Recommended badge) · **Aggressive** · **AI Hunter** · **Custom** (opens the Custom Mode Settings sheet).
-- **Fields:** "Quick Scan duplicate sample size"; switch "Auto-search output".
-- **Source:** the SourcePicker (multi-select gives a bulk scan). A name mismatch triggers a warning dialog.
-- **Run:** a QA_SCAN job (JobCard in Jobs; also posted into the chat when started from chat).
+- **Fields:** "Quick Scan duplicate sample size" (-1 = all text, 0 = duplicate check off; on mobile 0 when nothing is saved, and a saved desktop 1000 is migrated to 0 once: `qa_model.migrate_quick_sample_size` at app start and when the screen opens, flag in Prefs `qa_quick_sample_size_mobile_default`; Settings › QA shows the same default, `schema_access.MOBILE_DISPLAY_DEFAULTS`); switch "Auto-search output".
+- **Source:** the SourcePicker (multi-select gives a bulk scan). A name mismatch triggers a warning dialog. Direct Text workspaces are listed but not picked here; a chat scans its own workspace (§2.12.4).
+- **Run:** a QA_SCAN job (JobCard in Jobs; also posted into the chat when started from chat: Quick Scan, same sample size).
 - **Reports** list. It opens the **QA report viewer** (`/tools/qa/report/<rid>`, an `HtmlView`):
   - on Android and iOS, the HTML report in `flet_webview.WebView`, with per-issue "Open in Chapters" (deep link with filter);
   - on Windows/Linux dev, the html2text Markdown rendering plus "Open in browser".
@@ -1617,7 +1650,7 @@ Each tool picks its input through the **SourcePicker** sheet, with segments: Rec
 - **Converter (`/tools/convert`):**
   - Source picker and an options summary (links to Settings › EPUB output / PDF).
   - Buttons: **Compile EPUB** · **Compile PDF** · Validate EPUB structure · Rename files (retain extension) · Apply `<br>` → `<p>` to outputs · Generate MD · Generate TXT.
-  - Result card: Share / Save / Open in Reader / Add to Library.
+  - Result card: Share / Save / Open in Reader (EPUB and TXT) / Add to Library.
 - **Headers & metadata (`/tools/headers`):** Translate headers now / Stop · Delete header files · Delete TOC files · Translate metadata (one or many EPUBs; mode from Settings).
 
 ### 4.6 Manga (`/tools/manga?tab=files|settings|editor`)
@@ -1863,6 +1896,11 @@ keys, and `open_setting(section, key)` follows the key. KeyPoolTiles (§4.12) si
 Context & memory (rolling summary), Response handling (translation, truncation retry), Metadata
 (metadata), Provider options (fallback), QA Scanner (AI truncation) and the Glossary Refinement tab.
 
+**Notifications & background** (`/settings/notifications`):
+- **Notifications:** **Allow notifications** (the same request as the first Run). The status line shows the real state, read each time the page opens: "Notifications: On" / "Off: Allow notifications asks again" / "Blocked in system settings: open them to turn notifications on". On Android it comes from `post_notifications_granted` / `notifications_enabled` plus the permission status; on iOS from the authorisation status. **Open system settings** appears while notifications are off or blocked. **Send a test notification** posts one on `jobs.done` and reports "Test notification sent." or "The system did not show it: notifications are off or blocked for Glossarion." Then the three channel rows.
+- **Glossary review:** switch "Always accept generated glossaries". It is the global value in Prefs `chat_auto_accept_glossary`, default off, and a chat can override it in its settings sheet (§2.14). Help text: "Skip the Edit / Yes / No card: translation starts with the generated glossary. Applies to new sends; a chat can change it in its settings. The desktop always asks."
+- **Background:** Disable battery optimisation (Android), Keep the screen on while a job runs, and the iOS background note.
+
 **SectionPage.** It is a `ListView(build_controls_on_demand=False)`. A section has at most about 80 tiles, so every tile is built and is a valid `ScrollKey` target.
 
 **Tiles** (§5.7):
@@ -2023,7 +2061,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `MessageMoreSheet` (`chat/chat_view.py` `_message_more`) | ActionSheet with the §2.10 items | items disabled with a reason when their file is missing | `ActionSheet` |
 | `RefinementChips` (`chat/actions.py`) | More natural · More literal · Keep honorifics · Fix names (glossary) · Retranslate with… | idle · running (disabled) | `Row(scroll=AUTO)`, `Chip` |
 | `VersionSwitcher` (`chat/messages.py`) | ‹ 2/3 › | first · middle · last | `Row[IconButton, Text, IconButton]` |
-| `GlossaryApprovalCard` (`chat/cards.py`) | Header, title, question, FileChip, 5-entry preview, ✏️ Edit / ✓ Yes / ■ No | waiting · no file (Edit disabled) · answered | `Card`, `Column`, `FilledTonalButton`, `FilledButton`, `OutlinedButton` |
+| `GlossaryApprovalCard` (`chat/cards.py`) | Header, title, question, FileChip, 5-entry preview, ✏️ Edit / ✓ Yes / ■ No / Always accept (chat cards) | waiting · no file (Edit disabled) · answered | `Card`, `Column`, `FilledTonalButton`, `FilledButton`, `OutlinedButton` |
 | `PlanCard` (`chat/plan_card.py`) | Cover · facts line · chips (model · profile · → target · glossary · mode · range · Save to) · Run options · buttons | estimating · ready · invalid (Start disabled with a reason) · async variant | `Card`, `Image`, `Row(wrap=True)` of `Chip`s, `ExpansionTile`, `FilledButton` + a split `PopupMenuButton` |
 | `BatchPlanCard` (`chat/batch_plan.py`) | FileChip list with per-file glossary chips · Include subfolders · Start | same as PlanCard | `Card`, `Column`, `Switch` |
 | `JobCard` (`chat/cards.py`) | Plan → Queued → Running (ring, progress, line, current item, Requests, Log, issue chips, buttons) → Result (status, ExtractionReportSection, output chips, AttachmentActionsRow) | `PLAN` · `QUEUED` · `RUNNING` · `STOPPING` · `FORCE_STOPPING` · `DONE` · `STOPPED` · `FAILED` · `INTERRUPTED` | `Card`, `ProgressRing`, `ProgressBar`, `ExpansionTile`, `Chip`, `Row(wrap=True)` |
@@ -2033,7 +2071,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `ChatSettingsSheet` (`chat/chat_settings.py`) | Scope SegmentedButton · sections (§2.14) · Reset chat overrides | This chat / All chats; each row inherited or overridden | `BottomSheet` or `SidePanel`; `SegmentedButton`, `ExpansionTile`, `RadioGroup`, `Switch`, `Slider` |
 | `JumpToSheet` (`chat/jump_to.py`) | Step header (Input i/n ▲▼ · Output j/m ▲▼) · tabs Inputs / Outputs · rows | — | `BottomSheet`, `Tabs` / `TabBar` / `TabBarView`, `ListView`, `IconButton` |
 | `ChatSearchBar` (`chat/header.py`) | Header TextField · "3/17" · ▲ ▼ · ✕ + compact Input/Output step row | searching · no matches | `TextField`, `IconButton` |
-| `AttachmentsManagerView` (`chat/attachments.py`, `AttachmentsScreen`) | Intro + workspace cards (Migrate, ⋯) | empty · list · migrating · blocked (a job is writing the workspace) | `View`, `ListView`, `Card`, `FilledTonalButton`, `AlertDialog` |
+| `AttachmentsManagerView` (`chat/attachments.py`, `AttachmentsScreen`) | Intro + workspace cards (⋯; no Migrate button) | empty · list · blocked (a job is writing the workspace) | `View`, `ListView`, `Card`, `AlertDialog` |
 | `LibraryLinkCard` (`chat/job_card.py`) | Book cover + title + progress + Open | — | `Card`, `Image`, `ProgressBar` |
 | `ModelSheet` / `ModelPicker` (`settings/model_sheet.py`) | Tabs Model · Profile · Language; search; provider chips; sections; provider group headers with 🌐 refresh; title ⋯; Thinking & effort; route row; footer | loading catalog · polling a group (shimmer) · results · one-shot ("Use once") · field mode | phone: `BottomSheet(draggable=True, fullscreen=…)`; tablet: a custom overlay panel (`page.overlay` `Container`, 420 dp); `Tabs`, `SearchBar`, `Chip`, `ListView` (`first_item_prototype=True` only for the flat search-results list), `ExpansionTile`, `Switch`, `ListTile(on_long_press=…)` |
 | `PoeSetupSheet` (`settings/poe_setup.py`) | Warning (route deprecated) · p-b cookie SecretTile · link to the guide · Test | empty · saved · test passed · test failed | `BottomSheet`, `TextField(password=True, can_reveal_password=True)`, `UrlLauncher` |
@@ -2052,7 +2090,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `TextEditor` (`tools/text_editor.py`, `TextEditorScreen`) | FullScreenEditor + find bar (hit i/n) | read-only · editing | as FullScreenEditor |
 | `FileBrowser` (`screens/files.py`, `FileBrowserScreen`) | Breadcrumbs · root chips (Output, Library, Inbox, Chat workspaces) · rows (icon, name, size, date) · ⋯ (Open with · Share · Save to… · Rename · Delete) | loading · list · empty folder · outside the safe roots (blocked) | `View`, a `Row` of breadcrumbs, `ListView`, `ActionSheet`, `TextPromptDialog` |
 | `ExportSheet` (`chat/integration.py` `ChatFeature.export_file`: an `ActionSheet` over `services/files.FileBridge.export_options`) | Share · Save to… · Save to Downloads (Android) / Show in Files (iOS) · Open externally | per platform; unsupported items disabled with a reason | `ActionSheet`; `Share.share_files`, `FilePicker.save_file`, native `save_to_downloads`, `UrlLauncher` |
-| `SourcePicker` (`tools/source_picker.py`) | Segments Recent outputs · Library books · Chat workspaces · Browse; list with checkboxes (multi) | single · multi · empty segment | `BottomSheet`, `SegmentedButton`, `ListView`, `Checkbox`, `FilePicker` |
+| `SourcePicker` (`tools/source_picker.py`) | Segments Recent outputs · Library books · Chat workspaces · Browse; list with checkboxes (multi). Opt-in options (the chat's Library mode, device fix 2026-10-08): `segments` (one segment hides the SegmentedButton), `searchable` + `query`, `book_rows` (Library list rows via `models.card_model_for` + `BookListRow(show_more=False)`, `CoverQueue` covers, rows built once and kept across renders), `header_action` (label, callback), `include_unresolved` (`targets.library_targets`); eligibility is computed once per row on the io pool; Tools pickers keep the defaults | single · multi · empty segment | `BottomSheet`, `SegmentedButton`, `ListView`, `Checkbox`, `FilePicker` |
 | `SelectableTextSheet` (`components/dialogs.py`) | The full text, selectable, + Copy all | — | `BottomSheet`, `SelectionArea` around `Text` |
 
 ### 5.6 Lists, selection and Library
@@ -2060,7 +2098,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | Component (module) | Anatomy | States | Built from |
 |---|---|---|---|
 | `WindowedList` (`components/windowed_list.py`) | Python-side window (150 rows) over a provider; page selector beyond 1,500 rows | loading · window · appending · filtered · jump (re-centre, then `ScrollKey`) | `ListView(build_controls_on_demand=True, on_scroll=…)` without `first_item_prototype` (rows vary) |
-| `LogConsole` (`components/log_console.py`) | Filter chips All / Errors / Thinking / API · search · follow toggle · Copy · Share; 40-line blocks, ≤ 100 mounted | following · paused · filtered · empty | `ListView`, `Text(selectable=True)` in the mono family, `Chip`, `TextField`, `IconButton`; follow = `scroll_to(offset=-1)` |
+| `LogConsole` (`components/log_console.py`) | Filter chips All / Errors / Thinking / API · search · follow toggle · Copy · Share; 40-line blocks, ≤ 100 mounted | following · paused · filtered · empty | `ListView`, `Text(selectable=True)` in the mono family at the log size (§6.2, `theme.log_text`), `Chip`, `TextField`, `IconButton`; follow = `scroll_to(offset=-1)` |
 | `SelectionTopBar` + `BulkActionBar` (`library/selection.py`, reused) | "N selected", Select all, Select ▾, Close; a bottom bar with ≤ 4 icon+label actions + More | inactive · active; actions disabled with a reason | an `AppBar(actions=…)` swap, `BottomAppBar`, `IconButton`, `TextButton`, `PopupMenuButton` (More) |
 | `BookCard` (`library/book_card.py`) | Cover stack (image, ribbon, 3 dp progress, ▶ continue) · title · info row · warning chips · pill | not started · in progress · ready to compile · outdated · compiling · completed; selected | `Container(on_click=…, on_long_press=…)`, `Stack`, `Image`, `ProgressBar`, `FilledIconButton`, `Text`; grid = `GridView(max_extent=card_w)` |
 | `ProgressRow` / `ChunkChildRow` (`library/chapters_pane.py`) | StatusAvatar · line 1 · line 2 · badges · QA line · chunk chevron · ⋯ | per status · selected · expanded | `ListTile(on_click=…, on_long_press=…)` or `Container`; children in an inline `Column`; `key=ft.ScrollKey(row_key)` |
@@ -2204,7 +2242,8 @@ The Library ribbon and pill hex values (§3.2) are used verbatim in dark mode; i
 | labelMedium | 12/16 | 600 | chips, pills, tabs |
 | labelSmall | 11/14 | 500 | header meta, timestamps, captions |
 | ribbon | 10/12 | 700, caps, letter-spacing 0.6 | card ribbons |
-| mono | 13/18 | 400 | thinking, logs, code (Android `monospace`, iOS `Menlo`) |
+| mono | 13/18 | 400 | code, editors, error text (Android `monospace`, iOS `Menlo`) |
+| log | 8/11 | 400 | log lines: LogConsole (job detail Log, Diagnostics Live log, Manga Files log), the log-file viewer, Check environment lines, the Reader live Thinking/log pane; mono family; fixed sp: follows the OS font scale, not Appearance text size (`theme.log_text`, `tokens.LOG_STYLE`; device fix 2026-10-08) |
 
 Reader typography is independent (§3.11). CJK uses system fallback fonts.
 
@@ -2296,7 +2335,7 @@ On tablets, sheets become SidePanel content (persistent tasks) or centered dialo
 | Drawer search | small `ProgressBar` under the field | "No matches" | — |
 | Library | skeleton cards, "Scanning library…" / "Loading books…" | §3.1 strings | Banner "Couldn't read <folder>" + Retry |
 | Book page | hero skeleton + row shimmer; phase 1 (metadata) shows before phase 2 (chapters) | "No chapters found yet" | "Progress file could not be read — showing last snapshot" banner (outdated) + Full refresh |
-| Reader | "Loading EPUB…" with ProgressRing over the theme background | "This chapter is empty" | WebView failure → automatic switch to the native renderer + snackbar |
+| Reader | "Loading book…" (EPUB or TXT) with ProgressRing over the theme background | "This chapter is empty" | WebView failure → automatic switch to the native renderer + snackbar |
 | Glossaries | skeleton rows | "No glossaries yet" + Extract / Import | Parse error card with "Edit raw" |
 | Jobs | — | §1.8 | Failed row with "View log" |
 | Settings search | — | "No settings match “…”" (unavailable settings appear in results with their ReasonChip) | — |
@@ -2324,7 +2363,7 @@ On tablets, sheets become SidePanel content (persistent tasks) or centered dialo
   - Android: foreground service + ongoing notification.
   - iOS: banner "iOS may pause translation about 30 s after you leave the app (iOS 26+ continues in the background)". The setting "Keep screen on during jobs" (`Wakelock`) defaults to ON on iOS.
 - **Share / Open-with** is the drag-and-drop equivalent. Flet's `DragTarget` accepts only in-app `Draggable`s, so files cannot be dropped in from other apps. Shared files are imported to the Inbox, then the IntentRouter action sheet offers:
-  - Translate in new chat · Add to Library · Open in Reader · Extract glossary
+  - Translate in new chat · Add to Library · Open in Reader (EPUB / TXT) · Extract glossary
   - Manga for images · Load as glossary for csv/json · Import keys · Restore config
 - **Offline:** requests retry per settings. The running card shows "Waiting for network…"; no global blocking.
 
@@ -2375,7 +2414,9 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 **`direct_text_chats.mobile.json`**
 ```
 {version:1, chats:{"<id>":{
-  pinned, pinned_at, series_id (U9), text_scale, skip_plan,
+  pinned, pinned_at, series_id (U9), text_scale, skip_plan, auto_accept_glossary,
+  library_attachment:{bid, path},
+  tool_jobs:{"<created_at>":{library_job|qa_job, source, bid, folder, summary}},
   overrides:{model, profile, target_language, output_mode, attachment_prompt_role, glossary_override_mode,
              manual_glossary_path, force_multipass_off, disable_thinking, skip_prompt_profile, disable_auto_scroll, thinking:{…}},
   versions:{"<anchor fp>":{members:[fp…], selected:int}},
@@ -2383,6 +2424,10 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
   job_turns:{"run:<run root>": fp | null}}},
  scratch:[…]}
 ```
+
+- `auto_accept_glossary`: the chat's own "Always accept generated glossaries" (§2.11, §2.14).
+- `library_attachment`: the chat's attached Library book (§2.5 From Library); cleared when the attachment is removed or another file is attached.
+- `tool_jobs`: a Library-job or QA-scan card's data, keyed by the message's `created_at` (the desktop history keeps only its own message-storage keys).
 
 **`mobile_series.json`** (U9, optional)
 ```
@@ -2397,7 +2442,10 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 - reader per-book typography overrides;
 - `file_refs`: the FileRef registry (`fid` → path, bounded LRU of 2,000);
 - dismissed tips; `pending_deletes`;
-- haptics and appearance mirrors.
+- haptics and appearance mirrors;
+- `chat_auto_accept_glossary`: the All-chats "Always accept generated glossaries" (bool, default off);
+- job / background flags: `jobs_notification_permission_asked` (set only after a definite permission answer), `jobs_notifications_off_hint_shown` (the one-time "Notifications are off" snackbar), `jobs_battery_prompt_done`, `keep_screen_on_during_jobs`;
+- `qa_quick_sample_size_mobile_default` (bool): the one-time QA sample-size migration (a saved 1000 → 0) has run.
 
 **`config.json`** (shared) gets no new keys. Mobile writes only existing desktop keys, sparsely. Examples:
 - `epub_library_card_size`, `epub_library_page_size`;
@@ -2431,6 +2479,9 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 | Mobile-only chat data | Sidecar `direct_text_chats.mobile.json`; the desktop file stays v2-valid | §2.19, Appendix B |
 | Book-origin glossary gate | Optional "Review glossary before translating" on the TranslateSheet | §3.10 |
 | Plan card thresholds | EPUB / PDF / CBZ / ZIP / SDLXLIFF / subtitle bundles / folders, and TXT over 20k characters; per-chat "Skip plan" | §2.12.1 |
+| Always accept generated glossaries | Mobile-only (Prefs + sidecar, default off); the desktop always asks | §2.11, §2.14 |
+| Library hand-off | Automatic auto-migrate of finished chat books; no Migrate / Organize / Undo controls | §2.12.4, §2.17, §3.4 |
+| QA sample size | Mobile default 0 (duplicate check off) for chat and Tools scans; desktop keeps 1000 | §4.4 |
 
 **Recorded mobile divergences (accepted in the plan)**
 - Chat switching during a run, queued sends (the `queue` state), delete message, and edit-and-resend versions.
@@ -2450,6 +2501,14 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
   - SDLXLIFF reviewer: Mark as Completed updates the reviewer session's copy of the progress; the Book page reads the change from disk on its next 2 s poll.
   - Not built yet at U7 (both built in U9 on shared helpers): source-only SDLXLIFF sidecars for Not Translated rows in Manual editing (`progress_core.untranslated_manual_entries`, moved from Retranslation_GUI's `_progress_manager_untranslated_entries` closure); the "✏️ Edit file" jump to the QA issue (`progress_actions.qa_issue_search_target`).
 
+- **Device fixes 2026-10-08 (owner device report on the U8 APK; tests/parity/DISCREPANCIES.md "Device fixes 2026-10-08").**
+  - Any Library card opens the Book page (the desktop opens TXT in an editor and a PDF without a workspace in the system viewer); TXT books and TXT translations read in the Reader.
+  - Finished chat books move into the Library automatically; there is no Migrate, Organize or Undo control.
+  - The ongoing job notification is re-posted when swiped away (Android 14+; at most once a second, a quicker swipe is re-posted when the second is over) and kept current while the app is hidden; the glossary notification has Accept. The page re-reads the permission when the app comes back from the system settings.
+  - An auto-accepted glossary gate does not freeze the chat's request cards (the glossary-phase and translation-phase cards stay one live group until the run finishes).
+  - Chat QA scans Direct Text workspaces through the shared opt-in; mobile scans default to sample size 0.
+  - Log text is 8 sp.
+
 **Flet 1.0.3 constraints applied.** These came from source verification; details are in §5.0. In summary:
 - `scroll_to` needs an `ft.ScrollKey` and only reaches built items.
 - A control re-created under the key of the control it replaces in a list is frozen after the diff (setting a property raises "Frozen controls cannot be updated"); identity matches and a swapped `Container.content` are not. Cards that are updated in place stay the same objects (the chat's `CardSlot`s, the SDLXLIFF reviewer's per-build row keys).
@@ -2462,7 +2521,8 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 - `IconButton` has `tooltip` but no `semantics_label`.
 - The code editor uses `XML` for html and `PLAINTEXT` for csv.
 - Themes have no custom colour roles.
-- `flet-webview` runs only on Android, iOS and macOS.
+- `flet-webview` runs only on Android, iOS and macOS, and reads `url` only when the control is built: a built WebView navigates with `load_request`.
+- A property assignment of a control that compares equal to the current one is skipped (`Prop.__set__`: `old == value`), so a rebuilt control that should replace an identical one needs its own key.
 - `DragTarget` accepts only in-app `Draggable`s.
 
 **Still to verify in the 1.0.3 runtime or on a device.** Each item already has a fallback in this spec.

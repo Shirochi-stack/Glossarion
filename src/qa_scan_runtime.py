@@ -638,9 +638,11 @@ def run_qa_scan_path(
     progress_path=None,
     owner=None,
     config=None,
+    allow_direct_text=False,
 ):
     """Run the same configured QA scanner path for GUI and translation-worker callers."""
-    if is_direct_text_qa_path(folder_path) or is_direct_text_qa_path(epub_path):
+    # allow_direct_text: opt-in for Glossarion Mobile's explicit chat QA scans; desktop never passes it.
+    if not allow_direct_text and (is_direct_text_qa_path(folder_path) or is_direct_text_qa_path(epub_path)):
         log(
             "⏭️ QA scan skipped: Direct Text folders and temporary Direct Text "
             "outputs are excluded from automatic QA scanning."
@@ -1085,7 +1087,7 @@ def clear_qa_stop_flags():
 
 def run_bulk_qa_scan(folders_to_scan, *, mode, epub_path, qa_settings, load_settings, selected_mode_value,
                      disable_word_count_for_run, epub_basename_map, global_selected_files, log, stop_flag,
-                     owner=None, on_report=None):
+                     owner=None, on_report=None, allow_direct_text=False):
     """Scan every output folder (the QA Scanner's ``run_scan`` worker body).
 
     Per folder: the latest saved settings, the per-folder source EPUB match for bulk scans
@@ -1266,6 +1268,7 @@ def run_bulk_qa_scan(folders_to_scan, *, mode, epub_path, qa_settings, load_sett
                 selected_files=current_selected_files,
                 text_file_mode=None,
                 owner=owner,
+                allow_direct_text=allow_direct_text,
             )
 
             successful_scans += 1

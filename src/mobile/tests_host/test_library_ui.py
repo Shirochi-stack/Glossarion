@@ -704,7 +704,9 @@ def test_library_home_shelves_selection_and_delete_levels(tmp_path):
         page.update()
         assert [s.label.value for s in screen.shelf_buttons.segments] == ["In progress (2)", "Completed (1)"]
         assert screen.scan_chip.visible and screen.scan_chip.label.value == "Scan for raw (1)"
-        assert screen.menu_items["organize"].content == "Organize (3)" and screen.menu_items["undo"].content == "Undo (3)"
+        # device fix #4: no manual Organize (n) / Undo (n) (the desktop counters are 3 / 3 here)
+        assert set(screen.menu_items) == {"scan", "refresh", "settings"}
+        assert screen.menu_items["scan"].content == "Scan for raw (1)"
         assert list(screen.cards) == [book_key(b) for b in rows[0]] and screen.count_text.value == "2 novels"
         alpha_card = screen.cards[book_key(rows[0][0])]
         assert "⏳ 3/10" in _texts(alpha_card.control) and "IN PROGRESS" in _texts(alpha_card.control)
@@ -720,6 +722,7 @@ def test_library_home_shelves_selection_and_delete_levels(tmp_path):
         assert labels[:4] == ["Load 2 for translation", "Translate Metadata for 0 EPUBs", "Compile", "Delete 2"]
         assert "Delete glossary files (2)" in labels and "Restore glossary backup" in labels
         assert "Clear saved raw link (for 2 items)" in labels and "Share" in labels
+        assert "Organize selected" not in labels
         assert screen.bulk_bar.action("glossary_delete").disabled_reason
         # level 1: every target Not started -> a simple confirmation with the shared text
         beta = rows[0][1]
@@ -1219,8 +1222,8 @@ def test_book_page_full_refresh_runs_one_at_a_time():
 @needs_flet
 def test_library_home_quiet_scans_compile_ribbon_back_and_txt_cards(tmp_path):
     """U5 review: an unchanged quiet scan pushes nothing; the COMPILING ribbon clears when the
-    compile ends without changing the workspace; back leaves selection mode first; a TXT card
-    is shared to another app instead of opening the Reader on an error."""
+    compile ends without changing the workspace; back leaves selection mode first. Device fix #5:
+    a Completed TXT card opens the Book page like every card (it went to the share sheet)."""
     from glossarion_mobile.services.library import _norm
     from glossarion_mobile.ui.library.home import LibraryScreen
     from glossarion_mobile.ui.router import parse_route
@@ -1270,12 +1273,12 @@ def test_library_home_quiet_scans_compile_ribbon_back_and_txt_cards(tmp_path):
         assert screen.handle_back() is False
         view = build_screen_view(screen, "/library")
         assert view.can_pop is False and callable(view.on_confirm_pop)
-        # a TXT card goes to the share sheet
+        # a TXT card opens the Book page (no share sheet)
         screen.set_shelf("completed")
-        before = list(ctx.navigated)
-        screen._on_card_tap(screen.cards[book_key(rows[1][-1])].model)
+        model = screen.cards[book_key(rows[1][-1])].model
+        screen._on_card_tap(model)
         await asyncio.sleep(0.05)
-        assert shared == [[str(notes_txt)]] and ctx.navigated == before
+        assert shared == [] and ctx.navigated[-1] == ("library.book", {"bid": model.bid}, None)
         screen.dispose()
 
     from glossarion_mobile.ui.library.common import LibraryContext
@@ -1656,8 +1659,9 @@ def test_chapters_selection_keeps_the_mounted_window(real_env):
 
 @needs_flet
 def test_pdf_without_a_workspace_is_not_offered_to_the_reader(tmp_path):
-    """U5 second review: the card ⋯ "Open in Reader" follows the card tap: a PDF without a
-    translation workspace opens in another app (library_core's "system" decision)."""
+    """U5 second review: the card ⋯ "Open in Reader": a PDF without a translation workspace opens in
+    another app (library_core's "system" decision) through ⋯ › ↗ Share; its tap opens the Book page
+    (device fix #5)."""
     from glossarion_mobile.ui.library.home import LibraryScreen
     from glossarion_mobile.ui.router import parse_route
 
@@ -1679,6 +1683,8 @@ def test_pdf_without_a_workspace_is_not_offered_to_the_reader(tmp_path):
             return next(i for i in screen.card_actions(book).items if i.label.startswith("📖"))
 
         assert "another app" in (reader_item(row).disabled_reason or "")
+        share = next(i for i in screen.card_actions(row).items if i.label == "↗ Share")
+        assert share.disabled_reason is None
         workspace = dict(row, output_folder=str(tmp_path / "Output" / "Manual"))
         assert reader_item(workspace).disabled_reason is None
         assert reader_item(workspace).label.endswith("Open in EPUB reader")
@@ -1711,3 +1717,428 @@ def test_compile_spec_uses_the_workspace_compile_kind():
         assert (spec.kind, spec.params) == ("compile_pdf", {"folder": "/out/Manual"})
     with pytest.raises(ValueError):
         service.compile_spec({"name": "x"}, "compile_epub")
+
+
+# ==========================================================================
+# Device fixes (owner report on the U8 APK): #5 Completed cards, #4 no manual Organize,
+# #2 TXT Reader items, #8 the shared card model / covers / output-root question
+# ==========================================================================
+
+
+def _completed_workspace(output: Path, library: Path, name: str = "Fin") -> Path:
+    """A finished workspace with its compiled EPUB (the Completed shelf shows it as an EPUB card)."""
+    raw = make_epub(library / "Raw" / f"{name}.epub", CHAPTERS[:2], title=f"{name} Raw")
+    ws = output / name
+    ws.mkdir(parents=True)
+    (ws / "source_epub.txt").write_text(raw, encoding="utf-8")
+    chapters = {}
+    for index, stem in enumerate(("ch001", "ch002"), 1):
+        (ws / f"response_{stem}.html").write_text(f"<html><body>{stem}</body></html>", encoding="utf-8")
+        chapters[str(index)] = {"actual_num": index, "status": "completed", "output_file": f"response_{stem}.html",
+                                "original_basename": f"{stem}.xhtml", "content_hash": f"{name}{index}"}
+    (ws / "translation_progress.json").write_text(json.dumps({"version": "2.1", "chapters": chapters}),
+                                                  encoding="utf-8")
+    make_epub(ws / f"{name}.epub", CHAPTERS[:2], title=f"{name} Translated")
+    return ws
+
+
+def _named(rows, filename):
+    return next(b for b in rows if os.path.basename(str(b.get("path") or "")) == filename)
+
+
+async def _scanned_screen(screen):
+    screen.did_show()
+    for _ in range(200):
+        if screen.snapshot.scanned_at and screen.cards:
+            break
+        await asyncio.sleep(0.01)
+
+
+@needs_flet
+def test_library_menu_offers_no_organize_or_undo(tmp_path):
+    """Device fix #4: the Library ⋯ menu is Scan for raw (N) · Refresh · Library settings; the selection
+    bar's More has no "Organize selected"; organize_flow / undo_flow are gone (the shelf plans stay
+    LibraryService API)."""
+    from glossarion_mobile.ui.library import organize
+    from glossarion_mobile.ui.library.home import LibraryScreen
+    from glossarion_mobile.ui.router import parse_route
+
+    rows = _rows(tmp_path)
+    service = LibraryService(core=SharedCore({"library_core": fake_core(tmp_path, rows)}), prefs=FakePrefs(),
+                             config={})
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, service)
+        screen = LibraryScreen(parse_route("/library"), ctx)
+        screen.actions()
+        _mount(session.page, screen.get_body())
+        await _scanned_screen(screen)
+        assert screen.snapshot.organize_count == 3 and screen.snapshot.undo_count == 3  # the desktop counters
+        assert list(screen.menu_items) == ["scan", "refresh", "settings"]
+        assert [str(i.content) for i in screen.menu.items] == ["Scan for raw (1)", "Refresh", "Library settings"]
+        screen.select_all()
+        primary, more = screen.bulk_actions()
+        assert "organize" not in {a.id for a in primary + more}
+        assert not any("Organize" in a.label or "Undo" in a.label for a in primary + more)
+        screen.dispose()
+
+    asyncio.run(scenario())
+    assert not hasattr(organize, "organize_flow") and not hasattr(organize, "undo_flow")
+    assert callable(organize.clear_raw_link_flow) and callable(organize.collision_text)
+    assert callable(LibraryService.plan_organize_blocking) and callable(LibraryService.execute_organize_blocking)
+
+
+@needs_flet
+def test_every_completed_card_opens_the_book_page(tmp_path):
+    """Device fix #5 (the owner's report: a Completed book did not open its details like an In-progress
+    one): every card - a Completed EPUB workspace, a finished TXT workspace, a PDF without a workspace, a
+    Library/Translated EPUB, an In-progress TXT workspace - taps to the Book page and shares nothing;
+    ⋯ › ↗ Share still sends the file to another app, and TXT books get the Reader item."""
+    from glossarion_mobile.ui.library.home import LibraryScreen
+    from glossarion_mobile.ui.router import parse_route
+
+    rows = _rows(tmp_path)
+    output = tmp_path / "Output"
+    ws_epub = output / "WsEpub"
+    ws_epub.mkdir(parents=True)
+    (ws_epub / "WsEpub.epub").write_bytes(b"PK")
+    ws_txt = output / "WsTxt"
+    ws_txt.mkdir()
+    (ws_txt / "translation_progress.json").write_text("{}", encoding="utf-8")
+    txt_out = ws_txt / "WsTxt_translated.txt"
+    txt_out.write_text("translated text", encoding="utf-8")
+    pdf = tmp_path / "Manual.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    raw_txt = tmp_path / "Library" / "Raw" / "Novel.txt"
+    raw_txt.parent.mkdir(parents=True, exist_ok=True)
+    raw_txt.write_text("raw text", encoding="utf-8")
+    ws_novel = output / "Novel"
+    ws_novel.mkdir()
+    rows[0].append(_book("in_progress", 1, 3, name="Novel", workspace_kind="txt", output_folder=str(ws_novel),
+                         path=str(ws_novel), raw_source_path=str(raw_txt), mtime=3))
+    rows[1].extend([
+        {"name": "WsEpub", "type": "epub", "path": str(ws_epub / "WsEpub.epub"), "output_folder": str(ws_epub),
+         "size": 2, "mtime": 9, "translation_state": "completed", "is_in_progress": False},
+        {"name": "WsTxt", "type": "txt", "path": str(txt_out), "output_folder": str(ws_txt), "size": 15, "mtime": 8,
+         "translation_state": "completed", "is_in_progress": False},
+        {"name": "Manual", "type": "pdf", "path": str(pdf), "size": 15, "mtime": 7,
+         "translation_state": "completed", "is_in_progress": False},
+    ])
+    service = LibraryService(core=SharedCore({"library_core": fake_core(tmp_path, rows)}), prefs=FakePrefs(),
+                             config={"epub_library_page_size": "all"})
+    shared = []
+
+    async def share(paths):
+        shared.append(list(paths))
+        return True
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, service, files=types.SimpleNamespace(share=share))
+        screen = LibraryScreen(parse_route("/library"), ctx)
+        screen.actions()
+        _mount(session.page, screen.get_body())
+        await _scanned_screen(screen)
+        tapped = []
+        for shelf in ("progress", "completed"):
+            screen.set_shelf(shelf)
+            for key in list(screen.visible_keys):
+                model = screen.cards[key].model
+                screen._on_card_tap(model)
+                await asyncio.sleep(0.01)
+                assert ctx.navigated[-1] == ("library.book", {"bid": model.bid}, None), model.title
+                tapped.append(model.title)
+        assert sorted(tapped) == ["Alpha", "Beta", "Done", "Manual", "Novel", "WsEpub", "WsTxt"]
+        assert shared == []  # no share sheet on tap
+        txt_book = next(b for b in service.snapshot.completed if b["name"] == "WsTxt")
+        sheet = screen.card_actions(txt_book)
+        reader = next(i for i in sheet.items if i.label.startswith("\U0001f4d6"))
+        assert reader.label == "\U0001f4d6 Open in Reader" and reader.disabled_reason is None
+        share_item = next(i for i in sheet.items if i.label == "↗ Share")
+        await share_item.on_select()
+        assert shared == [[str(txt_out)]]  # ⋯ › ↗ Share: LibraryContext.share_books
+        novel = next(b for b in service.snapshot.in_progress if b["name"] == "Novel")
+        assert next(i for i in screen.card_actions(novel).items
+                    if i.label.startswith("\U0001f4d6")).disabled_reason is None
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_reader_actions_open_txt_books_in_the_reader(tmp_path):
+    """Device fix #2 (Library part): a TXT book (standalone, a finished TXT workspace, an In-progress row
+    whose raw is a .txt, with or without a workspace) gets "📖 Open in Reader"; a PDF without a workspace
+    still has no Reader item."""
+    from glossarion_mobile.ui.library.home import reader_actions
+
+    txt = tmp_path / "Notes.txt"
+    txt.write_text("text", encoding="utf-8")
+    assert reader_actions({"type": "txt", "path": str(txt)}) == [("\U0001f4d6 Open in Reader", "book", str(txt))]
+    raw = tmp_path / "Raw" / "Novel.txt"
+    raw.parent.mkdir()
+    raw.write_text("raw", encoding="utf-8")
+    ws = tmp_path / "Output" / "Novel"
+    ws.mkdir(parents=True)
+    (ws / "translation_progress.json").write_text("{}", encoding="utf-8")
+    for row in ({"type": "in_progress", "raw_source_path": str(raw), "output_folder": str(ws)},
+                {"type": "in_progress", "raw_source_path": str(raw)}):
+        assert reader_actions(row) == [("\U0001f4d6 Open in Reader", "book", str(raw))]
+    assert reader_actions({"type": "in_progress", "raw_source_path": str(tmp_path / "gone.txt")}) == []
+    assert reader_actions({"type": "pdf", "path": str(tmp_path / "Manual.pdf")}) == []
+
+
+@needs_flet
+def test_card_model_for_book_list_row_and_cover_queue_are_shared(tmp_path):
+    """Device fix #8 (shared pieces): ``models.card_model_for`` is the card the Library home renders,
+    ``BookListRow(show_more=False)`` has no ⋯, and ``CoverQueue`` loads covers one at a time for any list."""
+    import flet as ft
+
+    from glossarion_mobile.ui.library.book_card import BookListRow, CoverQueue
+    from glossarion_mobile.ui.library.home import LibraryScreen
+    from glossarion_mobile.ui.library.models import card_model_for
+    from glossarion_mobile.ui.router import parse_route
+
+    rows = _rows(tmp_path)
+    prefs = FakePrefs()
+    service = LibraryService(core=SharedCore({"library_core": fake_core(tmp_path, rows)}), prefs=prefs, config={})
+    snap = asyncio.run(service.refresh())
+    alpha = snap.in_progress[0]
+    key = book_key(alpha)
+    bid = service.bid_for(alpha)
+    service.compiling.add(os.path.normcase(os.path.normpath(os.path.abspath(alpha["output_folder"]))))
+    badge, size = service.card_badge(alpha)
+    before = build_card(  # what LibraryScreen._card_model built before the extraction
+        alpha, key=key, bid=bid, view=snap.views.get(key), raw_titles=True, raw_title=service.raw_title(alpha),
+        compiling=service.is_compiling(alpha), has_continue=True, selected=True, signature=snap.signatures.get(key),
+        dark=True, badge_text=badge, size_label=size)
+    shared = card_model_for(service, alpha, views=snap.views, raw_titles=True, dark=True, selected=True,
+                            has_continue=True)
+    assert shared == before and shared.ribbon_text == "⚙ COMPILING…" and shared.pill_text == "⏳ 3/10"
+    prefs.positions[bid] = {"chapter": 1}
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        screen = LibraryScreen(parse_route("/library"), _ctx(session.page, service))
+        screen.actions()
+        screen.get_body()
+        model = screen._card_model(key)
+        assert model == card_model_for(service, alpha, views=snap.views, raw_titles=False, dark=screen.ctx.dark,
+                                       has_continue=True)
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+    def keys(control, out=None):
+        out = out if out is not None else []
+        if control is None:
+            return out
+        if getattr(control, "key", None):
+            out.append(control.key)
+        for name in ("content", "controls"):
+            value = getattr(control, name, None)
+            for item in (value if isinstance(value, list) else [value]):
+                if isinstance(item, ft.BaseControl):
+                    keys(item, out)
+        return out
+
+    assert "more" in keys(BookListRow(shared).control)
+    assert "more" not in keys(BookListRow(shared, show_more=False).control)
+
+    class CoverService:
+        def __init__(self):
+            self.calls = []
+
+        async def io(self, fn, *args):
+            return fn(*args)
+
+        def cover_blocking(self, book):
+            self.calls.append(book["name"])
+            if book["name"] == "boom":
+                raise OSError("unreadable")
+            return f"/covers/{book['name']}.png" if book["name"] != "plain" else None
+
+    covers = CoverService()
+    got = []
+    live = {"a": {"name": "a"}, "plain": {"name": "plain"}, "boom": {"name": "boom"}}
+    queue = CoverQueue(covers, lambda k, p: got.append((k, p)), lookup=live.get)
+    for name in ("a", "gone", "plain", "boom"):
+        queue.add(name)
+    assert len(queue) == 4
+    asyncio.run(queue.run())
+    assert got == [("a", "/covers/a.png")] and covers.calls == ["a", "plain", "boom"]  # "gone" left the list
+    assert not queue.running and len(queue) == 0 and queue.kick() is None
+    picker = CoverQueue(covers, lambda k, p: got.append((k, p)))  # no lookup: the rows given to add()
+    picker.add("b", {"name": "b"})
+
+    async def kicked():
+        await picker.kick()
+
+    asyncio.run(kicked())
+    assert got[-1] == ("b", "/covers/b.png")
+
+
+def test_organized_library_book_keeps_its_workspace(real_env):
+    """Device fix #5: a Completed EPUB filed into Library/Translated (Organize; the row has no
+    output_folder) still has its translation workspace: ``workspace_for`` (desktop
+    ``_resolve_book_output_folder``), which Compile / Files / the metadata editor use, while the card's
+    own id stays; a Library EPUB without a workspace resolves to "" and no folder is created."""
+    service = real_env["service"]
+    library, output = real_env["library"], real_env["output"]
+    ws = _completed_workspace(output, library)
+    make_epub(library / "Translated" / "Shelf.epub", CHAPTERS, title="Shelf Translated")  # "Add translation"
+    snap = asyncio.run(service.refresh())
+    assert snap.ok, snap.error
+    fin = _named(snap.completed, "Fin.epub")
+    assert os.path.normcase(fin["output_folder"]) == os.path.normcase(str(ws))
+    plan = service.plan_organize_blocking()
+    assert [os.path.basename(p) for _b, p in plan["translated_moves"]] == ["Fin.epub"]
+    service.execute_organize_blocking(plan, "keep_both")
+    snap = asyncio.run(service.refresh())
+    row = _named(snap.completed, "Fin.epub")
+    assert row.get("in_library") and not row.get("output_folder")
+    listing = sorted(os.listdir(output))
+    assert os.path.normcase(service.workspace_for(row)) == os.path.normcase(str(ws))
+    spec = service.compile_spec(row, "compile_epub")
+    assert os.path.normcase(spec.params["folder"]) == os.path.normcase(str(ws)) and spec.inputs == (
+        spec.params["folder"],)
+    assert service.compile_spec(row, "compile_epub", folder=str(ws)).params["folder"] == str(ws)
+    bid = service.bid_for(row)
+    assert bid == service.prefs.file_ref(row["path"])  # the card keeps its own identity
+    again = service.book_for_bid(bid)
+    assert again["path"] == row["path"] and not again.get("output_folder")
+    assert os.path.normcase(service.workspace_for(again)) == os.path.normcase(str(ws))
+    shelf = _named(snap.completed, "Shelf.epub")
+    assert service.workspace_for(shelf) == ""
+    assert sorted(os.listdir(output)) == listing and not (output / "Shelf").exists()
+    assert set(snap.workspaces) == {book_key(row)}
+    if not _has("flet"):
+        return
+    from glossarion_mobile.ui.library.home import LibraryScreen
+    from glossarion_mobile.ui.router import parse_route
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, service)
+        screen = LibraryScreen(parse_route("/library?shelf=completed"), ctx)
+        reasons = {i.label: i.disabled_reason for i in screen.card_actions(row).items}
+        assert reasons["\U0001f4d8 Compile EPUB"] is None and reasons["\U0001f4c4 Compile PDF"] is None
+        assert reasons["\U0001f4c1 Files"] is None
+        screen.open_files(row)
+        assert ctx.navigated[-1] == ("tools.files.folder", {"root": "output", "fid": service.prefs.file_ref(
+            service.workspace_for(row))}, None)
+        none = {i.label: i.disabled_reason for i in screen.card_actions(shelf).items}
+        assert none["\U0001f4d8 Compile EPUB"] and none["\U0001f4c1 Files"]
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_output_root_mismatch_uses_the_shared_shelf_and_waits_for_jobs(real_env, monkeypatch):
+    """Device fix #8 (Library attach / Load for translation): the desktop "Output Folder Mismatch" check
+    (``LibraryShelf.output_root_mismatch`` / ``apply_output_override``) runs only while no job owns the
+    process environment; switching back to the default root keeps OUTPUT_DIRECTORY set (the mobile env
+    contract) and config.json's output_directory is never written."""
+    import threading
+
+    import job_runner
+
+    service = real_env["service"]
+    output = real_env["output"]
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(output))
+    asyncio.run(service.refresh())
+    book = service.snapshot.in_progress[0]
+    assert service.output_root_mismatch_blocking([book]) is None  # the app's own output root
+    other = output.parent / "Other"
+    second = other / "Second"
+    second.mkdir(parents=True)
+    (second / "translation_progress.json").write_text("{}", encoding="utf-8")
+    elsewhere = {"name": "Second", "output_folder": str(second), "type": "in_progress"}
+    info = service.output_root_mismatch_blocking([elsewhere])
+    assert info["new_override"] == str(other)
+    assert info["prompt"].startswith("The selected translation is saved under a different folder")
+    # a running job owns os.environ (its OUTPUT_DIRECTORY is its run root): no check, no switch
+    held, release = threading.Event(), threading.Event()
+
+    def job():
+        with job_runner.JOB_LOCK:
+            held.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=job)
+    worker.start()
+    try:
+        assert held.wait(5)
+        assert service.output_root_mismatch_blocking([elsewhere]) is None
+        with pytest.raises(RuntimeError):
+            service.apply_output_override_blocking(str(other))
+        assert os.environ["OUTPUT_DIRECTORY"] == str(output)
+    finally:
+        release.set()
+        worker.join(5)
+    assert service.apply_output_override_blocking(str(other)) == str(other)
+    assert os.environ["OUTPUT_DIRECTORY"] == str(other)
+    back = service.output_root_mismatch_blocking([book])
+    assert back is not None and back["new_override"] == ""  # the default root (the app's Output folder)
+    root = service.apply_output_override_blocking(back["new_override"])
+    assert os.path.normcase(root) == os.path.normcase(str(output))
+    assert os.path.normcase(os.environ["OUTPUT_DIRECTORY"]) == os.path.normcase(str(output))
+    assert "output_directory" not in service.config
+
+
+@needs_flet
+def test_confirm_output_root_asks_before_a_library_translation(tmp_path):
+    """Device fix #8: ``confirm_output_root`` (TranslateSheet Start and the chat's Library attach) is the
+    desktop _ensure_output_override_matches: no question when the roots match; "Output Folder Mismatch"
+    with the shared prompt otherwise; Yes switches the root, Cancel keeps the sheet and starts nothing."""
+    from glossarion_mobile.ui.library.translate_sheet import TranslateSheet, confirm_output_root
+
+    raw = tmp_path / "Raw" / "Book.epub"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"PK")
+    submitted, applied, mismatch = [], [], {"info": None}
+
+    class Jobs:
+        def has_kind(self, kind):
+            return kind == "translate"
+
+        async def submit(self, spec):
+            submitted.append(spec)
+            return f"job{len(submitted)}"
+
+    service = LibraryService(core=SharedCore({"library_core": types.ModuleType("library_core")}),
+                             prefs=FakePrefs(), jobs=Jobs(), config={"model": "authgpt/gpt-6-luna"})
+    service.output_root_mismatch_blocking = lambda books: mismatch["info"]
+    service.apply_output_override_blocking = lambda root: applied.append(root) or "/other"
+    book = _book("not_started", name="Book", raw_source_path=str(raw))
+
+    async def scenario():
+        ctx = _ctx(None, service)
+        ctx.extras["answers"] = []
+        assert await confirm_output_root(ctx, [book]) is True and "asked" not in ctx.extras
+        mismatch["info"] = {"prompt": "The selected translation is saved under a different folder …",
+                            "new_override": "/other"}
+        ctx.extras["answers"] = ["cancel"]
+        assert await confirm_output_root(ctx, [book]) is False and applied == []
+        assert ctx.extras["asked"][-1] == ("Output Folder Mismatch", mismatch["info"]["prompt"])
+        ctx.extras["answers"] = ["yes"]
+        assert await confirm_output_root(ctx, [book]) is True and applied == ["/other"]
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        ctx.extras["answers"] = ["cancel"]
+        assert await sheet.start() is None and submitted == [] and sheet.started_job is None
+        ctx.extras["answers"] = ["yes"]
+        assert await sheet.start() == "job1" and submitted[0].inputs == (str(raw),) and applied[-1] == "/other"
+
+        def broken(books):
+            raise OSError("unreadable")
+
+        service.output_root_mismatch_blocking = broken  # a failed check never blocks the run
+        assert await confirm_output_root(ctx, [book]) is True
+        bare = _ctx(None, types.SimpleNamespace(io=service.io, prefs=None))
+        assert await confirm_output_root(bare, [book]) is True  # a service without the check
+
+    asyncio.run(scenario())
+    # the real service without a library_core shelf: no question
+    plain = LibraryService(core=SharedCore({"library_core": types.ModuleType("library_core")}), config={})
+    assert asyncio.run(confirm_output_root(_ctx(None, plain), [book])) is True

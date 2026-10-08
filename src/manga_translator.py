@@ -5,7 +5,7 @@ Handles OCR, translation, and advanced text rendering for manga panels
 Now with proper history management and full page context support
 """
 
-from safe_image import open_image
+from safe_image import open_image, open_page_image, cv2_imdecode, cv2_imread, cv2_refusal
 
 import os
 import json
@@ -3690,7 +3690,7 @@ class MangaTranslator:
                             
                             # Load image for cropping
                             import cv2
-                            cv_image = cv2.imread(image_path)
+                            cv_image = cv2_imread(image_path)
                             if cv_image is None:
                                 self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
                             else:
@@ -4162,11 +4162,11 @@ class MangaTranslator:
                             # Load image for full-image OCR if not already loaded
                             if 'image' not in locals():
                                 import cv2
-                                image = cv2.imread(image_path)
+                                image = cv2_imread(image_path)
                                 if image is None:
                                     from PIL import Image as PILImage
                                     import numpy as np
-                                    pil_image = open_image(image_path)
+                                    pil_image = open_page_image(image_path)
                                     image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                             
                             
@@ -4354,7 +4354,7 @@ class MangaTranslator:
                                     
                                     # Load the original image for cropping
                                     import cv2
-                                    original_image = cv2.imread(image_path)
+                                    original_image = cv2_imread(image_path)
                                     if original_image is None:
                                         self._log("❌ Failed to load original image for fallback OCR", "error")
                                     else:
@@ -4814,17 +4814,18 @@ class MangaTranslator:
                 from ocr_manager import OCRManager
                 
                 # Load image as numpy array
+                image = None
                 if isinstance(processed_image_data, bytes):
                     # Convert bytes to numpy array
                     nparr = np.frombuffer(processed_image_data, np.uint8)
-                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                else:
-                    # Load from file path
-                    image = cv2.imread(image_path)
+                    image = cv2_imdecode(nparr, cv2.IMREAD_COLOR)
+                if image is None:
+                    # Load from file path (also when the decoder gate refused the bytes)
+                    image = cv2_imread(image_path)
                     if image is None:
                         # Try with PIL for Unicode paths
                         from PIL import Image as PILImage
-                        pil_image = open_image(image_path)
+                        pil_image = open_page_image(image_path)
                         image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                 
                 # Ensure OCR manager is available
@@ -5499,7 +5500,7 @@ class MangaTranslator:
                                         
                                         # Load the original image for cropping
                                         import cv2
-                                        original_image = cv2.imread(image_path)
+                                        original_image = cv2_imread(image_path)
                                         if original_image is None:
                                             self._log("❌ Failed to load original image for fallback OCR", "error")
                                         else:
@@ -6843,10 +6844,10 @@ class MangaTranslator:
             
             # Handle Unicode paths
             try:
-                img = cv2.imread(image_path)
+                img = cv2_imread(image_path)
                 if img is None:
                     # Fallback to PIL for Unicode paths
-                    pil_image = open_image(image_path)
+                    pil_image = open_page_image(image_path)
                     img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             except Exception as e:
                 self._log(f"   Failed to load image for debug: {str(e)}", "warning")
@@ -14927,6 +14928,16 @@ class MangaTranslator:
         }
         
         try:
+            # Owner-approved decoder hardening (2026-10-08): a page must hold PNG, JPEG, WEBP, BMP
+            # or GIF bytes (safe_image's OpenCV allowlist). Anything else is refused here, before
+            # OCR, any decoder or the "no text found" copy of the page.
+            refusal = cv2_refusal(image_path)
+            if refusal:
+                error_msg = f"Not a supported image: {os.path.basename(image_path)} ({refusal})"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                return result
+
             # RAM cap gating before heavy processing
             try:
                 self._block_if_over_cap("processing image")
@@ -15105,12 +15116,12 @@ class MangaTranslator:
             import cv2
             self._log(f"🖼️ Loading image with OpenCV...")
             try:
-                image = cv2.imread(image_path)
+                image = cv2_imread(image_path)
                 if image is None:
                     self._log(f"   Using PIL to handle Unicode path...", "info")
                     from PIL import Image as PILImage
                     import numpy as np
-                    pil_image = open_image(image_path)
+                    pil_image = open_page_image(image_path)
                     image_rgb = np.array(pil_image)
                     image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
                     self._log(f"   ✅ Successfully loaded with PIL", "info")
@@ -15915,9 +15926,9 @@ class MangaTranslator:
             self._log("📱 Processing webtoon in chunks for better OCR", "info")
             
             # Load the image
-            image = cv2.imread(image_path)
+            image = cv2_imread(image_path)
             if image is None:
-                pil_image = open_image(image_path)
+                pil_image = open_page_image(image_path)
                 image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             
             height, width = image.shape[:2]

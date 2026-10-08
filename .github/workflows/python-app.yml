@@ -73,6 +73,7 @@ jobs:
         python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
           tests/test_mobile_runtime.py \
           tests/test_safe_image.py \
+          tests/test_cv2_decode_gate.py \
           tests/test_mobile_compat_patches_core.py \
           tests/test_mobile_compat_patches_io.py \
           tests/test_mobile_compat_patches_api.py \

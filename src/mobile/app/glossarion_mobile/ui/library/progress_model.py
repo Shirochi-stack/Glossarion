@@ -8,6 +8,9 @@ Manager and Glossary Progress panels run:
   match - writes through the three-way merge), ``refresh_book_progress`` (the 2 s
   read-only tick; ``read_only=False`` = Refresh), ``set_view_toggles``; its
   ``RowPresentation`` rows and ``ProgressStats`` become ``RowVM`` / ``StatChip``.
+  The workspace is ``LibraryService.workspace_for`` (``book_workspace``), so an organized
+  Library/Translated book opens the workspace it came from; a Library-filed book with no
+  workspace lists its EPUB's own chapters (``spine_rows`` over ``BookDetailsModel.row_specs``).
 * Actions: ``progress_actions`` (``plan_remove_qa_marks`` / ``remove_qa_marks``,
   ``remove_pending_marks``, ``refinement_status_keys`` / ``remove_refinement_status``,
   ``restore_in_progress``, ``reset_tts``, ``find_row_audio`` / ``delete_row_audio``,
@@ -56,6 +59,7 @@ __all__ = [
     "GlossaryView",
     "ImageFolderView",
     "ImageItemVM",
+    "NO_WORKSPACE",
     "PM_GROUP_ORDER",
     "ProgressView",
     "RetranslatePlanVM",
@@ -63,6 +67,7 @@ __all__ = [
     "StatChip",
     "apply_action",
     "audio_path_for",
+    "book_workspace",
     "glossary_signature",
     "image_delete_confirmation",
     "image_folder_action",
@@ -80,7 +85,12 @@ __all__ = [
     "row_matches",
     "run_glossary_action",
     "set_manual_editing",
+    "spine_rows",
+    "workspace_row",
 ]
+
+#: The Chapters / At a glance text when a book has neither an output workspace nor a raw source to open one.
+NO_WORKSPACE = "This book has no output workspace yet"
 
 PM_GROUP_ORDER = ("completed", "merged", "in_progress", "pending", "missing", "failed", "skipped")
 #: Chips shown even at 0 (UI_SPEC §3.7: Completed and the missing/failed groups).
@@ -225,6 +235,8 @@ class ProgressView:
     show_special: bool = False
     show_model_info: bool = True
     state: Any = None  # progress_core.BookProgress
+    #: No output workspace resolves (and none was opened): the Chapters tab lists the EPUB's own chapters.
+    no_workspace: bool = False
 
     @property
     def fraction(self) -> Optional[float]:
@@ -279,12 +291,82 @@ def row_matches(row: Any, query: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def book_workspace(service: Any, book: Mapping[str, Any]) -> str:
+    """The book's output workspace, never created: ``LibraryService.workspace_for`` (the row's folder, else
+    the workspace an organized Library/Translated book came from - desktop ``_resolve_book_output_folder``,
+    resolved at each use like ``BookDetailsDialog``; the row itself is never changed). A service without
+    the resolver (host fakes) gives the row's ``output_folder``."""
+    resolver = getattr(service, "workspace_for", None)
+    if callable(resolver):
+        try:
+            return str(resolver(book) or "")
+        except Exception:
+            log.debug("workspace_for failed", exc_info=True)
+    return str(book.get("output_folder") or "")
+
+
+def workspace_row(service: Any, book: Mapping[str, Any]) -> dict:
+    """A copy of the row carrying its resolved workspace as ``output_folder``, for one call into a shared
+    helper that reads the row's folder (metadata.json saves, the compiled outputs list). The Book page's
+    own row - and so its id - stays the card's."""
+    folder = book_workspace(service, book)
+    row = dict(book)
+    if folder:
+        row["output_folder"] = folder
+    return row
+
+
+def _file_row(book: Mapping[str, Any]) -> bool:
+    """A book that is a file (a Library/Translated EPUB, or a row synthesised from a file's route id before
+    the first scan) rather than a translation workspace row (In progress, or a compiled workspace)."""
+    return not book.get("is_in_progress") and str(book.get("type") or "") != "in_progress"
+
+
+def spine_rows(model: Any, *, show_raw_title: bool = False) -> tuple:
+    """The chapters of a book's own EPUB (no workspace): ``BookDetailsModel.row_specs`` - the desktop Book
+    Details chapter rows over ``load_book_details`` ``chapters_info`` (special-file / search / QA filters
+    included) - as ``RowVM`` rows of kind ``spine``: "Ch.NNN · title", the file name, the desktop badge."""
+    if model is None:
+        return ()
+    try:
+        specs = list(model.row_specs(show_raw_title=show_raw_title))
+    except Exception:
+        log.debug("row_specs failed", exc_info=True)
+        return ()
+    rows: list = []
+    for position, spec in enumerate(specs):
+        info = spec.get("info") if isinstance(spec.get("info"), Mapping) else {}
+        try:
+            index = int(info.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        filename = str(info.get("filename") or "")
+        primary = str(spec.get("primary_text") or filename or f"Chapter {index + 1}")
+        status = str(info.get("status") or "")
+        search = [primary, str(info.get("raw_title") or ""), str(info.get("translated_title") or ""), filename]
+        rows.append(RowVM(
+            key=f"spine:{index}:{filename}",
+            kind="spine",
+            status=status,
+            icon="\U0001f4c4",
+            label=str(spec.get("badge_text") or ""),
+            title=f"Ch.{index + 1:03d} · {primary}",
+            subtitle=str(spec.get("filename") or filename),
+            filename=filename,
+            is_special=bool(info.get("is_special")),
+            search_text=" ".join(s for s in search if s),
+            opf_position=index,
+            raw=spec,
+        ))
+    return tuple(rows)
+
+
 def _source_for(service: Any, book: Mapping[str, Any]) -> str:
     """The raw source, else a path named like the workspace (never created, never linked)."""
     source = service.raw_source(book)
     if source:
         return source
-    folder = str(book.get("output_folder") or "")
+    folder = book_workspace(service, book)
     kind = str(book.get("workspace_kind") or "epub").lower()
     ext = {"txt": ".txt", "pdf": ".pdf", "html": ".html"}.get(kind, ".epub")
     return os.path.join(folder, os.path.basename(os.path.normpath(folder)) + ext) if folder else ""
@@ -421,7 +503,9 @@ def load_progress_view(service: Any, book: Mapping[str, Any], *, show_special: b
         return ProgressView(error="The Progress Manager core is not available in this build",
                             missing=("progress_core.build_book_progress",))
     groups = {str(k): tuple(v) for k, v in (getattr(progress_core, "STATUS_GROUPS", None) or _DEFAULT_GROUPS).items()}
-    output_dir = str(book.get("output_folder") or "")
+    # The resolved workspace is the fixed output folder: an organized book opens the workspace it came
+    # from, never a new Output/<raw stem> (``build_book_progress`` derives and creates one without it).
+    output_dir = book_workspace(service, book)
     previous_state = previous.state if previous is not None else None
     try:
         if previous_state is not None and hasattr(progress_core, "refresh_book_progress"):
@@ -433,9 +517,12 @@ def load_progress_view(service: Any, book: Mapping[str, Any], *, show_special: b
                                                                 force=full or toggles)
             created = None
         else:
-            source = _source_for(service, book)
+            # A book file without a workspace (an "Add translation" EPUB, an organized book whose workspace
+            # is gone or not resolved yet) is not a Progress Manager source - opening one would create
+            # Output/<raw stem>: its own chapters are listed instead.
+            source = "" if not output_dir and _file_row(book) else _source_for(service, book)
             if not source:
-                return ProgressView(error="This book has no output workspace yet")
+                return ProgressView(error=NO_WORKSPACE, no_workspace=True)
             owner = make_owner(service)
             book_progress = progress_core.build_book_progress(
                 source, owner.config, owner=owner, fixed_output_dir=output_dir or None,
@@ -458,7 +545,7 @@ def load_progress_view(service: Any, book: Mapping[str, Any], *, show_special: b
 
 def progress_signature(service: Any, book: Mapping[str, Any], view: Optional[ProgressView] = None) -> Any:
     """Blocking: ``progress_core.snapshot_signature`` of the book's workspace (the 2 s poll)."""
-    output_dir = (view.output_dir if view is not None and view.output_dir else str(book.get("output_folder") or ""))
+    output_dir = view.output_dir if view is not None and view.output_dir else book_workspace(service, book)
     if not output_dir:
         return None
     progress_file = (view.progress_file if view is not None and view.progress_file
@@ -1038,7 +1125,7 @@ def load_glossary_view(service: Any, book: Mapping[str, Any], *, previous: Optio
     groups = {str(k): tuple(v) for k, v in (getattr(gpc, "GLOSSARY_STATUS_GROUPS", None) or GP_GROUPS).items()}
     state = progress.state if progress is not None else None
     owner = getattr(state, "owner", None) or make_owner(service)
-    output_dir = str(book.get("output_folder") or "") or None
+    output_dir = book_workspace(service, book) or None
     source = _source_for(service, book)
     model = previous.state if previous is not None else None
     if model is not None:

@@ -48,6 +48,7 @@ import logging
 import mimetypes
 import os
 import secrets
+import sys
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -193,6 +194,15 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, owner: "ReaderServer") -> None:
         self.owner = owner
         super().__init__((owner.host, 0), _Handler)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """The WebView dropping a keep-alive connection (a chapter turn, the page closed) is routine:
+        a debug line, not ``socketserver``'s traceback on stderr. Anything else is logged."""
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionError, TimeoutError)):
+            log.debug("reader http: %s from %s", type(error).__name__, client_address)
+            return
+        log.exception("reader http: request from %s failed", client_address)
 
 
 class _Handler(BaseHTTPRequestHandler):

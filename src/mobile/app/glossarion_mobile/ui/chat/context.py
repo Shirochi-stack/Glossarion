@@ -44,6 +44,15 @@ class ChatEnv(SettingsContext):
     open_external: Optional[Callable[[str], Any]] = None
     save_file: Optional[Callable[[str], Any]] = None  # async: FileBridge save_as
     after_migrate: Optional[Callable[..., Any]] = None  # (target folder, attachment path)
+    # Device fixes (UI_SPEC §2.17: finished chat books move into the Library by themselves). ``prefs``
+    # (the app Prefs) is the SettingsContext field. ``library_service``: () -> app.library (LibraryService)
+    # or None; ``library_book``: async (workspace folder) -> the Library book id of the row whose
+    # workspace is that folder (a quiet rescan first when the Library is stale), or None;
+    # ``library_translate``: async (workspace folder, attachment path) -> the Library translate sheet
+    # for that book (Resume / Retry failed of a workspace that moved into the Library).
+    library_service: Optional[Callable[[], Any]] = None
+    library_book: Optional[Callable[[str], Any]] = None
+    library_translate: Optional[Callable[..., Any]] = None
     profiles: Callable[[], list] = field(default=lambda: [])
     languages: tuple = ()
     mono: str = "monospace"

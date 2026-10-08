@@ -27,6 +27,12 @@ workspace whose raw source is a PDF, or any workspace without an EPUB),
 while visible), **dual** (completed book whose raw EPUB resolves: the compiled
 EPUB and the raw one swap on Original/Translated) and **plain**.
 
+TXT books (``OpenPlan.source_kind`` "txt"; ``text_book``): a ``.txt`` the desktop hands to the
+system editor opens in plain mode as **text** (paragraph-bounded sections, or the sections of a
+compiled ``_translated.txt``), and a TXT translation workspace whose split exists opens in
+workspace mode on its sections (raw ``word_count`` text + translated responses: Original /
+Translated / Bilingual).
+
 Blocking methods (``load``, ``refresh_overlay``, ``set_flavor`` for dual
 reloads, ``ensure_workspace_raw``, ``search``, ``image_bytes``) run on the io
 pool. Python 3.10 compatible.
@@ -45,6 +51,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from glossarion_mobile.services.library import CoreMissing, SharedCore, bind_call
 from glossarion_mobile.ui.reader import model as rm
+from glossarion_mobile.ui.reader import text_book
 
 __all__ = [
     "DocEngine",
@@ -54,6 +61,10 @@ __all__ = [
     "MODE_WORKSPACE",
     "OpenPlan",
     "ReaderSession",
+    "SOURCE_EPUB",
+    "SOURCE_TXT",
+    "TXT_TRANSLATE_REASON",
+    "plan_for_file",
     "plan_open",
 ]
 
@@ -63,6 +74,11 @@ MODE_PLAIN = "plain"
 MODE_OVERLAY = "overlay"
 MODE_DUAL = "dual"
 MODE_WORKSPACE = "workspace"
+
+#: ``OpenPlan.source_kind``: "txt" for a TXT book (text mode) or a TXT translation workspace.
+SOURCE_EPUB = "epub"
+SOURCE_TXT = "txt"
+TXT_TRANSLATE_REASON = "Translate TXT files from the Library (whole file)"
 
 _HTML_EXT = (".html", ".xhtml", ".htm")
 
@@ -81,6 +97,10 @@ def _is_file(path: Any, ext: Optional[str] = None) -> bool:
 
 def _base(name: Any) -> str:
     return os.path.basename(str(name or "").replace("\\", "/")).lower()
+
+
+def _is_txt(path: Any) -> bool:
+    return str(path or "").lower().endswith(".txt")
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +215,13 @@ class DocEngine:
             raise RuntimeError("Loading the EPUB was cancelled")
         return _unpack_loaded(result)
 
+    def load_text(self, path: str, *, should_stop: Optional[Callable[[], bool]] = None) -> tuple:
+        """A ``.txt`` as (chapters, images, filenames): ``text_book.load_text_chapters``."""
+        result = text_book.load_text_chapters(path, should_stop=should_stop)
+        if result is None:
+            raise RuntimeError("Loading the text file was cancelled")
+        return _unpack_loaded(result)
+
     def merge(self, raw: list, images: Mapping, filenames: list, overlay: Mapping, extra_dirs: list,
               previous: Optional[list]) -> tuple:
         """(overlaid chapters, images, applied, retry_required, read signature)."""
@@ -288,12 +315,23 @@ class DocEngine:
     def define_url(self, text: str) -> str:
         return str(self.call("reader_doc", ("define_url", "web_define_url"), text, text=text))
 
-    def workspace_manifest(self, workspace: str, source: Optional[str]) -> dict:
+    def workspace_manifest(self, workspace: str, source: Optional[str], *, source_kind: str = "") -> dict:
+        """``workspace_reader.build_workspace_reader_manifest``; a TXT workspace (``source_kind`` "txt"
+        or a ``.txt`` source) gets its sections from ``text_book.build_text_workspace_manifest``."""
         from workspace_reader import build_workspace_reader_manifest
 
-        return dict(build_workspace_reader_manifest(workspace, source_path=source or None))
+        manifest = dict(build_workspace_reader_manifest(workspace, source_path=source or None))
+        if source_kind == SOURCE_TXT or str(manifest.get("source_format") or "").lower() == SOURCE_TXT:
+            return text_book.build_text_workspace_manifest(workspace, source_path=source or None, base=manifest)
+        return manifest
 
     def workspace_chapters(self, manifest: Mapping) -> tuple:
+        if str(manifest.get("source_format") or "").lower() == SOURCE_TXT:
+            loaded = text_book.load_text_workspace_chapters(manifest)
+            if loaded is None:
+                raise RuntimeError("Loading the workspace was cancelled")
+            raw, translated, filenames = loaded
+            return list(raw), list(translated), list(filenames)
         result = self.call("reader_doc", ("load_workspace_chapters",), dict(manifest), manifest=dict(manifest))
         if isinstance(result, Mapping):
             return (list(result.get("raw") or result.get("raw_chapters") or []),
@@ -345,6 +383,7 @@ class OpenPlan:
     css_dirs: list = field(default_factory=list)
     initial_chapter_filename: str = ""
     error: str = ""
+    source_kind: str = SOURCE_EPUB  # SOURCE_TXT: epub_path is a .txt (text mode) / a TXT workspace
 
 
 def plan_open(book: Mapping[str, Any], *, raw_only: bool = False, engine: Optional[DocEngine] = None,
@@ -363,9 +402,13 @@ def plan_open(book: Mapping[str, Any], *, raw_only: bool = False, engine: Option
       payload-less decision has no chapter list;
     * ``epub`` with ``alt_epub_path`` -> **dual** (compiled EPUB + raw EPUB);
     * ``epub`` otherwise -> **plain**;
-    * ``system`` (TXT / HTML / image workspaces, which the desktop hands to the OS viewer)
-      -> **workspace** when the book has a translation workspace (the same manifest
-      ``workspace_reader`` builds for PDF workspaces), else an error naming the file.
+    * ``system`` (TXT / HTML / image workspaces, which the desktop hands to the OS viewer):
+      a TXT book (its workspace's source, its raw source or the decision's target is a ``.txt``)
+      -> **workspace** on the translation's sections once a run split it (``text_book``),
+      else **plain** text mode on the decision's ``.txt`` (compiled output, or the raw file of a
+      Not-started / Library book); any other book with a translation workspace -> **workspace**
+      (the same manifest ``workspace_reader`` builds for PDF workspaces); else an error naming
+      the file.
     """
     engine = engine or DocEngine()
     decide = engine.fn("library_core", "plan_open_reader")
@@ -402,19 +445,44 @@ def plan_open(book: Mapping[str, Any], *, raw_only: bool = False, engine: Option
         return OpenPlan(mode=MODE_PLAIN, epub_path=source, output_folder=output_folder, title=title,
                         initial_raw=bool(raw_only), in_progress=in_progress, toc_dir=toc_dir,
                         initial_chapter_filename=str(kwargs.get("initial_chapter_filename") or ""))
+    target = str(plan.get("target") or book.get("path") or "")
+    raw_source = str(book.get("raw_source_path") or "")
     if output_folder and os.path.isfile(os.path.join(output_folder, "translation_progress.json")):
         pointed = engine.source_pointer(output_folder)
+        if _is_txt(pointed) or _is_txt(raw_source) or _is_txt(target):
+            if text_book.has_text_workspace(output_folder):
+                source = next((p for p in (pointed, raw_source) if _is_file(p, ".txt")), "")
+                return OpenPlan(mode=MODE_WORKSPACE, workspace_dir=output_folder, source_path=source,
+                                output_folder=output_folder, title=title, initial_raw=bool(raw_only),
+                                in_progress=in_progress, toc_dir=output_folder, source_kind=SOURCE_TXT)
+            text = next((p for p in (target, pointed, raw_source) if _is_file(p, ".txt")), "")
+            if text:  # not split for translation yet (a Not-started import): the file itself
+                return _text_plan(text, title=title, output_folder=output_folder, raw_only=raw_only,
+                                  in_progress=in_progress)
         return OpenPlan(mode=MODE_WORKSPACE, workspace_dir=output_folder,
                         source_path=pointed if _is_file(pointed) else "", output_folder=output_folder, title=title,
                         initial_raw=False, in_progress=in_progress, toc_dir=output_folder)
-    target = str(plan.get("target") or book.get("path") or "")
+    text = next((p for p in (target, raw_source) if _is_file(p, ".txt")), "")
+    if text:
+        return _text_plan(text, title=title, output_folder=output_folder, raw_only=raw_only, in_progress=in_progress)
     return OpenPlan(mode=MODE_PLAIN, title=title, error=(
-        f"The Reader opens EPUB books and translation workspaces; "
+        f"The Reader opens EPUB and TXT books and translation workspaces; "
         f"{os.path.basename(target) or 'this book'} is not one of them."))
 
 
+def _text_plan(path: str, *, title: str = "", output_folder: str = "", raw_only: bool = False,
+               in_progress: bool = False) -> OpenPlan:
+    """Text mode: a ``.txt`` read in sections (``text_book.load_text_chapters``)."""
+    path = os.path.abspath(path)
+    return OpenPlan(mode=MODE_PLAIN, epub_path=path, output_folder=output_folder,
+                    title=title or os.path.splitext(os.path.basename(path))[0], initial_raw=bool(raw_only),
+                    in_progress=in_progress, toc_dir=os.path.dirname(path), source_kind=SOURCE_TXT)
+
+
 def plan_for_file(path: str) -> OpenPlan:
-    """A shared / picked EPUB opened directly (no Library row)."""
+    """A shared / picked EPUB or TXT opened directly (no Library row)."""
+    if _is_txt(path):
+        return _text_plan(path)
     return OpenPlan(mode=MODE_PLAIN, epub_path=os.path.abspath(path), title=os.path.splitext(os.path.basename(path))[0],
                     toc_dir=os.path.dirname(os.path.abspath(path)))
 
@@ -466,6 +534,13 @@ class ReaderSession:
         self._zip: Optional[zipfile.ZipFile] = None
         self._zip_path = ""
         self._zip_names: dict = {}
+        self._txt_layout_totals: dict = {}  # position_from_pref: sections of the other TXT layout
+
+    @property
+    def is_text(self) -> bool:
+        """A TXT book: text mode or a TXT translation workspace."""
+        return self.plan.source_kind == SOURCE_TXT or \
+            str(self.manifest.get("source_format") or "").lower() == SOURCE_TXT
 
     # ---- loading (blocking) ----------------------------------------------------------------
 
@@ -483,14 +558,20 @@ class ReaderSession:
             if plan.mode == MODE_OVERLAY:
                 self._attach_overlay(plan.output_folder)
         with self.lock:
-            self.display_numbers = self.engine.display_numbers(self.filenames)
-            self.native_toc = self.engine.native_toc(plan.toc_dir, self.active_path, self.filenames)
+            if self.is_text:  # sections in reading order; no EPUB TOC
+                self.display_numbers = list(range(1, len(self.filenames) + 1))
+                self.native_toc = []
+            else:
+                self.display_numbers = self.engine.display_numbers(self.filenames)
+                self.native_toc = self.engine.native_toc(plan.toc_dir, self.active_path, self.filenames)
             self.loaded = True
             self.generation += 1
 
     def _load_epub(self, path: str) -> None:
         cached = self.dual_cache.get(_norm(path))
-        if cached is None:
+        if cached is None and self.plan.source_kind == SOURCE_TXT:
+            cached = self.engine.load_text(path)
+        elif cached is None:
             chapters, images, filenames = self.engine.load_epub(path, show_special=self.show_special,
                                                                  cache_dir=self.cache_dir)
             cached = (chapters, images, filenames)
@@ -512,7 +593,8 @@ class ReaderSession:
         self.refresh_overlay(force=True)
 
     def _load_workspace(self) -> None:
-        manifest = self.engine.workspace_manifest(self.plan.workspace_dir, self.plan.source_path)
+        manifest = self.engine.workspace_manifest(self.plan.workspace_dir, self.plan.source_path,
+                                                  source_kind=self.plan.source_kind)
         raw, translated, filenames = self.engine.workspace_chapters(manifest)
         with self.lock:
             self.manifest = manifest
@@ -578,7 +660,8 @@ class ReaderSession:
 
     def adopt_output_folder(self, output_folder: str) -> set:
         """Plain EPUB translated live: overlay its new workspace (blocking)."""
-        if self.plan.mode != MODE_PLAIN or not output_folder or not os.path.isdir(output_folder):
+        if self.plan.mode != MODE_PLAIN or self.plan.source_kind == SOURCE_TXT or not output_folder \
+                or not os.path.isdir(output_folder):
             return set()
         css_dirs: list = []
         try:  # the shared decision for an in-progress book gives its translated CSS folders
@@ -603,8 +686,8 @@ class ReaderSession:
             return self.overlay_applied
         if mode == MODE_DUAL:
             return bool(self.plan.raw_path)
-        if mode == MODE_WORKSPACE:
-            return str(self.manifest.get("source_format") or "").lower() == "pdf"
+        if mode == MODE_WORKSPACE:  # PDF: raw pages on demand; TXT: the raw word_count sections
+            return str(self.manifest.get("source_format") or "").lower() in ("pdf", SOURCE_TXT)
         return False
 
     def set_flavor(self, flavor: str) -> bool:
@@ -728,6 +811,8 @@ class ReaderSession:
         """PDF workspaces extract a section's raw pages on first view (blocking). True when replaced."""
         if self.plan.mode != MODE_WORKSPACE or index in self.workspace_raw_ready or not self.has_alternate:
             return False
+        if str(self.manifest.get("source_format") or "").lower() != "pdf":
+            return False  # a TXT workspace loaded its raw sections already
         entries = self.manifest.get("entries") or []
         if not 0 <= index < len(entries):
             return False
@@ -745,12 +830,69 @@ class ReaderSession:
             self.generation += 1
         return True
 
+    # ---- saved positions --------------------------------------------------------------------------
+
+    def position_from_pref(self, data: Optional[Mapping[str, Any]]) -> Optional[rm.Position]:
+        """A saved ``reader_positions`` entry or bookmark for this book (``rm.Position.from_pref``).
+
+        A TXT book has two section layouts: the Reader's own sections (``section_0001.txt``...) until
+        a translation run splits it, then the translation's (``word_count`` names). A saved href of
+        the other layout restores at the same place in the book (its book percent) instead of the
+        same section number. Blocking the first time (it may count the other layout's sections)."""
+        position = rm.Position.from_pref(data, self.filenames)
+        if not isinstance(data, Mapping) or not self.is_text or not self.filenames:
+            return position
+        href = _base(str(data.get("href") or "").split("#", 1)[0])
+        if not href or href in self.filenames:
+            return position
+        total = self._txt_layout_total(href)
+        try:
+            chapter = int(data.get("chapter"))
+            fraction = float(data.get("fraction") or 0.0)
+        except (TypeError, ValueError):
+            return position
+        if total <= 0 or fraction != fraction:
+            return position
+        share = (min(max(chapter, 0), total - 1) + max(0.0, min(1.0, fraction))) / float(total)
+        exact = max(0.0, min(1.0, share)) * len(self.filenames)
+        index = min(len(self.filenames) - 1, int(exact))
+        mode = data.get("mode") if data.get("mode") in rm.READER_MODES else rm.TRANSLATED
+        return rm.Position(chapter=index, href=self.filenames[index], fraction=max(0.0, min(1.0, exact - index)),
+                           mode=mode)
+
+    def _txt_layout_total(self, href: str) -> int:
+        """Sections in the TXT layout ``href`` belongs to when it is not the open one (0: unknown)."""
+        reader_layout = bool(text_book.READER_SECTION_NAME.match(href))
+        workspace_open = self.plan.mode == MODE_WORKSPACE
+        if reader_layout != workspace_open:
+            return 0  # a name of the open layout that is gone (the file changed): keep the index rule
+        key = "reader" if reader_layout else "workspace"
+        with self.lock:
+            if key in self._txt_layout_totals:
+                return self._txt_layout_totals[key]
+        total = 0
+        try:
+            if reader_layout:  # the TXT workspace's source, read in the Reader's own sections
+                source = next((p for p in (self.plan.source_path, str(self.manifest.get("source_path") or ""))
+                               if _is_file(p, ".txt")), "")
+                total = text_book.text_section_count(source) if source else 0
+            else:  # text mode: the book's translation split, if it has one
+                folder = self.plan.output_folder or self.plan.workspace_dir
+                total = text_book.workspace_section_count(folder) if folder and os.path.isdir(folder) else 0
+        except Exception:
+            log.debug("counting the other TXT layout failed", exc_info=True)
+        with self.lock:
+            self._txt_layout_totals[key] = total
+        return total
+
     # ---- live translation helpers -----------------------------------------------------------------
 
     def translate_target(self, index: int) -> tuple:
         """(source EPUB, chapter file, reason) for "Translate this chapter" (desktop rules)."""
         if self.plan.mode == MODE_WORKSPACE:
             return "", "", "Workspace sections are translated from the Progress manager"
+        if self.plan.source_kind == SOURCE_TXT:
+            return "", "", TXT_TRANSLATE_REASON
         filename = self.filenames[index] if 0 <= index < len(self.filenames) else ""
         if not filename:
             return "", "", "Could not resolve this chapter's source filename."
@@ -765,7 +907,7 @@ class ReaderSession:
 
     def translate_visible(self, index: int) -> bool:
         """``_update_translate_btn_visibility``: hidden for completed overlay chapters and the compiled view."""
-        if self.plan.mode == MODE_WORKSPACE:
+        if self.plan.mode == MODE_WORKSPACE or self.plan.source_kind == SOURCE_TXT:
             return False
         filename = self.filenames[index] if 0 <= index < len(self.filenames) else ""
         if self.plan.mode == MODE_OVERLAY and self.overlay:

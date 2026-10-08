@@ -272,8 +272,11 @@ class ScanSnapshot:
     signatures: Mapping[str, Any] = field(default_factory=dict)  # book_key -> card_signature
     views: Mapping[str, Any] = field(default_factory=dict)  # book_key -> card_progress_view dict
     missing_raw: int = 0  # cards with ``missing_raw_file`` (the "Scan for raw (N)" chip)
-    organize_count: int = 0  # Organize (n)
-    undo_count: int = 0  # Undo (n)
+    organize_count: int = 0  # desktop Organize (n) counter (the mobile Library offers no manual Organize)
+    undo_count: int = 0  # desktop Undo (n) counter (likewise no control on mobile)
+    #: book_key -> the translation workspace of a Completed row without one of its own (a
+    #: Library/Translated EPUB): the desktop ``_resolve_book_output_folder`` origins lookup
+    workspaces: Mapping[str, str] = field(default_factory=dict)
     scanned_at: float = 0.0
     seconds: float = 0.0
     error: Optional[str] = None
@@ -499,6 +502,7 @@ class LibraryService:
         self._by_bid: dict = {}
         self._bid_by_key: dict = {}
         self._local_refs: dict = {}  # bid -> identity (when Prefs is unavailable)
+        self._workspaces: dict = {}  # book_key -> resolved workspace (ScanSnapshot.workspaces of the last scan)
         self._generation = 0
         self._env_key: Any = None
         self.scanning = False
@@ -776,13 +780,15 @@ class LibraryService:
         return dict(view) if isinstance(view, Mapping) else None
 
     def scan_blocking(self) -> ScanSnapshot:
-        """``library_core.scan_library`` (both scans + merge), card views, Organize / Undo / raw counters."""
+        """``library_core.scan_library`` (both scans + merge), card views, Organize / Undo / raw counters and
+        the workspaces of Completed Library rows (:meth:`resolve_workspaces_blocking`)."""
         started = time.monotonic()
         config = self.config_snapshot()
         lc = self._lc()
         if not hasattr(lc, "scan_library"):
             raise CoreMissing("library_core.scan_library")
         in_progress, completed = lc.scan_library(config)
+        workspaces = self.resolve_workspaces_blocking(completed)
         signatures: dict = {}
         views: dict = {}
         for book in list(in_progress) + list(completed):
@@ -810,10 +816,47 @@ class LibraryService:
             missing_raw=missing,
             organize_count=organize,
             undo_count=undo,
+            workspaces=workspaces,
             scanned_at=self.clock(),
             seconds=time.monotonic() - started,
             generation=self._generation,
         )
+
+    def resolve_workspaces_blocking(self, rows: Iterable[Mapping[str, Any]]) -> dict:
+        """``book_key -> workspace`` for the Completed Library rows without a workspace of their own.
+
+        A Library/Translated EPUB (Organize, a chat book filed by the desktop, "Add translation") carries
+        no ``output_folder`` (``library_core`` merge), so the Book page, the card ⋯ Compile / Files and
+        the metadata editor would have nothing to work on. Desktop resolves the folder at each use with
+        ``_resolve_book_output_folder`` (the ``library_origins`` "translated" entry's folder); the
+        result is kept only when it holds ``translation_progress.json`` (desktop
+        ``_card_has_reader_workspace``). Read only: nothing is created, the rows and their ids stay as
+        they are."""
+        resolve = self.core.fn("library_core", "resolve_book_output_folder", "_resolve_book_output_folder")
+        if resolve is None:
+            return {}
+        found: dict = {}
+        for book in rows or ():
+            folder = str(book.get("output_folder") or "")
+            if (folder and os.path.isdir(folder)) or not book.get("in_library"):
+                continue
+            try:
+                workspace = str(resolve(dict(book)) or "")
+            except Exception:
+                log.debug("resolving the workspace of %s failed", book.get("name"), exc_info=True)
+                continue
+            if workspace and os.path.isfile(os.path.join(workspace, "translation_progress.json")):
+                found[book_key(book)] = workspace
+        return found
+
+    def workspace_for(self, book: Mapping[str, Any]) -> str:
+        """The book's translation workspace: its ``output_folder`` when that is a folder, else the one
+        the last scan resolved for a Library row (:meth:`resolve_workspaces_blocking`), else "".
+        Sync and cheap (no disk work beyond one ``isdir``); never creates a folder."""
+        folder = str(book.get("output_folder") or "")
+        if folder and os.path.isdir(folder):
+            return folder
+        return str(self._workspaces.get(book_key(book)) or "")
 
     # ---- scanning (UI loop) --------------------------------------------------------------------
 
@@ -843,6 +886,7 @@ class LibraryService:
     def _apply_snapshot(self, snap: ScanSnapshot) -> None:
         self._snapshot = snap
         if snap.ok:
+            self._workspaces = dict(snap.workspaces or {})
             for book in snap.all_books():
                 bid = self.bid_for(book)
                 self._by_bid[bid] = dict(book)
@@ -1002,8 +1046,9 @@ class LibraryService:
             self.mark_dirty()
 
     def plan_organize_blocking(self, books: Optional[Sequence[Mapping[str, Any]]] = None) -> dict:
-        """The shelf's Organize plan; ``books`` (U9 selection bar › "Organize selected", UI_SPEC §3.3): only
-        their moves, with the preview and the collisions recomputed by the shelf's own helpers."""
+        """The shelf's Organize plan; ``books``: only their moves, with the preview and the collisions
+        recomputed by the shelf's own helpers. Service API only: the mobile Library has no manual
+        Organize / Undo control (finished chat books reach the Library by themselves)."""
         shelf = self._shelf_for()
         plan = dict(shelf.plan_organize())
         if books is None:
@@ -1042,6 +1087,57 @@ class LibraryService:
             return dict(self._shelf_for().execute_undo(dict(plan), restore_raw, restore_trans, policy, collisions))
         finally:
             self.mark_dirty()
+
+    # ---- output root (desktop "Load for translation": _ensure_output_override_matches) ------------------
+
+    def _job_lock(self) -> Any:
+        """``job_runner.JOB_LOCK``: a running job owns ``os.environ`` (its ``OUTPUT_DIRECTORY`` is its own
+        run root); None when the module is missing."""
+        return self.core.value("job_runner", "JOB_LOCK", default=None)
+
+    def output_root_mismatch_blocking(self, books: Sequence[Mapping[str, Any]]) -> Optional[dict]:
+        """``LibraryShelf.output_root_mismatch``: None when ``books`` can load as they are, else the switch
+        the desktop proposes, with its "Output Folder Mismatch" text in ``prompt``.
+
+        Checked only while no job owns the process environment (``JOB_LOCK`` taken without waiting): a
+        running job's ``OUTPUT_DIRECTORY`` is its own run root, which would make every book look
+        mismatched. None then; the queued translation starts in the app's output root anyway."""
+        lock = self._job_lock()
+        if lock is not None and not lock.acquire(blocking=False):
+            return None
+        try:
+            info = self._shelf_for().output_root_mismatch([dict(b) for b in books or ()])
+        finally:
+            if lock is not None:
+                lock.release()
+        return dict(info) if info else None
+
+    def apply_output_override_blocking(self, root: str) -> str:
+        """``LibraryShelf.apply_output_override``: the process ``OUTPUT_DIRECTORY`` becomes ``root`` so the
+        next translation writes into the folder that holds the book's progress. Returns the root used.
+
+        Mobile differences: "" (the desktop's "back to the default root") names the default root
+        (``library_core._default_output_root``, the app's Output folder), because the mobile env contract
+        never leaves ``OUTPUT_DIRECTORY`` unset; and config.json's ``output_directory`` is not written
+        (Settings › Storage: the output root is app storage). Refused (RuntimeError) while a job owns the
+        process environment."""
+        target = str(root or "")
+        if not target:
+            default = self.core.fn("library_core", "_default_output_root")
+            target = str(default() or "") if default is not None else ""
+            target = target or (self.output_roots() or [""])[0]
+        if not target:
+            raise ValueError("No output folder to switch to")
+        lock = self._job_lock()
+        if lock is not None and not lock.acquire(blocking=False):
+            raise RuntimeError("Wait for the running job to finish, then try again.")
+        try:
+            self._shelf_for().apply_output_override(target)
+        finally:
+            if lock is not None:
+                lock.release()
+            self.mark_dirty()
+        return target
 
     # ---- Scan for raw ---------------------------------------------------------------------------------
 
@@ -1143,7 +1239,7 @@ class LibraryService:
 
     def compiled_outputs_blocking(self, book: Mapping[str, Any]) -> list:
         """``[(path, kind)]``: the workspace's compiled outputs (``list_compiled_outputs`` order) and a
-        Library-filed EPUB itself."""
+        Library-filed EPUB (or a Library PDF, which has no workspace to compile) itself."""
         folder = str(book.get("output_folder") or "")
         out: list = []
         if folder and os.path.isdir(folder):
@@ -1153,9 +1249,12 @@ class LibraryService:
                     path = name if os.path.isabs(str(name)) else os.path.join(folder, str(name))
                     out.append((path, str(kind)))
         path = str(book.get("path") or "")
-        if path and os.path.isfile(path) and path.lower().endswith(".epub") and all(
-                _norm(p) != _norm(path) for p, _ in out):
-            out.insert(0, (path, "epub"))
+        lower = path.lower()
+        kind = "epub" if lower.endswith(".epub") else (
+            "pdf" if lower.endswith(".pdf") and book.get("in_library") and str(book.get("type") or "") == "pdf"
+            else "")
+        if kind and os.path.isfile(path) and all(_norm(p) != _norm(path) for p, _ in out):
+            out.insert(0, (path, kind))
         return out
 
     # ---- jobs ------------------------------------------------------------------------------------
@@ -1173,10 +1272,12 @@ class LibraryService:
     def origin_for(self, book: Mapping[str, Any]) -> dict:
         return {"type": "library", "bid": self.bid_for(book), "label": f"Library · {book.get('name') or ''}"}
 
-    def compile_spec(self, book: Mapping[str, Any], kind: str = "compile_epub") -> Any:
+    def compile_spec(self, book: Mapping[str, Any], kind: str = "compile_epub", folder: Optional[str] = None) -> Any:
+        """A compile job over ``folder``, else the book's ``output_folder``, else the workspace the scan
+        resolved for a Library row (:meth:`workspace_for`)."""
         from glossarion_mobile.services.jobs import JobSpec
 
-        folder = str(book.get("output_folder") or "")
+        folder = str(folder or book.get("output_folder") or "") or self.workspace_for(book)
         if not folder:
             raise ValueError("This book has no output workspace to compile")
         params: dict = {"folder": folder}
@@ -1229,7 +1330,7 @@ class LibraryService:
         sources = tuple(s for s in (self.raw_source(b) for b in books) if s)
         if not sources:
             raise ValueError("No raw EPUB resolves for the selection")
-        roots = [str(b.get("output_folder") or "") for b in books]
+        roots = [str(b.get("output_folder") or "") or self.workspace_for(b) for b in books]
         title = str(books[0].get("name") or "") if len(books) == 1 else f"{len(books)} books"
         origin = self.origin_for(books[0]) if len(books) == 1 else {"type": "library", "label": "Library"}
         return JobSpec(kind="metadata", title=title, inputs=sources, params={"output_roots": roots}, origin=origin)
@@ -1270,7 +1371,7 @@ class LibraryService:
         return result
 
     def is_compiling(self, book: Mapping[str, Any]) -> bool:
-        folder = str(book.get("output_folder") or "")
+        folder = str(book.get("output_folder") or "") or self.workspace_for(book)
         return bool(folder) and _norm(folder) in self.compiling
 
     # ---- finished jobs ---------------------------------------------------------------------------

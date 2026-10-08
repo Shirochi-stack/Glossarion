@@ -3,7 +3,8 @@
 Filter chips All / Errors / Thinking / API, a follow toggle and Copy. Lines
 arrive from a ``LogBuffer`` through ``UiDispatcher.subscribe_log`` (the pump
 hands over at most 400 new lines per 120 ms tick, on the loop thread) and are
-coalesced into 40-line selectable mono ``Text`` blocks, at most 100 mounted
+coalesced into 40-line selectable ``Text`` blocks in the mono family at the log
+size (``theme.log_text``, §6.2), at most 100 mounted
 (§7.3). Following scrolls with ``scroll_to(offset=-1)``; ``auto_scroll`` stays
 off. Search and Share arrive with the job detail view (U3).
 """
@@ -19,7 +20,7 @@ import flet as ft
 
 from glossarion_mobile.services.dispatcher import LogBuffer, LogLine, UiDispatcher
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.theme import HIT_TARGET, mono_family
+from glossarion_mobile.ui.theme import HIT_TARGET, log_text
 
 __all__ = ["FILTERS", "LogConsole"]
 
@@ -161,12 +162,7 @@ class LogConsole(ft.Column):
             self._block_counts.pop(0)
 
     def _new_block(self) -> ft.Text:
-        return ft.Text(
-            "",
-            selectable=True,
-            font_family=mono_family(self._page_or_none()),
-            size=tokens.MONO_STYLE.size,
-        )
+        return log_text("", page=self._page_or_none())
 
     def _page_or_none(self) -> Any:
         try:

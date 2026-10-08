@@ -7,7 +7,9 @@ modified." The form opens with ``BookDetailsModel.editor_values()``; Save sends 
 the changed fields (``metadata_changed_values``) to ``save_metadata_json_atomic``
 (``original_*`` kept, ``<field>_translated`` set so a later compile does not
 translate over a manual value). A **metadata.json** segment edits the raw file
-(validated JSON, atomic replace).
+(validated JSON, atomic replace). The workspace is the book's resolved one
+(``LibraryService.workspace_for``), so an organized Library/Translated book edits the
+metadata.json of the workspace it came from.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import EmptyState
+from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import LibraryContext
 from glossarion_mobile.ui.library.overview_tab import hero_values, split_tags
 from glossarion_mobile.ui.screens.base import Screen
@@ -89,8 +92,18 @@ class MetadataEditorScreen(Screen):
     def actions(self) -> list:
         return [self.save_button]
 
+    @property
+    def workspace(self) -> str:
+        """The book's resolved output workspace (``LibraryService.workspace_for``; an organized
+        Library/Translated book edits the workspace it came from)."""
+        return pm.book_workspace(self.service, self.book) if self.book else ""
+
+    def _target(self) -> dict:
+        """The row carrying its resolved workspace, for the shared metadata calls (the row keeps its id)."""
+        return pm.workspace_row(self.service, self.book)
+
     def build_body(self) -> ft.Control:
-        if not self.book or not self.book.get("output_folder"):
+        if not self.book or not self.workspace:
             return EmptyState(icon="EDIT_OFF", title="No output workspace",
                               body="Metadata can be edited once this book has an output workspace.",
                               key="meta-none")
@@ -120,20 +133,21 @@ class MetadataEditorScreen(Screen):
         ], spacing=tokens.SPACING["md"], padding=16, expand=True)
 
     def did_show(self) -> None:
-        if self.book and self.book.get("output_folder"):
+        if self.book and self.workspace:
             self.ctx.spawn(self.load())
 
     async def load(self) -> None:
+        target = self._target()  # the workspace's metadata.json, also for an organized book
         try:
-            self.payload = await self.ctx.io(self.service.load_details_blocking, self.book, "preview")
+            self.payload = await self.ctx.io(self.service.load_details_blocking, target, "preview")
         except Exception as exc:
             log.info("metadata editor details failed: %s", exc)
             self.payload = {}
-        model = self.service.details_model(self.book, self.payload)
-        self.initial = editor_values(self.book, self.payload, model)
+        model = self.service.details_model(target, self.payload)
+        self.initial = editor_values(target, self.payload, model)
         for field, control in self.fields.items():
             control.value = self.initial.get(field, "")
-        path = os.path.join(str(self.book.get("output_folder")), "metadata.json")
+        path = os.path.join(self.workspace, "metadata.json")
 
         def read() -> str:
             try:
@@ -172,13 +186,13 @@ class MetadataEditorScreen(Screen):
             if self.mode == "json":
                 text = str(self.json_field.value or "")
                 json.loads(text)
-                result = await self.ctx.io(self.service.save_metadata_json_text_blocking, self.book, text)
+                result = await self.ctx.io(self.service.save_metadata_json_text_blocking, self._target(), text)
                 self.json_text = text
             else:
                 edits = self.edits()
                 if not edits:
                     return None
-                result = await self.ctx.io(self.service.save_metadata_blocking, self.book, edits, self.payload)
+                result = await self.ctx.io(self.service.save_metadata_blocking, self._target(), edits, self.payload)
                 if isinstance(result, Mapping):
                     self.book["metadata_json"] = dict(result)
                 self.initial = self.current_values()

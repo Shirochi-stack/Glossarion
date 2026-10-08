@@ -12,6 +12,13 @@ module only shapes it for the screen:
   ``qa_scanner_settings.custom_mode_settings`` (fractions) and the sheet's percents
   exactly like the desktop Custom dialog's load and "Start Scan" save;
 * pre-run checks with the desktop dialog texts (no source for word count, name mismatch);
+* the Quick Scan duplicate-check sample size on mobile (owner 2026-10-08): 0 (duplicate check
+  off) when config.json has none (``job_kinds.qa.MOBILE_QUICK_SAMPLE_SIZE``; the desktop keeps
+  1000), a one-time migration of a saved desktop 1000 to 0 (``migrate_quick_sample_size``, flag
+  in Prefs), still editable in Tools › QA Scanner and Settings › QA Scanner Settings;
+* chat QA (owner 2026-10-08): ``chat_qa_job`` is the ``qa_scan`` job a chat submits for its own
+  workspace - Quick Scan with the same sample size as Tools › QA Scanner, the Direct Text
+  workspace flagged so the shared scan path's opt-in lets it through;
 * reports: ``<folder>/<folder>_Scan Report/validation_results.html`` (+ ``.json``), the
   summary the report viewer shows, and the report HTML prepared for the WebView
   (file links post an "open" event instead of navigating; a CSP nonce lets only that
@@ -21,44 +28,65 @@ module only shapes it for the screen:
 from __future__ import annotations
 
 import html as html_lib
+import inspect
 import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Union
 
-from glossarion_mobile.job_kinds.qa import REPORT_FILE, SOURCE_DEPENDENT_CHECKS, report_path_for
+from glossarion_mobile.job_kinds.qa import (
+    MOBILE_QUICK_SAMPLE_SIZE,
+    QUICK_SAMPLE_KEY,
+    REPORT_FILE,
+    SOURCE_DEPENDENT_CHECKS,
+    report_path_for,
+    saved_quick_sample_size,
+    with_mobile_qa_defaults,
+)
 
 __all__ = [
+    "CHAT_QA_MODE",
+    "CHAT_QA_SAMPLE_SIZE",
+    "CHAT_QA_UNAVAILABLE",
     "CUSTOM_LIMITS",
     "CUSTOM_THRESHOLDS",
+    "DESKTOP_QUICK_SAMPLE_SIZE",
     "DISPLAY_ORDER",
     "EVENT_PREFIX",
     "MISMATCH_TITLE",
+    "MOBILE_QUICK_SAMPLE_SIZE",
     "MODE_CARDS",
     "ModeCard",
     "NO_SOURCE_TITLE",
     "QA_FAILED_FILTER",
     "QUICK_SAMPLE_HINT",
+    "QUICK_SAMPLE_KEY",
     "QUICK_SAMPLE_LABEL",
+    "QUICK_SAMPLE_MIGRATION_PREF",
     "ReportEntry",
     "ReportRow",
     "ReportSummary",
     "annotate_report_html",
+    "chat_qa_job",
+    "chat_qa_summary_line",
     "custom_defaults",
     "custom_saved",
     "custom_values",
     "effective_settings",
     "list_reports",
     "load_report_summary",
+    "migrate_quick_sample_size",
     "mismatch_text",
     "names_match",
     "needs_source",
     "no_source_text",
     "parse_report_event",
     "qa_spec",
+    "quick_sample_size",
     "report_folder",
     "report_path_for",
+    "sample_size_text",
 ]
 
 #: The Book page Chapters filter a QA report's "Open in Chapters" selects: the Failed chip
@@ -131,16 +159,65 @@ def _runtime() -> Any:
 
 
 def effective_settings(config: Mapping[str, Any]) -> dict:
-    """The settings a scan starts from: ``normalize_qa_scan_settings`` over the saved ones."""
+    """The settings a scan starts from: ``normalize_qa_scan_settings`` over the saved ones (+ the
+    mobile Quick Scan sample size when none is saved, as the job applies it)."""
     saved = dict((config or {}).get("qa_scanner_settings") or {})
     runtime = _runtime()
     if runtime is None:
-        return saved
+        return with_mobile_qa_defaults(saved, config)
     try:
         language = (config or {}).get("output_language") or os.getenv("OUTPUT_LANGUAGE", "")
-        return runtime.normalize_qa_scan_settings(saved, target_language=language)
+        return with_mobile_qa_defaults(runtime.normalize_qa_scan_settings(saved, target_language=language), config)
     except Exception:
-        return saved
+        return with_mobile_qa_defaults(saved, config)
+
+
+#: Prefs flag (``mobile_state.json``) of the one-time migration below.
+QUICK_SAMPLE_MIGRATION_PREF = "qa_quick_sample_size_mobile_default"
+#: The desktop default (``qa_scan_runtime.default_qa_scan_settings``) the U6-U9 QA screen saved
+#: from its field on every Start / blur, so a phone's config.json very likely holds it.
+DESKTOP_QUICK_SAMPLE_SIZE = 1000
+
+
+def quick_sample_size(config: Optional[Mapping[str, Any]]) -> Any:
+    """The Quick Scan sample size a mobile scan uses: the saved one, else ``MOBILE_QUICK_SAMPLE_SIZE``."""
+    saved = saved_quick_sample_size(config)
+    return MOBILE_QUICK_SAMPLE_SIZE if saved is None else saved
+
+
+def migrate_quick_sample_size(get_cfg: Callable[..., Any], set_cfg: Callable[[Any, Any], Any],
+                              prefs: Any) -> bool:
+    """One-time mobile migration (owner 2026-10-08): a saved sample size of exactly 1000 becomes 0.
+
+    ``get_cfg(key, default)`` / ``set_cfg(key, value)`` take the config path tuple
+    (``MobileConfigStore.get``/``set``, ``ToolsContext.cfg``/``set_cfg``). The flag goes into Prefs
+    (never config.json) whatever was saved, so a 1000 the owner types later stays 1000. Without
+    Prefs nothing happens (the run could not be recorded). True when the value was changed.
+    """
+    if prefs is None:
+        return False
+    try:
+        if prefs.get(QUICK_SAMPLE_MIGRATION_PREF):
+            return False
+        value = get_cfg(QUICK_SAMPLE_KEY, None)
+        changed = False
+        if type(value) is int and value == DESKTOP_QUICK_SAMPLE_SIZE:
+            set_cfg(QUICK_SAMPLE_KEY, MOBILE_QUICK_SAMPLE_SIZE)
+            changed = True
+        prefs.set(QUICK_SAMPLE_MIGRATION_PREF, True)
+        return changed
+    except Exception:
+        return False
+
+
+def sample_size_text(value: Any) -> str:
+    """The Quick Scan duplicate-check setting in plain words (desktop hint: -1 = all text, 0 = off)."""
+    text = str(value).strip()
+    if text == "0":
+        return "duplicate check off (sample size 0)"
+    if text == "-1":
+        return "duplicate check on the full text (sample size -1)"
+    return f"duplicate check sample size {text}"
 
 
 def needs_source(settings: Mapping[str, Any]) -> bool:
@@ -235,11 +312,87 @@ def qa_spec(targets: Sequence[Any], mode: str, *, disable_word_count: bool = Fal
     title = str(getattr(first, "title", "") or os.path.basename(folders[0]))
     if len(folders) > 1:
         title = f"{title} +{len(folders) - 1}"
-    params = {"mode": mode, "targets": [t.to_param() for t in targets if getattr(t, "folder", "")]}
+    params = {"mode": mode, "targets": [_target_param(t) for t in targets if getattr(t, "folder", "")]}
     if disable_word_count:
         params["disable_word_count"] = True
     return JobSpec(kind="qa_scan", title=title, inputs=tuple(folders), params=params,
                    origin=dict(origin or {"type": "tools", "tool": "qa", "label": "Tools · QA Scanner"}))
+
+
+def _target_param(target: Any) -> dict:
+    """``ToolTarget.to_param()``, + ``"direct_text": True`` for a Direct Text workspace (only the chat
+    submits one: Tools › QA Scanner's ``qa_eligibility`` keeps them out of its picks)."""
+    param = target.to_param()
+    if getattr(target, "direct_text", False):
+        param["direct_text"] = True
+    return param
+
+
+# ---- chat QA (owner 2026-10-08) ------------------------------------------------------------------
+
+#: A scan started from the chat runs Quick Scan ...
+CHAT_QA_MODE = "quick-scan"
+#: ... with the mobile sample size (0 = duplicate check off) unless the owner saved another one in
+#: Tools › QA Scanner / Settings › QA Scanner Settings (the job reads the same value).
+CHAT_QA_SAMPLE_SIZE = MOBILE_QUICK_SAMPLE_SIZE
+#: Why a chat workspace cannot be scanned by a build whose shared scanner lacks the opt-in.
+CHAT_QA_UNAVAILABLE = "Available once this book is in the Library"
+
+
+def _allows_direct_text(runtime: Any) -> bool:
+    """The shared scan loop has the ``allow_direct_text`` opt-in (``qa_scan_runtime.run_bulk_qa_scan``;
+    a wrapper that forwards ``**kwargs`` - instrumentation, a decorator without ``functools.wraps`` -
+    passes it on too)."""
+    loop = getattr(runtime, "run_bulk_qa_scan", None)
+    if not callable(loop):
+        return False
+    try:
+        parameters = inspect.signature(loop).parameters
+    except (TypeError, ValueError):
+        return False
+    return "allow_direct_text" in parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
+def chat_qa_job(folder: str, source: Optional[str], *, cid: str,
+                chat_title: str) -> Union[tuple, str]:
+    """The ``qa_scan`` job a chat submits for one of its workspaces, as the chat's
+    ``env.jobs.submit(kind, title, inputs, params, origin)`` parts; else the reason it cannot run.
+
+    Quick Scan (``CHAT_QA_MODE``); the sample size is not fixed here: the job reads the saved
+    value, else the mobile default, so the chat scans like Tools › QA Scanner does. A Direct Text
+    workspace (``Output/Direct Text/<chat>/Attachments/<book>``) is flagged ``direct_text`` so the
+    job opts out of the shared scan path's Direct Text guard; a workspace the Library already
+    holds scans like any book. Without a source the word-count check is off for the run (one tap
+    asks no question). The origin has no ``params["chat_id"]``: the chat's JobStrip shows the job.
+    Pure: no disk access (the job logs a missing source and scans without it).
+    """
+    from glossarion_mobile.ui.tools.targets import ToolTarget
+
+    if not folder:
+        return "No output folder to scan"
+    runtime = _runtime()
+    if runtime is None:
+        return "The QA scanner is not in this build"
+    is_direct_text = getattr(runtime, "is_direct_text_qa_path", None)
+    folder = os.path.abspath(os.fspath(folder))
+    source = os.path.abspath(os.fspath(source)) if source else ""
+    direct_text = bool(callable(is_direct_text) and (is_direct_text(folder) or (source and is_direct_text(source))))
+    if direct_text and not _allows_direct_text(runtime):
+        return CHAT_QA_UNAVAILABLE
+    target = ToolTarget(title=os.path.basename(folder.rstrip("/\\")) or folder, folder=folder, source=source,
+                        origin="chat", direct_text=direct_text)
+    title = str(chat_title or "").strip()
+    spec = qa_spec([target], CHAT_QA_MODE, disable_word_count=not source,
+                   origin={"type": "chat", "cid": cid, "label": f"Chat · {title}" if title else "Chat"})
+    return spec.kind, spec.title, tuple(spec.inputs), dict(spec.params), dict(spec.origin)
+
+
+def chat_qa_summary_line(config: Optional[Mapping[str, Any]] = None) -> str:
+    """What a chat scan runs, in plain words: ``Quick Scan · duplicate check off (sample size 0)``
+    (``config``: the saved settings; without it, the mobile default)."""
+    size = quick_sample_size(config) if config is not None else CHAT_QA_SAMPLE_SIZE
+    return f"{MODES_BY_VALUE[CHAT_QA_MODE].title.title()} · {sample_size_text(size)}"
 
 
 # ---- reports -------------------------------------------------------------------------------------

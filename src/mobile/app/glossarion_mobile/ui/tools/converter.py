@@ -49,6 +49,10 @@ _KIND_LABELS = {"epub": "EPUB workspace", "pdf": "PDF workspace", "txt": "Text w
 #: The job kinds this screen submits (a reopened screen follows a queued / running one of its folder).
 CONVERTER_KINDS = ("compile_epub", "compile_pdf", "validate_epub", "rename_outputs", "md_txt_sidecars",
                    "br_to_paragraphs")
+#: Result-card files the Reader opens ("Open in Reader"; a compiled ``*_translated.txt`` included).
+READER_OUTPUT_EXTENSIONS = (".epub", ".txt")
+#: Result-card files: the compiled EPUB / PDF, and a TXT book when a job lists one.
+RESULT_EXTENSIONS = (".epub", ".pdf", ".txt")
 
 
 def converter_eligibility(target: tg.ToolTarget) -> Optional[str]:
@@ -410,7 +414,7 @@ class ConverterScreen(Screen):
                                     f"converted, {audit.get('unchanged', 0)} unchanged, {audit.get('failed', 0)} failed "
                                     f"({audit.get('scanned', 0)} scanned)", theme_style=ft.TextThemeStyle.BODY_SMALL))
         else:
-            outputs = cm.outputs_of(getattr(snap, "outputs", ()) or ())
+            outputs = cm.outputs_of(getattr(snap, "outputs", ()) or (), RESULT_EXTENSIONS)
             if not outputs:
                 rows.append(ft.Text(f"{snap.state_label}: no compiled file" + (f" — {snap.error}" if snap.error else ""),
                                     key="cv-no-output"))
@@ -436,8 +440,9 @@ class ConverterScreen(Screen):
                                         icon=option.icon, disabled_reason=option.disabled_reason,
                                         key=f"export-{option.id}"))
         epub = path.lower().endswith(".epub")
+        readable = path.lower().endswith(READER_OUTPUT_EXTENSIONS)  # the Reader opens TXT books too
         items.append(ActionItem("Open in Reader", lambda: self.ctx.open_reader(path=path), icon="AUTO_STORIES",
-                                disabled_reason=None if epub else "EPUB files only", key="open-reader"))
+                                disabled_reason=None if readable else "EPUB and TXT files only", key="open-reader"))
         items.append(ActionItem("Add to Library", lambda: self.ctx.spawn(self.add_to_library(path)),
                                 icon="LIBRARY_ADD", disabled_reason=None if (epub and files is not None)
                                 else "Only EPUB files go to the Completed shelf", key="add-library"))

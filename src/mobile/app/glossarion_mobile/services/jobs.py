@@ -78,6 +78,10 @@ from glossarion_mobile.services.dispatcher import LogBuffer
 
 __all__ = [
     "ACTIVE_STATE_FILE",
+    "AUTO_ACCEPT_GLOSSARY_PARAM",
+    "GLOSSARY_ACCEPTED_LINE",
+    "GLOSSARY_AUTO_ACCEPTED_LINE",
+    "GLOSSARY_QUESTION_KINDS",
     "HISTORY_LIMIT",
     "HISTORY_STATE_FILE",
     "INTERRUPTED_STATE_FILE",
@@ -97,7 +101,9 @@ __all__ = [
     "ISSUE_LABELS",
     "classify_issue",
     "format_duration",
+    "is_glossary_question",
     "issue_label",
+    "notification_text",
     "progress_line",
     "status_key",
     "strip_model_for",
@@ -157,6 +163,36 @@ def sign_in_event(job_model: Optional[str], provider: str, line: str = "") -> di
     except Exception:
         account_id = 0
     return {"provider": provider, "account_id": account_id, "line": str(line or "")[:200]}
+
+
+# ---------------------------------------------------------------------------
+# Glossary questions (the shared gate's ``host.ask`` kinds)
+# ---------------------------------------------------------------------------
+
+#: Blocking job questions the glossary approval card answers: the chat run's Direct Text gate
+#: (``translation_pipeline._await_direct_text_glossary_approval`` -> ``_ui_request`` -> ``host.ask``) and
+#: the Library "Review glossary before translating" gate (``job_kinds.translate.GLOSSARY_REVIEW_QUESTION``).
+#: The one home of the kinds (contract C1): the chat run controller, the chat cards, the Jobs feature and
+#: the notifications import them from here.
+GLOSSARY_QUESTION_KINDS = ("glossary_approval", "direct_text_glossary_approval")
+
+#: ``JobSpec.params`` flag of a chat send (``run_request.job_params``, captured at Send from the chat's
+#: "Always accept generated glossaries" setting): ``_job_ask`` answers the glossary gate Yes itself.
+AUTO_ACCEPT_GLOSSARY_PARAM = "auto_accept_glossary"
+#: The desktop's own log line for an accepted generated glossary (``translator_gui._resolve_glossary_approval``;
+#: ``tests_host/test_glossary_auto_accept.py`` checks the desktop source still has it).
+GLOSSARY_ACCEPTED_LINE = "✅ Direct Text: generated glossary accepted"
+GLOSSARY_AUTO_ACCEPTED_LINE = GLOSSARY_ACCEPTED_LINE + " (Always accept is on)"
+
+
+def is_glossary_question(kind: Any) -> bool:
+    """The pipeline's Direct Text glossary gate (``_ui_request`` kind), whatever its exact name."""
+    value = str(kind or "").lower()
+    return value in GLOSSARY_QUESTION_KINDS or ("glossary" in value and "approv" in value)
+
+
+def _question_kind(question: Any) -> str:
+    return str(question.get("kind") or "") if isinstance(question, Mapping) else ""
 
 
 class JobKind(str, enum.Enum):
@@ -676,10 +712,12 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     parts: list[str] = []
     if snap.question:
         question = snap.question if isinstance(snap.question, Mapping) else {}
-        if question.get("kind") == "async_batch_question":  # Tools › Async batch asks the dialog's question
-            title = str((question.get("data") or {}).get("title") or "")
-            return f"Waiting for your answer: {title}" if title else "Waiting for your answer"
-        return "Waiting for your glossary decision"
+        if is_glossary_question(_question_kind(question)):
+            return "Waiting for your glossary decision"
+        # Tools › Async batch asks the dialog's question (``async_batch_question``)
+        data = question.get("data")
+        title = str((data if isinstance(data, Mapping) else {}).get("title") or "")
+        return f"Waiting for your answer: {title}" if title else "Waiting for your answer"
     if snap.state is JobState.STOPPING:
         parts.append("Stopping after current request…")
     elif snap.state is JobState.FORCE_STOPPING:
@@ -702,7 +740,9 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
 
 
 def notification_text(snap: JobSnapshot) -> str:
-    """Ongoing FGS text: "Translating *Book*: 12/80 chapters · 3 in flight" (UI_SPEC §1.9)."""
+    """Ongoing FGS text: "Translating *Book*: 12/80 chapters · 3 in flight" (UI_SPEC §1.9); while the job
+    asks, "waiting for your glossary decision" (glossary gates) or "waiting for your answer" (other kinds,
+    e.g. Tools › Async batch)."""
     text = f"{kind_verb(snap.kind)} {snap.title}"
     progress = snap.progress
     details: list[str] = []
@@ -715,7 +755,8 @@ def notification_text(snap: JobSnapshot) -> str:
     elif snap.state is JobState.FORCE_STOPPING:
         details.append("force stopping")
     if snap.question:
-        details = ["waiting for your glossary decision"]
+        details = ["waiting for your glossary decision" if is_glossary_question(_question_kind(snap.question))
+                   else "waiting for your answer"]
     return f"{text}: {' · '.join(details)}" if details else text
 
 
@@ -1279,7 +1320,9 @@ class JobService:
         return self._remover(self._question_listeners, callback)
 
     def on_event(self, callback: EventListener) -> Callable[[], None]:
-        """``callback(job_id, kind, data)`` for job events the service does not consume itself."""
+        """``callback(job_id, kind, data)`` for job events the service does not consume itself, plus its own
+        ``sign_in_required`` and ``question_resolved`` (``{"id", "kind"}``: a delivered question was
+        answered or given up)."""
         self._event_listeners.append(callback)
         return self._remover(self._event_listeners, callback)
 
@@ -1695,8 +1738,27 @@ class JobService:
             return dict(job.question) if job is not None and job.question else None
 
     def _job_ask(self, job: _Job, kind: str, data: Mapping[str, Any]) -> Any:
+        """The job thread's blocking question (``host.ask``): delivered to the question listeners (the
+        chat's approval card, the Book page / Jobs sheet, the notification) and answered by ``answer``;
+        Stop gives up with the default. A delivered question ends with the job event
+        ``question_resolved`` ``{"id", "kind"}`` (posted, so it also arrives while the UI loop's pump is
+        parked, e.g. to cancel its notification).
+
+        "Always accept generated glossaries" (``params["auto_accept_glossary"]``, set at Send by a chat
+        whose setting is on): a glossary gate is answered Yes here, on the job thread, with the desktop's
+        accepted log line; nothing is delivered (no card, no notification, no UI loop needed, so it works
+        with the screen off). Mobile divergence: the chat's request cards are then not frozen at the gate
+        (``RunController.commit_gate`` = desktop ``_commit_active_request_phase`` runs only when the card
+        shows). Other kinds (``async_batch_question``) always ask.
+        """
         data = dict(data)
         default = data.pop("default", None)
+        params = job.spec.params if isinstance(job.spec.params, Mapping) else {}
+        if is_glossary_question(kind) and params.get(AUTO_ACCEPT_GLOSSARY_PARAM):
+            if job.stop_event.is_set():
+                return default  # stopping: the gate gives up like an unanswered question
+            self._job_log(job, GLOSSARY_AUTO_ACCEPTED_LINE, {})
+            return True
         if not self._question_listeners:
             return default
         question = {"id": uuid.uuid4().hex[:12], "job_id": job.id, "kind": kind, "data": data,
@@ -1720,6 +1782,7 @@ class JobService:
                 self._answers.pop(question["id"], None)
                 job.question = None
                 job.warning = False
+            self._post(self._deliver_event, job.id, "question_resolved", {"id": question["id"], "kind": kind})
             self._changed()
 
     def _deliver_question(self, snap: JobSnapshot, question: Mapping[str, Any]) -> None:

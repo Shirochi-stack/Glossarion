@@ -1,10 +1,10 @@
 """Quick-action chips above the composer (UI_SPEC §2.7).
 
 With an attachment in the composer: **Translate** · **Extract glossary first** (books) ·
-**Translate as manga** (images / CBZ) · **Open in Reader** (EPUB). At most five, in a scrolling
+**Translate as manga** (images / CBZ) · **Open in Reader** (EPUB / TXT). At most five, in a scrolling
 row, dismissible (× hides them until the attachment changes). The chat decides what each chip
 does (``ChatView._on_quick_chip``): the ＋ sheet tools for glossary and manga (the manga tool
-receives the attachment), Send for Translate, the Reader for an EPUB.
+receives the attachment), Send for Translate, the Reader for an EPUB or TXT.
 
 ``chips_for_attachment`` is pure (host-tested); ``QuickChips`` is the row.
 """
@@ -30,7 +30,7 @@ QUICK_CHIPS = (
 )
 _GLOSSARY_SOURCES = (".epub", ".pdf", ".txt", ".md", ".html", ".htm", ".xhtml", ".zip", ".csv", ".json")
 _MANGA_SOURCES = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".cbz")
-_READER_SOURCES = (".epub",)
+_READER_SOURCES = (".epub", ".txt")
 
 
 def chips_for_attachment(path: Optional[str]) -> list:

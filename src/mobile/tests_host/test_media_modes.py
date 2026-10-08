@@ -654,13 +654,31 @@ def test_migrate_attachment_and_delete_workspace(desktop_store_cls, tmp_path, mo
 # ==========================================================================
 
 
+def _walk_controls(control):
+    """Every control under ``control`` (content / controls / title / leading ...)."""
+    yield control
+    for name in ("content", "controls", "title", "subtitle", "leading", "trailing", "actions"):
+        value = getattr(control, name, None)
+        for child in value if isinstance(value, (list, tuple)) else ([value] if value is not None else []):
+            if hasattr(child, "__dict__") and not isinstance(child, str):
+                yield from _walk_controls(child)
+
+
 @needs_flet
 def test_attachments_guard_sees_every_job_writing_the_workspace(tmp_path):
-    """U7 review (UI_SPEC §2.17 "Migrating is blocked while a job is writing that workspace"): not
-    only the chat's own run but any active / queued job whose folder is the workspace or inside it
-    (the job card's Compile, ＋ › Retranslate chapters) blocks Migrate and Delete workspace, per
-    workspace."""
-    from glossarion_mobile.ui.chat.attachments import BUSY_REASON, AttachmentsScreen, job_writes_into
+    """U7 review (UI_SPEC §2.17 "blocked while a job is writing that workspace"): not only the chat's
+    own run but any active / queued job whose folder is the workspace or inside it (the job card's
+    Compile, ＋ › Retranslate chapters) blocks the merge and Delete workspace, per workspace.
+    Device report #4: the cards have no Migrate button (finished books move by themselves)."""
+    from glossarion_mobile.ui.chat.attachments import (
+        BUSY_REASON,
+        INTRO,
+        JOBS_RUNNING_TEXT,
+        MERGE_ACTION,
+        AttachmentsScreen,
+        job_writes_into,
+        workspace_busy,
+    )
     from glossarion_mobile.ui.chat.chat_view import ChatView
     from glossarion_mobile.ui.components.reason_chip import ReasonChip
 
@@ -691,8 +709,15 @@ def test_attachments_guard_sees_every_job_writing_the_workspace(tmp_path):
     assert ChatView._workspace_busy(view, "2", str(book)) and not ChatView._workspace_busy(view, "2", str(other))
     view.env.runs = types.SimpleNamespace(live_run=lambda cid: object())  # the chat's own run: every workspace
     assert ChatView._workspace_busy(view, "2", str(other))
+    # the module rule the Attachments screen and the Library auto-migrate share; ended jobs never count
+    idle_runs = types.SimpleNamespace(live_run=lambda cid: None)
+    assert workspace_busy(idle_runs, adapter, "2", str(book)) and not workspace_busy(idle_runs, adapter, "2", str(other))
+    assert workspace_busy(view.env.runs, adapter, "2", str(other))
+    ended = types.SimpleNamespace(spec=compile_job.spec, output_dir=None, output_dirs={}, state="DONE")
+    assert not workspace_busy(idle_runs, types.SimpleNamespace(pending=lambda: [ended]), "2", str(book))
 
-    migrated, notes = [], []
+    migrated, notes, merged_into = [], [], []
+    targets = {str(other): ""}
 
     class Chats:
         def session(self, cid):
@@ -705,28 +730,71 @@ def test_attachments_guard_sees_every_job_writing_the_workspace(tmp_path):
             return []
 
         def migration_target(self, cid, folder):
-            return ""
+            return targets.get(folder, "")
 
         def migrate_attachment(self, cid, folder, confirm=None):
             migrated.append(folder)
-            return {"ok": True, "notices": []}
+            if confirm is not None:
+                merged_into.append(folder)
+            return {"ok": True, "notices": [{"title": "Attachment migrated",
+                                             "text": f"The attachment workspace was moved to:\n{tmp_path / 'Out' / 'x'}"}]}
 
     async def io(fn, *args):
         return fn(*args)
 
+    moved = []
+
     async def scenario():
         screen = AttachmentsScreen(None, chats=Chats(), cid="2", run_io=io, notify=notes.append,
-                                   busy=lambda folder: job_writes_into(compile_job, folder))
-        screen.get_body()
+                                   busy=lambda folder: job_writes_into(compile_job, folder),
+                                   on_migrated=lambda target, source: moved.append(target))  # still accepted
+        body = screen.get_body()
+        assert body.controls[0].value == INTRO and "Library" in INTRO
         screen.reload_sync()
-        busy_row = screen.cards[str(book)].content.controls[2].controls
-        free_row = screen.cards[str(other)].content.controls[2].controls
-        assert busy_row[0].content.disabled and isinstance(busy_row[1], ReasonChip)
-        assert busy_row[1].reason == BUSY_REASON
-        assert not free_row[0].content.disabled and len(free_row) == 1
+        busy_card = screen.cards[str(book)].content.controls
+        free_card = screen.cards[str(other)].content.controls
+        assert isinstance(busy_card[2].controls[0], ReasonChip) and busy_card[2].controls[0].reason == BUSY_REASON
+        assert len(free_card) == 2  # name row + summary: no button row
+        for folder in (book, other):  # no Migrate button (nor its destination long-press)
+            for control in _walk_controls(screen.cards[str(folder)]):
+                assert "migrate" not in str(getattr(control, "key", "") or "").lower()
+                texts = [getattr(control, name, None) for name in ("content", "value", "text")]
+                assert not any(isinstance(t, str) and "Migrate" in t for t in texts)
+                assert getattr(control, "on_long_press_start", None) is None
+        labels = [item.label for item in screen.more_items(str(other))]
+        assert labels == ["Open in Reader", "Progress", "Share output", "Delete workspace"]
+        # a different Library book already has the name: ⋯ offers the desktop merge dialog
+        targets[str(other)] = str(tmp_path)  # exists
+        items = {item.label: item for item in screen.more_items(str(other))}
+        assert MERGE_ACTION in items and items[MERGE_ACTION].disabled_reason is None
+        assert {i.label: i for i in screen.more_items(str(book))}["Delete workspace"].disabled_reason == BUSY_REASON
+        dialog = screen.migrate(str(other))
+        assert dialog is not None and dialog.title == "Attachment folder already exists" and migrated == []
         assert screen.migrate(str(book)) is None and notes[-1] == BUSY_REASON and migrated == []
         assert (await screen.run_migrate(str(book)))["ok"] is False and migrated == []
-        assert (await screen.run_migrate(str(other)))["ok"] is True and migrated == [str(other)]
+        assert (await screen.run_migrate(str(other), merge=True))["ok"] is True and migrated == [str(other)]
+        assert merged_into == [str(other)] and moved == [str(tmp_path / "Out" / "x")]
+        # the move never runs while a job owns the process environment (job_runner.JOB_LOCK)
+        import threading
+
+        import job_runner
+
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with job_runner.JOB_LOCK:
+                held.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        assert held.wait(5)
+        try:
+            assert (await screen.run_migrate(str(other)))["ok"] is False and notes[-1] == JOBS_RUNNING_TEXT
+            assert migrated == [str(other)]
+        finally:
+            release.set()
+            holder.join(5)
 
     asyncio.run(scenario())
 
@@ -1444,3 +1512,416 @@ def test_transcript_cards_stay_live_across_rerenders(app_env, desktop_store_cls,
             await tf._stop(app)
 
     asyncio.run(scenario())
+
+
+# ==========================================================================
+# Device report #4: chat books move into the Library by themselves (no Migrate step)
+# ==========================================================================
+
+
+@pytest.fixture
+def iso_env(tmp_path, monkeypatch):
+    """Real data stays untouched: the Library, the output root and HOME live under tmp_path."""
+    out = tmp_path / "Out"
+    library = tmp_path / "Library"
+    home = tmp_path / "home"
+    for folder in (out, library, home):
+        folder.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(out))
+    monkeypatch.delenv("OUTPUT_DIR", raising=False)
+    monkeypatch.setenv("GLOSSARION_LIBRARY_DIR", str(library))
+    for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"):
+        monkeypatch.setenv(key, str(home))
+    monkeypatch.setenv("GLOSSARION_HTTP_LOG", "0")
+    return types.SimpleNamespace(out=out, library=library, home=home)
+
+
+class _IdleJobs(FakeJobService):
+    """FakeJobService plus ``JobService.view`` (active / queue / history) and ``on_transition``."""
+
+    def __init__(self):
+        super().__init__()
+        self.active = None
+        self.queued = []
+        self.history = []
+        self.transitions = []
+
+    def view(self):
+        return types.SimpleNamespace(active=self.active, queue=tuple(self.queued), interrupted=(),
+                                     history=tuple(self.history))
+
+    def on_transition(self, callback):
+        self.transitions.append(callback)
+        return lambda: self.transitions.remove(callback) if callback in self.transitions else None
+
+
+def _chat_feature(adapter, jobs, tmp_path, **app_fields):
+    """ChatFeature over the desktop store on a bare app (no page / dispatcher: work runs inline)."""
+    from glossarion_mobile.ui.chat.integration import ChatFeature
+
+    notes, routes = [], []
+    app = types.SimpleNamespace(
+        page=None, dispatcher=None, state=None, chat_view=None, shell=None, settings=None, prefs=None, library=None,
+        paths=types.SimpleNamespace(data=str(tmp_path / "data"), temp=str(tmp_path / "tmp"), cache=str(tmp_path / "cache")),
+        notify=lambda *args: notes.append(args), navigate_to=lambda *args, **kw: routes.append(args),
+    )
+    for key, value in app_fields.items():
+        setattr(app, key, value)
+    feature = ChatFeature(app, chats=adapter, jobs=jobs, oauth=types.SimpleNamespace())
+    feature.attach()
+    return feature, app, notes, routes
+
+
+def _write_workspace(folder: Path, raw: Path, *, done=2, total=2, compiled="book.epub") -> Path:
+    """A finished chat workspace: progress file, a response, a compiled EPUB, ``source_epub.txt``."""
+    folder.mkdir(parents=True, exist_ok=True)
+    chapters = {str(i): {"status": "completed" if i <= done else "pending", "output_file": f"response_{i:03d}.html"}
+                for i in range(1, total + 1)}
+    (folder / "translation_progress.json").write_text(json.dumps({"chapters": chapters}), encoding="utf-8")
+    (folder / "response_001.html").write_text("<p>one</p>", encoding="utf-8")
+    if compiled:
+        (folder / compiled).write_bytes(b"PK\x03\x04compiled")
+    (folder / "source_epub.txt").write_text(str(raw), encoding="utf-8")
+    return folder
+
+
+def _book_workspace(adapter, tmp_path) -> tuple:
+    """Chat 2's ``Attachments/book`` (from its ``book.epub`` turn) as a finished translation."""
+    raw = tmp_path / "book.epub"
+    workspace = Path(adapter.attachment_folders("2")[0])
+    _write_workspace(workspace, raw)
+    return workspace, raw
+
+
+def test_glossary_predicate_has_one_home():
+    """Contract C1: run_controller re-exports the services.jobs predicate (no second copy)."""
+    from glossarion_mobile.services import jobs as jobs_service
+    from glossarion_mobile.ui.chat import run_controller
+
+    assert run_controller.is_glossary_question is jobs_service.is_glossary_question
+    assert run_controller._GLOSSARY_QUESTION_KINDS == jobs_service.GLOSSARY_QUESTION_KINDS
+    assert run_controller.is_glossary_question("direct_text_glossary_approval")
+
+
+def test_finished_attachment_run_moves_into_the_library(desktop_store_cls, tmp_path, iso_env):
+    """The owner's complaint: a chat EPUB translation reaches the Library with no Migrate tap. A DONE
+    run commits into ``Attachments/<stem>``, ``subscribe_finished`` fires and the desktop Migrate moves
+    the tree into the output folder: the stored paths follow, the raw stays in the Inbox (no
+    "X (2)" copy), the Library scan lists the book and the snackbar offers "Open book"."""
+    _TC._desktop_history(tmp_path)
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    jobs = _IdleJobs()
+    feature, app, notes, _routes = _chat_feature(adapter, jobs, tmp_path)
+    runs = feature.runs
+    assert runs.temp_dir == str(tmp_path / "data" / "direct_text_runs")
+    inbox = tmp_path / "Inbox"
+    inbox.mkdir()
+    raw = inbox / "Novel.epub"
+    raw.write_bytes(b"PK\x03\x04novel")
+    seen = []
+    runs.subscribe_finished(lambda cid, run, state: seen.append((cid, state, adapter.get(cid).running)))
+    run = asyncio.run(runs.send("5", text="", attachment={"name": "Novel.epub", "path": str(raw), "size": 12},
+                                settings=DirectTextSettings(), output_mode="text"))
+    jobs.publish("RUNNING")
+    generated = Path(run.run.temp_root) / "Novel"
+    _write_workspace(generated, raw, compiled="Novel.epub")
+    Path(run.run.expected_output).write_text("Translated novel", encoding="utf-8")
+    jobs.publish("DONE", progress={"total": 2, "completed": 2, "failed": 0})
+    _TC._finish_all(runs)
+    assert seen == [("5", "DONE", False)]  # after set_running(False)
+    target = iso_env.out / "Novel"
+    workspace = Path(adapter.output_folder("5")) / "Attachments" / "Novel"
+    assert not workspace.exists() and (target / "Novel.epub").is_file()
+    assert (target / "translation_progress.json").is_file()
+    assert adapter.attachment_folders("5") == []
+    folders = {m[4] for m in adapter.messages("5") if m[0] == "assistant" and len(m) > 4 and m[4]}
+    assert str(target) in folders and not any("Attachments" in Path(f).parts for f in folders)
+    assert run.output_folder == str(target)  # Compile / Reader from the card follow the move
+    assert raw.is_file() and not any(p.name.startswith("Novel (") for p in iso_env.out.iterdir())
+    assert not (iso_env.library / "Raw").exists() or not any((iso_env.library / "Raw").iterdir())
+    assert notes[-1] == ("Added to the Library",)  # no Library installed in this bare app: no "Open book"
+
+    from glossarion_mobile.services.library import LibraryService
+
+    import library_core
+
+    service = LibraryService(paths=types.SimpleNamespace(library=iso_env.library, output=iso_env.out,
+                                                         cache=tmp_path / "cache"), config={}, prefs=None)
+    service.ensure_env()
+    try:
+        snap = service.scan_blocking()
+        rows = [b for b in snap.all_books() if Path(str(b.get("output_folder") or b.get("path") or "")).parts[-2:]
+                in (("Out", "Novel"), ("Novel", "Novel.epub"))]
+        assert rows, [b.get("name") for b in snap.all_books()]
+        assert service.raw_source(rows[0]) == str(raw)  # the registry knows the Inbox raw
+    finally:
+        library_core.uninstall_library_env()
+    adapter.close()
+
+
+def test_auto_migrate_waits_while_a_job_holds_the_lock(desktop_store_cls, tmp_path, iso_env, monkeypatch):
+    """Regression for the race the skeptic probe showed: the shared Migrate reads the live
+    OUTPUT_DIRECTORY, which a running job points at its temporary run root. While JOB_LOCK is held,
+    a job is active, or OUTPUT_DIRECTORY names a run root, the move waits; the idle transition then
+    moves it into Output/<stem>."""
+    import threading
+
+    import job_runner
+
+    _TC._desktop_history(tmp_path)
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    jobs = _IdleJobs()
+    feature, app, notes, _routes = _chat_feature(adapter, jobs, tmp_path)
+    assert feature._on_job_transition in jobs.transitions  # subscribed at attach
+    workspace, _raw = _book_workspace(adapter, tmp_path)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with job_runner.JOB_LOCK:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held.wait(5)
+    try:
+        outcome = feature.auto_migrate_blocking("2", str(workspace))
+    finally:
+        release.set()
+        holder.join(5)
+    assert outcome["status"] == "deferred" and outcome["jobs_running"] and workspace.is_dir()
+    # a job is active (its env is set) although the lock is free for a moment
+    jobs.active = types.SimpleNamespace(id="j9", state="RUNNING", spec=types.SimpleNamespace(kind="translate", inputs=(),
+                                                                                            params={}))
+    assert feature.auto_migrate_blocking("2", str(workspace))["status"] == "deferred"
+    assert feature._on_job_transition(types.SimpleNamespace(state="DONE")) is None  # not idle yet
+    jobs.active = None
+    # OUTPUT_DIRECTORY still names a run root
+    run_root = Path(feature.runs.temp_dir) / "glossarion_input_output_next"
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(run_root))
+    assert feature.auto_migrate_blocking("2", str(workspace))["status"] == "deferred"
+    assert not (run_root / "book").exists() and workspace.is_dir()
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(iso_env.out))
+
+    async def idle():
+        assert feature._on_job_transition(types.SimpleNamespace(state="RUNNING")) is None
+        task = feature._on_job_transition(types.SimpleNamespace(state="DONE"))
+        return await task
+
+    outcomes = asyncio.run(idle())
+    assert [o["status"] for o in outcomes] == ["moved"]
+    assert not workspace.exists() and (iso_env.out / "book" / "book.epub").is_file()
+    assert notes[-1] == ("Added to the Library",)
+    adapter.close()
+
+
+def test_auto_migrate_merges_the_same_book_and_asks_for_another(desktop_store_cls, tmp_path, iso_env):
+    """A same-named Library folder of the SAME book (its source_epub.txt points at the same raw) is
+    merged into silently (the newest compiled document kept); a different book's folder is left
+    alone: the workspace stays in Attachments and the snackbar's action opens the desktop
+    "Attachment folder already exists" dialog, whose Merge and replace moves it."""
+    _TC._desktop_history(tmp_path)
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    jobs = _IdleJobs()
+    feature, app, notes, _routes = _chat_feature(adapter, jobs, tmp_path)
+    workspace, raw = _book_workspace(adapter, tmp_path)
+    existing = _write_workspace(iso_env.out / "book", raw, compiled="Old.epub")
+    os.utime(existing / "Old.epub", (1, 1))
+    (existing / "notes.txt").write_text("kept", encoding="utf-8")
+    outcome = feature.auto_migrate_blocking("2", str(workspace))
+    assert outcome["status"] == "moved" and outcome["reason"] == "merged" and not workspace.exists()
+    epubs = sorted(p.name for p in existing.glob("*.epub"))
+    assert epubs == ["book.epub"] and (existing / "notes.txt").is_file()
+
+    # a different book already owns Out/other
+    other_raw = tmp_path / "other.epub"
+    other_raw.write_bytes(b"PK\x03\x04other book")
+    stranger = tmp_path / "stranger.epub"
+    stranger.write_bytes(b"PK\x03\x04a different book")
+    second = _write_workspace(Path(adapter.output_folder("2")) / "Attachments" / "other", other_raw)
+    foreign = _write_workspace(iso_env.out / "other", stranger)
+    before = (foreign / "translation_progress.json").read_bytes()
+    outcome = feature.auto_migrate_blocking("2", str(second))
+    assert outcome["status"] == "collision" and second.is_dir()
+    assert (foreign / "translation_progress.json").read_bytes() == before
+    feature._announce(outcome)
+    feature._announce(outcome)  # once per workspace and session
+    collisions = [n for n in notes if n and str(n[0]).startswith("A Library book named")]
+    assert collisions == [notes[-1]] and notes[-1][:2] == ("A Library book named other already exists", "Merge…")
+    dialog = notes[-1][2]()
+    assert dialog.title == "Attachment folder already exists"
+    asyncio.run(dialog._on_confirm())
+    assert dialog.result is True and not second.exists() and (foreign / "source_epub.txt").read_text(
+        encoding="utf-8") == str(other_raw)
+    assert notes[-1] == ("Added to the Library",)
+    adapter.close()
+
+
+def test_auto_migrate_leaves_resumable_scratch_and_non_book_workspaces(desktop_store_cls, tmp_path, iso_env):
+    """Workspaces whose job card still offers Resume / Retry failed (stopped, done with failed
+    chapters, a failed job remembered after a relaunch), scratch chats and non-book attachments
+    (an image) stay in Attachments."""
+    from glossarion_mobile.ui.chat.run_controller import ChatRun
+    from glossarion_mobile.ui.chat.run_request import DirectTextRun
+    from glossarion_mobile.ui.chat.stream_bridge import RunStream
+
+    _TC._desktop_history(tmp_path)
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    jobs = _IdleJobs()
+    feature, app, notes, _routes = _chat_feature(adapter, jobs, tmp_path)
+    workspace, raw = _book_workspace(adapter, tmp_path)
+    runs = feature.runs
+
+    def session_run(state, failed=0):
+        prepared = DirectTextRun(temp_root=str(tmp_path / "runs" / "r1"), source_path=str(raw), source_extension=".epub",
+                                 is_attachment=True, expected_output="")
+        snap = types.SimpleNamespace(progress={"total": 2, "completed": 2 - failed, "failed": failed})
+        runs.runs["2"] = ChatRun(cid="2", run=prepared, stream=RunStream(), user_index=2, params={"run": {}},
+                                 state=state, finished=True, output_folder=str(workspace), last_snapshot=snap)
+
+    session_run("done", failed=1)  # "Finished with issues · 1 failed": Retry failed
+    assert runs.last_job_ending("2")[0] == "issues"
+    outcome = feature.auto_migrate_blocking("2", str(workspace))
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "its run can still be resumed")
+    session_run("stopped")
+    assert feature.auto_migrate_blocking("2", str(workspace))["status"] == "skipped"
+    # after a relaunch: JobService remembers the chat's failed job on this turn (Resume)
+    runs.runs.clear()
+    failed_job = types.SimpleNamespace(
+        id="old", state="FAILED", resolution=None, finished=5.0, started=1.0, created=1.0, progress=None,
+        spec=types.SimpleNamespace(kind="direct_text", title="book", inputs=(str(raw),),
+                                   origin={"type": "chat", "cid": "2", "label": "Chat · My novel"},
+                                   params={"chat_id": 2, "user_index": 2, "run": {"source_path": str(raw)}}))
+    assert feature.job_workspace(failed_job) == str(workspace)  # the turn's workspace, not a name guess
+    jobs.history = [failed_job]
+    assert runs.last_job_ending("2")[0] == "failed"
+    assert feature.auto_migrate_blocking("2", str(workspace))["reason"] == "its run can still be resumed"
+    assert workspace.is_dir()
+    # the same job finished cleanly: the workspace moves on the next sweep
+    jobs.history = [types.SimpleNamespace(**{**vars(failed_job), "state": "DONE"})]
+    assert runs.last_job_ending("2")[0] == "done"
+
+    # an image attachment's workspace is not a book
+    png = tmp_path / "photo.png"
+    png.write_bytes(PNG)
+    adapter.append_messages("2", [("user_file", "photo.png", str(png), len(PNG), "", "user")])
+    photo = Path(adapter.output_folder("2")) / "Attachments" / "photo"
+    _write_workspace(photo, png, compiled="")
+    # a scratch chat's workspace never leaves the scratch folder
+    scratch = adapter.new_scratch()
+    scratch_ws = Path(adapter.output_folder(scratch, create=True)) / "Attachments" / "book"
+    _write_workspace(scratch_ws, raw)
+    assert feature.auto_migrate_blocking(scratch, str(scratch_ws))["status"] == "skipped"
+    outcomes = {Path(o["folder"]).name: o for o in feature.sweep_blocking()}
+    assert outcomes["photo"]["reason"] == "not a book" and photo.is_dir()
+    assert outcomes["book"]["status"] == "moved" and (iso_env.out / "book").is_dir()
+    assert scratch_ws.is_dir() and all(o["cid"] != scratch for o in outcomes.values())
+    adapter.close()
+
+
+def test_startup_sweep_moves_earlier_chat_books_once(desktop_store_cls, tmp_path, iso_env):
+    """Chat books finished by an earlier version (or before the app was killed) join the Library
+    on the next launch; a second sweep finds nothing to do."""
+    _TC._desktop_history(tmp_path)
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    feature, app, notes, _routes = _chat_feature(adapter, _IdleJobs(), tmp_path)
+    workspace, _raw = _book_workspace(adapter, tmp_path)
+    first = asyncio.run(feature.startup_sweep(wait=0))
+    assert [(Path(o["folder"]).name, o["status"]) for o in first] == [("book", "moved")]
+    assert not workspace.exists() and (iso_env.out / "book" / "book.epub").is_file()
+    assert asyncio.run(feature.sweep("again")) == []
+    assert sorted(p.name for p in iso_env.out.iterdir()) == ["book"]
+    assert notes == [("Added to the Library",)]
+    # several books in one sweep: one summary snackbar instead of one per book
+    for name in ("alpha", "beta"):
+        raw = tmp_path / f"{name}.epub"
+        raw.write_bytes(f"PK\x03\x04{name}".encode())
+        _write_workspace(Path(adapter.output_folder("2")) / "Attachments" / name, raw)
+    moved = asyncio.run(feature.sweep("idle"))
+    assert sorted(Path(o["target"]).name for o in moved if o["status"] == "moved") == ["alpha", "beta"]
+    assert notes[1:] and len(notes) == 2 and notes[-1][:2] == ("Added 2 books to the Library", "Library")
+    notes[-1][2]()
+    assert _routes[-1] == ("library",)
+    adapter.close()
+
+
+def test_finished_listeners_run_after_the_commit_and_the_library_hooks(desktop_store_cls, tmp_path, iso_env,
+                                                                       monkeypatch):
+    """``subscribe_finished`` runs once the chat is saved and idle; the chat env's Library hooks (C2):
+    ``library_book`` finds the moved book's id, ``library_translate`` opens the Library translate sheet
+    for it (Resume / Retry failed of a moved workspace), and "Open book" opens it."""
+    from glossarion_mobile.ui.chat.run_controller import ChatRun, ChatRuns
+    from glossarion_mobile.ui.chat.run_request import DirectTextRun
+    from glossarion_mobile.ui.chat.stream_bridge import RunStream
+
+    calls = []
+
+    class Store:
+        def session(self, cid):
+            return None
+
+        def set_running(self, cid, running):
+            calls.append(("set_running", running))
+
+        def refresh_attachments(self, cid):
+            calls.append(("refresh_attachments", cid))
+
+        def flush(self):
+            calls.append(("flush",))
+
+    runs = ChatRuns(Store(), JobsAdapter(None))
+    unsubscribe = runs.subscribe_finished(lambda cid, run, state: calls.append(("finished", cid, state)))
+    prepared = DirectTextRun(temp_root="", source_path="", source_extension=".txt", is_attachment=False, expected_output="")
+    run = ChatRun(cid="7", run=prepared, stream=RunStream(), user_index=0)
+    runs.finish(run, types.SimpleNamespace(state="DONE", started=1.0))
+    assert calls == [("set_running", False), ("refresh_attachments", "7"), ("flush",), ("finished", "7", "DONE")]
+    unsubscribe()
+    runs.finish(ChatRun(cid="8", run=prepared, stream=RunStream(), user_index=0), types.SimpleNamespace(state="DONE"))
+    assert not any(c[0] == "finished" and c[1] == "8" for c in calls)
+
+    from glossarion_mobile.services.library import LibraryService
+
+    import library_core
+
+    _TC._desktop_history(tmp_path)
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    service = LibraryService(paths=types.SimpleNamespace(library=iso_env.library, output=iso_env.out,
+                                                         cache=tmp_path / "cache"), config={}, prefs=None)
+    service.ensure_env()
+    sheets = []
+
+    async def fake_sheet(ctx, books):
+        sheets.append((ctx, [dict(b) for b in books]))
+        return "sheet"
+
+    import glossarion_mobile.ui.library.translate_sheet as translate_sheet
+
+    monkeypatch.setattr(translate_sheet, "open_translate_sheet", fake_sheet)
+    try:
+        feature, app, notes, routes = _chat_feature(
+            adapter, _IdleJobs(), tmp_path, library=service,
+            library_feature=types.SimpleNamespace(context=lambda: "library-ctx"))
+        env = feature.env
+        assert env.library_service() is service and env.prefs is None
+        workspace, raw = _book_workspace(adapter, tmp_path)
+        outcome = feature.auto_migrate_blocking("2", str(workspace))
+        feature._announce(outcome)
+        target = str(iso_env.out / "book")
+        assert service.dirty and notes[-1][:2] == ("Added to the Library", "Open book")
+
+        async def hooks():
+            bid = await env.library_book(target)
+            sheet = await env.library_translate(target, str(raw))
+            missing = await env.library_book(str(tmp_path / "nowhere"))
+            return bid, sheet, missing
+
+        bid, sheet, missing = asyncio.run(hooks())
+        assert bid and bid == service.bid_for(service.book_for_bid(bid)) and missing is None
+        assert Path(service.book_for_bid(bid)["output_folder"]) == Path(target)
+        assert sheet == "sheet" and sheets[0][0] == "library-ctx"
+        assert Path(sheets[0][1][0]["output_folder"]) == Path(target)
+        notes[-1][2]()  # Open book
+        assert routes[-1] == ("library.book", {"bid": bid})
+    finally:
+        library_core.uninstall_library_env()
+        adapter.close()

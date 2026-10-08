@@ -10,6 +10,13 @@ Data (all on the io pool): book details from ``library_core.load_book_details``
 (phase ``preview`` first, then ``full``), Chapters from ``progress_core``, Glossary
 from ``glossary_progress_core`` (``ui/library/progress_model.py``).
 
+Workspace: every workspace action (Compile, Edit metadata.json, Files, the Output tab, job matching)
+uses ``LibraryService.workspace_for`` (``BookPageScreen.workspace``), like the desktop
+``BookDetailsDialog`` resolving ``_resolve_book_output_folder`` at each use: a Completed book filed in
+Library/Translated keeps its workspace actions, and the card's row (so its id) is never changed. A
+book with no workspace at all lists its EPUB's own chapters (Chapters tab, At a glance "N chapters").
+Completed and In progress cards both open this page; ⋯ › ↗ Share sends the file to another app.
+
 Refresh: every 2 s while the page is on top and the app is in the foreground,
 ``progress_core.snapshot_signature`` (+ the glossary progress file's stat) is
 compared on a worker thread; only a change reloads the rows (read-only), which
@@ -58,12 +65,14 @@ def _norm(path: Any) -> str:
         return str(path or "")
 
 
-def job_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queued: bool = True) -> Optional[Any]:
+def job_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queued: bool = True,
+                 folder: Optional[str] = None) -> Optional[Any]:
     """The running (or, with ``include_queued``, queued) job of this book: origin ``bid``, or the
-    same output folder / raw input."""
+    same output folder (``folder``: the resolved workspace, else the row's) / raw input."""
     if view is None:
         return None
-    folder = _norm(book.get("output_folder")) if book.get("output_folder") else None
+    folder = folder or book.get("output_folder")
+    folder = _norm(folder) if folder else None
     raw = _norm(book.get("raw_source_path")) if book.get("raw_source_path") else None
     candidates = ([view.active] if getattr(view, "active", None) is not None else []) + (
         list(getattr(view, "queue", ()) or ()) if include_queued else [])
@@ -110,6 +119,8 @@ class BookPageScreen(Screen):
         self.layout_builds = 0
         self.review_sheet: Any = None  # U9: the open glossary-review sheet (Library review gate)
         self._review_question: Optional[str] = None
+        self.menu: Any = None
+        self._menu_workspace: Optional[str] = None  # the workspace the ⋯ menu was built for
         self.poller = Poller(self._tick, interval=2.0, visible=lambda: self.ctx.is_top(self),
                              foreground=self.ctx.foreground, spawn=self.ctx.spawn, name="book")
         from glossarion_mobile.ui.library.chapters_tab import ChaptersTab, take_range_request
@@ -130,11 +141,19 @@ class BookPageScreen(Screen):
                                        items=self._menu_items())
         return [self.menu]
 
+    @property
+    def workspace(self) -> str:
+        """The book's output workspace (``LibraryService.workspace_for``: an organized book's resolved
+        folder, never created); "" when it has none."""
+        return pm.book_workspace(self.service, self.book)
+
     def _menu_items(self) -> list:
         def item(label: str, handler: Any, icon: Any = None, disabled: bool = False) -> ft.PopupMenuItem:
             return ft.PopupMenuItem(content=label, icon=icon, on_click=lambda e: handler(), disabled=disabled)
 
-        has_workspace = bool(self.book.get("output_folder"))
+        workspace = self.workspace
+        self._menu_workspace = workspace
+        has_workspace = bool(workspace)
         return [
             item("Translate…", lambda: self.ctx.spawn(self.open_translate()), ft.Icons.TRANSLATE),
             item("Compile EPUB", lambda: self.ctx.spawn(self.compile("compile_epub")), ft.Icons.MENU_BOOK,
@@ -147,6 +166,8 @@ class BookPageScreen(Screen):
             item("Edit metadata.json", lambda: self.ctx.go("library.book.metadata", {"bid": self.bid}),
                  ft.Icons.DATA_OBJECT, not has_workspace),
             item("Files", self.open_files, ft.Icons.FOLDER_OPEN, not has_workspace),
+            # the Library card ⋯ › ↗ Share (a card tap opens this page, it no longer shares)
+            item("↗ Share", lambda: self.ctx.spawn(self.share()), ft.Icons.IOS_SHARE),
             # U9 (UI_SPEC §3.12): reload every tab from disk (the Chapters ⋯ and the Glossary tab have it too)
             item("⟳ Refresh", lambda: self.ctx.spawn(self.full_refresh()), ft.Icons.REFRESH),
             item("Clear saved raw link", lambda: self.ctx.spawn(self.clear_raw_link()), ft.Icons.LINK_OFF),
@@ -330,6 +351,7 @@ class BookPageScreen(Screen):
         await self.reload_details("preview")
         await self.reload_progress()
         await self.reload_details("full")
+        self._sync_workspace()
         if self.initial_tab == "glossary":
             await self.reload_glossary()
         if self.initial_tab == "output":
@@ -479,7 +501,7 @@ class BookPageScreen(Screen):
 
     def _on_jobs(self, view: Any) -> None:
         self.job_view = view
-        job = job_for_book(view, self.bid, self.book)
+        job = job_for_book(view, self.bid, self.book, folder=self.workspace)
         finished = self.job is not None and job is None
         self.job = job
         self._render_strip()
@@ -570,7 +592,8 @@ class BookPageScreen(Screen):
             self.ctx.say("Stopping after the current request · tap again to force stop")
 
     def _on_library(self, snap: Any) -> None:
-        """Keep the book row current (state, counts, compiled output) from the Library scans."""
+        """Keep the book row current (state, counts, compiled output) from the Library scans; the scan
+        also resolves an organized book's workspace (``_sync_workspace``)."""
         identity = _norm(book_identity(self.book))
         for row in snap.all_books():
             if _norm(book_identity(row)) == identity:
@@ -578,7 +601,27 @@ class BookPageScreen(Screen):
                     self.book = dict(row)
                     self.overview.render()
                     self.output.mark_stale()
+                self._sync_workspace()
                 return
+
+    def _sync_workspace(self) -> str:
+        """The workspace can resolve after the page was built (a Library scan fills
+        ``LibraryService.workspace_for``): rebuild the ⋯ menu so Compile EPUB / PDF, Edit metadata.json
+        and Files follow it, and open the Chapters once a workspace appears where none was loaded."""
+        workspace = self.workspace
+        if workspace == self._menu_workspace:
+            return workspace
+        if self.menu is not None:
+            self.menu.items = self._menu_items()
+            self.ctx.push(self.menu)
+        else:
+            self._menu_workspace = workspace
+        self.overview.render()
+        self.output.mark_stale()
+        view = self.progress
+        if workspace and view is not None and view.no_workspace:
+            self.ctx.spawn(self.reload_progress(force=True))
+        return workspace
 
     # ---- actions shared by the tabs ---------------------------------------------------------------------
 
@@ -593,7 +636,7 @@ class BookPageScreen(Screen):
             self.ctx.say("The job service is not running")
             return None
         try:
-            job_id = await service.submit(service.compile_spec(self.book, kind))
+            job_id = await service.submit(service.compile_spec(self.book, kind, folder=self.workspace or None))
         except Exception as exc:
             self.ctx.say(f"Could not start: {exc}")
             return None
@@ -626,8 +669,12 @@ class BookPageScreen(Screen):
             return "Metadata translation is not available in this session"
         return None
 
+    async def share(self) -> bool:
+        """⋯ › ↗ Share: the book's file to another app (``LibraryContext.share_books``, as the card ⋯)."""
+        return bool(await self.ctx.share_books([self.book]))
+
     def open_files(self) -> None:
-        folder = str(self.book.get("output_folder") or "")
+        folder = self.workspace
         prefs = self.ctx.prefs
         if not folder or prefs is None:
             self.ctx.go("tools.files", {"root": "output"})
