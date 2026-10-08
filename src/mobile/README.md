@@ -192,6 +192,7 @@ os_log (iOS) plus `console.log`. (`sys.__stderr__` is fd 2 = `/dev/null` on Andr
 | `GLOSSARION_READY` | the first page is built |
 | `GLOSSARION_BACKEND_READY modules=<n> secs=<s>` | warm import finished (`n` = backend modules loaded) |
 | `GLOSSARION_BACKEND_FAIL {json}` | warm import failed |
+| `GLOSSARION_SELFTEST_START {json}` | self-test started (suite, source) |
 | `GLOSSARION_SELFTEST PASS {json}` / `FAIL {json}` | self-test finished (deep link or button) |
 | `GLOSSARION_SPIKE …` | U0 spike results (FGS ticks every 60 s, events) |
 
@@ -199,7 +200,8 @@ os_log (iOS) plus `console.log`. (`sys.__stderr__` is fd 2 = `/dev/null` on Andr
 adb logcat -s flet.python
 adb shell am start -W -a android.intent.action.VIEW \
   -d "glossarion://app/__selftest__?suite=smoke" com.glossarion.app
-xcrun simctl openurl booted "glossarion://app/__selftest__?suite=smoke"
+# iOS simulator: openurl stops at an "Open in ...?" alert; launch with the env trigger instead
+SIMCTL_CHILD_GLOSSARION_CI_SELFTEST=smoke xcrun simctl launch --console-pty booted com.glossarion.app
 ```
 
 Routes: only `/`, `/__selftest__` and `/oauth/return` are acted on (U0). Flet hands

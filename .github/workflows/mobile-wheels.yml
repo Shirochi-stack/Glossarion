@@ -179,6 +179,9 @@ jobs:
       - name: Verify the wheelhouse (structure, pins, uv.lock)
         run: uv run --no-project python src/mobile/tools/check_mobile_wheels.py --verify-wheelhouse "$WHEELHOUSE" --platform "$PLATFORM" --report "$RUNNER_TEMP/wheelhouse_check.md"
 
+      # Also checks every import of cryptography's _rust module. On Android those resolve against
+      # the NDK's API-24 stub libraries: $ANDROID_HOME/ndk/<toolchain.android_ndk>, preinstalled on
+      # ubuntu-24.04 (so a cache hit needs no toolchain step); without it the step fails closed.
       - name: Verify the wheelhouse (native binaries)
         run: uv run --no-project python src/mobile/ci/wheels/wheels.py verify-native --platform "$PLATFORM" "$WHEELHOUSE"
 

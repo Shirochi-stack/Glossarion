@@ -14,7 +14,8 @@
 #      sha256-checked and stored under the names forge expects, so forge downloads nothing itself;
 #   4. Android: the pinned NDK (forge's .ci/install_ndk.sh, a no-op when installed) -> NDK_HOME;
 #   5. source forge's setup.sh: support tree, uv venv on CPython 3.13.15, dependency wheels;
-#   6. wheels.py stage-openssl: static OpenSSL 3.5.9 replaces the support tree's 3.0.x;
+#   6. wheels.py stage-openssl: static OpenSSL 3.5.9 replaces the support tree's 3.0.x, and every
+#      other libcrypto.a/libssl.a in the support tree is deleted (see "Link order" below);
 #   7. iOS: include/<arch>-<sdk> -> python3.13 symlinks, because cryptography-cffi's build.rs
 #      derives Python.h's directory from PYO3_CROSS_LIB_DIR (platform-config/<arch>-<sdk>);
 #   8. forge <host> <recipe directory> for each package (src/mobile/ci/wheels/recipes/<package>);
@@ -30,6 +31,14 @@
 # Android, IPHONEOS_DEPLOYMENT_TARGET on iOS). Read by forge's own process or inherited by its
 # pip installs, and so effective from here: NDK_HOME, MOBILE_FORGE_*_SUPPORT_PATH (setup.sh),
 # PIP_CONSTRAINT. rustc comes from rustup's default toolchain (`rustup default`, found via HOME).
+#
+# Link order: forge sets CARGO_TARGET_<triple>_RUSTFLAGS to " -L{prefix}/lib ..." and cargo puts
+# RUSTFLAGS before the -L native=$OPENSSL_DIR/lib of openssl-sys's build script, so its
+# `-l static=crypto` / `static=ssl` take the first libcrypto.a / libssl.a on that path. On Android
+# {prefix}/lib is the support tree's install/android/<abi>/python-3.13.x/lib, which ships CPython's
+# static OpenSSL 3.0.x. A module compiled against the 3.5.9 headers got linked with it, the 3.2+
+# symbols stayed undefined and dlopen failed on the device. Hence stage-openssl's deletion, the
+# recipe's `-z defs` (Android) and wheels.py verify-native's import checks (every build and cache hit).
 set -euo pipefail
 
 die() {

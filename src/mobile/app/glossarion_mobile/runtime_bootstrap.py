@@ -93,6 +93,10 @@ MARKER_READY = "GLOSSARION_READY"
 MARKER_BACKEND_READY = "GLOSSARION_BACKEND_READY"
 MARKER_BACKEND_FAIL = "GLOSSARION_BACKEND_FAIL"
 MARKER_SELFTEST = "GLOSSARION_SELFTEST"
+MARKER_SELFTEST_START = "GLOSSARION_SELFTEST_START"
+# Launch-environment self-test trigger (CI: ``SIMCTL_CHILD_GLOSSARION_CI_SELFTEST=smoke xcrun simctl
+# launch``). The iOS simulator asks "Open in ...?" before a ``simctl openurl`` link reaches the app.
+CI_SELFTEST_ENV = "GLOSSARION_CI_SELFTEST"
 
 # Imported off the UI loop once the page is up (heavy: ~75 modules).
 WARM_IMPORT_MODULES = (

@@ -4,8 +4,10 @@
   --verify-installed / --platform, pip's ranking, the manifest checks, and that without the
   new flags nothing changes (the pins keep failing while no index has their mobile wheels).
 * ci/wheels/wheels.py: ELF / Mach-O checks (including the load commands forge's Rust builds
-  really carry), the self-test assertion (JSON report or the logcat GLOSSARION_WHEELS line),
-  OpenSSL staging helpers, collect / assemble, the pinned inputs.
+  really carry, and the imports: undefined OpenSSL symbols, NDK-stub resolution, Mach-O library
+  ordinals, the shape of run 37697523575's broken Android module), the self-test assertion (JSON
+  report or the logcat GLOSSARION_WHEELS line), OpenSSL staging (only the staged static OpenSSL
+  may remain in the support tree), collect / assemble, the pinned inputs.
 * ci/wheels/build_wheels.sh: run end to end with git, uv, setup.sh and forge stubbed (needs bash),
   asserting every wheels.py and forge call's exact arguments.
 * The committed ci/wheels files agree with pyproject.toml, uv.lock and mobile-forge upstream.
@@ -627,28 +629,42 @@ def test_cryptography_requires_dist_matches_the_sdist_metadata():
         cmw.runtime_requirements(sdist_requires)
 
 
-def _render_recipe(path: Path, sdk: str) -> dict:
+def _render_recipe(path: Path, sdk: str, arch: str = "arm64") -> dict:
+    """forge's package.py: the recipe is a Jinja template over sdk, sdk_version, arch (the Android ABI
+    or the Apple arch), version and py_version."""
     jinja2 = pytest.importorskip("jinja2")
     yaml = pytest.importorskip("yaml")
     text = jinja2.Template(path.read_text(encoding="utf-8")).render(
-        sdk=sdk, sdk_version="24" if sdk == "android" else "13.0", arch="arm64", version=None,
+        sdk=sdk, sdk_version="24" if sdk == "android" else "13.0", arch=arch, version=None,
         py_version=sys.version_info)
     return yaml.safe_load(text)
 
 
 def test_recipes_render_like_forge():
     recipes = MOBILE / "ci" / "wheels" / "recipes"
-    android = _render_recipe(recipes / "cryptography" / "meta.yaml", "android")
-    ios = _render_recipe(recipes / "cryptography" / "meta.yaml", "iphoneos")
-    assert android["package"] == {"name": "cryptography", "version": "50.0.2"}
-    assert android["build"]["number"] == 1000 and android["requirements"]["host"] == ["openssl 3.5.9"]
-    assert android["build"]["script_env"]["OPENSSL_STATIC"] == "1"
-    assert "OPENSSL_STATIC" not in ios["build"]["script_env"]       # clang_rt.osx otherwise
-    assert ios["build"]["script_env"]["OPENSSL_DIR"] == "{platlib}/opt"
-    # forge's build environment starts empty: the recipe is the only way to reach rustc
     manifest = cmw.load_wheelhouse_manifest(cmw.DEFAULT_WHEELHOUSE_MANIFEST)
-    assert ios["build"]["script_env"]["IPHONEOS_DEPLOYMENT_TARGET"] == manifest.data["toolchain"]["ios_deployment_target"]
-    assert "IPHONEOS_DEPLOYMENT_TARGET" not in android["build"]["script_env"]
+    android_abis = [t for t in manifest.wheel("cryptography").targets if cmw.platform_of(t) == "android"]
+    assert android_abis
+    for abi in android_abis:
+        android = _render_recipe(recipes / "cryptography" / "meta.yaml", "android", abi)
+        assert android["package"] == {"name": "cryptography", "version": "50.0.2"}
+        assert android["build"]["number"] == 1000 and android["requirements"]["host"] == ["openssl 3.5.9"]
+        env = android["build"]["script_env"]
+        assert env["OPENSSL_STATIC"] == "1"
+        assert "IPHONEOS_DEPLOYMENT_TARGET" not in env
+        # -z defs on this ABI's cargo target: forge formats script_env with its own environment
+        # (build.py compile_env), so the value is forge's RUSTFLAGS plus ours
+        key = f"CARGO_TARGET_{wh.RUST_TARGETS[abi].replace('-', '_').upper()}_RUSTFLAGS"
+        assert [k for k in env if k.startswith("CARGO_")] == [key], abi
+        forge_flags = " -L/support/install/android/x/python-3.13.15/lib -C link-arg=-undefined -C link-arg=dynamic_lookup"
+        assert env[key].format(**{key: forge_flags}) == forge_flags + " -C link-arg=-Wl,-z,defs"
+    for sdk, arch in (("iphoneos", "arm64"), ("iphonesimulator", "arm64"), ("iphonesimulator", "x86_64")):
+        ios = _render_recipe(recipes / "cryptography" / "meta.yaml", sdk, arch)
+        assert "OPENSSL_STATIC" not in ios["build"]["script_env"]       # clang_rt.osx otherwise
+        assert ios["build"]["script_env"]["OPENSSL_DIR"] == "{platlib}/opt"
+        assert not any(k.startswith("CARGO_") for k in ios["build"]["script_env"])
+        # forge's build environment starts empty: the recipe is the only way to reach rustc
+        assert ios["build"]["script_env"]["IPHONEOS_DEPLOYMENT_TARGET"] == manifest.data["toolchain"]["ios_deployment_target"]
     pillow = _render_recipe(recipes / "pillow" / "meta.yaml", "android")
     assert pillow["package"]["version"] == "12.3.0" and pillow["build"]["number"] == 1000
     assert pillow["patches"] == ["setup-12.x.patch"]
@@ -886,33 +902,52 @@ def test_build_script_runs_end_to_end_with_stubbed_tools(tmp_path, platform, pac
 
 
 # --------------------------------------------------------------------------- wheels.py
-def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", elf_class=2) -> bytes:
-    strtab = b"\0" + b"".join(n.encode() + b"\0" for n in needed)
-    offsets, pos = [], 1
-    for n in needed:
-        offsets.append(pos)
-        pos += len(n) + 1
+GLOBAL, WEAK = 1, 2
+UND, DEF = False, True
+
+
+def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", symbols=(), sections=True) -> bytes:
+    """A 64-bit little-endian ELF shared object: one LOAD, a PT_DYNAMIC with DT_NEEDED and, with
+    ``sections``, section headers for .dynstr and a .dynsym of ``symbols`` [(name, binding, defined)]."""
+    strtab, name_off = b"\0", {}
+    for n in list(needed) + [s[0] for s in symbols]:
+        if n not in name_off:
+            name_off[n] = len(strtab)
+            strtab += n.encode() + b"\0"
     dynstr_off = 64 + 2 * 56
     pad = b"\0" * ((-(dynstr_off + len(strtab))) % 8)
     dyn_off = dynstr_off + len(strtab) + len(pad)
-    dyn = b"".join(struct.pack("<qQ", 1, o) for o in offsets) + struct.pack("<qQ", 5, dynstr_off) + struct.pack("<qQ", 0, 0)
-    body = strtab + pad + dyn + extra
+    dyn = b"".join(struct.pack("<qQ", 1, name_off[n]) for n in needed)
+    dyn += struct.pack("<qQ", 5, dynstr_off) + struct.pack("<qQ", 0, 0)
+    sym_off = dyn_off + len(dyn)
+    syms = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)
+    for n, bind, defined in symbols:
+        syms += struct.pack("<IBBHQQ", name_off[n], (bind << 4) | 2, 0, 7 if defined else 0, 0, 0)
+    body = strtab + pad + dyn + syms + extra
     total = dynstr_off + len(body)
-    ehdr = b"\x7fELF" + bytes([elf_class, 1, 1, 0]) + b"\0" * 8 + struct.pack(
-        "<HHIQQQIHHHHHH", 3, machine, 1, 0, 64, 0, 0, 64, 56, 2, 64, 0, 0)
+    shoff = total + (-total) % 8
+    shdrs = b"\0" * 64                                                                   # SHN_UNDEF
+    shdrs += struct.pack("<IIQQQQIIQQ", 0, 3, 2, dynstr_off, dynstr_off, len(strtab), 0, 0, 1, 0)       # .dynstr
+    shdrs += struct.pack("<IIQQQQIIQQ", 0, 11, 2, sym_off, sym_off, len(syms), 1, 1, 8, 24)            # .dynsym
+    ehdr = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8 + struct.pack(
+        "<HHIQQQIHHHHHH", 3, machine, 1, 0, 64, shoff if sections else 0, 0, 64, 56, 2, 64, 3 if sections else 0, 0)
     load = struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, total, total, align)
     dynamic = struct.pack("<IIQQQQQQ", 2, 6, dyn_off, dyn_off, dyn_off, len(dyn), len(dyn), 8)
-    return ehdr + load + dynamic + body
+    out = ehdr + load + dynamic + body
+    return out + b"\0" * (shoff - total) + shdrs if sections else out
 
 
 ARM64, X86_64 = 0x0100000C, 0x01000007
 LC_VERSION_MIN_MACOSX, LC_VERSION_MIN_IPHONEOS = 0x24, 0x25
+MH_NOUNDEFS, MH_DYLDLINK, MH_TWOLEVEL = 0x1, 0x4, 0x80
 
 
 def make_macho(cputype=ARM64, platform=2, minos=(13, 0, 0), dylibs=("@rpath/Python.framework/Python",
-               "/usr/lib/libSystem.B.dylib"), extra=b"", version_min=None, both=False) -> bytes:
+               "/usr/lib/libSystem.B.dylib"), extra=b"", version_min=None, both=False, imports=(), defined=(),
+               flags=MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL) -> bytes:
     """A thin Mach-O dylib. ``version_min`` (a LC_VERSION_MIN_* id) replaces LC_BUILD_VERSION, as ld
-    writes it for deployment targets below iOS 12; ``both`` writes the two."""
+    writes it for deployment targets below iOS 12; ``both`` writes the two. LC_SYMTAB holds the
+    ``imports`` [(symbol, library ordinal)] as undefined externals and ``defined`` as section symbols."""
     v = (minos[0] << 16) | (minos[1] << 8) | minos[2]
     plat_cmds = []
     if version_min is None or both:
@@ -926,8 +961,18 @@ def make_macho(cputype=ARM64, platform=2, minos=(13, 0, 0), dylibs=("@rpath/Pyth
         size += (-size) % 8
         cmd = struct.pack("<IIIIII", 0xC, size, 24, 0, 0x10000, 0x10000) + name
         cmds += cmd + b"\0" * (size - len(cmd))
-    hdr = struct.pack("<IiiIIIII", 0xFEEDFACF, cputype, 0, 6, len(plat_cmds) + len(dylibs), len(cmds), 0, 0)
-    return hdr + cmds + extra
+    sizeofcmds = len(cmds) + 24
+    symoff = 32 + sizeofcmds
+    strtab, entries = b"\0", b""
+    for sym in defined:
+        entries += struct.pack("<IBBHQ", len(strtab), 0x0F, 1, 0, 0x4000)          # N_SECT | N_EXT
+        strtab += sym.encode() + b"\0"
+    for sym, ordinal in imports:
+        entries += struct.pack("<IBBHQ", len(strtab), 0x01, 0, (ordinal & 0xFF) << 8, 0)   # N_UNDF | N_EXT
+        strtab += sym.encode() + b"\0"
+    cmds += struct.pack("<IIIIII", 0x2, 24, symoff, len(defined) + len(imports), symoff + len(entries), len(strtab))
+    hdr = struct.pack("<IiiIIIII", 0xFEEDFACF, cputype, 0, 6, len(plat_cmds) + len(dylibs) + 1, sizeofcmds, flags, 0)
+    return hdr + cmds + entries + strtab + extra
 
 
 OPENSSL_TEXT = b"\0OpenSSL 3.5.9 30 Sep 2026\0"
@@ -959,6 +1004,143 @@ def test_android_binary_checks():
     imaging = "PIL/_imaging.cpython-313-aarch64-linux-android.so"
     assert wh.check_android_binary(imaging, make_elf(needed=("libjpeg.so", "libz.so")), "arm64-v8a", "pillow", "3.5.9") == []
     assert any("libjpeg.so" in e for e in wh.check_android_binary(imaging, make_elf(), "arm64-v8a", "pillow", "3.5.9"))
+
+
+RUST_SO = "cryptography/hazmat/bindings/_rust.abi3.so"
+RUST_NEEDED = ("libpython3.13.so", "libdl.so", "libc.so")
+PY_IMPORTS = [("PyObject_GetAttr", GLOBAL, UND), ("_Py_NoneStruct", GLOBAL, UND), ("PyExc_TypeError", GLOBAL, UND)]
+LIBC_IMPORTS = [("malloc", GLOBAL, UND), ("pthread_once", GLOBAL, UND), ("dlopen", GLOBAL, UND),
+                ("getrandom", WEAK, UND), ("getentropy", WEAK, UND)]          # weak: bionic API 28
+RUST_EXPORTS = [("PyInit__rust", GLOBAL, DEF)]
+# What run 37697523575 shipped: compiled against the 3.5.9 headers, linked with the support tree's
+# static 3.0.21, so the 3.2+ API stayed undefined and both version texts are in the module.
+OPENSSL_32_IMPORTS = [("OSSL_get_max_threads", GLOBAL, UND), ("OSSL_set_max_threads", GLOBAL, UND),
+                      ("EVP_DigestSqueeze", GLOBAL, UND), ("SSL_get0_group_name", GLOBAL, UND)]
+OPENSSL_3021_TEXT = b"\0OpenSSL 3.0.21 9 Jun 2026\0"
+
+
+def make_ndk(root: Path, exports=None) -> Path:
+    """An NDK tree with API-24 stub libraries (ELF shared objects that export ``exports``) for both ABIs."""
+    exports = exports or {"libc.so": ["malloc", "free", "pthread_once"], "libdl.so": ["dlopen", "dlsym"]}
+    for triple in wh.NDK_TRIPLE.values():
+        d = root / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "sysroot" / "usr" / "lib" / triple / "24"
+        d.mkdir(parents=True)
+        for lib, names in exports.items():
+            (d / lib).write_bytes(make_elf(needed=(), symbols=[(n, GLOBAL, DEF) for n in names]))
+    return root
+
+
+def test_elf_dynsym_reads_imports_and_exports():
+    data = make_elf(needed=("libc.so",), symbols=[("malloc", GLOBAL, UND), ("getrandom", WEAK, UND), ("PyInit__rust", GLOBAL, DEF)])
+    assert wh.elf_dynsym(data) == [("malloc", 1, False), ("getrandom", 2, False), ("PyInit__rust", 1, True)]
+    assert wh.parse_elf(data)["needed"] == ["libc.so"]
+    with pytest.raises(ValueError, match="no section headers"):
+        wh.elf_dynsym(make_elf(sections=False))
+
+
+def test_openssl_symbol_and_version_patterns():
+    for n in ("OSSL_get_max_threads", "EVP_DigestSqueeze", "SSL_get0_group_name", "X509_free", "d2i_X509", "BN_new",
+              "ERR_get_error", "OPENSSL_init_ssl", "TLS_method", "EC_KEY_free", "PKCS12_parse", "HMAC_CTX_new"):
+        assert wh.OPENSSL_SYMBOL.match(n), n
+    # the Python C API and what the real module imports from bionic never match
+    for n in ("PyErr_SetString", "_Py_NoneStruct", "malloc", "pthread_once", "dl_iterate_phdr", "__cxa_atexit",
+              "getrandom", "strerror_r", "__system_property_get", "getauxval", "__FD_SET_chk", "sched_getaffinity"):
+        assert not wh.OPENSSL_SYMBOL.match(n), n
+    assert wh.openssl_versions(OPENSSL_TEXT + OPENSSL_3021_TEXT + b"OpenSSL 3.5.90\0") == {"3.5.9", "3.0.21", "3.5.90"}
+
+
+def test_android_imports_resolve_against_the_ndk_stubs(tmp_path):
+    stubs = wh.NdkStubs(make_ndk(tmp_path / "ndk"))
+    good = make_elf(needed=RUST_NEEDED, symbols=PY_IMPORTS + LIBC_IMPORTS + RUST_EXPORTS, extra=OPENSSL_TEXT)
+    assert wh.check_android_binary(RUST_SO, good, "arm64-v8a", "cryptography", "3.5.9", stubs) == []
+    x86 = make_elf(machine=62, needed=RUST_NEEDED, symbols=PY_IMPORTS + LIBC_IMPORTS, extra=OPENSSL_TEXT)
+    assert wh.check_android_binary(RUST_SO, x86, "x86_64", "cryptography", "3.5.9", stubs) == []
+
+    def errs(data, s=stubs):
+        return "\n".join(wh.check_android_binary(RUST_SO, data, "arm64-v8a", "cryptography", "3.5.9", s))
+
+    # a strong import bionic does not export at API 24 (pthread_cond_clockwait is API 30)
+    late = make_elf(needed=RUST_NEEDED, symbols=PY_IMPORTS + [("pthread_cond_clockwait", GLOBAL, UND)], extra=OPENSSL_TEXT)
+    assert ("1 undefined symbols ['pthread_cond_clockwait'] are exported by none of its NEEDED ['libdl.so', "
+            "'libc.so'] at API 24") in errs(late)
+    # libdl's exports count only when libdl.so is NEEDED
+    no_dl = make_elf(needed=("libpython3.13.so", "libc.so"), symbols=[("dlopen", GLOBAL, UND)], extra=OPENSSL_TEXT)
+    assert "['dlopen'] are exported by none of its NEEDED ['libc.so']" in errs(no_dl)
+    # the Python C API needs libpython in NEEDED
+    no_py = make_elf(needed=("libc.so",), symbols=PY_IMPORTS, extra=OPENSSL_TEXT)
+    assert "imports 3 Python C API symbols but does not need libpython3.13.so" in errs(no_py)
+    # fail closed without the stub libraries
+    assert ("cannot resolve 3 undefined symbols against the NDK API 24 stubs of ['libdl.so', 'libc.so']: "
+            "no NDK given") in errs(good, None)
+    assert "no NDK (pass --ndk" in errs(good, wh.NdkStubs(None))
+    assert "no sysroot/usr/lib/aarch64-linux-android/24 stub libraries" in errs(good, wh.NdkStubs(tmp_path / "empty"))
+    partial = wh.NdkStubs(make_ndk(tmp_path / "ndk-libc-only", {"libc.so": ["malloc"]}))
+    assert "libdl.so not found" in errs(good, partial)
+
+
+def test_android_undefined_openssl_symbols_are_errors(tmp_path):
+    stubs = wh.NdkStubs(make_ndk(tmp_path / "ndk"))
+    broken = make_elf(needed=RUST_NEEDED, symbols=PY_IMPORTS + LIBC_IMPORTS + OPENSSL_32_IMPORTS + RUST_EXPORTS,
+                      extra=OPENSSL_TEXT + OPENSSL_3021_TEXT)
+    errs = wh.check_android_binary(RUST_SO, broken, "arm64-v8a", "cryptography", "3.5.9", stubs)
+    assert errs == [
+        f"{RUST_SO}: 4 undefined OpenSSL symbols ['EVP_DigestSqueeze', 'OSSL_get_max_threads', 'OSSL_set_max_threads', "
+        f"'SSL_get0_group_name']: OpenSSL is not (fully) linked in, and dlopen fails on them on the device",
+        f"{RUST_SO}: OpenSSL version strings ['3.0.21'] besides 3.5.9: another libcrypto/libssl was linked in "
+        f"(the 3.5.9 text alone can come from the headers)"]
+    # every module, weak imports included
+    imaging = "PIL/_imaging.cpython-313-aarch64-linux-android.so"
+    pil = make_elf(needed=("libjpeg.so", "libc.so"), symbols=[("EVP_sha256", WEAK, UND), ("malloc", GLOBAL, UND)])
+    assert "1 undefined OpenSSL symbols ['EVP_sha256']" in "\n".join(
+        wh.check_android_binary(imaging, pil, "arm64-v8a", "pillow", "3.5.9"))
+    # no readable symbol table: fail closed
+    stripped = make_elf(needed=RUST_NEEDED, extra=OPENSSL_TEXT, sections=False)
+    assert any("cannot read the dynamic symbols (no section headers" in e
+               for e in wh.check_android_binary(RUST_SO, stripped, "arm64-v8a", "cryptography", "3.5.9", stubs))
+
+
+def _android_wheelhouse(directory: Path, rust_symbols, rust_text=OPENSSL_TEXT) -> Path:
+    for target, machine in (("arm64-v8a", 183), ("x86_64", 62)):
+        triple = wh.NDK_TRIPLE[target]
+        make_wheel(directory, "cryptography", "50.0.2", f"cp313-cp313-{LABEL[target]}", requires=CRYPTO_REQS,
+                   files={RUST_SO: make_elf(machine=machine, needed=RUST_NEEDED, symbols=rust_symbols, extra=rust_text)})
+        pil = make_elf(machine=machine, needed=("libjpeg.so", "libpython3.13.so", "libc.so"),
+                       symbols=[("PyModule_Create2", GLOBAL, UND), ("malloc", GLOBAL, UND)])
+        make_wheel(directory, "pillow", "12.3.0", f"cp313-cp313-{LABEL[target]}", requires=PILLOW_REQS,
+                   files={f"PIL/{m}.cpython-313-{triple}.so": pil for m in wh.PILLOW_MODULES})
+    return directory
+
+
+def test_verify_native_rejects_the_android_wheels_of_run_37697523575(proj, tmp_path, capsys, monkeypatch):
+    for var in ("NDK_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    ndk = make_ndk(tmp_path / "ndk")
+    good = _android_wheelhouse(tmp_path / "good", PY_IMPORTS + LIBC_IMPORTS + RUST_EXPORTS)
+    bad = _android_wheelhouse(tmp_path / "bad", PY_IMPORTS + LIBC_IMPORTS + OPENSSL_32_IMPORTS + RUST_EXPORTS,
+                              OPENSSL_TEXT + OPENSSL_3021_TEXT)
+    argv = ["--manifest", str(proj["root"] / "wheelhouse.toml"), "verify-native", "--platform", "android"]
+    assert wh.main(argv + ["--ndk", str(ndk), str(good)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"NDK for the import checks: {ndk}" in out
+    assert "_rust.abi3.so NEEDED ['libpython3.13.so', 'libdl.so', 'libc.so']; 8 imports (3 Python C API, 2 weak)" in out
+    assert wh.main(argv + ["--ndk", str(ndk), str(bad)]) == 1
+    out = capsys.readouterr().out
+    errors = [line for line in out.splitlines() if line.startswith("ERROR")]
+    assert len(errors) == 4 and "verify-native (android): 4 errors" in out
+    for label in ("android_24_arm64_v8a", "android_24_x86_64"):
+        assert any(f"cryptography-50.0.2-1000-cp313-cp313-{label}.whl" in e and "'OSSL_get_max_threads'" in e
+                   for e in errors)
+        assert any(f"cryptography-50.0.2-1000-cp313-cp313-{label}.whl" in e and "['3.0.21'] besides 3.5.9" in e
+                   for e in errors)
+    assert not any("pillow" in e for e in errors)
+    # the default NDK: $ANDROID_HOME/ndk/<toolchain.android_ndk>; none at all fails closed
+    make_ndk(tmp_path / "sdk" / "ndk" / "27.3.13750724")
+    monkeypatch.setenv("ANDROID_HOME", str(tmp_path / "sdk"))
+    assert wh.main(argv + [str(good)]) == 0, capsys.readouterr().out
+    monkeypatch.delenv("ANDROID_HOME")
+    capsys.readouterr()
+    assert wh.main(argv + [str(good)]) == 1
+    assert "no NDK (pass --ndk, or set NDK_HOME or ANDROID_HOME)" in capsys.readouterr().out
 
 
 def test_ios_binary_checks():
@@ -1033,6 +1215,42 @@ def test_ios_binary_checks_reject_the_wrong_slice_platform_or_minos():
         "iphoneos.arm64")
     hdr_only = struct.pack("<IiiIIIII", 0xFEEDFACF, ARM64, 0, 6, 0, 0, 0, 0) + OPENSSL_TEXT
     assert "0 platform load commands" in errs(hdr_only, "iphoneos.arm64")
+    assert "no LC_SYMTAB, so its imports cannot be checked" in errs(hdr_only, "iphoneos.arm64")
+
+
+# The real slices' dylibs (Python first) and imports of each kind, by library ordinal.
+IOS_DYLIBS = ("@rpath/Python.framework/Python", "/usr/lib/libiconv.2.dylib", "/usr/lib/libSystem.B.dylib")
+IOS_IMPORTS = [("_PyObject_GetAttr", 1), ("__Py_NoneStruct", 1), ("_iconv", 2), ("_malloc", 3), ("___stack_chk_fail", 3)]
+OPENSSL_35_DEFINED = ["_OSSL_get_max_threads", "_EVP_DigestSqueeze", "_SSL_get0_group_name"]
+
+
+def test_ios_imports_must_be_bound_two_level():
+    def errs(data):
+        return "\n".join(wh.check_ios_binary(RUST_SO, data, "iphoneos.arm64", "cryptography", "3.5.9", (13, 0)))
+
+    ok = make_macho(dylibs=IOS_DYLIBS, imports=IOS_IMPORTS, defined=OPENSSL_35_DEFINED, extra=OPENSSL_TEXT)
+    macho = wh.parse_macho(ok)
+    assert macho["undefined"] == IOS_IMPORTS and macho["flags"] & MH_TWOLEVEL
+    assert errs(ok) == ""
+    assert wh.describe_macho(macho).endswith("; 5 imports (2 from Python.framework)")
+    # forge links iOS with -undefined dynamic_lookup: whatever ld64 could not resolve gets no library
+    lookup = make_macho(dylibs=IOS_DYLIBS, imports=IOS_IMPORTS + [("_OSSL_get_max_threads", 0xFE)], extra=OPENSSL_TEXT)
+    text = errs(lookup)
+    assert ("1 undefined symbols bound to none of its dylibs ['_OSSL_get_max_threads (DYNAMIC_LOOKUP_ORDINAL)'] "
+            "(left unresolved at link time; dyld fails on them)") in text
+    assert "1 undefined OpenSSL symbols ['_OSSL_get_max_threads']: OpenSSL is not (fully) linked in" in text
+    for ordinal, label in ((0, "SELF_LIBRARY_ORDINAL"), (0xFF, "EXECUTABLE_ORDINAL"), (4, "ordinal 4")):
+        assert f"['_foo ({label})']" in errs(make_macho(dylibs=IOS_DYLIBS, imports=[("_foo", ordinal)], extra=OPENSSL_TEXT))
+    # Python.framework provides the C API only; OpenSSL from any dylib is an error
+    text = errs(make_macho(dylibs=IOS_DYLIBS, imports=[("_SSL_new", 1), ("_EVP_sha256", 3)], extra=OPENSSL_TEXT))
+    assert "1 non-Python symbols ['_SSL_new'] bound to @rpath/Python.framework/Python" in text
+    assert "2 undefined OpenSSL symbols ['_EVP_sha256', '_SSL_new']" in text
+    assert "flat namespace (MH_TWOLEVEL not set)" in errs(make_macho(dylibs=IOS_DYLIBS, flags=0x4, extra=OPENSSL_TEXT))
+    # the iOS support tree's own OpenSSL is 3.0.18
+    assert "OpenSSL version strings ['3.0.18'] besides 3.5.9" in errs(
+        make_macho(dylibs=IOS_DYLIBS, extra=OPENSSL_TEXT + b"OpenSSL 3.0.18 30 Sep 2025\0"))
+    with pytest.raises(ValueError, match="LC_SYMTAB points outside"):
+        wh.parse_macho(ok[:-len(OPENSSL_TEXT) - 40])
 
 
 def test_verify_native_accepts_forge_shaped_ios_wheels(proj, tmp_path, capsys):
@@ -1193,6 +1411,79 @@ def test_rewrite_versions(tmp_path):
     v.write_text("bzip2: 1.0.8-1\n", encoding="utf-8")
     with pytest.raises(wh.WheelsError):
         wh.rewrite_versions(v, "3.5.9", "0")
+
+
+# forge's make_dep_wheels, reduced to what stage-openssl relies on: pack the VERSIONS openssl tree
+# of each ABI into dist/openssl-<version>-<build>-py3-none-<tag>.whl (opt/...), skipping existing wheels.
+STUB_MAKE_DEP_WHEELS = """\
+import os, pathlib, re, sys, zipfile
+os_name = sys.argv[1]
+support = pathlib.Path(os.environ["MOBILE_FORGE_ANDROID_SUPPORT_PATH"])
+text = (support / "support" / "3.13" / os_name / "VERSIONS").read_text()
+full = re.search(r"(?im)^openssl:\\s*(\\S+)", text).group(1)
+for abi, tag in (("arm64-v8a", "android_24_arm64_v8a"), ("x86_64", "android_24_x86_64")):
+    whl = pathlib.Path("dist") / f"openssl-{full}-py3-none-{tag}.whl"
+    if whl.exists():
+        continue
+    src = support / "install" / os_name / abi / f"openssl-{full}"
+    with zipfile.ZipFile(whl, "w") as zf:
+        for p in sorted(src.rglob("*")):
+            if p.is_file():
+                zf.writestr("opt/" + p.relative_to(src).as_posix(), p.read_bytes())
+        zf.writestr(f"openssl-{full.split('-')[0]}.dist-info/WHEEL", "Wheel-Version: 1.0\\n")
+"""
+
+
+def test_stage_openssl_leaves_only_the_staged_static_openssl(proj, tmp_path, monkeypatch, capsys):
+    """The support tree's python-3.13.x/lib ships CPython's static OpenSSL 3.0.x on forge's cargo -L
+    path ahead of OPENSSL_DIR/lib (run 37697523575 linked it); stage-openssl deletes it."""
+    support, forge, downloads = tmp_path / "support", tmp_path / "forge", tmp_path / "downloads"
+    (support / "support" / "3.13" / "android").mkdir(parents=True)
+    (support / "support" / "3.13" / "android" / "VERSIONS").write_text(
+        "Python version: 3.13.15\n---\nlibffi: 3.4.4-1\nopenssl: 3.0.21-1\n", encoding="utf-8")
+    shipped = ["python-3.13.15/lib/libcrypto.a", "python-3.13.15/lib/libssl.a", "openssl-3.0.21-1/lib/libcrypto.a",
+               "openssl-3.0.21-1/lib/libssl.a"]
+    kept = ["python-3.13.15/lib/libpython3.13.so", "python-3.13.15/lib/libcrypto_python.so",
+            "python-3.13.15/lib/libssl_python.so", "libffi-3.4.4-1/lib/libffi.a"]
+    for abi in ANDROID:
+        for rel in shipped + kept:
+            p = support / "install" / "android" / abi / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"!<arch>\n3.0.21")
+    manifest_text = MANIFEST.replace('recipe = "recipes/', f'recipe = "{(MOBILE / "ci" / "wheels" / "recipes").as_posix()}/')
+    downloads.mkdir()
+    for abi, placeholder in (("arm64-v8a", "3" * 64), ("x86_64", "4" * 64)):
+        name = f"openssl-3.5.9-0-{wh.NDK_TRIPLE[abi]}.tar.gz"
+        (downloads / name).write_bytes(_tar_bytes({
+            "include/openssl/opensslv.h": b'# define OPENSSL_VERSION_STR "3.5.9"\n',
+            "lib/libcrypto.a": b"!<arch>\n3.5.9", "lib/libssl.a": b"!<arch>\n3.5.9", "lib/libcrypto.so": b"\x7fELF"}))
+        manifest_text = manifest_text.replace(placeholder, cmw.file_sha256(downloads / name))
+    manifest = proj["root"] / "wheelhouse.toml"
+    manifest.write_text(manifest_text, encoding="utf-8")
+    (forge / "dist").mkdir(parents=True)
+    (forge / "make_dep_wheels.py").write_text(STUB_MAKE_DEP_WHEELS, encoding="utf-8")
+    make_wheel(forge / "dist", "openssl", "3.0.21", "py3-none-android_24_arm64_v8a", build="1")
+    monkeypatch.setenv("MOBILE_FORGE_ANDROID_SUPPORT_PATH", str(support))
+    monkeypatch.delenv("ANDROID_ABIS", raising=False)
+    argv = ["--manifest", str(manifest), "--pyproject", str(proj["root"] / "pyproject.toml"), "stage-openssl",
+            "--platform", "android", "--downloads", str(downloads), "--forge", str(forge)]
+    assert wh.main(argv) == 0, capsys.readouterr()
+    out = capsys.readouterr().out
+    for abi in ANDROID:
+        base = support / "install" / "android" / abi
+        assert [rel for rel in shipped if (base / rel).exists()] == []
+        assert all((base / rel).is_file() for rel in kept)
+        assert (base / "openssl-3.5.9-0" / "lib" / "libcrypto.a").read_bytes() == b"!<arch>\n3.5.9"
+        assert f"removed install/android/{abi}/python-3.13.15/lib/libcrypto.a: a static OpenSSL other than" in out
+    assert wh.shadow_openssl_archives(support, sorted((support / "install" / "android").glob("*/openssl-3.5.9-0"))) == []
+    assert "openssl: 3.5.9-0" in (support / "support" / "3.13" / "android" / "VERSIONS").read_text(encoding="utf-8")
+    assert sorted(p.name for p in (forge / "dist").glob("*.whl")) == [
+        "openssl-3.5.9-0-py3-none-android_24_arm64_v8a.whl", "openssl-3.5.9-0-py3-none-android_24_x86_64.whl"]
+    # anything left behind fails the stage instead of being linked later
+    monkeypatch.setattr(wh, "remove_shadow_openssl", lambda support_dir, staged: [])
+    (support / "install" / "android" / "x86_64" / "python-3.13.15" / "lib" / "libssl.a").write_bytes(b"!<arch>\n")
+    assert wh.main(argv) == 1
+    assert ("static OpenSSL archives other than the staged 3.5.9 remain" in capsys.readouterr().err)
 
 
 def test_download_verified_rejects_wrong_hash(tmp_path):

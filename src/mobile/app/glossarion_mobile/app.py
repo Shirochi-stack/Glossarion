@@ -37,12 +37,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import flet as ft
 
+from glossarion_mobile import SELFTEST_ROUTE
 from glossarion_mobile import runtime_bootstrap as rb
 from glossarion_mobile.services import secure_keys
 from glossarion_mobile.services.browser import InAppUrlOpener
@@ -445,6 +448,19 @@ class GlossarionApp:
                 await self.jobs.handle_initial_shared(shared)  # Open-with at cold start (IntentRouter)
             except Exception:
                 log.exception("importing the shared files failed")
+        await self._run_launch_env_selftest()
+
+    async def _run_launch_env_selftest(self) -> None:
+        """``GLOSSARION_CI_SELFTEST=<suite>`` in the launch environment runs that self-test once the
+        backend is warm, exactly as the deep link does (the iOS simulator smoke: ``simctl openurl``
+        stops at an "Open in ...?" alert nothing taps). The suite name goes through the router."""
+        suite = os.environ.pop(rb.CI_SELFTEST_ENV, "").strip()
+        if not suite:
+            return
+        deadline = time.monotonic() + 900
+        while self.state.backend.value is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+        await self.dispatch_route(f"{SELFTEST_ROUTE}?suite={quote(suite, safe='')}", source="launch-env")
 
     # ---- screens --------------------------------------------------------------------------
 

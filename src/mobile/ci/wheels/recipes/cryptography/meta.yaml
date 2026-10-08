@@ -10,10 +10,17 @@
 #     stage-openssl packs into forge's dist/ in place of the support tree's end-of-life 3.0.x;
 #   - OPENSSL_STATIC=1 on Android only. It must stay unset on iOS: with it, the build script
 #     of cryptography-cffi links clang_rt.osx (a macOS runtime) on every Apple target;
+#   - Android: `-z defs` appended to forge's per-target cargo RUSTFLAGS (the {CARGO_TARGET_...}
+#     placeholder is forge's own value), so the link fails on any symbol nothing provides
+#     instead of shipping a module dlopen rejects; forge's `-undefined dynamic_lookup` means
+#     nothing to clang there. A build once linked the support tree's static OpenSSL 3.0.21
+#     against the 3.5.9 headers that way ("Link order" in build_wheels.sh). Every Android ABI
+#     of wheelhouse.toml needs a branch below (the tests check it);
 #   - IPHONEOS_DEPLOYMENT_TARGET=13.0 on iOS (wheelhouse.toml toolchain.ios_deployment_target,
 #     the ios_13_0 wheel tag). forge builds the compile environment from scratch, so script_env
 #     is the only way it reaches rustc; without it rustc links for iOS 10.0. rustc raises the
 #     arm64 simulator slice to its floor of 14.0 either way (wheels.py verify-native allows that).
+#     iOS keeps forge's dynamic_lookup: verify-native rejects any import it leaves unbound.
 package:
   name: cryptography
   version: "50.0.2"
@@ -30,6 +37,11 @@ build:
     _PYTHON_SYSCONFIGDATA_NAME: '{sysconfigdata_name}'
 # {% if sdk == 'android' %}
     OPENSSL_STATIC: '1'
+# {% if arch == 'arm64-v8a' %}
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: '{CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS} -C link-arg=-Wl,-z,defs'
+# {% elif arch == 'x86_64' %}
+    CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS: '{CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS} -C link-arg=-Wl,-z,defs'
+# {% endif %}
 # {% else %}
     IPHONEOS_DEPLOYMENT_TARGET: '13.0'
 # {% endif %}

@@ -934,7 +934,10 @@ jobs:
       ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
       READY_TIMEOUT: '600'
       SELFTEST_TIMEOUT: '900'
-      SELFTEST_URL: glossarion://app/__selftest__?suite=smoke
+      # The self-test starts from the launch environment (GLOSSARION_CI_SELFTEST, app.py): a
+      # `simctl openurl` deep link stops at an "Open in ...?" alert that nothing taps.
+      SELFTEST_SUITE: smoke
+      SELFTEST_START_TIMEOUT: '120'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1037,8 +1040,10 @@ jobs:
           xcrun simctl install "$udid" "$SIM_APP"
           xcrun simctl spawn "$udid" log stream --style compact --level debug \
             --predicate "process == \"$executable\"" > "$logs/oslog_stream.txt" 2>&1 &
-          # --console-pty captures the process's own stdout/stderr (fd 1/2).
-          xcrun simctl launch --console-pty --terminate-running-process "$udid" "$APP_PACKAGE" \
+          # --console-pty captures the process's own stdout/stderr (fd 1/2). SIMCTL_CHILD_* variables
+          # reach the app's environment; GLOSSARION_CI_SELFTEST runs the suite once the backend is warm.
+          SIMCTL_CHILD_GLOSSARION_CI_SELFTEST="$SELFTEST_SUITE" \
+            xcrun simctl launch --console-pty --terminate-running-process "$udid" "$APP_PACKAGE" \
             > "$logs/console_pty.txt" 2>&1 &
 
           console_log() {
@@ -1073,7 +1078,10 @@ jobs:
 
           wait_for GLOSSARION_READY "$READY_TIMEOUT"
           wait_for GLOSSARION_BACKEND_READY "$READY_TIMEOUT"
-          xcrun simctl openurl "$udid" "$SELFTEST_URL"
+          if ! wait_for GLOSSARION_SELFTEST_START "$SELFTEST_START_TIMEOUT"; then
+            echo "::error title=iOS smoke::The self-test never started (GLOSSARION_CI_SELFTEST not delivered)."
+            exit 1
+          fi
           wait_for 'GLOSSARION_SELFTEST PASS' "$SELFTEST_TIMEOUT"
 
       - name: Collect simulator logs

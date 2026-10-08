@@ -57,8 +57,10 @@ class SelfTestRunner:
         if self.running:
             log.info("self-test already running; ignored request from %s", source)
             return None
+        from glossarion_mobile import runtime_bootstrap as rb
         from glossarion_mobile.diagnostics import selftest
 
+        rb.emit_marker(rb.MARKER_SELFTEST_START, {"suite": suite, "source": source})
         self.current_suite = suite
         self.state.selftest_running.set(True)
         self.runs += 1

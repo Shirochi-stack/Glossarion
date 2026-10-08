@@ -1677,6 +1677,33 @@ def test_app_with_native_extension_on_android(app_env, monkeypatch):
     asyncio.run(scenario())
 
 
+@needs_flet
+def test_launch_env_selftest_runs_once(app_env, monkeypatch, capsys):
+    """iOS simulator smoke: ``simctl openurl`` stops at an "Open in ...?" alert, so CI launches with
+    SIMCTL_CHILD_GLOSSARION_CI_SELFTEST=smoke; the app runs that suite after the warm import, once,
+    through the same route as the deep link, and announces the start (fail-fast marker)."""
+    import os
+
+    monkeypatch.setenv(rb.CI_SELFTEST_ENV, "smoke")
+
+    async def scenario():
+        _m, conn, session, page, app = await _start("ios")
+        try:
+            assert await _wait(lambda: app.state.selftest_result.value is not None, timeout=20)
+            result = app.state.selftest_result.value
+            assert result["ok"] and result["suite"] == "smoke" and result["source"] == "route/launch-env"
+            assert rb.CI_SELFTEST_ENV not in os.environ  # consumed: never re-run, never leaks into job envs
+            await asyncio.sleep(0.3)
+            assert app.selftest.runs == 1
+            assert _routes(page) == ["/"]
+        finally:
+            await _stop(app)
+
+    asyncio.run(scenario())
+    lines = capsys.readouterr().err.splitlines()
+    assert any(line.startswith(rb.MARKER_SELFTEST_START + " ") and "launch-env" in line for line in lines)
+
+
 # ==========================================================================
 # Import hygiene
 # ==========================================================================
