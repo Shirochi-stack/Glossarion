@@ -30,6 +30,7 @@ from typing import Any, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import (
@@ -171,7 +172,7 @@ class OverviewTab:
     def build(self) -> ft.Control:
         tablet = self.ctx.tablet
         cover_w, cover_h = (240, 340) if tablet else (120, 180)
-        self.cover = ft.Image(src="icon.png", width=cover_w, height=cover_h, fit=ft.BoxFit.CONTAIN,
+        self.cover = ft.Image(src=HALGAKOS_ASSET, width=cover_w, height=cover_h, fit=ft.BoxFit.CONTAIN,
                               border_radius=tokens.RADII["cover"], key="ov-cover")
         self.title_text = ft.Text("", theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600,
                                   selectable=True, key="ov-title")

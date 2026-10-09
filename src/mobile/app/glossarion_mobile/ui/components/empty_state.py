@@ -10,9 +10,22 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import icon_data
 
-__all__ = ["EmptyState", "HALGAKOS_ASSET"]
+__all__ = ["EmptyState", "HALGAKOS_ASSET", "HALGAKOS_AVATAR", "HALGAKOS_FULL", "faded_mascot"]
 
-HALGAKOS_ASSET = "icon.png"  # app/assets/icon.png (the mascot)
+# Mascot art in app/assets, built from src/Halgakos.png (chibi) and src/Halgakos_NoChibi.png by
+# tools/make_mascot_assets.py. icon.png / splash.png are the launcher icon and launch screen only.
+HALGAKOS_ASSET = "halgakos_chibi.png"  # transparent chibi: empty states, Welcome, About, cover placeholder
+HALGAKOS_AVATAR = "halgakos_avatar.png"  # chibi head crop for small round avatars
+HALGAKOS_FULL = "halgakos_full.png"  # non-chibi art: the Manga translator's faded placeholder
+
+#: How strongly the Manga translator's placeholder art shows behind its hint.
+PLACEHOLDER_OPACITY = 0.18
+
+
+def faded_mascot(height: float = 220, opacity: float = PLACEHOLDER_OPACITY) -> ft.Image:
+    """The non-chibi Halgakos, semi-transparent: a placeholder where a page or image will appear."""
+    return ft.Image(src=HALGAKOS_FULL, height=height, fit=ft.BoxFit.CONTAIN, opacity=opacity,
+                    semantics_label="Halgakos", gapless_playback=True)
 
 Action = tuple[str, Callable[..., Any]]
 

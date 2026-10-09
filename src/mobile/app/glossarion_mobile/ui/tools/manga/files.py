@@ -39,6 +39,7 @@ import flet as ft
 from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.components.empty_state import faded_mascot
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, hint_text
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
@@ -112,7 +113,12 @@ class FilesTab(MangaTab):
                                           on_click=lambda e: self.ctx.spawn(self.clear_all()), key="mf-clear")
         self.list_view = ft.ReorderableListView(controls=[], on_reorder=self._on_reorder, height=360,
                                                 show_default_drag_handles=True, key="mf-list")
-        self.empty = hint_text("No images yet. Add files, a ZIP / CBZ or a folder.", key="mf-empty")
+        # the non-chibi Halgakos, faded, where a page will appear (owner, 2026-10-09)
+        self.empty = ft.Container(
+            content=ft.Column([faded_mascot(), hint_text("No images yet. Add files, a ZIP / CBZ or a folder.")],
+                              horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+            alignment=ft.Alignment.CENTER, padding=ft.Padding.symmetric(vertical=12), key="mf-empty",
+        )
         cfg = self.ctx.config_snapshot()
         # the tab's defaults (manga_settings_defaults: both on, like the desktop checkboxes)
         self.create_cbz_switch = ft.Switch(label="Create CBZ at end",

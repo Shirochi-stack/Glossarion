@@ -37,7 +37,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     timestamp_label,
 )
 from glossarion_mobile.ui.chat.stream_bridge import segment_processing_label
-from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
+from glossarion_mobile.ui.components.empty_state import HALGAKOS_AVATAR
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
 __all__ = [
@@ -230,7 +230,7 @@ class AssistantMessage(ft.Column):
             overflow=ft.TextOverflow.ELLIPSIS, expand=True,
         )
         header = ft.Row(
-            [ft.CircleAvatar(foreground_image_src=HALGAKOS_ASSET, radius=10), self.header_text],
+            [ft.CircleAvatar(foreground_image_src=HALGAKOS_AVATAR, radius=10), self.header_text],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )

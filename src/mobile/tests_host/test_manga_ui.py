@@ -2768,3 +2768,46 @@ def test_new_sources_parse_on_python_310_and_keep_uniform_line_endings():
     # services / job adapters stay Flet-free (they run on the job thread and in host tools)
     for path in files[:2]:
         assert "import flet" not in path.read_text(encoding="utf-8")
+
+
+@needs_flet
+@needs_cores
+def test_empty_manga_tabs_show_the_faded_halgakos(iso, tmp_path):
+    """Owner, 2026-10-09: the Manga translator uses the non-chibi Halgakos as a semi-transparent
+    placeholder where pages will appear (Files and Editor tabs with nothing loaded)."""
+    import flet as ft
+
+    from glossarion_mobile.ui.components.empty_state import HALGAKOS_FULL
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    def faded(control):
+        found = []
+
+        def walk(c):
+            if isinstance(c, ft.Image) and c.src == HALGAKOS_FULL:
+                found.append(c)
+            for child in getattr(c, "controls", None) or []:
+                walk(child)
+            content = getattr(c, "content", None)
+            if isinstance(content, ft.Control):
+                walk(content)
+
+        walk(control)
+        return found
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        ctx = _ctx(page, {}, jobs=FakeJobs(), files=FakeFiles(picks=[]), output_root=str(iso["Output"]))
+        manga = _session(tmp_path, {})
+        screen = MangaScreen(parse_route("/tools/manga?tab=files"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        screen.did_show()
+        await _settle()
+        for tab in (screen.files_tab, screen.editor_tab):
+            images = faded(tab.empty)
+            assert len(images) == 1 and 0 < images[0].opacity < 0.5, (tab, images)
+        assert screen.files_tab.empty.visible
+
+    asyncio.run(scenario())

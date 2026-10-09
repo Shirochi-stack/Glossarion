@@ -55,7 +55,7 @@ import flet as ft
 from glossarion_mobile.state.app_state import AppState
 from glossarion_mobile.state.chat_index import ChatSummary
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
+from glossarion_mobile.ui.components.empty_state import HALGAKOS_AVATAR
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = ["DESTINATIONS", "ChatDrawer", "KEYS_ROUTE", "SEARCH_DEBOUNCE", "SEARCH_GROUPS", "SEARCH_LIMIT",
@@ -148,7 +148,7 @@ class ChatDrawer:
             padding=ft.Padding.only(left=16, right=4),
             content=ft.Row(
                 [
-                    ft.CircleAvatar(foreground_image_src=HALGAKOS_ASSET, radius=tokens.SIZES["avatar_small"] / 2),
+                    ft.CircleAvatar(foreground_image_src=HALGAKOS_AVATAR, radius=tokens.SIZES["avatar_small"] / 2),
                     ft.Container(  # the title, with the row's 56 dp minimum height (it grows at 200 % text)
                         content=ft.Row([ft.Container(width=0, height=tokens.SIZES["drawer_header"]),
                                         ft.Text("Glossarion", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,

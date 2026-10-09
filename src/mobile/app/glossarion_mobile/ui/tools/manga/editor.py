@@ -39,6 +39,7 @@ from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.components.empty_state import faded_mascot
 from glossarion_mobile.ui.tools.common import JobWatch, hint_text
 from glossarion_mobile.ui.tools.manga.box_sheet import BoxSheet
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
@@ -242,7 +243,12 @@ class EditorTab(MangaTab):
             ft.TextButton(content="Files", icon=ft.Icons.PHOTO_LIBRARY, key="me-files",
                           on_click=lambda e: self.screen.select_tab("files") if self.screen else None),
         ], wrap=True, spacing=4)
-        self.empty = hint_text("Add images in the Files tab, then open a page here.", key="me-empty")
+        # the non-chibi Halgakos, faded, where a page will appear (owner, 2026-10-09)
+        self.empty = ft.Container(
+            content=ft.Column([faded_mascot(), hint_text("Add images in the Files tab, then open a page here.")],
+                              horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+            alignment=ft.Alignment.CENTER, padding=ft.Padding.symmetric(vertical=12), key="me-empty",
+        )
         self.root = ft.Column([
             self.empty,
             self.strip,
