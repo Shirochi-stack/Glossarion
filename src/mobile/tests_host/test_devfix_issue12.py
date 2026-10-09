@@ -913,11 +913,19 @@ def test_resume_lists_the_resumed_runs_live_requests(iso, offline):
 
         # ---- ■ Stop mid-book ------------------------------------------------------------------------
         assert await _until(lambda: probe.job()["completed"] >= 8, RUN_TIMEOUT), probe.describe()
-        await _tap(probe, view.live_job_card.action_buttons["stop"])
+        # Hold the fake model while ■ Stop is tapped, so the run stops with most of the book left
+        # whatever the runner speed (Build Mobile 37965815033: a fast runner had translated nearly
+        # every chapter before the Stop landed, leaving the resumed run 2 chapters).
+        ctx.server.hold()
+        try:
+            await _tap(probe, view.live_job_card.action_buttons["stop"])
+        finally:
+            ctx.server.release()
         await _finished(app, run)
         assert run.state == "stopped", run.state
         committed = probe.committed_labels()
         assert len(committed) >= 8, committed
+        assert probe.job()["completed"] <= chapters - 20, (probe.job(), "too little left for the resumed run")
         next_number = probe.chats.request_count(probe.cid) + 1
         assert next_number > int(run.params.get("request_number") or 0), (next_number, run.params.get("request_number"))
 
