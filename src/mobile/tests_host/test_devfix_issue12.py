@@ -668,16 +668,22 @@ def test_book_card_stays_live_through_the_glossary_gate(iso, offline):
         # ---- ✓ Yes on the chat's approval card ---------------------------------------------------
         await _tap(probe, app.chat_view.approval_card.yes_button)
         assert await _until(lambda: probe.job()["completed"] >= 30, RUN_TIMEOUT), probe.describe()
-        await asyncio.sleep(0.6)  # a stream tick (280-900 ms) and the next snapshot
-        mid = probe.sample("mid-translation")
-        assert mid["job"]["state"] == "RUNNING" and mid["job"]["total"] == CHAPTERS, mid
-        c = _check_live_card(mid, card, committed)
-        assert c["requests"] >= len(committed) + 25, c
-        texts = probe.visible_texts()
-        assert c["line"] in texts and c["state"] in texts and EPUB_NAME in texts
-        assert "Done" not in texts and "Attachment" not in texts
-        # the newest 20 rows are shown; "↑ Show … earlier requests" pages back to the glossary cards
-        assert card.earlier_requests_button.visible and probe.on_screen(card.earlier_requests_button)
+        # Hold the fake model while the mid-translation card is checked, so a fast runner cannot
+        # finish the remaining chapters inside the wait (the job must still be RUNNING).
+        server.hold()
+        try:
+            await asyncio.sleep(0.6)  # a stream tick (280-900 ms) and the next snapshot
+            mid = probe.sample("mid-translation")
+            assert mid["job"]["state"] == "RUNNING" and mid["job"]["total"] == CHAPTERS, mid
+            c = _check_live_card(mid, card, committed)
+            assert c["requests"] >= len(committed) + 25, c
+            texts = probe.visible_texts()
+            assert c["line"] in texts and c["state"] in texts and EPUB_NAME in texts
+            assert "Done" not in texts and "Attachment" not in texts
+            # the newest 20 rows are shown; "↑ Show … earlier requests" pages back to the glossary cards
+            assert card.earlier_requests_button.visible and probe.on_screen(card.earlier_requests_button)
+        finally:
+            server.release()
 
         # ---- the end -------------------------------------------------------------------------------
         await _finished(app, run)
@@ -805,15 +811,21 @@ def test_hidden_app_never_shows_done_and_catches_up(iso, offline):
         assert not frozen["visible"] and len(frozen["cards"]) == 1 and frozen["cards"][0]["id"] == id(card), frozen
         c = frozen["cards"][0]
         assert c["live"] and c["phase"] == "running" and not c["state"].startswith("Done"), c
-        await probe.lifecycle(*COME_BACK)
-        await asyncio.sleep(1.2)  # the stream loop's catch-up tick and the next job snapshot
-        back = probe.sample("returned to the app")
-        assert back["job"]["state"] == "RUNNING", back  # still translating: the catch-up is a live one
-        c = _check_live_card(back, card, committed)
-        assert c["requests"] > frozen["cards"][0]["requests"] + 30, (c, frozen["cards"][0])
-        assert c["chapter"][0] >= frozen["job"]["completed"], (c, frozen["job"])
-        texts = probe.visible_texts()
-        assert c["line"] in texts and "Done" not in texts and "Attachment" not in texts
+        # Hold the fake model across the return so the job is still RUNNING when the catch-up is
+        # checked, whatever the runner speed.
+        server.hold()
+        try:
+            await probe.lifecycle(*COME_BACK)
+            await asyncio.sleep(1.2)  # the stream loop's catch-up tick and the next job snapshot
+            back = probe.sample("returned to the app")
+            assert back["job"]["state"] == "RUNNING", back  # still translating: the catch-up is a live one
+            c = _check_live_card(back, card, committed)
+            assert c["requests"] > frozen["cards"][0]["requests"] + 30, (c, frozen["cards"][0])
+            assert c["chapter"][0] >= frozen["job"]["completed"], (c, frozen["job"])
+            texts = probe.visible_texts()
+            assert c["line"] in texts and "Done" not in texts and "Attachment" not in texts
+        finally:
+            server.release()
 
         await _finished(app, run)
         await _stop_sampling(ctx)
@@ -923,33 +935,39 @@ def test_resume_lists_the_resumed_runs_live_requests(iso, offline):
         resume_t = time.monotonic()
         assert resumed.params.get("request_number") == next_number, resumed.params.get("request_number")
         assert await _until(lambda: len(resumed.stream.segments() or []) >= 5, RUN_TIMEOUT), probe.describe()
-        await asyncio.sleep(1.2)  # a stream tick (280-900 ms) and the next snapshot
+        # Hold the fake model so the resumed job is still RUNNING while its card is checked: a fast
+        # CI runner finished the remaining chapters inside the repaint wait (Build Mobile 37959235956).
+        ctx.server.hold()
+        try:
+            await asyncio.sleep(1.2)  # a stream tick (280-900 ms) and the next snapshot
 
-        # ---- the running card: the stopped run's rows, then the resumed run's live ones -----------------
-        sample = probe.sample("resumed run")
-        assert sample["job"]["state"] == "RUNNING" and sample["run_state"] == "running", sample
-        card = view.live_job_card
-        assert card is not None and len(sample["cards"]) == 1 and sample["cards"][0]["id"] == id(card), sample
-        c = sample["cards"][0]
-        assert c["live"] and c["mounted"] and c["phase"] == "running" and c["title"] == EPUB_NAME, c
-        labels = _labels(card)
-        assert labels[:len(committed)] == committed, labels[:len(committed) + 2]
-        live_segments = resumed.stream.segments() or []
-        live_labels = [str(s.get("label") or "") for s in live_segments]
-        shown_live = labels[len(committed):]
-        assert shown_live, (f"the resumed run's live requests are not on its card: {c['tile']}, "
-                            f"live segments {live_labels[:3]}")
-        # the same requests in the same order, a repaint behind at most (a request's label turns from
-        # "Request N" into its chapter once its content is classified, so compare the request numbers)
-        shown_numbers = [segment_request_number(s) for s in card.request_segments[len(committed):]]
-        live_numbers = [segment_request_number(s) for s in live_segments]
-        assert shown_numbers == live_numbers[:len(shown_numbers)] and \
-            len(live_numbers) - len(shown_numbers) <= REPAINT_LAG, (shown_numbers[:5], live_numbers[:5])
-        assert c["tile"] == f"Requests ({len(labels)})" and len(labels) > len(committed), c
-        numbers = [segment_request_number(s) for s in live_segments if segment_request_number(s)]
-        assert numbers and min(numbers) >= next_number, (numbers[:5], next_number)
-        assert set(shown_live) & probe.visible_texts(rows=True), "the live request rows are not on screen"
-        seen["committed"] = committed
+            # ---- the running card: the stopped run's rows, then the resumed run's live ones -----------------
+            sample = probe.sample("resumed run")
+            assert sample["job"]["state"] == "RUNNING" and sample["run_state"] == "running", sample
+            card = view.live_job_card
+            assert card is not None and len(sample["cards"]) == 1 and sample["cards"][0]["id"] == id(card), sample
+            c = sample["cards"][0]
+            assert c["live"] and c["mounted"] and c["phase"] == "running" and c["title"] == EPUB_NAME, c
+            labels = _labels(card)
+            assert labels[:len(committed)] == committed, labels[:len(committed) + 2]
+            live_segments = resumed.stream.segments() or []
+            live_labels = [str(s.get("label") or "") for s in live_segments]
+            shown_live = labels[len(committed):]
+            assert shown_live, (f"the resumed run's live requests are not on its card: {c['tile']}, "
+                                f"live segments {live_labels[:3]}")
+            # the same requests in the same order, a repaint behind at most (a request's label turns from
+            # "Request N" into its chapter once its content is classified, so compare the request numbers)
+            shown_numbers = [segment_request_number(s) for s in card.request_segments[len(committed):]]
+            live_numbers = [segment_request_number(s) for s in live_segments]
+            assert shown_numbers == live_numbers[:len(shown_numbers)] and \
+                len(live_numbers) - len(shown_numbers) <= REPAINT_LAG, (shown_numbers[:5], live_numbers[:5])
+            assert c["tile"] == f"Requests ({len(labels)})" and len(labels) > len(committed), c
+            numbers = [segment_request_number(s) for s in live_segments if segment_request_number(s)]
+            assert numbers and min(numbers) >= next_number, (numbers[:5], next_number)
+            assert set(shown_live) & probe.visible_texts(rows=True), "the live request rows are not on screen"
+            seen["committed"] = committed
+        finally:
+            ctx.server.release()
 
         # ---- the end: Done, the stopped run's cards first ----------------------------------------------
         await _finished(app, resumed)
