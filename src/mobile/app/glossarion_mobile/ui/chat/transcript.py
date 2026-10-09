@@ -241,11 +241,15 @@ class Transcript(ft.ListView):
             self.release_edge_load()
 
     async def scroll_to_end(self, duration: int = 200, settle: float = 0.15) -> None:
-        """Jump to the newest card once the client has laid out the latest update."""
+        """Jump to the newest card once the client has laid out the latest update - unless the user left
+        the end meanwhile ("↑ earlier", a jump, an edge load during the settle): every caller starts this
+        only while following the tail, so a change during the wait is the user's and wins."""
         import asyncio
 
         if settle:
             await asyncio.sleep(settle)  # scroll_to before layout would stop at the old max extent
+        if not self.follow_tail or self.hidden_after:
+            return
         try:
             await self.scroll_to(offset=-1, duration=duration)
         except Exception:

@@ -630,9 +630,11 @@ def test_chat_view_pickers_on_a_fresh_config(tmp_path, desktop_store_cls):
             model_sheet = view.open_model_sheet("profile")
             assert list(model_sheet.profiles) == TRANSLATION + SPECIALISED
             # ModelSheet › Profile: the Specialised heading, and previews from the shared listing (built-ins
-            # have no stored text on a fresh config). The app installs a SheetEnv with the settings store.
-            assert model_sheet.env.store is None and model_sheet._profile_preview("Manga_JP") is None
-            model_sheet.env.store = store
+            # have no stored text on a fresh config). The app installs a SheetEnv with the settings store; a
+            # fresh one here, so neither another test's installed SheetEnv nor this store leaks either way.
+            from glossarion_mobile.ui.sheets.model_sheet import SheetEnv
+
+            model_sheet.env = SheetEnv(store=store)
             rows = model_sheet.profile_rows()
             keys = [str(getattr(row, "key", "") or "") for row in rows]
             assert keys.count("profile-group-specialised") == 1
@@ -660,3 +662,43 @@ def test_profile_section_links_to_the_profile_editors():
     links = STATIC_LINKS["main.prompt"]
     assert [link[2] for link in links] == ["settings.profiles", "settings.prefill"]
     assert all(link[2] in ROUTES_BY_NAME and getattr(ft.Icons, link[1], None) is not None for link in links)
+
+
+@needs_flet
+def test_profile_section_tiles_only_choose_real_profiles_and_keep_the_profiles(tmp_path):
+    """Device fixes 2 (#16, review): Settings › Profile & System Prompt's "Profile" is the desktop combo over the
+    shared listing (a name that is not a profile is never stored: every run would silently use the first
+    profile), and the raw "Prompt profiles" JSON is read-only on mobile - nor does "Reset this section" wipe the
+    custom profiles behind it."""
+    from glossarion_mobile.state.setting_writes import write_setting
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens.profiles import ProfileService
+    from glossarion_mobile.ui.settings.context import SettingsContext
+    from glossarion_mobile.ui.settings.schema_access import SchemaAccess
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+    from glossarion_mobile.ui.settings.tiles import ProfileTile
+
+    profiles = {**_desktop_defaults(), "Wuxia House Style": "wuxia prompt"}
+    store = _store(tmp_path, {"prompt_profiles": profiles, "active_profile": "Wuxia House Style"})
+    ctx = SettingsContext(page=None, store=store, schema=SchemaAccess(), notify=lambda *args: None)
+    page = SectionPage(parse_route("/settings/s/main.prompt"), ctx)
+    page.get_body()
+
+    tile = page.tile("active_profile")
+    names = list(ProfileService(store).listing().names)
+    assert isinstance(tile, ProfileTile) and tile.editable
+    assert [value for value, _label in tile.options()] == names and "Wuxia House Style" in names
+    assert tile.value() == "Wuxia House Style"
+    assert tile.choose(names.index("Korean_html2text"))  # "Use this profile": the extraction method follows
+    assert store.get("active_profile") == "Korean_html2text" and store.get("text_extraction_method") == "enhanced"
+    assert write_setting(store, "active_profile", "wuxia house style") == []  # not a profile: refused
+    assert store.get("active_profile") == "Korean_html2text"
+    assert tile.apply("wuxia house style") and store.get("active_profile") == "Korean_html2text"
+
+    json_tile = page.tile("prompt_profiles")
+    assert not json_tile.editable and json_tile.readonly_reason == "Edited in Settings › Profiles & prompts"
+    assert json_tile.activate() is None
+    removed = page.reset_section()
+    assert "active_profile" in removed and "prompt_profiles" not in removed
+    assert store.get("prompt_profiles")["Wuxia House Style"] == "wuxia prompt"
+    store._saver.close()

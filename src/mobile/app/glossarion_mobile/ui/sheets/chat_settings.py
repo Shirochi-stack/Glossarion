@@ -83,6 +83,7 @@ __all__ = [
     "INTRO",
     "SERIES_HOOKS",
     "global_updates_for",
+    "inherited_value",
 ]
 
 log = logging.getLogger("glossarion.chat")
@@ -152,6 +153,22 @@ def global_updates_for(field_name: str, value: Any) -> dict:
     if field_name in SIDECAR_META_FIELDS:  # mobile-only: no config.json key (UI_SPEC Appendix B)
         return {}
     return {CHAT_SETTING_KEYS[field_name]: value}
+
+
+def inherited_value(get: Callable[[str, Any], Any], field_name: str, listing: Any = None,
+                    profiles: Sequence[str] = ()) -> str:
+    """What a chat without its own ``model`` / ``profile`` / ``target_language`` runs: the All-chats value
+    (``get`` is the config store's ``get(key, default)``), else what the owner would use on a fresh config
+    (the desktop fallbacks; shown, never written). The profile is the shared listing's active one (the
+    desktop start-up rule) when the stored name is missing or unset."""
+    value = get({"model": "model", "profile": "active_profile", "target_language": "output_language"}[field_name],
+                "") or ""
+    if not value and field_name == "target_language":
+        value = get("glossary_target_language", "") or ""
+    if field_name == "profile" and listing is not None and listing.active and value not in listing.texts:
+        value = listing.active  # what the desktop start-up runs for a missing / unset one
+    return str(value or {"model": "authgpt/gpt-6-luna", "profile": (list(profiles) or ["Universal"])[0],
+                         "target_language": "English"}[field_name])
 
 
 class ChatSettingsSheet:
@@ -250,16 +267,7 @@ class ChatSettingsSheet:
             override = self.overrides().get(field_name)
             if self.scope == "chat" and override:
                 return override
-            value = self.config.get({"model": "model", "profile": "active_profile",
-                                     "target_language": "output_language"}[field_name], "") or ""
-            if not value and field_name == "target_language":
-                value = self.config.get("glossary_target_language", "") or ""
-            if field_name == "profile" and self.listing is not None and self.listing.active and \
-                    value not in self.listing.texts:
-                value = self.listing.active  # what the desktop start-up runs for a missing / unset one
-            # what the owner would use on a fresh config (desktop fallbacks), shown, never written
-            return value or {"model": "authgpt/gpt-6-luna", "profile": (self.profiles or ["Universal"])[0],
-                             "target_language": "English"}[field_name]
+            return inherited_value(self.config.get, field_name, self.listing, self.profiles)
         settings = self.effective() if self.scope == "chat" else self.global_settings()
         return getattr(settings, field_name)
 

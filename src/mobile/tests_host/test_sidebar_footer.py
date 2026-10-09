@@ -22,9 +22,10 @@ These tests drive the REAL app (``main.main`` on the fake Flet session of tests_
   cannot scroll (pins the owner's complaint; it fails on the U1 box size), for 3-button and gesture
   navigation, with the keyboard up, after a navigation-mode change and after a rotation;
 * the Keys button opens the Multi-Key Manager (``/settings/keys``, ``KeysScreen``) and closes the
-  drawer; Android back then goes Keys -> Settings -> chat (drawer navigation keeps the route's
-  static parents, like Help › Logs & diagnostics and the status chip's Accounts); on a tablet the
-  screen opens in the main area and the system back (``on_confirm_pop``) pops the same way.
+  drawer; one Android back then returns to the chat (a drawer shortcut: the Multi-Key Manager is
+  the whole stack), while Settings › API keys opened from Settings home still goes back to Settings;
+  on a tablet the screen opens in the main area and the system back (``on_confirm_pop``) pops the
+  same way.
 
 Real data is never touched: FLET_APP_STORAGE_* (so HOME, OUTPUT_DIRECTORY, GLOSSARION_LIBRARY_DIR,
 CONFIG_FILE) come from ``app_env`` under ``tmp_path``; USERPROFILE, APPDATA and LOCALAPPDATA are pointed
@@ -270,7 +271,7 @@ def test_phone_drawer_footer_never_scrolls_with_the_chat_list(app_env, monkeypat
 
 
 @needs_backend
-def test_phone_keys_button_opens_the_key_manager_and_back_returns_through_settings(app_env):
+def test_phone_keys_button_opens_the_key_manager_and_back_returns_to_the_chat(app_env):
     from glossarion_mobile.ui.screens.keys import KeysScreen
 
     async def scenario():
@@ -279,14 +280,20 @@ def test_phone_keys_button_opens_the_key_manager_and_back_returns_through_settin
             await uf._wait(lambda: app.state.engine_ready, timeout=60)
             conn.messages.clear()
             await session.dispatch_event(app.drawer.keys_button._i, "click", None)
-            assert await uf._wait(lambda: uf._routes(page) == ["/", "/settings", "/settings/keys"])
+            assert await uf._wait(lambda: uf._routes(page) == ["/", "/settings/keys"])
             screen = app.shell.top_screen
             assert isinstance(screen, KeysScreen) and screen.pool == "main"
             assert "close_drawer" in conn.invoked()  # one tap navigates and closes the drawer (§1.3)
-            # Android back: Keys -> Settings -> the chat
+            # Android back: Keys -> the chat (a shortcut: the Multi-Key Manager is the whole stack)
+            await session.dispatch_event(page._i, "view_pop", {"route": "/settings/keys"})
+            assert uf._routes(page) == ["/"] and app.shell.stack == []
+            # Settings › API keys opened from Settings home still goes back to Settings
+            await session.dispatch_event(app.drawer.settings_button._i, "click", None)
+            assert await uf._wait(lambda: uf._routes(page) == ["/", "/settings"])
+            app.navigate_to("settings.keys")
+            assert await uf._wait(lambda: uf._routes(page) == ["/", "/settings", "/settings/keys"])
             await session.dispatch_event(page._i, "view_pop", {"route": "/settings/keys"})
             assert uf._routes(page) == ["/", "/settings"]
-            assert type(app.shell.top_screen).__name__ != "KeysScreen"
             await session.dispatch_event(page._i, "view_pop", {"route": "/settings"})
             assert uf._routes(page) == ["/"] and app.shell.stack == []
             # the Settings button next to it still opens the Settings home
@@ -328,18 +335,15 @@ def test_tablet_sidebar_footer_is_pinned_and_keys_open_in_the_main_area(app_env)
 
             await session.dispatch_event(drawer.keys_button._i, "click", None)
             assert await uf._wait(lambda: isinstance(shell.top_screen, KeysScreen))
-            assert [e.route for e in shell.stack] == ["/settings", "/settings/keys"] and uf._routes(page) == ["/"]
+            assert [e.route for e in shell.stack] == ["/settings/keys"] and uf._routes(page) == ["/"]
             assert shell.top_screen.body in uf._walk(shell.main_area)
             _assert_pinned_footer(drawer, shell.sidebar)  # the sidebar stays as it was
-            # the system back on the one root View pops the main area: Keys -> Settings -> the chat
+            # the system back on the one root View pops the main area: Keys -> the chat
             root = page.views[0]
             assert root.can_pop is False and callable(root.on_confirm_pop)
             conn.messages.clear()
             await session.dispatch_event(root._i, "confirm_pop", None)
             assert await uf._wait(lambda: confirm_calls(conn) == [False])
-            assert [e.route for e in shell.stack] == ["/settings"]
-            await session.dispatch_event(root._i, "confirm_pop", None)
-            assert await uf._wait(lambda: confirm_calls(conn) == [False, False])
             assert shell.stack == [] and page.views[0].can_pop is True
         finally:
             await uf._stop(app)

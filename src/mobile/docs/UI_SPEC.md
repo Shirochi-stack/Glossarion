@@ -150,7 +150,7 @@ From top to bottom:
      - The last two use the warning colour.
      - The chip opens ModelSheet. In the sign-in case it opens the LoginSheet directly.
    - `IconButton(settings)` opens **Settings**.
-   - `IconButton(key)` "API keys" opens the **Multi-Key Manager** (`/settings/keys`; owner request 17: key settings are not in Chat settings). Back returns through Settings, like the other drawer-opened settings pages.
+   - `IconButton(key)` "API keys" opens the **Multi-Key Manager** (`/settings/keys`; owner request 17: key settings are not in Chat settings). It is a shortcut: the Multi-Key Manager is the whole stack (`app._drawer_shortcut`, `AppShell.show(alone=True)`), so one Back returns to the chat. Settings › API keys opened from Settings home still goes back to Settings.
    - `IconButton(help_outline)` opens **Help** (bundled user guide).
    - On phones the drawer content box is the NavigationDrawer list's viewport minus the navigation-bar padding (`AppShell._drawer_height`, re-fitted on `page.on_media_change`), so that list never scrolls the footer away.
 
@@ -350,9 +350,10 @@ On iOS the same text goes to local notifications (action category Accept / Revie
 - **Scratch toggle** (`chat_bubble_outline` drawn dashed via a custom icon asset):
   - shown only while the chat is empty;
   - in a scratch chat it becomes a "Scratch" chip plus a `TextButton("Save")`.
+  - On phones narrower than 400 dp (`ChatHeader.set_width`, `NARROW_HEADER_DP`) a scratch chat's Save is an `IconButton(save_outlined)` and New chat moves into ⋯ as its first item: the four actions (~217 dp) would otherwise leave a title slot narrower than the "custom" chip (a RenderFlex overflow at 320-360 dp).
 - **New chat** (`edit_square`). The current chat is reused if it is empty (desktop `_new_chat` rule).
 - **⋯** (`PopupMenuButton`):
-  - Chat settings · Attachments (N) · Jump to… · Search in chat · Text size · Move to Series… (U9) · Export chat · Delete chat.
+  - (New chat, only while the button above is folded in) · Chat settings · Attachments (N) · Jump to… · Search in chat · Text size · Move to Series… (U9) · Export chat · Delete chat.
 
 ### 2.2 ModelSheet (`ui/settings/model_sheet.py`)
 
@@ -659,7 +660,7 @@ Every tap triggers `HapticFeedback.light_impact`.
 - Loading earlier / newer cards moves one page (`limit/3` cards; the window keeps `limit` cards, end = min(total, start + limit)):
   - tapping a loader row (always works: a transcript shorter than the screen sends no scroll events) shows the loaded cards;
   - a user scroll within 600 px of the start, or a pull past the top, prepends a page and puts the card that was at the top back in view with `scroll_to(scroll_key=…, duration=0)`; one load per gesture; the mirror at the end appends a page;
-  - after "↑ earlier" a live run no longer pulls the view to the end (the ↓ FAB shows).
+  - after "↑ earlier" a live run no longer pulls the view to the end (the ↓ FAB shows); the same after a jump to a card above the newest one. A scroll to the end waits 0.15 s for the client's layout and gives way when the user left the end meanwhile (`Transcript.scroll_to_end` re-checks), so a tap or a jump during a live run is never undone by a repaint that was already settling.
 - Loader rows (desktop strings): "↑ Scroll for earlier messages (N hidden)" and "Scroll for newer messages (N hidden) ↓".
 
 **Lazy bodies.**
@@ -888,7 +889,8 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
 **Current item.** The last request label (bodySmall).
 
 **Requests (N)** (`ExpansionTile`, open while the job runs, like Jobs › job; a Result's stays closed)
-- The turn's request cards: the cards the run already committed (the glossary gate freezes its phase into the chat; an earlier run of the same turn) followed by the live ones, in spine order. Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
+- The turn's request cards: the cards the run already committed (the glossary gate freezes its phase into the chat; an earlier run of the same turn) followed by the live ones, in spine order. Once the run's finish has committed its cards (the run is still live for a moment) the committed rows are listed, as the Result lists them (matched by request number; the shared commit drops lifecycle-only rows such as the EPUB metadata request's). Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
+- The rows and their streamed text come from the job's log, which carries the API client's log records too (`JobBackend.client_logs`, the desktop GuiLogHandler: "Sending API call", the streamed text), so they stream while the job runs.
 - The newest `direct_text_rendered_card_limit` rows are shown; "↑ Show N earlier requests (M hidden)" adds a page. Jump-to and search open the list on the target request.
 - Tapping a row opens a `RequestSheet` with the full streaming content and thinking.
 - These cards are persisted as v2 assistant messages exactly as desktop does.
@@ -1853,9 +1855,11 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 ### 4.14 Profiles and prompts
 
 - **`/settings/profiles`:** a list of prompt profiles (built-in badge, modified dot), a FAB "New profile", and ⋯ Import / Export (FilePicker / Share).
-- **`/settings/profiles/<pid>`:** a `PromptEditor` (full-screen mono, token count, placeholder chips such as `{split_marker_instruction}` and `{glossary_prompt}`), a System ⇄ User role toggle, and an extraction-override section when the profile defines one. Actions: Save · Save as · Reset to default · Delete.
+- **`/settings/profiles/<pid>`:** a `PromptEditor` (full-screen mono, token count, placeholder chips such as `{split_marker_instruction}` and `{glossary_prompt}`), a System ⇄ User role toggle, and an extraction-override section when the profile defines one. Actions: Save · Save as · Use this profile · Reset to default · Delete.
+- **The active profile changes only through "Use this profile"** (a row's long-press or the profile page), the All chats profile in Chat settings / the ModelSheet, or Settings › Profile & System Prompt › Profile. Save, Save as, Duplicate, Delete and Reset to default of any row run with `keep_active=True` (device fixes 2): on the desktop only the selected, active profile can be edited, so deleting a non-active profile must not switch every inheriting chat to Universal, and renaming a chat's own profile must not make it the global one. Renaming or deleting the profile in use follows the desktop rule; New profile selects the new one (desktop `_quick_new_profile`).
 - **`/settings/prefill`:** Assistant prefill (Asst. Prompt) profiles: list, editor, enable.
-- **From the chat (device fixes #15/#16):** Chat settings › Model & prompt edits and adds profiles through the same `ProfileService` with `keep_active=True` (This chat / This series edits never change `active_profile` or `text_extraction_method`; renaming or deleting the profile in use follows the desktop rule). Chats and series follow a profile renamed on the device; one deleted here, on the desktop or by an import inherits again (`ChatFeature.reconcile_profile_overrides` on every `prompt_profiles` change and once after launch). The chat's pickers (Chat settings, ModelSheet › Profile) list every profile of this page, the task-specific built-ins under "Specialised"; Settings › Profile & System Prompt links here and to Assistant prefill.
+- **From the chat (device fixes #15/#16):** Chat settings › Model & prompt edits and adds profiles through the same `ProfileService` with `keep_active=True` (This chat / This series edits never change `active_profile` or `text_extraction_method`; renaming or deleting the profile in use follows the desktop rule). Chats and series follow a profile renamed on the device; one deleted here, on the desktop or by an import inherits again (`ChatFeature.reconcile_profile_overrides` on every `prompt_profiles` change and once after launch). The chat's pickers (Chat settings, ModelSheet › Profile) list every profile of this page, the task-specific built-ins under "Specialised"; Settings › Profile & System Prompt links here and to Assistant prefill. A chat that still names a profile that is gone when Send is tapped runs the re-check first and never sends the unknown name (`ChatView.run_overrides`). The chat header names the profile the chat runs (its own / its series', else the shared listing's active one).
+- **Settings › Profile & System Prompt** (`main.prompt`): **Profile** (`active_profile`) is the desktop profile combo over this page's listing (`ProfileTile`; a choice is "Use this profile", a name that is not a profile is never stored); the raw **Prompt profiles** JSON is read-only ("Edited in Settings › Profiles & prompts") and "Reset this section" keeps it.
 - **"All prompts" index:** a searchable list of every PromptTile in the schema, each linking into its section. It covers:
   - Refine prompt; Full + raw prompts / header / footer
   - Configure All translation prompts; title prompt; metadata prompts

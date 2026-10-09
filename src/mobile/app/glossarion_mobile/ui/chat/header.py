@@ -21,6 +21,11 @@ into the ``ChatSearchBar`` (field · "3/17" · ▲ ▼ · ✕, §2.18).
 U9: ⋯ › "Move to Series…" (the optional Series, §2.15) once the SeriesFeature sets its handler
 (``set_series_handler``); the "custom" chip also covers series defaults (the chat context reads
 the layered overrides).
+
+Narrow phones (``set_width`` < ``NARROW_HEADER_DP``): a scratch chat's actions ("Scratch" chip,
+Save, New chat, ⋯; ~217 dp) would leave a title slot narrower than the "custom" chip (~15 dp at
+320 dp, a RenderFlex overflow in the Android UI tests), so there Save is an icon button and "New
+chat" moves into ⋯; every action stays one or two taps away.
 """
 
 from __future__ import annotations
@@ -33,13 +38,17 @@ from glossarion_mobile.state.app_state import ChatContext
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ChatHeader", "ChatSearchBar", "MENU_ITEMS", "SCROLL_TINT_PX"]
+__all__ = ["ChatHeader", "ChatSearchBar", "MENU_ITEMS", "NARROW_HEADER_DP", "SCROLL_TINT_PX"]
 
 SCROLL_TINT_PX = 4
+
+#: Window widths (dp) below which a scratch chat's header actions are compact (see the module docstring).
+NARROW_HEADER_DP = 400
 
 # (action id, label) for the ⋯ menu. "Move to Series…" (U9, optional Series) shows only once the
 # SeriesFeature sets ``on_move_series`` and never in a scratch chat (scratch chats are not saved).
 MENU_ITEMS = (
+    ("new_chat", "New chat"),  # only while the New chat button is folded in (a scratch chat on a narrow phone)
     ("chat_settings", "Chat settings"),
     ("attachments", "Attachments (0)"),
     ("jump_to", "Jump to…"),
@@ -71,6 +80,8 @@ class ChatHeader:
         self.context = context or ChatContext()
         self.is_scratch = False
         self.empty = True
+        self.narrow = False  # a phone narrower than NARROW_HEADER_DP (set_width)
+        self.on_new_chat = on_new_chat
         self.on_open_model_sheet = on_open_model_sheet
         self.on_menu_action = on_menu_action
         self.scrolled = False
@@ -138,6 +149,7 @@ class ChatHeader:
         #: U9 Series: "Move to Series…" handler (SeriesFeature); the item is hidden without one.
         self.on_move_series: Optional[Callable[[], Any]] = None
         self.menu_items["move_series"].visible = False
+        self.menu_items["new_chat"].visible = False
         self.overflow = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             tooltip="More",
@@ -153,8 +165,11 @@ class ChatHeader:
             tooltip="Scratch chat — not saved",
             key="header-scratch-chip",
         )
-        self.save_scratch_button = ft.TextButton(content="Save", visible=False, on_click=on_save_scratch,
-                                                 key="header-scratch-save")
+        self.save_text_button = ft.TextButton(content="Save", visible=False, on_click=on_save_scratch,
+                                              key="header-scratch-save")
+        self.save_icon_button = ft.IconButton(icon=ft.Icons.SAVE_OUTLINED, tooltip="Save scratch chat", visible=False,
+                                              on_click=on_save_scratch, size_constraints=HIT_TARGET,
+                                              key="header-scratch-save-icon")
         self.title_column = ft.Column(
             [self.title_gesture, ft.Row([self.subtitle, self.custom_badge], spacing=6, tight=True)],
             spacing=0,
@@ -170,11 +185,23 @@ class ChatHeader:
 
     @property
     def actions(self) -> list[ft.Control]:
-        return [self.scratch_chip, self.save_scratch_button, self.scratch_button, self.new_chat_button, self.overflow]
+        return [self.scratch_chip, self.save_text_button, self.save_icon_button, self.scratch_button,
+                self.new_chat_button, self.overflow]
+
+    @property
+    def compact_actions(self) -> bool:
+        """A scratch chat on a narrow phone: Save as an icon, New chat in ⋯ (module docstring)."""
+        return self.is_scratch and self.narrow and not self.tablet
+
+    @property
+    def save_scratch_button(self) -> ft.Control:
+        """The scratch chat's Save control in use (the "Save" text button, or its icon on narrow phones)."""
+        return self.save_icon_button if self.compact_actions else self.save_text_button
 
     def build(self, tablet: bool = False) -> Any:
         """``ft.AppBar`` for phones, a 56 dp ``Container`` bar for tablets."""
         self.tablet = tablet
+        self._sync_actions()
         bgcolor = ft.Colors.SURFACE_CONTAINER if self.scrolled else ft.Colors.SURFACE
         if tablet:
             self.wrapper = ft.Container(
@@ -258,11 +285,28 @@ class ChatHeader:
         self.empty = empty
         self.scratch_button.visible = empty and not self.is_scratch
 
+    def set_width(self, width: float) -> None:
+        """The window width (dp): below ``NARROW_HEADER_DP`` a scratch chat's actions are compact."""
+        try:
+            self.narrow = 0 < float(width or 0) < NARROW_HEADER_DP
+        except (TypeError, ValueError):
+            self.narrow = False
+        self._sync_actions()
+
+    def _sync_actions(self) -> None:
+        compact = self.compact_actions
+        self.save_text_button.visible = self.is_scratch and not compact
+        self.save_icon_button.visible = self.is_scratch and compact
+        self.new_chat_button.visible = not compact
+        item = self.menu_items.get("new_chat")
+        if item is not None:
+            item.visible = compact
+
     def set_scratch(self, scratch: bool) -> None:
         """A scratch chat shows a "Scratch" chip and Save instead of the toggle (§2.1)."""
         self.is_scratch = bool(scratch)
         self.scratch_chip.visible = self.is_scratch
-        self.save_scratch_button.visible = self.is_scratch
+        self._sync_actions()
         self.set_empty(self.empty)
         delete = self.menu_items.get("delete")
         if delete is not None:
@@ -320,6 +364,9 @@ class ChatHeader:
     def _menu(self, action: str) -> None:
         if action == "move_series" and self.on_move_series is not None:
             self.on_move_series()
+            return
+        if action == "new_chat" and self.on_new_chat is not None:
+            self.on_new_chat(None)  # the New chat button, folded into ⋯
             return
         if self.on_menu_action is not None:
             self.on_menu_action(action)

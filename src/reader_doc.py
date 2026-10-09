@@ -2745,7 +2745,12 @@ _MOBILE_COMMON_CSS = (
 # between them: a stylesheet !important wins over the inline ``innerHeight - 36`` of the desktop
 # ``_setupColumns``. With env() = 0 this is the desktop geometry (columns from 20px to innerHeight - 16px);
 # the image limits keep the desktop offsets from that column height (100vh first, then 100dvh where
-# the WebView has dynamic viewport units).
+# the WebView has dynamic viewport units). A full-page illustration box that also holds a paragraph pulled
+# in before the picture (process_html's lead-in: a <p> that is not the box's last child - the picture's
+# container always is) is laid out as plain blocks: the desktop box is one monolithic, overflow-hidden flex
+# column, and on a phone-width column paragraph + picture are taller than the column, so its end (the
+# picture, the paragraph's last lines) was cut off. As blocks the paragraph flows across columns like text
+# and the picture (break-inside avoid, at most a column high) follows whole. (:has() cannot nest.)
 _MOBILE_PAGED_CSS = (
     "html { height: 100%; height: 100dvh; padding: 0; touch-action: pan-y; }"
     "body { height: 100%; height: 100dvh; "
@@ -2771,6 +2776,8 @@ _MOBILE_PAGED_CSS = (
     ".full-page-img img { "
     "max-height: calc(100vh - 100px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); "
     "max-height: calc(100dvh - 100px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }"
+    ".full-page-img:has(> p ~ *) { display: block; overflow: visible; min-height: 0; "
+    "break-inside: auto; -webkit-column-break-inside: auto; }"
 )
 
 _MOBILE_SCROLL_CSS = (

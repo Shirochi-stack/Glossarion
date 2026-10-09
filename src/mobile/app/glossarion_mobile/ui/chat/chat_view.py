@@ -126,6 +126,7 @@ from glossarion_mobile.ui.chat.send_state import (
     excluded_route_reason,
 )
 from glossarion_mobile.ui.chat.quick_chips import QuickChips
+from glossarion_mobile.ui.chat.stream_bridge import label_request_number, segment_request_number
 from glossarion_mobile.ui.chat.transcript import CardSlot, Transcript
 from glossarion_mobile.ui.chat.transcript_model import (
     ACTIONS_LABEL,
@@ -480,6 +481,7 @@ class ChatView:
         self.composer.set_compact_text(layout.compact_text)
         self.header.set_compact_text(layout.compact_text)
         self.header.set_text_scale(layout.text_scale)  # the bar grows with large text (UI_SPEC §7.5)
+        self.header.set_width(layout.width)  # narrow phones: compact scratch-chat actions
 
     # ---- services ----------------------------------------------------------------
 
@@ -576,16 +578,28 @@ class ChatView:
         return base.with_overrides(merge_meta_overrides(self.env.chats.overrides(cid), self.env.chats.meta(cid)))
 
     def chat_context_for(self, cid: str) -> ChatContext:
+        """The header's model · profile · language of chat ``cid``: its own (or its series') values, else
+        what it inherits - the same values Chat settings shows and the run uses (never the previous chat's
+        header: on a fresh config nothing names a global model or profile)."""
+        from glossarion_mobile.ui.sheets.chat_settings import inherited_value
+
         env = self.env
         overrides = env.chats.overrides(cid) if self.bound else {}
-        model = overrides.get("model") or env.config_get("model", None) or self.state.chat_context.value.model
-        profile = overrides.get("profile") or env.config_get("active_profile", None) or self.state.chat_context.value.profile
-        target = (
-            overrides.get("target_language")
-            or env.config_get("output_language", None)
-            or env.config_get("glossary_target_language", None)
-            or self.state.chat_context.value.target_language
-        )
+        listing = None
+        service = getattr(env, "profile_service", None)
+        if service is not None:
+            try:
+                listing = service.listing()
+            except Exception:
+                log.debug("prompt profile listing failed", exc_info=True)
+
+        def inherited(field_name: str) -> str:
+            return inherited_value(env.config_get, field_name, listing,
+                                   self._profiles() if listing is None and field_name == "profile" else ())
+
+        model = overrides.get("model") or inherited("model")
+        profile = overrides.get("profile") or inherited("profile")
+        target = overrides.get("target_language") or inherited("target_language")
         custom = any(overrides.get(k) is not None for k in overrides)
         return ChatContext(model=str(model), profile=str(profile), target_language=str(target), custom=custom)
 
@@ -1177,10 +1191,20 @@ class ChatView:
         current = str(segments[-1].get("label") or "") if segments else ""
         card.set_progress(counts.get("fraction"), progress_line(snapshot, eta=self._eta), current)
         # the turn's committed cards (the glossary gate's) stay listed above the run's live ones (desktop);
-        # while the finish commits the live cards they are both: the live one is listed once
-        live_labels = {str(s.get("label") or "") for s in segments} - {""}
-        saved = [s for s in card.saved_requests if str(s.get("label") or "") not in live_labels]
-        card.set_requests(saved + segments)
+        # once the finish has committed the run's cards (the run is still live while it finishes) they are
+        # both: the committed ones are listed, as the Result will list them (matched by request number - the
+        # commit's label ends in "Request N" and may be renamed, e.g. the header batch's; the shared commit
+        # drops lifecycle-only rows such as the EPUB metadata request's)
+        saved = card.saved_requests
+        rows = segments
+        if saved and segments:
+            live_numbers = {segment_request_number(s) for s in segments} - {0}
+            if live_numbers & {label_request_number(s.get("label")) for s in saved}:
+                rows = []
+            else:
+                live_labels = {str(s.get("label") or "") for s in segments} - {""}
+                saved = [s for s in saved if str(s.get("label") or "") not in live_labels]
+        card.set_requests(saved + rows)
         active_issue = getattr(snapshot, "active_issue", None)
         try:
             from glossarion_mobile.services.jobs import issue_label
@@ -1466,11 +1490,39 @@ class ChatView:
         self.show_newest()
         self.refresh_send()
 
+    def run_overrides(self, cid: str) -> dict:
+        """The chat's overrides for a run (``ChatStoreAdapter.overrides``), its prompt profile checked at
+        Send: the re-check that follows a renamed profile / clears a deleted one is posted (and waits for
+        the Library at start-up), so a chat may still name a profile that is gone - it runs with what it
+        inherits (series / All chats), never with the backend's silent first profile."""
+        chats = self.env.chats
+        overrides = dict(chats.overrides(cid))
+        name = overrides.get("profile")
+        service = getattr(self.env, "profile_service", None)
+        if not name or service is None:
+            return overrides
+        try:
+            listing = service.core_listing()  # None: no desktop core here, the names are unknown
+        except Exception:
+            listing = None
+        if listing is None or not listing.names or name in listing.names:
+            return overrides
+        reconcile = getattr(self.env, "reconcile_profiles", None)
+        if callable(reconcile):
+            try:
+                reconcile()  # the posted re-check, now: renames followed, gone ones cleared (with its notice)
+            except Exception:
+                log.exception("re-checking the chats' prompt profiles failed")
+            overrides = dict(chats.overrides(cid))
+        if overrides.get("profile") and overrides["profile"] not in listing.names:
+            overrides.pop("profile", None)
+        return overrides
+
     async def _submit(self, cid: str, text: str, record: Optional[dict], settings: DirectTextSettings,
                       output_mode: str, manual: Optional[ManualGlossarySource], user_index: Optional[int],
                       once: Optional[dict] = None, anchor: Optional[int] = None,
                       config_extra: Optional[dict] = None) -> Any:
-        overrides = self.env.chats.overrides(cid)
+        overrides = self.run_overrides(cid)
         if once:
             overrides = {**overrides, **{k: v for k, v in once.items() if v}}
         expected = len(self.env.chats.messages(cid)) if user_index is None else None
@@ -1834,7 +1886,7 @@ class ChatView:
         # (the desktop Output Mode selector's flags, settings_rules.output_mode_flags), then Run options
         overrides: dict = {}
         try:
-            overrides.update(chat_config_overrides(self.env.chats.overrides(cid)))
+            overrides.update(chat_config_overrides(self.run_overrides(cid)))
         except Exception:
             log.debug("chat overrides unavailable", exc_info=True)
         overrides.update(output_mode_values(plan.get("output_mode")))
@@ -3672,7 +3724,7 @@ class ChatView:
     async def _generate(self, cid: str, prompt: str, mode: str, settings: DirectTextSettings) -> Any:
         try:
             run = await self.env.runs.generate(cid, prompt=prompt, output_mode=mode, settings=settings,
-                                               overrides=self.env.chats.overrides(cid))
+                                               overrides=self.run_overrides(cid))
         except Exception as exc:
             log.warning("generate failed: %s", exc)
             self.notify(f"Could not start: {exc}")
@@ -4172,6 +4224,10 @@ class ChatView:
         if not (start <= position < end):
             self.window = window_around(len(self.items), self.settings().rendered_card_limit, position)
             self.render_transcript()
+        if position < len(self.items) - 1 and self.transcript.follow_tail:
+            # the user reads the jumped-to card now: a live run's repaints no longer pull the view to the
+            # end (as after "↑ earlier"; ↓ shows instead) - the client's own scroll report comes too late
+            self.transcript.follow_tail = False
         self.focus_index = index
         key = self._scroll_key_for(index)
         card = getattr(self.transcript.slot_for(key), "card", None)

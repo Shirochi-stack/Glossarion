@@ -489,11 +489,13 @@ class AppShell:
             below.append(entry)
         return below
 
-    def _plan(self, match: RouteMatch, reset: bool, in_app: bool) -> tuple[list[RouteMatch], dict[str, StackEntry]]:
+    def _plan(self, match: RouteMatch, reset: bool, in_app: bool,
+              alone: bool = False) -> tuple[list[RouteMatch], dict[str, StackEntry]]:
         """The routes of the stack after showing ``match`` (a non-root route) and the current entries
-        by route, which ``show`` reuses for those routes and disposes otherwise."""
-        wanted = self._chain(match)
-        below = None if reset else self._push_base(match, wanted, in_app)
+        by route, which ``show`` reuses for those routes and disposes otherwise. ``alone``: the route
+        without its static parents (a drawer shortcut: Back returns to the chat)."""
+        wanted = [match] if alone else self._chain(match)
+        below = None if (reset or alone) else self._push_base(match, wanted, in_app)
         if below is not None:
             # Pushed on top of the screens the user came from (UI_SPEC §1.6 rule 5).
             existing = {entry.route: entry for entry in self.stack[len(below):]}
@@ -503,7 +505,8 @@ class AppShell:
             existing = {entry.route: entry for entry in self.stack}
         return wanted, existing
 
-    def leaving_entries(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False) -> list[StackEntry]:
+    def leaving_entries(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False,
+                        alone: bool = False) -> list[StackEntry]:
         """The stack entries ``show(match, reset=, in_app=)`` would dispose (nothing changes): the app asks
         their screens' ``confirm_leave`` first (unsaved edits)."""
         presentation = match.presentation
@@ -513,7 +516,7 @@ class AppShell:
             if not self.stack and match.route == self.current.route:
                 return []
             return list(self.stack)
-        wanted, existing = self._plan(match, reset, in_app)
+        wanted, existing = self._plan(match, reset, in_app, alone)
         for item in wanted:
             existing.pop(item.route, None)
         return list(existing.values())
@@ -526,12 +529,13 @@ class AppShell:
                 return list(self.stack[index + 1:])
         return []
 
-    def show(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False) -> bool:
+    def show(self, match: RouteMatch, *, reset: bool = False, in_app: bool = False, alone: bool = False) -> bool:
         """Show a whitelisted route. Returns False when nothing changed.
 
         ``in_app``: opened from a screen of the app, so it goes on top of the current screens
         (``_push_base``). ``reset`` (drawer navigation) rebuilds the stack from the route's
-        static parents instead.
+        static parents instead; ``alone`` (a drawer shortcut such as the footer's API keys) makes the
+        route the whole stack, so one Back returns to the chat.
         """
         presentation = match.presentation
         if presentation == HANDLED:
@@ -551,7 +555,7 @@ class AppShell:
             self.current = match
             self._install_views()
             return True
-        wanted, existing = self._plan(match, reset, in_app)
+        wanted, existing = self._plan(match, reset, in_app, alone)
         if presentation != FULLSCREEN:
             self._close_unpinned_panel()
         new_stack: list[StackEntry] = []

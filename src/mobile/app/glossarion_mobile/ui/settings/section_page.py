@@ -31,7 +31,7 @@ from glossarion_mobile.ui.settings.banners import JobBanner
 from glossarion_mobile.ui.settings.model import WINDOW_SIZE, grouped_specs, window_bounds
 from glossarion_mobile.ui.settings.schema_access import SearchHit
 from glossarion_mobile.ui.settings.search import SettingsSearch, search_sheet
-from glossarion_mobile.ui.settings.tiles import EffectiveConfig, SettingTile, make_tile
+from glossarion_mobile.ui.settings.tiles import MOBILE_READONLY_REASONS, EffectiveConfig, SettingTile, make_tile
 from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["HIGHLIGHT_SECONDS", "SECTION_POOL_KEYS", "STATIC_LINKS", "STATIC_ROWS", "SectionPage",
@@ -426,6 +426,8 @@ class SectionPage(Screen):
                 continue
             ok, _reason = self.ctx.schema.availability(key)
             if getattr(spec, "readonly", ""):  # a mirror another control writes (Follows Output mode, ...)
+                continue
+            if key in MOBILE_READONLY_REASONS:  # edited on its own page (Prompt profiles: Profiles & prompts)
                 continue
             if ok and self.ctx.schema.lock_reason(spec, self.config_view) is None:
                 if self.ctx.store.unset(self.ctx.schema.path_of(key)):

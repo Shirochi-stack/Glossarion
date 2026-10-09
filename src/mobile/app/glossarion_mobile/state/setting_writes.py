@@ -197,14 +197,20 @@ def effective_streaming_values(source: Any) -> dict:
     return values
 
 
-def streaming_states(source: Any) -> dict:
-    """``{toggle: bool}`` the way a mobile run reads the four toggles (``settings_rules.streaming_states``
-    over the stored values, an absent toggle ON)."""
+def _stored_toggles(source: Any) -> dict:
+    """The four streaming toggles that are stored in ``source`` (absent ones left out)."""
     stored = {}
     for key in STREAMING_KEYS:
         present, value = _stored_value(source, key)
         if present:
             stored[key] = value
+    return stored
+
+
+def streaming_states(source: Any) -> dict:
+    """``{toggle: bool}`` the way a mobile run reads the four toggles (``settings_rules.streaming_states``
+    over the stored values, an absent toggle ON)."""
+    stored = _stored_toggles(source)
     rules = _rules()
     if rules is not None and hasattr(rules, "streaming_states"):
         try:
@@ -216,8 +222,15 @@ def streaming_states(source: Any) -> dict:
 
 def streaming_mode(source: Any) -> str:
     """'on' / 'off' / 'custom' (the toggles differ: an imported desktop config, or the U8/U9 builds'
-    four switches) - what the Streaming switch shows."""
-    states = streaming_states(source).values()
+    four switches) - what the Streaming switch shows (``settings_rules.streaming_mode`` over the stored
+    values, an absent toggle ON)."""
+    rules = _rules()
+    if rules is not None and hasattr(rules, "streaming_mode"):
+        try:
+            return str(rules.streaming_mode(_stored_toggles(source), unset=MOBILE_STREAMING_DEFAULT))
+        except Exception:
+            log.debug("streaming_mode failed", exc_info=True)
+    states = streaming_states(source).values()  # no backend (a broken build)
     return "on" if all(states) else "off" if not any(states) else "custom"
 
 
@@ -307,11 +320,20 @@ def extraction_method_for_profile(name: Any) -> Optional[str]:
 
 
 def _select_profile(store: Any, name: Any) -> list:
-    """Settings › Profiles' "Use this profile" (``ProfileService.select`` -> ``select_profile``)."""
+    """Settings › Profiles' "Use this profile" (``ProfileService.select`` -> ``select_profile``).
+
+    Like the desktop combo it only ever switches to an existing profile: with the profiles core loaded a
+    name it does not know is refused (nothing written; a stored unknown name would make every run silently
+    use the first profile). Without the core (names unknown) the plain key is written, as before."""
     try:
         from glossarion_mobile.ui.screens.profiles import ProfileService
 
-        changed = list(ProfileService(store).select(str(name)))
+        service = ProfileService(store)
+        listing = service.core_listing()
+        if listing is not None and listing.names and str(name) not in listing.names:
+            log.warning("not a prompt profile, not selected: %r", name)
+            return []
+        changed = list(service.select(str(name)))
     except Exception:
         log.debug("profile select through prompt_profiles failed", exc_info=True)
         changed = []

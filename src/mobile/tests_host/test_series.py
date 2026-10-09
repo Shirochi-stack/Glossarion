@@ -415,6 +415,37 @@ def test_header_move_to_series_item():
     assert item.visible is False
 
 
+@needs_flet
+def test_header_compact_scratch_actions_on_narrow_phones():
+    """Below NARROW_HEADER_DP a scratch chat's Save is an icon and New chat moves into ⋯ (device fixes 2: the
+    four actions left a title slot narrower than the "custom" chip); wider screens and normal chats keep them."""
+    from glossarion_mobile.ui.chat.header import MENU_ITEMS, NARROW_HEADER_DP, ChatHeader
+
+    assert [a for a, _l in MENU_ITEMS][0] == "new_chat"
+    calls = []
+    header = ChatHeader(on_new_chat=lambda e: calls.append("new"), on_menu_action=lambda a: calls.append(a))
+    header.build()
+    header.set_width(NARROW_HEADER_DP - 80)
+    assert header.new_chat_button.visible and not header.menu_items["new_chat"].visible  # a normal chat
+    header.set_scratch(True)
+    assert header.compact_actions and header.save_scratch_button is header.save_icon_button
+    assert header.save_icon_button.visible and not header.save_text_button.visible and header.scratch_chip.visible
+    assert not header.new_chat_button.visible and header.menu_items["new_chat"].visible
+    header._menu("new_chat")
+    assert calls == ["new"]  # the folded New chat button, not a menu action
+    header.set_width(NARROW_HEADER_DP + 11)
+    assert header.save_scratch_button is header.save_text_button and header.save_text_button.visible
+    assert not header.save_icon_button.visible and header.new_chat_button.visible
+    assert not header.menu_items["new_chat"].visible
+    header.set_width(NARROW_HEADER_DP - 80)
+    header.build(tablet=True)  # a tablet's bar is never compact
+    assert not header.compact_actions and header.save_text_button.visible and header.new_chat_button.visible
+    header.build()
+    header.set_scratch(False)
+    assert not header.save_icon_button.visible and not header.save_text_button.visible
+    assert header.new_chat_button.visible and not header.menu_items["new_chat"].visible
+
+
 def _drawer(chats):
     from glossarion_mobile.state.app_state import AppState
     from glossarion_mobile.ui.shell.drawer import ChatDrawer

@@ -28,7 +28,10 @@ Routes carry an opaque profile id (``profile_id(name)``: 12 hex of SHA-1), never
 Shared with the chat (device fixes, owner #15/#16): ``ProfileService.listing`` is the one profile
 list (the chat pickers order it with ``chat_profile_order``: translation profiles first, the
 task-specific built-ins under "Specialised"); ``keep_active=True`` edits a profile without
-switching the global/desktop active profile (Chat settings › This chat); ``ask_profile_name``,
+switching the global/desktop active profile (Chat settings › This chat, and every Save / Save as /
+Duplicate / Delete / Reset here: on the desktop only the active profile can be edited, here any row
+can, so "Use this profile" is the one switch; renaming or deleting the profile in use still follows
+the core's choice like the desktop); ``ask_profile_name``,
 ``profile_badges``, ``prompt_preview`` and ``profile_prompt_card`` are the pieces Chat settings
 reuses; ``follow_profile`` tells where a chat's or series' stored profile went after a rename
 (noted by ``ProfileService.save``) or a delete (None: inherit).
@@ -956,7 +959,7 @@ class ProfilesScreen(_ProfilesBase):
 
     def duplicate(self, name: str) -> Optional[str]:
         try:
-            new = self.service.duplicate(name)
+            new = self.service.duplicate(name, keep_active=True)
         except Exception as exc:
             self.say(str(exc))
             return None
@@ -982,7 +985,7 @@ class ProfilesScreen(_ProfilesBase):
 
     def delete_or_reset(self, name: str) -> Optional[str]:
         try:
-            kind = self.service.delete_or_reset(name)
+            kind = self.service.delete_or_reset(name, keep_active=True)
         except Exception as exc:
             self.say(str(exc))
             return None
@@ -1126,7 +1129,7 @@ class ProfileDetailScreen(_ProfilesBase):
     def save(self) -> Optional[str]:
         new_name = (self.name_field.value or "").strip()
         try:
-            saved = self.service.save(self.name, new_name, self.editor.value)
+            saved = self.service.save(self.name, new_name, self.editor.value, keep_active=True)
         except Exception as exc:
             self._error(str(exc))
             return None
@@ -1156,7 +1159,7 @@ class ProfileDetailScreen(_ProfilesBase):
 
     def save_as(self, name: str) -> Optional[str]:
         try:
-            saved = self.service.save_as(name, self.editor.value)
+            saved = self.service.save_as(name, self.editor.value, keep_active=True)
         except Exception as exc:
             self._error(str(exc))
             return None
@@ -1195,7 +1198,7 @@ class ProfileDetailScreen(_ProfilesBase):
 
     def delete_or_reset(self) -> Optional[str]:
         try:
-            kind = self.service.delete_or_reset(self.name)
+            kind = self.service.delete_or_reset(self.name, keep_active=True)
         except Exception as exc:
             self._error(str(exc))
             return None

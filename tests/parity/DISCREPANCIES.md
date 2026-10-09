@@ -3997,7 +3997,17 @@ byte-identical.
      tap sets all four.
   4. Every job config re-applies the thoughts lock: stream thinking on gives enable_thoughts True in the
      snapshot, never stored. Mobile has no Enable thoughts tile to show a stale value; desktop applies the same
-     lock when Other Settings opens.
+     lock when Other Settings opens. An Enable thoughts OFF stored by the U8/U9 builds' own tile counts as a
+     stored value of the switch (its long-press Reset removes it, `reset_streaming`) and its ⓘ lists it as
+     "On (locked by stream thinking)", the value a run uses (`StreamingTile.run_values`).
+- The API client's log records reach the job (parity fix, not a divergence): `unified_api_client` turns its
+  print()s into `logging` records ("Sending API call", "SDK stream opened", the streamed text, retry notices),
+  which the desktop routes into the log panel and so into the Direct Text classifier
+  (`TranslatorGUI._attach_gui_logging_handlers`). The GUI-free default of that hook is a no-op, so on mobile
+  these lines only reached data/logs/run.log and Streaming ON looked like OFF in the chat, Jobs and the Reader's
+  live panel. `JobService` now attaches the shared GUI-free `translate_headers_standalone._attach_logging_handlers`
+  to the job's host for the job's duration (`JobBackend.client_logs`, detached when the job ends): the same
+  loggers (`unified_api_client`, `httpx`, `requests.packages.urllib3`, `openai`) as the desktop handler.
 - Tests: tests_host/test_streaming_toggle.py, tests/test_other_settings_streaming_texts.py; tests_host/
   test_u9_gap_closure.py and test_mobile_settings.py follow the fold (Enable thoughts is listed under Response
   handling; a folded key has no tile of its own).
@@ -4021,6 +4031,14 @@ byte-identical.
   live ones and pages its rows (newest `direct_text_rendered_card_limit` first, "↑ Show N earlier requests");
   its Requests list starts open while the job runs (the desktop shows every request card in the transcript).
   Scrolling within 600 px of the top, or a pull past it, loads one page of earlier cards (UI_SPEC §2.8).
+  Once the run's finish has committed its cards (`ChatStore.finish_run`, the run still live for a moment) the
+  card lists the committed rows, as the Result does: the commit is recognised by the request number its
+  labels end in ("· Request N"; the header commit renames its card), and the shared commit drops the
+  lifecycle-only live rows (the EPUB metadata request's), like the desktop.
+- Mobile-only scroll rules (the dialog's QTextBrowser has no settle delay): a scroll to the end waits 0.15 s
+  for the client's layout and gives way when the user left the end meanwhile ("↑ earlier", a jump, an edge
+  load: `Transcript.scroll_to_end` re-checks); a jump to a card above the newest stops following the end, so
+  a live run's repaints do not scroll it away (↓ shows).
 - Tests: tests_host/test_chat_transcript_window.py; tests_host/test_chat.py::test_transcript_window_and_grouping
   (the partial window's JobCard keeps index 2, `detached`, key `job-2`).
 
@@ -4049,14 +4067,24 @@ byte-identical.
 - Tests: tests_host/test_reader_layout.py (Chrome measurement test needs headless Chrome + node >= 22, else
   skips), tests_host/test_reader_modes.py; tests/test_reader_doc.py.
 
-### Desktop bug found (recorded, not fixed): a long paragraph before an illustration is clipped
+### Desktop bug found (recorded, not fixed on desktop): a paragraph before an illustration is clipped
 
-- Shared reader core, same on desktop and mobile, unchanged by this batch: `reader_doc._process_html` (about
-  line 1813) pulls any preceding `<p>` (and a heading before it) into the `.full-page-img` wrapper of an
-  illustration with no length check. The wrapper is `overflow: hidden` and `break-inside: avoid`, so a long
-  paragraph right before an image paragraph is clipped (example: a 2302 px wrapper in a 692 px column; at 24 pt
-  14 lines were never shown). Proposed fix, desktop-shared, needs the owner's approval: apply the <= 240-character
-  rule line 1806 already applies to the image's parent (`len(prev.get_text(' ', strip=True)) <= 240`).
+- Shared reader core, unchanged by this batch: `reader_doc._process_html` (about line 1813) pulls any preceding
+  `<p>` (and a heading before it) into the `.full-page-img` wrapper of an illustration with no length check. The
+  wrapper is a monolithic flex column (`overflow: hidden`, `break-inside: avoid`), so paragraph + picture taller
+  than the column lose their end: the picture, and on a phone-width column the paragraph's last lines too
+  (example: a 2302 px wrapper in a 692 px column; at 24 pt 14 lines were never shown). The desktop paged page
+  cuts the picture in 40 of 48 measured desktop geometries (1000x800 to 1920x1040, 14/18 pt, spread 1/2).
+- Mobile (fixed, mobile-only CSS): `_MOBILE_PAGED_CSS` lays a wrapper that holds such a lead-in
+  (`.full-page-img:has(> p ~ *)`: a `<p>` that is not the wrapper's last child; the picture's container always
+  is) out as plain blocks with `overflow: visible`: the paragraph flows across columns like text and the
+  picture (break-inside avoid, at most a column high) follows whole. Wrappers without a lead-in keep the
+  desktop's centred full-page box. Measured on 412x915 and 360x800 at 14 and 18 pt with a 1000x1400 portrait
+  plate (tests_host/test_devfix_issue10.py::test_owner_report_10_text_leading_into_an_illustration_is_not_cut).
+  A WebView without `:has()` (Chrome < 105) keeps the desktop box.
+- Desktop fix (needs the owner's approval): the same block layout for a wrapper with a lead-in, or the
+  <= 240-character rule line 1806 already applies to the image's parent (`len(prev.get_text(' ', strip=True))
+  <= 240`).
 
 ### Chat settings prompt profiles (mobile only; the shared prompt_profiles core unchanged)
 
@@ -4080,15 +4108,43 @@ byte-identical.
   by an import or a restore) is cleared from the chat sidecar / mobile_series.json, so the chat inherits again,
   with one snackbar (`ChatFeature.reconcile_profile_overrides`, on every `prompt_profiles` change and once at
   startup). There is no silent fallback to Universal.
-- Settings › Profile & System Prompt (the generated `main.prompt` section, whose `prompt_profiles` tile is raw
-  JSON) links to Profiles & prompts and Assistant prefill.
-- Tests: tests_host/test_chat_prompts.py.
+- Settings › Profiles & prompts (Manage…): Save, Save as, Duplicate, Delete and Reset to default also run with
+  `keep_active=True`. The desktop only edits the combo's selected profile, which is the active one, so the
+  core's "save selects it" / "delete selects the first profile" never touch another profile there; on mobile
+  any row or profile page can be edited, and without this a delete of a non-active profile switched every
+  inheriting chat (and the desktop) to Universal, and a rename made a chat's own profile the global one.
+  "Use this profile" is the one switch. Renaming or deleting the profile in use still follows the core's choice
+  like the desktop; New profile still selects the new one (`_quick_new_profile`).
+- The chat header names the profile a chat runs: its own / its series', else the shared listing's active one
+  (`chat_settings.inherited_value`, also used by Chat settings), never the previous chat's.
+- At Send a chat whose stored profile is unknown to the loaded core runs the profile re-check first and never
+  sends the unknown name (`ChatView.run_overrides`); the backend would otherwise silently use the first profile.
+- Settings › Profile & System Prompt (the generated `main.prompt` section) links to Profiles & prompts and
+  Assistant prefill. Its **Profile** (`active_profile`) is the desktop combo over the shared listing
+  (`tiles.ProfileTile`; a choice is "Use this profile"), and `setting_writes._select_profile` refuses a name the
+  loaded core does not know (the plain key is written only without the core). Its raw **Prompt profiles** JSON
+  is read-only on mobile ("Edited in Settings › Profiles & prompts", `tiles.MOBILE_READONLY_REASONS`; the
+  desktop-shared `settings_schema.READONLY_REASONS` is unchanged): saving a partial dict bypassed `save_profiles`
+  and dropped the built-ins the desktop start-up does not re-add (Manga_*, Glossary_Editor, Original).
+- Tests: tests_host/test_chat_prompts.py, tests_host/test_devfix_issue15.py, tests_host/test_devfix_issue16.py.
+
+### Chat header on narrow phones (mobile only)
+
+- The subtitle (model · profile · → language) is a loose Flexible that ellipsizes, so the "custom" chip stays
+  whole (the Android UI tests' RenderFlex overflow at 320 dp). A scratch chat's four actions ("Scratch" chip,
+  Save, New chat, ⋯; ~217 dp) still left a title slot narrower than the chip, so below 400 dp
+  (`header.NARROW_HEADER_DP`) a scratch chat shows Save as an icon button and moves New chat into ⋯. The
+  desktop dialog has no app bar.
+- Tests: tests_host/test_devfix_issue18.py.
 
 ### Drawer / sidebar footer: API keys button, pinned footer (mobile only)
 
 - The footer is status chip · Settings · **API keys** (🔑, `/settings/keys`, the Multi-Key Manager) · Help. Key
-  settings are not in Chat settings. Back from Keys returns through Settings, the drawer's static-parent rule
-  (Help › Logs & diagnostics, About and the status chip's Accounts do the same).
+  settings are not in Chat settings. The Keys button is a shortcut: the Multi-Key Manager is the whole stack
+  (`app._drawer_shortcut`, `AppShell.show(alone=True)`), so one Back returns to the chat (owner acceptance
+  for #17). Settings › API keys opened from Settings home still goes back to Settings; Help › Logs &
+  diagnostics, About and the status chip's Accounts keep the drawer's static-parent rule (back through
+  Settings).
 - Phone: Flet 1.0.3 builds the drawer as Flutter's NavigationDrawer, whose own list pads its end by the
   navigation bar. The content box is now the page height minus the top and bottom insets
   (`AppShell._drawer_height`, re-fitted on `page.on_media_change`), so that outer list can no longer scroll the

@@ -62,7 +62,7 @@ from glossarion_mobile.ui.router import HANDLED, RouteError, RouteMatch, Router,
 from glossarion_mobile.ui.screens.base import HubScreen, PlaceholderScreen, Screen
 from glossarion_mobile.ui.screens.diagnostics import DiagnosticsScreen
 from glossarion_mobile.ui.shell.app_shell import AppShell
-from glossarion_mobile.ui.shell.drawer import ChatDrawer
+from glossarion_mobile.ui.shell.drawer import KEYS_ROUTE, ChatDrawer
 from glossarion_mobile.ui.theme import Appearance, apply_theme, is_dark
 
 __all__ = ["GlossarionApp", "main"]
@@ -214,6 +214,7 @@ class GlossarionApp:
             on_new_scratch=lambda e: self.chat_view._on_new_scratch(e),
             on_status=self._on_status_chip,
             on_settings=lambda e: self._drawer_navigate("settings"),
+            on_keys=lambda e: self._drawer_shortcut(KEYS_ROUTE),
             on_help=self._on_help,
             dark=dark,
         )
@@ -586,10 +587,12 @@ class GlossarionApp:
     async def on_route_change(self, e: Any) -> None:
         await self.dispatch_route(getattr(e, "route", None), source="event")
 
-    async def dispatch_route(self, raw: Optional[str], *, source: str, reset: bool = False) -> Optional[RouteMatch]:
+    async def dispatch_route(self, raw: Optional[str], *, source: str, reset: bool = False,
+                             alone: bool = False) -> Optional[RouteMatch]:
         """Apply a route. In-app navigation (``source="app"``) pushes a route opened over other
         screens on top of them; ``reset`` (drawer navigation) rebuilds the stack from the route's
-        static parents; a link from outside the app keeps the static parents unless they are open."""
+        static parents (``alone``: without them, a drawer shortcut); a link from outside the app keeps
+        the static parents unless they are open."""
         match = self.router.handle(raw)
         self._spike_routes_changed()
         if match is None:
@@ -612,13 +615,13 @@ class GlossarionApp:
                 return match  # the client echoing a route the app pushed (overlays stay)
             if not self.shell.overlays:
                 return match  # echo of an in-app navigation
-        guarded = self._guarded(self.shell.leaving_entries(match, reset=reset, in_app=source == "app"))
+        guarded = self._guarded(self.shell.leaving_entries(match, reset=reset, in_app=source == "app", alone=alone))
         if guarded and not await self._confirm_leave(guarded):
             log.info("navigation to %s cancelled: a screen kept its unsaved changes", match.route)
             if source != "app":
                 self.dispatcher.spawn(self._restore_route())  # the client already shows the link's route
             return None
-        self.shell.show(match, reset=reset, in_app=source == "app")
+        self.shell.show(match, reset=reset, in_app=source == "app", alone=alone)
         self.page.update()
         return match
 
@@ -671,28 +674,35 @@ class GlossarionApp:
     async def _restore_route(self) -> None:
         await self._push_client_route(self.shell.current_route if self.shell is not None else "/")
 
-    async def navigate(self, route: str, *, reset: bool = False) -> Optional[RouteMatch]:
+    async def navigate(self, route: str, *, reset: bool = False, alone: bool = False) -> Optional[RouteMatch]:
         """In-app navigation to a route string: apply it now, then sync the client route."""
-        match = await self.dispatch_route(route, source="app", reset=reset)
+        match = await self.dispatch_route(route, source="app", reset=reset, alone=alone)
         if match is not None and match.presentation not in (HANDLED, "sheet"):
             await self.close_drawer()
             await self._push_client_route(self.shell.current_route)
         return match
 
     def navigate_to(self, route_name: str, params: Optional[dict] = None, query: Optional[dict] = None, *,
-                    reset: bool = False) -> None:
+                    reset: bool = False, alone: bool = False) -> None:
         """Navigate by route name (the only way UI code builds routes). A route opened over other
-        screens is pushed on top of them (back returns there); ``reset`` is drawer navigation."""
+        screens is pushed on top of them (back returns there); ``reset`` is drawer navigation,
+        ``alone`` a drawer shortcut (the route without its static parents)."""
         try:
             route = build_route(route_name, params, query)
         except RouteError as exc:
             log.error("bad in-app route %s: %s", route_name, exc)
             return
-        self.dispatcher.spawn(self.navigate(route, reset=reset))
+        self.dispatcher.spawn(self.navigate(route, reset=reset, alone=alone))
 
     def _drawer_navigate(self, route_name: str) -> None:
         """A drawer / sidebar destination: the stack restarts from the route's static parents."""
         self.navigate_to(route_name, reset=True)
+
+    def _drawer_shortcut(self, route_name: str) -> None:
+        """A drawer / sidebar footer shortcut into Settings (the footer's API keys, owner #17): the page alone
+        on the stack, so one Back returns to the chat (Settings > API keys opened from Settings home still goes
+        back to Settings)."""
+        self.navigate_to(route_name, reset=True, alone=True)
 
     async def on_view_pop(self, e: Any) -> None:
         view = getattr(e, "view", None)

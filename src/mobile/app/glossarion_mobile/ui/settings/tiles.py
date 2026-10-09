@@ -3,7 +3,8 @@
 One tile per ``SettingSpec``; ``make_tile`` picks the class from
 ``model.tile_kind``: SwitchTile · NumberTile · SliderTile · SegmentedTile ·
 DropdownTile · TextTile · PromptTile (opens ``PromptEditor``) · SecretTile ·
-PathTile · ListSettingTile · JsonTile.
+PathTile · ListSettingTile · JsonTile; ``active_profile`` is a ProfileTile (the desktop
+profile combo over the shared profile listing).
 
 Common anatomy: label + "modified" dot, one help line, the effective value
 (the stored value, else the schema default marked "· default"; defaults are
@@ -41,6 +42,7 @@ from glossarion_mobile.state.setting_writes import (
     reset_streaming,
     streaming_states,
     streaming_summary,
+    with_mobile_streaming_defaults,
     write_setting,
 )
 from glossarion_mobile.ui import tokens
@@ -78,9 +80,11 @@ __all__ = [
     "JsonTile",
     "ListSettingTile",
     "MIRRORS",
+    "MOBILE_READONLY_REASONS",
     "MultiplierGridTile",
     "NumberTile",
     "PathTile",
+    "ProfileTile",
     "PromptTile",
     "SecretTile",
     "SegmentedTile",
@@ -183,6 +187,12 @@ def pool_slug_for(key: str) -> Optional[str]:
     return mapping.get(str(key or ""))
 
 
+#: Keys another mobile page edits with the desktop semantics, shown read-only here (mobile display only; the
+#: desktop-shared list is ``settings_schema.READONLY_REASONS``): the raw JSON would bypass the desktop
+#: ``save_profiles`` and could drop built-ins the desktop start-up does not re-add (Manga_*, Original, ...).
+MOBILE_READONLY_REASONS = {"prompt_profiles": "Edited in Settings › Profiles & prompts"}
+
+
 class SettingTile:
     kind = "text"
 
@@ -215,6 +225,8 @@ class SettingTile:
             return reason
         if pool_slug_for(self.key):
             return "Edited in API keys"
+        if len(self.path) == 1 and self.key in MOBILE_READONLY_REASONS:
+            return MOBILE_READONLY_REASONS[self.key]
         return None
 
     # ---- value -------------------------------------------------------------------------
@@ -733,6 +745,39 @@ class ContextModeTile(DropdownTile):
         return True
 
 
+class ProfileTile(DropdownTile):
+    """Profile & System Prompt › Profile (``active_profile``): the desktop profile combo - every profile of
+    the shared listing (``ProfileService.listing``: desktop order, the built-ins the desktop start-up adds);
+    a choice is "Use this profile" (``setting_writes`` -> ``ProfileService.select``, the extraction-method
+    switch included). A stored name that is not a profile (or none) shows the profile the desktop start-up
+    runs instead; the tile never stores a name that is not a profile."""
+
+    kind = "dropdown"
+
+    def _listing(self) -> Any:
+        try:
+            from glossarion_mobile.ui.screens.profiles import ProfileService
+
+            return ProfileService(self.store).listing()
+        except Exception:
+            log.debug("prompt profile listing failed", exc_info=True)
+            return None
+
+    def options(self) -> list[tuple[Any, str]]:
+        listing = self._listing()
+        names = list(listing.names) if listing is not None and listing.names else []
+        if not names:
+            return super().options()
+        return [(name, name) for name in names]
+
+    def value(self) -> Any:
+        stored = super().value()
+        listing = self._listing()
+        if listing is not None and listing.active and stored not in listing.texts:
+            return listing.active  # what the desktop start-up runs for a missing / unset name
+        return stored
+
+
 def _settings_rules() -> Any:
     try:
         import settings_rules  # shared, GUI-free (U4)
@@ -778,7 +823,18 @@ class StreamingTile(SwitchTile):
 
     @property
     def stored(self) -> bool:
-        return any(self.store.has(key) for key in STREAMING_KEYS)
+        """A toggle is stored - or Enable thoughts is stored off (the U8/U9 builds' own tile): the lock keeps
+        thoughts on while stream thinking is on, so that value is stale, and Reset removes it
+        (``reset_streaming``)."""
+        if any(self.store.has(key) for key in STREAMING_KEYS):
+            return True
+        return bool(MOBILE_STREAMING_DEFAULT and self.store.has(_THOUGHTS_KEY)
+                    and not bool(self.store.get(_THOUGHTS_KEY)))
+
+    def run_values(self) -> dict:
+        """``STREAMING_WRITES`` as a run uses them: the stored values, the mobile default for absent ones and
+        the desktop thoughts lock (``with_mobile_streaming_defaults``, what a job's config gets)."""
+        return with_mobile_streaming_defaults(dict(effective_streaming_values(self.store)))
 
     def summary(self) -> str:
         return streaming_summary(self.store)
@@ -847,13 +903,18 @@ class StreamingTile(SwitchTile):
         tooltip = plain_text(spec_attr(self.spec, "tooltip", ""))
         if tooltip:
             lines.append(tooltip)
-        values = effective_streaming_values(self.store)
+        values = self.run_values()
         rows = []
         for key in STREAMING_WRITES:
             spec = self.ctx.schema.spec(key)
             names = env_names(spec) if spec is not None else []
             state = "On" if bool(values[key]) else "Off"
-            stored = "" if self.store.has(key) else " (default)"
+            if not self.store.has(key):
+                stored = " (default)"
+            elif bool(self.store.get(key)) != bool(values[key]):  # a stale Enable thoughts off, under the lock
+                stored = " (locked by stream thinking)"
+            else:
+                stored = ""
             rows.append(f"• {self._label(key)}{' · ' + ', '.join(names) if names else ''}: {state}{stored}")
         lines.append("Desktop settings it sets:\n" + "\n".join(rows))
         lines.append(f"{self._label(_THOUGHTS_KEY)} stays on while {self._label('stream_thinking_logs')} is on "
@@ -1140,6 +1201,8 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> Setti
         cls = ContextModeTile
     elif key == STREAMING_KEY and getattr(spec, "virtual", "") == "streaming":
         cls = StreamingTile
+    elif key == PROFILE_KEY and len(config_path(spec)) == 1:
+        cls = ProfileTile
     else:
         cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
     return cls(spec, ctx, config=config)

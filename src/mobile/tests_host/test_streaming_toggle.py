@@ -402,6 +402,25 @@ def test_streaming_tile_custom_state_and_one_tap_normalises(tmp_path):
 
 
 @needs_flet
+def test_a_stale_enable_thoughts_off_from_the_old_tile_is_shown_as_run_and_reset_clears_it(tmp_path):
+    """U8/U9 builds had their own Enable thoughts tile: a user who turned it off has enable_thoughts False stored
+    and no streaming key. Every run uses thoughts ON (the desktop lock under the default-ON stream thinking), so
+    the switch's ⓘ says so, and long-press Reset can clear the stale value (review finding mobile-behaviour-9)."""
+    from glossarion_mobile.state.setting_writes import with_mobile_streaming_defaults
+    from glossarion_mobile.ui.settings.tiles import make_tile
+
+    ctx = _ctx(tmp_path, {"enable_thoughts": False}, notify=lambda *args: None)
+    tile = make_tile(ctx.schema.spec("streaming"), ctx)
+    assert with_mobile_streaming_defaults(dict(ctx.store.snapshot()))["enable_thoughts"] is True  # what runs
+    assert tile.switch.value is True and tile.stored
+    thoughts = [line for line in tile.help_body().splitlines() if "ENABLE_THOUGHTS" in line]
+    assert thoughts and thoughts[0].endswith("On (locked by stream thinking)"), thoughts
+    assert tile.reset() and not ctx.store.has("enable_thoughts") and not tile.stored
+    assert [line for line in tile.help_body().splitlines() if "ENABLE_THOUGHTS" in line][0].endswith("On (default)")
+    ctx.store._saver.close()
+
+
+@needs_flet
 def test_section_pages_show_one_switch_and_settings_home_counts_it(tmp_path):
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.settings.section_page import SectionPage

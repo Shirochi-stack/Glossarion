@@ -317,7 +317,7 @@ class SettingsHome(HubScreen):
         self.md.set_two_pane(wide)
 
     def _on_config_change(self) -> None:
-        if not self.search.active:
+        if hasattr(self, "content") and not self.search.active:  # posted to a screen whose body was never built
             self.refresh()
 
     def refresh_all(self) -> None:
@@ -328,6 +328,8 @@ class SettingsHome(HubScreen):
                 self.refresh()
 
     def _on_saved(self) -> None:
+        if not hasattr(self, "notices"):  # posted to a screen whose body was never built
+            return
         self.notices.controls = self._notice_controls()
         self.ctx.push(self.notices)
 

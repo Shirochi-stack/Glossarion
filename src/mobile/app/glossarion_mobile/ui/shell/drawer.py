@@ -7,8 +7,9 @@ Tools · Pinned (hidden when empty) · Recents (Today / Yesterday / Previous 7
 days / <Month YYYY>) · footer: status chip, Settings, API keys, Help. Settings
 lives in the footer, not among the destination chips (§1.3 item 3); so does
 the Keys button (owner request 17, device report 2026-10-08): it opens the
-Multi-Key Manager (``settings.keys``, ``ui/screens/keys.py``) the way Settings
-opens the Settings home, and key settings are not part of Chat settings.
+Multi-Key Manager (``settings.keys``, ``ui/screens/keys.py``) as a shortcut (the
+app's ``on_keys``: the page alone on the stack, one Back returns to the chat),
+and key settings are not part of Chat settings.
 
 The footer is pinned: ``content`` is a non-scrolling ``Column`` whose only
 scrolling child is ``body`` (the chat list / search results, ``expand``), with

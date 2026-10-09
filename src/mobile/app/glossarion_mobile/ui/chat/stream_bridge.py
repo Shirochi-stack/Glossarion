@@ -33,12 +33,16 @@ chat binds ``JobService.request_stream(job_id)``; None while the job is queued):
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Any, Callable, Optional
 
 from glossarion_mobile.ui.chat.direct_text_rules import stream_render_interval_ms
 
-__all__ = ["RunStream", "as_segment", "segment_message", "segment_processing_label"]
+__all__ = [
+    "RunStream", "as_segment", "label_request_number", "segment_message", "segment_processing_label",
+    "segment_request_number",
+]
 
 log = logging.getLogger("glossarion.chat.stream")
 
@@ -66,6 +70,25 @@ def _model_segments(model: Any) -> list:
         return list(model.segments(drain=False))
     except TypeError:  # a model without the keyword (test doubles)
         return list(model.segments())
+
+
+_LABEL_REQUEST_NUMBER = re.compile(r"(?:^|·\s*)request\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def label_request_number(label: Any) -> int:
+    """The request number a committed card's label ends in ("<label> · Request N" / "Request N", the shared
+    ``request_segment_message`` rule; the header commit's "Header / TOC translation · Request N" too); 0
+    when it names none."""
+    match = _LABEL_REQUEST_NUMBER.search(str(label or ""))
+    return int(match.group(1)) if match else 0
+
+
+def segment_request_number(segment: dict) -> int:
+    """A live segment's conversation request number (0 when it has none)."""
+    try:
+        return max(0, int(segment.get("request_number") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def segment_processing_label(segment: dict) -> str:

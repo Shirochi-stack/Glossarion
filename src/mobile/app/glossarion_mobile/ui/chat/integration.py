@@ -296,6 +296,8 @@ class ChatFeature:
 
         # the shared profile operations (Chat settings › Edit prompt / New profile…; stateless)
         env.profile_service = ProfileService(env.store)
+        # the chats' / series' profile re-check, also run at Send when a chat names an unknown profile
+        env.reconcile_profiles = self.reconcile_profile_overrides
         return env
 
     def attach(self) -> None:

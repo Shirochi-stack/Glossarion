@@ -455,6 +455,61 @@ def test_real_job_runner_scope_watcher_and_stdout_capture(tmp_path):
     service.close()
 
 
+def test_api_client_log_records_reach_the_job_and_are_detached_after_it(tmp_path):
+    """The desktop GuiLogHandler for one job (device fixes 2, owner #12/#14): unified_api_client turns its
+    print()s ("Sending API call", the streamed text) into logging records, which the desktop routes into the log
+    panel and the Direct Text classifier. JobBackend.client_logs attaches the shared GUI-free handler
+    (translate_headers_standalone._attach_logging_handlers) to the job's host: records from the job's own and
+    its API worker threads reach the job's log, and nothing is left attached once the job ends."""
+    import logging
+
+    if str(SRC_DIR) not in sys.path:
+        sys.path.append(str(SRC_DIR))
+    pytest.importorskip("job_runner")
+    pytest.importorskip("translate_headers_standalone")
+    fake = FakeBackend(str(tmp_path / "out"))
+    client = logging.getLogger("unified_api_client")
+
+    class RealScopeBackend(JobBackend):
+        def make_owner(self, config, *, host):
+            owner = FakeOwner(fake, config, host)
+            fake.owners.append(owner)
+            return owner
+
+        def reset_for_new_run(self, kind):
+            return 1
+
+        def request_stop(self, *, graceful, wait_for_chunks, force, set_stop_requested, log, **kwargs):
+            set_stop_requested()
+
+    def outer_ids(logger):
+        return [getattr(h, "outer_id", None) for h in logger.handlers if getattr(h, "outer_id", None) is not None]
+
+    before = outer_ids(client)
+
+    def worker(owner, request):
+        client.info("📤 Sending API call now (GLTEST)")
+        api = threading.Thread(target=lambda: client.info("📡 Text streaming GLTEST chunk"), name="Thread-2 (api_call)")
+        api.start()
+        api.join()
+        logging.getLogger("httpx").info('HTTP Request: POST http://127.0.0.1/v1 "HTTP/1.1 200 OK" (GLTEST)')
+        return None
+
+    fake.behavior = worker
+    service = JobService(jobs_dir=tmp_path / "jobs", config_store=FakeStore(), backend=RealScopeBackend())
+    job_id = service.submit(JobSpec("translate", "Book", (epub(tmp_path),)))
+    assert service.wait_idle(TIMEOUT)
+    assert service.snapshot(job_id).state is JobState.DONE, service.snapshot(job_id).error
+    lines = service.read_log_tail(job_id)
+    for text in ("Sending API call now (GLTEST)", "Text streaming GLTEST chunk", "HTTP Request: POST"):
+        assert any(text in line for line in lines), (text, lines)
+    # detached when the job ended: no handler of a job host is left, a later record reaches no job
+    assert outer_ids(client) == before and outer_ids(logging.getLogger("httpx")) == []
+    client.info("after the job (GLTEST)")
+    assert not any("after the job" in line for line in service.read_log_tail(job_id))
+    service.close()
+
+
 # ==========================================================================
 # Stop semantics
 # ==========================================================================

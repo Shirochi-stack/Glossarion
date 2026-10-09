@@ -880,6 +880,32 @@ class JobBackend:
         headless_owner = self._module("headless_owner")
         return headless_owner.HeadlessOwner(config, host=host)
 
+    @contextlib.contextmanager
+    def client_logs(self, host: Any) -> Iterator[None]:
+        """The desktop ``_attach_gui_logging_handlers`` for one job: the API client loggers' records
+        (``unified_api_client`` turns its print()s into them: "Sending API call", the streamed text, the
+        retry notices; httpx, openai) reach the job's ``host.append_log`` - its log, request stream and
+        live listeners - as the desktop GuiLogHandler sends them to the log panel. The shared GUI-free
+        attach (``translate_headers_standalone._attach_logging_handlers``); detached when the job ends
+        (each job has its own host)."""
+        attached = False
+        try:
+            import translate_headers_standalone as headers_core
+
+            headers_core._attach_logging_handlers(host)
+            attached = True
+        except Exception:
+            log.debug("the API client log handlers could not be attached", exc_info=True)
+        try:
+            yield
+        finally:
+            if attached:
+                outer = id(host)
+                for logger in [logging.getLogger()] + [
+                        v for v in list(logging.Logger.manager.loggerDict.values()) if isinstance(v, logging.Logger)]:
+                    if any(getattr(h, "outer_id", None) == outer for h in logger.handlers):
+                        logger.handlers = [h for h in logger.handlers if getattr(h, "outer_id", None) != outer]
+
     def reset_for_new_run(self, kind: str) -> Any:
         stop_control = self._module("stop_control")
         return stop_control.reset_for_new_run(kind=kind)
@@ -1973,7 +1999,9 @@ class JobService:
                         self._issue_stop(job, pending_mode)
                 self._transition(job, JobState.RUNNING, only_from={JobState.STARTING})
                 ctx = JobContext(self, job, owner=owner, host=host, config=config)
-                with self._watching(job, host), self._draining(job):
+                client_logs = getattr(self.backend, "client_logs", None)
+                with (client_logs(host) if callable(client_logs) else contextlib.nullcontext()), \
+                        self._watching(job, host), self._draining(job):
                     result = kind.run(ctx)
         except _Cancelled:
             pass
