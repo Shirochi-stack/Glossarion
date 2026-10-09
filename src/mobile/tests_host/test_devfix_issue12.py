@@ -679,7 +679,13 @@ def test_book_card_stays_live_through_the_glossary_gate(iso, offline):
         # the card followed the job: its chapter count and its rows grew during the run
         chapters = [s["cards"][0]["chapter"][0] for s in seen if s["cards"][0]["chapter"]]
         requests = [s["cards"][0]["requests"] for s in seen]
-        assert len(set(chapters)) >= 10 and max(chapters) >= 150, sorted(set(chapters))[:20]
+        # How many distinct counts a sampler sees depends on the runner's speed: the card repaints on
+        # the stream timer (280-900 ms) and the fake server finishes 210 chapters in a few seconds on
+        # CI (Build Mobile 37937223020 saw 42, 84, 170, 210). What matters: intermediate progress was
+        # shown, it only rose, and it reached the end of the book.
+        distinct = sorted(set(chapters))
+        assert len(distinct) >= 3 and any(0 < n < CHAPTERS for n in distinct), distinct[:20]
+        assert max(chapters) >= 150, distinct[:20]
         assert chapters == sorted(chapters), "the progress went backwards"
         assert requests[0] == len(committed) and requests == sorted(requests), "the rows did not only grow"
         # the live card listed the job's own requests (Jobs › job: JobService.request_segments);
