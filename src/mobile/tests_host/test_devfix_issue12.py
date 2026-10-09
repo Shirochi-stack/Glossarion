@@ -49,6 +49,18 @@ page's source) reports.
    followed by the resumed run's live requests, which continue the chat's request numbers. Before the
    fix the resumed run reused the stopped run's request numbers, the card took every live row for an
    already committed one, and it stayed frozen at the stopped run's rows for the whole resumed run.
+   The live rows keep the shared stream's spine order, as on the desktop: the run's first request (the
+   EPUB metadata translation) is a lifecycle-only "Request N" row listed after the chapter rows, so a
+   chapter dispatched later is inserted above it. The card is compared with the stream once the held
+   fake model keeps both from changing (an append-only comparison failed whenever a chapter was
+   dispatched between the card's last repaint and the check); no step depends on the runner's speed.
+   The Stop lands while the model holds the run's sent requests: a graceful Stop waits for them (the
+   run stays Stopping, with no Resume) and commits their answers with the stopped run, in order.
+6. ``test_a_force_stopped_runs_late_answers_stay_out_of_the_resumed_run`` (the late-answer question of
+   test 5's flake, which was the spine order above): Force stop while the model holds the run's sent
+   requests, Resume, and only then let them through. The force-stopped run ended without them (their
+   status-only rows are dropped), and nothing of it reaches the chat, the resumed run's stream or its
+   card after Resume; the Result lists every chapter once.
 
 Real data stays untouched: the app runs in temp FLET_APP_STORAGE_* dirs (the bootstrap points HOME,
 OUTPUT_DIRECTORY, GLOSSARION_LIBRARY_DIR, GLOSSARION_DATA_DIR and CONFIG_FILE there; asserted below),
@@ -68,6 +80,7 @@ import importlib.util
 import os
 import re
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -271,6 +284,98 @@ def _labels(card) -> list:
         except (AttributeError, IndexError):
             labels.append("")
     return labels
+
+
+def _chapters(labels) -> list:
+    """The chapter number of each chapter request label ("Chapter 12 (chunk 1/1) · chapter0012.xhtml …"), in order."""
+    return [int(m.group(1)) for m in (re.match(r"Chapter (\d+) \(chunk 1/1\)", str(label)) for label in labels) if m]
+
+
+def _sent_chapters(records) -> list:
+    """The chapters the fake model's requests ``records`` translate: the test book's "제N장" headings in their prompt
+    previews (``RequestRecord.chapters`` reads the self-test book's "제N화" headings)."""
+    return sorted({int(n) for r in records for n in re.findall(r"제\s*(\d+)\s*장", r.preview or "")})
+
+
+def _request_rows(segments) -> list:
+    """(request number, label) of each request segment; a label turns from "Request N" into its chapter once the
+    request's content is classified, the number stays."""
+    from glossarion_mobile.ui.chat.stream_bridge import segment_request_number
+
+    return [(segment_request_number(s), str(s.get("label") or "")) for s in segments or []]
+
+
+def _threads(segments) -> set:
+    """The API client threads of request segments ("Thread-24 (api_call)"; unique in the process)."""
+    return {str(s.get("thread") or "") for s in segments or []} - {""}
+
+
+def _in_stream_order(shown: list, live: list) -> bool:
+    """``shown`` lists rows of ``live`` in ``live``'s order, a repaint behind at most (the newest rows may be missing,
+    anywhere). The shared ``DirectTextStream`` keeps its rows in spine order, not in dispatch order
+    (``_sort_active_request_segments``, as the desktop Direct Text dialog lists them): the EPUB metadata request's
+    lifecycle-only "Request N" row and the end-of-book header batch sort after the chapter rows, so a row dispatched
+    later can be inserted above an older one, and a repaint behind is not a prefix of the stream."""
+    rest = iter(live)
+    return all(row in rest for row in shown)
+
+
+def _card_shows_stream(view, run, offset: int, snap: dict, minimum: int = 1) -> bool:
+    """The live card's rows after the first ``offset`` (the turn's committed cards) are exactly ``run``'s live
+    request rows, and there are at least ``minimum``. One snapshot of both goes to ``snap``: assert on it with no
+    await in between, so the card (repainted on the UI loop) cannot change in the meantime."""
+    card = view.live_job_card
+    live = _request_rows(run.stream.segments())
+    shown = None if card is None else _request_rows(card.request_segments[offset:])
+    snap.update(shown=shown, live=live)
+    return shown == live and len(live) >= minimum
+
+
+def _settled(server) -> bool:
+    """The fake model holds and every request in flight is parked: the job cannot end, and its stream stops changing
+    once the workers still handling earlier replies have dispatched (and parked) their next chapter."""
+    return server.holding and server.parked >= 1 and server.in_flight() == server.parked
+
+
+def _held_state(probe, server) -> tuple:
+    return probe.describe(), server.holding, server.parked, server.in_flight()
+
+
+def _next_run(probe, ended):
+    """The chat's live run after ``ended`` (Resume starts a new run for the same turn)."""
+    current = probe.run()
+    return current if current is not None and current is not ended and current.live else None
+
+
+class HoldGate:
+    """The fake model's own reply hook: ``hold()`` once ``count`` translation replies went out to requests sent after
+    ``hold_after`` was called (a run's first request is the EPUB metadata translation, then come its chapters).
+    A step then waits on the model's state, never on the runner's speed. Released requests answer; nothing is
+    aborted (an abort makes the client retry)."""
+
+    def __init__(self, server, count: "int | None" = None) -> None:
+        self.server = server
+        self._lock = threading.Lock()
+        self.since = 0
+        self.replies = 0
+        self.hold_at = count
+        server.on_response.append(self)
+
+    def hold_after(self, count: int) -> None:
+        with self._lock:
+            self.since = self.server.mark()
+            self.replies = 0
+            self.hold_at = count
+
+    def __call__(self, record) -> None:
+        if record.kind != "translation" or record.id <= self.since:
+            return
+        with self._lock:
+            self.replies += 1
+            if self.hold_at is None or self.replies < self.hold_at:
+                return
+            self.hold_at = None
+        self.server.hold()
 
 
 class Probe:
@@ -713,15 +818,14 @@ def test_book_card_stays_live_through_the_glossary_gate(iso, offline):
         # output) is a live row like on the desktop, and the shared commit drops it (DirectTextStream)
         lifecycle = [s for s in job_segments if _lifecycle_only(s)]
         shown_live = probe.last_live_labels[len(committed):]
-        assert shown_live == job_labels[:len(shown_live)] and len(job_labels) - len(shown_live) <= 2 + len(lifecycle), \
+        assert _in_stream_order(shown_live, job_labels) and len(job_labels) - len(shown_live) <= 2 + len(lifecycle), \
             (shown_live[:3], shown_live[-2:], job_labels[:3], job_labels[-2:], len(shown_live), len(job_labels))
 
         # ---- the Result: Done · 210/210 chapters, the book's title, every request once ----------------
         result = _check_result(probe, committed, "done", f"Done · {CHAPTERS}/{CHAPTERS} chapters")
         assert result["item"].report is not None
-        chapter_rows = [int(m.group(1)) for m in (re.match(r"Chapter (\d+) \(chunk 1/1\)", label)
-                                                  for label in result["labels"]) if m]
-        assert sorted(chapter_rows) == list(range(1, CHAPTERS + 1)), "the Result does not list every chapter once"
+        assert sorted(_chapters(result["labels"])) == list(range(1, CHAPTERS + 1)), \
+            "the Result does not list every chapter once"
         assert result["state"]["requests"] == len(committed) + len(job_labels) - len(lifecycle), \
             (result["state"], len(job_labels), [s.get("label") for s in lifecycle])
 
@@ -895,71 +999,77 @@ def test_a_render_while_the_run_commits_lists_each_request_once(iso, offline, mo
 # ==========================================================================
 
 
-@pytest.mark.xfail(strict=False, reason="a stopped run's last in-flight request can be committed after Resume and appear among the resumed run's rows (found 2026-10-09 with paced replies; fix in progress)")
 def test_resume_lists_the_resumed_runs_live_requests(iso, offline):
     """A 40-chapter book, glossary off: ■ Stop after 8 chapters, then the ended card's Resume. While the
     resumed job translates, the running card lists the stopped run's committed cards followed by the
     resumed run's live requests (UI_SPEC §2.12.3: "the cards the run already committed (… an earlier run
     of the same turn) followed by the live ones"), "Requests (N)" grows with them, and their rows are on
-    screen. The resumed run's requests continue the chat's request numbers, as a new Send would."""
-    from glossarion_mobile.ui.chat.stream_bridge import segment_request_number
+    screen. The resumed run's requests continue the chat's request numbers, as a new Send would.
 
+    The Stop is graceful and lands while the model holds the chapter requests the run already sent: the
+    run stays Stopping, with no Resume, until they have answered, and their answers are committed with the
+    stopped run, in order (desktop parity; test 6 covers Force stop, where they never answer).
+
+    The live rows keep the shared stream's spine order, as the desktop Direct Text dialog lists them
+    (``DirectTextStream._sort_active_request_segments``): the run's first request, the EPUB metadata
+    translation, is a lifecycle-only "Request N" row that sorts after every chapter row, so a chapter
+    dispatched later is inserted above it, not appended. The card (a repaint behind at most) is therefore
+    compared with the stream once neither can change: the fake model parks every request after a fixed
+    number of replies, counted by its own reply hook, and the check waits for the card's next repaint.
+    No step depends on the runner's speed."""
     chapters = 40
     seen: dict = {}
-    # The fake model slows each chapter reply to SLOW s once ``pace["after"]`` chapter replies went out,
-    # so a Stop lands with most of the book left and the resumed run is still RUNNING while its card
-    # is checked, on any runner (Build Mobile 37965815033 / 37968556012: a fast runner translated
-    # 38-40 of 40 chapters before the Stop landed). Nothing is parked or aborted (no retries).
-    slow, normal = 1.0, 0.08
-    pace: dict = {"after": 8, "server": None, "replies": 0}
-
-    def pace_replies(record):
-        server = pace["server"]
-        if server is None or record.kind != "translation":
-            return
-        pace["replies"] += 1
-        if pace["after"] is not None and pace["replies"] >= pace["after"]:
-            server.set_delay("translation", slow)
 
     async def body(ctx):
-        app, run, probe = ctx.app, ctx.run, ctx.probe
+        app, run, probe, server = ctx.app, ctx.run, ctx.probe, ctx.server
         view = app.chat_view
-        runs = app.chat_feature.runs
 
-        # ---- ■ Stop mid-book ------------------------------------------------------------------------
-        assert await _until(lambda: probe.job()["completed"] >= 8, RUN_TIMEOUT), probe.describe()
-        await _tap(probe, view.live_job_card.action_buttons["stop"])  # later chapters are slow (pace)
+        # ---- ■ Stop mid-book, while the model holds the requests the run already sent -------------------------
+        # Wait on the model only, not on the job's chapter count: translation_progress.json can lag the replies
+        # while a request dispatched with them is parked (seen: completed 0 after 8 chapter replies, until the
+        # fake model's 120 s hold timeout let the parked requests through).
+        assert await _until(lambda: _settled(server), RUN_TIMEOUT), _held_state(probe, server)
+        await _tap(probe, view.live_job_card.action_buttons["stop"])
+        assert await _until(lambda: run.stop_requested, 5)
+        # a graceful Stop waits for the sent requests: Stopping, and no Resume, while the model holds them
+        assert await _until(lambda: _settled(server) and probe.job()["state"] == "STOPPING", 10), \
+            (probe.job(), _held_state(probe, server))
+        held = server.records("translation", status="pending")
+        await asyncio.sleep(0.5)  # a stream tick: nothing ends the run while its sent requests are unanswered
+        assert run.live and run.state == "stopping" and probe.job()["state"] == "STOPPING", (run.state, probe.job())
+        assert "resume" not in view.live_job_card.action_buttons
+        server.release()  # the held requests answer now, after the Stop
         await _finished(app, run)
         assert run.state == "stopped", run.state
         committed = probe.committed_labels()
         assert len(committed) >= 8, committed
         assert probe.job()["completed"] <= chapters - 20, (probe.job(), "too little left for the resumed run")
+        # the late answers were committed with the stopped run, in the book's order
+        late = _sent_chapters(held)
+        assert held and all(r.status == "ok" for r in held), [(r.id, r.status) for r in held]
+        stopped_chapters = _chapters(committed)
+        assert stopped_chapters == sorted(set(stopped_chapters)), stopped_chapters
+        assert late and set(late) <= set(stopped_chapters), (late, stopped_chapters)
         next_number = probe.chats.request_count(probe.cid) + 1
         assert next_number > int(run.params.get("request_number") or 0), (next_number, run.params.get("request_number"))
 
-        # ---- Resume on the ended card -------------------------------------------------------------
+        # ---- Resume on the ended card (the model holds again after 6 replies of the resumed run) -------------
         ended = probe.job_cards()[0]
         assert "resume" in ended.action_buttons
-        # the resumed run: normal speed for its first chapters, slow again after 6 more replies
-        pace["after"] = pace["replies"] + 6
-        ctx.server.set_delay("translation", normal)
+        gate.hold_after(6)
         await _tap(probe, ended.action_buttons["resume"])
-
-        def resumed_run():
-            current = runs.run_for(probe.cid)
-            return current if current is not None and current is not run and current.live else None
-
-        assert await _until(lambda: resumed_run() is not None, 30)
-        resumed = resumed_run()
+        assert await _until(lambda: _next_run(probe, run) is not None, 30)
+        resumed = _next_run(probe, run)
         resume_t = time.monotonic()
         assert resumed.params.get("request_number") == next_number, resumed.params.get("request_number")
-        assert await _until(lambda: len(resumed.stream.segments() or []) >= 5, RUN_TIMEOUT), probe.describe()
-        # The resumed job's later chapters are slow (pace), so it is still RUNNING while its card is
-        # checked: a fast CI runner finished them inside the repaint wait (Build Mobile 37959235956).
         try:
-            await asyncio.sleep(1.2)  # a stream tick (280-900 ms) and the next snapshot
+            assert await _until(lambda: _settled(server), RUN_TIMEOUT), _held_state(probe, server)
+            # Once the held stream stops changing, the card's next repaint (a stream tick, 280-900 ms) lists it.
+            snap: dict = {}
+            assert await _until(lambda: _card_shows_stream(view, resumed, len(committed), snap, 5), 30), snap
 
             # ---- the running card: the stopped run's rows, then the resumed run's live ones -----------------
+            # (no await from here to the end of the block: the card and the stream are still those of ``snap``)
             sample = probe.sample("resumed run")
             assert sample["job"]["state"] == "RUNNING" and sample["run_state"] == "running", sample
             card = view.live_job_card
@@ -968,25 +1078,17 @@ def test_resume_lists_the_resumed_runs_live_requests(iso, offline):
             assert c["live"] and c["mounted"] and c["phase"] == "running" and c["title"] == EPUB_NAME, c
             labels = _labels(card)
             assert labels[:len(committed)] == committed, labels[:len(committed) + 2]
-            live_segments = resumed.stream.segments() or []
-            live_labels = [str(s.get("label") or "") for s in live_segments]
-            shown_live = labels[len(committed):]
-            assert shown_live, (f"the resumed run's live requests are not on its card: {c['tile']}, "
-                                f"live segments {live_labels[:3]}")
-            # the same requests in the same order, a repaint behind at most (a request's label turns from
-            # "Request N" into its chapter once its content is classified, so compare the request numbers)
-            shown_numbers = [segment_request_number(s) for s in card.request_segments[len(committed):]]
-            live_numbers = [segment_request_number(s) for s in live_segments]
-            assert shown_numbers == live_numbers[:len(shown_numbers)] and \
-                len(live_numbers) - len(shown_numbers) <= REPAINT_LAG, (shown_numbers[:5], live_numbers[:5])
+            # exactly the resumed run's live requests, in the stream's (spine) order: the chapter rows, then the
+            # lifecycle-only metadata row, as the desktop lists ``_active_request_segments``
+            assert labels[len(committed):] == [label for _number, label in snap["live"]], \
+                (labels[len(committed):][:3], snap["live"][:3])
             assert c["tile"] == f"Requests ({len(labels)})" and len(labels) > len(committed), c
-            numbers = [segment_request_number(s) for s in live_segments if segment_request_number(s)]
+            numbers = [number for number, _label in snap["live"] if number]
             assert numbers and min(numbers) >= next_number, (numbers[:5], next_number)
-            assert set(shown_live) & probe.visible_texts(rows=True), "the live request rows are not on screen"
+            assert set(labels[len(committed):]) & probe.visible_texts(rows=True), "the live request rows are not on screen"
             seen["committed"] = committed
         finally:
-            pace["after"] = None
-            ctx.server.set_delay("translation", 0.0)  # finish the book quickly
+            server.release()
 
         # ---- the end: Done, the stopped run's cards first ----------------------------------------------
         await _finished(app, resumed)
@@ -1009,9 +1111,110 @@ def test_resume_lists_the_resumed_runs_live_requests(iso, offline):
         result = _check_result(probe, committed, "done", f"Done · {chapters}/{chapters} chapters")
         assert len(result["labels"]) > len(committed), result["state"]
 
-    with _server(normal) as server:  # a resumed run long enough to sample
-        pace["server"] = server
-        server.on_response.append(pace_replies)
+    with _server(0.08) as server:  # timing only: the holds decide when each step happens
+        gate = HoldGate(server, 9)  # the EPUB metadata request + 8 chapters, then ■ Stop
         asyncio.run(_owner_flow(iso, server, body, chapters=chapters, glossary="off"))
     assert seen.get("committed"), "the scenario did not reach the resumed run"
+    _assert_offline(offline)
+
+
+# ==========================================================================
+# 6. A force-stopped run's late answers stay out of the resumed run
+# ==========================================================================
+
+
+def test_a_force_stopped_runs_late_answers_stay_out_of_the_resumed_run(iso, offline):
+    """A 40-chapter book, glossary off. The model holds the chapter requests the run already sent; ■ Stop,
+    then Force stop: unlike the graceful Stop of test 5, which waits for them and commits their answers with
+    the run, the run ends while they are unanswered, and the shared commit drops their status-only rows.
+    Resume starts the next run while the model still holds them, and only then are they let through, so the
+    stopped run's answers come after Resume (the force stop has hung up on them by then). Nothing of the
+    stopped run reaches the chat, the resumed run's stream or its card: the chat keeps the stopped run's
+    committed cards as they were, the resumed run's card lists them followed by its own live requests only,
+    and the Result lists every chapter once, the stopped run's first (desktop parity: the Direct Text
+    dialog's Force stop, then Resume). Every step waits on the fake model's state."""
+    chapters = 40
+    seen: dict = {}
+
+    async def body(ctx):
+        app, run, probe, server = ctx.app, ctx.run, ctx.probe, ctx.server
+        view = app.chat_view
+        service = app.job_service
+
+        # ---- the model holds the run's sent requests; ■ Stop, then Force stop -----------------------------
+        assert await _until(lambda: _settled(server), RUN_TIMEOUT), _held_state(probe, server)
+        sent = {r.id for r in server.records("translation", status="pending")}
+        await _tap(probe, view.live_job_card.action_buttons["stop"])
+
+        def force_stop():
+            card = view.live_job_card
+            return None if card is None else card.action_buttons.get("force_stop")
+
+        assert await _until(lambda: force_stop() is not None and probe.on_screen(force_stop()), 10), probe.describe()
+        await _tap(probe, force_stop())
+        await _finished(app, run)
+        assert run.state == "stopped", run.state
+        # the run ended before its sent requests answered: the model still holds every one of them
+        held = server.records("translation", status="pending")
+        assert sent and sent <= {r.id for r in held} and server.parked == len(held), \
+            (sent, [(r.id, r.status) for r in held], server.parked)
+        committed = probe.committed_labels()
+        stopped_threads = _threads(service.request_segments(run.job_id))
+        late = _sent_chapters(held)
+        assert committed and stopped_threads and late, (committed[-2:], stopped_threads, late)
+        # their status-only rows were dropped by the commit
+        assert not set(late) & set(_chapters(committed)), (late, committed[-3:])
+        next_number = probe.chats.request_count(probe.cid) + 1
+
+        # ---- Resume while the model still holds the stopped run's requests ---------------------------------
+        ended = probe.job_cards()[0]
+        assert "resume" in ended.action_buttons
+        gate.hold_after(6)  # the resumed run's own replies (the stopped run's late ones do not count)
+        await _tap(probe, ended.action_buttons["resume"])
+        assert await _until(lambda: _next_run(probe, run) is not None, 30)
+        resumed = _next_run(probe, run)
+        assert resumed.params.get("request_number") == next_number, resumed.params.get("request_number")
+        # the resumed run's first request parks behind the stopped run's held ones
+        assert await _until(lambda: server.parked > len(held), RUN_TIMEOUT), _held_state(probe, server)
+        messages = len(probe.chats.messages(probe.cid))
+        try:
+            # ---- the stopped run's answers come now, after Resume -----------------------------------------
+            server.release()
+            assert await _until(lambda: all(r.status != "pending" for r in held), 30), [(r.id, r.status) for r in held]
+
+            def stopped_alive() -> set:
+                return stopped_threads & {thread.name for thread in threading.enumerate()}
+
+            # its request threads have ended: nothing of the stopped run can arrive later
+            assert await _until(lambda: not stopped_alive(), 60), sorted(stopped_alive())
+            # the resumed run holds again after 6 replies: its card is checked while it runs
+            assert await _until(lambda: _settled(server), RUN_TIMEOUT), _held_state(probe, server)
+            snap: dict = {}
+            assert await _until(lambda: _card_shows_stream(view, resumed, len(committed), snap, 5), 30), snap
+            # (no await from here to the end of the block: the card and the stream are still those of ``snap``)
+            assert resumed.live and probe.job()["state"] == "RUNNING", (resumed.state, probe.job())
+            assert probe.committed_labels() == committed and len(probe.chats.messages(probe.cid)) == messages, \
+                "the stopped run's late answers reached the chat"
+            assert not _threads(resumed.stream.segments()) & stopped_threads, \
+                "a request of the stopped run is among the resumed run's rows"
+            assert _labels(view.live_job_card)[:len(committed)] == committed
+            numbers = [number for number, _label in snap["live"] if number]
+            assert numbers and min(numbers) >= next_number, (numbers[:5], next_number)
+            seen["late"] = late
+        finally:
+            server.release()
+
+        # ---- the end: Done, every chapter once, the stopped run's cards first ----------------------------
+        await _finished(app, resumed)
+        await _stop_sampling(ctx)
+        assert resumed.state == "done" and resumed.error is None, (resumed.state, resumed.error)
+        assert not _threads(service.request_segments(resumed.job_id)) & stopped_threads
+        result = _check_result(probe, committed, "done", f"Done · {chapters}/{chapters} chapters")
+        assert sorted(_chapters(result["labels"])) == list(range(1, chapters + 1)), \
+            "the Result does not list every chapter once"
+
+    with _server(0.08) as server:  # timing only: the holds decide when each step happens
+        gate = HoldGate(server, 9)  # the EPUB metadata request + 8 chapters, then ■ Stop
+        asyncio.run(_owner_flow(iso, server, body, chapters=chapters, glossary="off"))
+    assert seen.get("late"), "the scenario did not reach the stopped run's late answers"
     _assert_offline(offline)
