@@ -107,6 +107,10 @@ SCAN_RAW_KEYS = ("epub_library_scan_raw_mode", "epub_library_scan_raw_threshold"
 #: Desktop delete keywords (``EpubLibraryDialog._DELETE_KEYWORDS``); the shared tuple wins when present.
 DELETE_KEYWORDS = ("halgakos", "delete")
 
+#: Job kinds whose outputs are reported inside a temporary run root that is moved when the job ends
+#: (the chat's ``ChatRuns.finish``): the job-end mirror never copies from there.
+_RUN_ROOT_KINDS = ("direct_text",)
+
 
 class CoreMissing(RuntimeError):
     """A shared-core function this action needs does not exist in this build."""
@@ -331,16 +335,19 @@ class DeleteReport:
     errors: tuple = ()
     unregistered: int = 0
     summary_text: str = ""
+    links_note: str = ""  # U10: what happened to the deleted books' share-link uploads
 
     @property
     def summary(self) -> str:
-        """Desktop ``_on_delete_finished`` text."""
+        """Desktop ``_on_delete_finished`` text (plus the U10 share-link note)."""
         if self.summary_text:
-            return self.summary_text
+            return self.summary_text + (f"\n\n{self.links_note}" if self.links_note else "")
         text = f"Deleted {self.deleted} of {self.total} item{'s' if self.total != 1 else ''}."
         if self.errors:
             text += (f"\n\n{len(self.errors)} error{'s' if len(self.errors) != 1 else ''}:\n"
                      + "\n".join("  - " + e for e in list(self.errors)[:5]))
+        if self.links_note:
+            text += f"\n\n{self.links_note}"
         return text
 
 
@@ -511,6 +518,13 @@ class LibraryService:
         self.compiling: set = set()  # normalised output folders with a compile job queued/running
         self.covers: dict = {}  # book_key -> cover thumbnail path (None: placeholder)
         self.mirrored: list = []  # last on_job_finished mirror URIs (diagnostics)
+        #: The U10 cloud sync service, set when the app installs it: book outputs then go to its
+        #: destination (the phone folder: one entry per output, updated in place), so the job-end
+        #: mirror copies only the other outputs.
+        self.cloud_sync: Any = None
+        #: The U10 share-link service (``services/share_links.py``), set when the app installs it: the share
+        #: links of deleted books are forgotten (``execute_delete_blocking``).
+        self.share_links: Any = None
 
     # ---- plumbing ----------------------------------------------------------------------------
 
@@ -1018,8 +1032,11 @@ class LibraryService:
                           simple_prompt=str(raw.get("simple_prompt") or ""), raw=raw)
 
     def execute_delete_blocking(self, plan: DeletePlan, selected: Optional[Iterable[str]] = None,
-                                progress: Optional[Callable[[int, int, str], Any]] = None) -> DeleteReport:
-        """``LibraryShelf.execute_delete`` on the confirmed targets (all, or the ticked paths)."""
+                                progress: Optional[Callable[[int, int, str], Any]] = None, *,
+                                delete_remote_links: bool = False) -> DeleteReport:
+        """``LibraryShelf.execute_delete`` on the confirmed targets (all, or the ticked paths).
+        ``delete_remote_links``: the user chose to delete the books' share-link uploads on their services too
+        (``deletable_links_blocking``); otherwise they stay online until they expire and the report says so."""
         keep = None if selected is None else {_norm(p) for p in selected}
         chosen = [t.as_tuple() for t in plan.targets if keep is None or _norm(t.path) in keep]
         self.deleting = True
@@ -1028,11 +1045,60 @@ class LibraryService:
         finally:
             self.deleting = False
             self.mark_dirty()
+        note = self._forget_deleted_blocking([t for t in plan.targets if keep is None or _norm(t.path) in keep],
+                                             delete_remote=delete_remote_links)
         result = result if isinstance(result, Mapping) else {}
         return DeleteReport(deleted=_as_int(result.get("deleted")), total=len(chosen),
                             errors=tuple(str(e) for e in (result.get("errors") or ())),
                             unregistered=_as_int(result.get("unregistered")),
-                            summary_text=str(result.get("summary") or ""))
+                            summary_text=str(result.get("summary") or ""), links_note=note)
+
+    def deletable_links_blocking(self, books: Sequence[Mapping[str, Any]]) -> int:
+        """U10, io pool: how many live share-link uploads of ``books`` Glossarion can still delete on their
+        services (the delete asks whether to delete them too: after the book is gone it cannot)."""
+        finder = getattr(self.share_links, "deletable_links_blocking", None)
+        if not callable(finder):
+            return 0
+        identities = [i for i in (book_identity(b) for b in books or ()) if i]
+        try:
+            return len(finder(identities)) if identities else 0
+        except Exception:
+            log.debug("listing the share links of the books to delete failed", exc_info=True)
+            return 0
+
+    def _forget_deleted_blocking(self, targets: Sequence[DeleteTarget], *, delete_remote: bool = False) -> str:
+        """U10, worker thread: the cloud sync records / queue and the share links of the books that are really
+        gone. Files already in the cloud are never deleted; share-link uploads only with ``delete_remote``
+        (the user's choice). Returns the report's note about those uploads ('' for none)."""
+        cloud, shares = self.cloud_sync, self.share_links
+        if cloud is None and shares is None:
+            return ""
+        books = {book_identity(t.book) for t in targets}
+        gone = sorted(p for p in books | {t.path for t in targets} if p and not os.path.exists(p))
+        if not gone:
+            return ""
+        if cloud is not None:
+            try:
+                cloud.forget_books_threadsafe([p for p in gone if p in books])
+            except Exception:
+                log.exception("forgetting the cloud records of deleted books failed")
+        note = ""
+        if shares is not None:
+            try:
+                finder = getattr(shares, "deletable_links_blocking", None)
+                live = len(finder(gone)) if callable(finder) else 0
+                failed = shares.forget_books_blocking(gone, delete_remote=delete_remote) if delete_remote \
+                    else shares.forget_books_blocking(gone)
+                kept = len(failed or ()) if delete_remote else live
+                if kept:
+                    note = (f"{kept} file{'s' if kept != 1 else ''} shared via a link "
+                            f"{'are' if kept != 1 else 'is'} still online until the link expires"
+                            + (" (the service could not be reached to delete it)." if delete_remote else "."))
+                elif delete_remote and live:
+                    note = f"Deleted {live} shared upload{'s' if live != 1 else ''} from {'their services' if live != 1 else 'its service'} too."
+            except Exception:
+                log.exception("forgetting the share links of deleted books failed")
+        return note
 
     # ---- clear raw link / organize / undo -------------------------------------------------------------
 
@@ -1248,6 +1314,21 @@ class LibraryService:
                 for name, kind in fn(folder) or ():
                     path = name if os.path.isabs(str(name)) else os.path.join(folder, str(name))
                     out.append((path, str(kind)))
+            # The PDF an EPUB book's Compile PDF writes is "<Title>.pdf" (``_pdf_worker``), which the shared
+            # list (it knows "*_translated.pdf") leaves out: listed after the EPUBs, like the cloud sync takes
+            # it (``job_kinds.compiled_outputs``), so the Output tab has its row (cloud line, save location).
+            listed = {_norm(p) for p, _kind in out}
+            raw = _norm(book.get("raw_source_path")) if book.get("raw_source_path") else ""
+            try:
+                names = sorted(os.listdir(folder), key=str.casefold)
+            except OSError:
+                names = []
+            extra = [(os.path.join(folder, n), "pdf") for n in names if n.lower().endswith(".pdf")
+                     and os.path.isfile(os.path.join(folder, n))
+                     and _norm(os.path.join(folder, n)) not in listed and _norm(os.path.join(folder, n)) != raw]
+            if extra:
+                at = sum(1 for _p, kind in out if kind == "epub")
+                out[at:at] = extra
         path = str(book.get("path") or "")
         lower = path.lower()
         kind = "epub" if lower.endswith(".epub") else (
@@ -1380,10 +1461,15 @@ class LibraryService:
         """JobService hook: refresh the Library and mirror the outputs (Android).
 
         (a) the Library is marked dirty and, when a Library screen listens, rescanned at
-        once; (b) on Android with the Storage "Mirror outputs" switch on, every output
-        of a DONE job is copied to the public ``Downloads/Glossarion`` folder through
-        ``ui/screens/storage.mirror_output`` (MediaStore; UI_SPEC Appendix C). Returns
-        the mirrored URIs.
+        once; (b) on Android with the Storage switch ``mirror_outputs`` on, the outputs of
+        a DONE job are copied once to the public ``Downloads/Glossarion`` folder through
+        ``ui/screens/storage.mirror_output`` (MediaStore; UI_SPEC Appendix C). Once the
+        U10 cloud sync is installed (``cloud_sync``) book outputs are left to its
+        destination (the phone folder keeps them updated in place under
+        ``Downloads/Glossarion/<book>/``) and only the other outputs are copied here. A
+        chat run (``direct_text``) is never mirrored from here: its outputs sit in a
+        temporary run root the chat moves away while this runs; the book reaches the U10
+        destination once it lands in the Library. Returns the mirrored URIs.
         """
         spec = getattr(job, "spec", None)
         for path in getattr(spec, "inputs", ()) or ():
@@ -1404,14 +1490,17 @@ class LibraryService:
         targets = list(outputs if outputs is not None else (getattr(job, "outputs", ()) or ()))
         if not targets or self.files is None:
             return []
+        if str(getattr(spec, "kind", "") or "") in _RUN_ROOT_KINDS:
+            return []
         try:
             from glossarion_mobile.ui.screens.storage import mirror_output
         except Exception:  # Flet missing (host tools): nothing to mirror
             return []
+        skip_books = self.cloud_sync is not None
         saved: list = []
         for path in targets:
             try:
-                saved.extend(await mirror_output(self.files, path, self.prefs))
+                saved.extend(await mirror_output(self.files, path, self.prefs, skip_books=skip_books))
             except Exception:
                 log.exception("mirroring %s failed", path)
         self.mirrored = saved

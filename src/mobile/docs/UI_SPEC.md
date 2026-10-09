@@ -200,7 +200,7 @@ From top to bottom:
 | `/tools/qa/report/<rid>` | QA report viewer | View |
 | `/tools/files/<root>`, `/tools/files/<root>/<fid>` | File browser at a root (`output`, `library`, `inbox`, `chats` or a workspace `oid`), optionally opened at a folder | View |
 | `/tools/text/<fid>?hit=<n>` | Text editor on a file. `hit` is the index of a QA issue or search hit, computed by the opener | full-screen View |
-| `/settings`, `/settings/s/<section>#<key>`, `/settings/{models,keys,keys/<pool>,accounts,profiles,profiles/<pid>,prefill,endpoints,appearance,notifications,storage,backup,import,logs,updates,about,danger}` | Settings | View |
+| `/settings`, `/settings/s/<section>#<key>`, `/settings/{models,keys,keys/<pool>,accounts,profiles,profiles/<pid>,prefill,endpoints,appearance,notifications,storage,cloud,backup,import,logs,updates,about,danger}` | Settings (`/settings/cloud`: Cloud sync & sharing, U10) | View |
 | `/welcome` | First-run welcome | full-screen View |
 | `/oauth/return?p=<provider>` | OAuth return | handled, no View |
 | `/__selftest__?suite=smoke` | CI and Diagnostics self-test; prints `GLOSSARION_SELFTEST PASS <json>` or `FAIL <json>` | handled, no View |
@@ -321,6 +321,8 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 **Permission.** Android 13+ asks for `POST_NOTIFICATIONS` on the first Run, at Welcome step 4 and from Settings › Notifications & background. It is one request (`BackgroundExecution.request_notification_permission`), and "asked" is remembered only for a definite answer, so a failed or dismissed request is asked again by the next Run. The first long job started while notifications are off shows once: "Notifications are off: you won't see progress, finished jobs or glossary reviews" · **Turn on** → `/settings/notifications`. A post the system refuses is logged.
 
 On iOS the same text goes to local notifications (action category Accept / Review), plus the `BGContinuedProcessingTask` progress on iOS 26+.
+
+**Cloud sync and share links (U10, §4.18).** Failures and "needs a save location" only, on `jobs.action`, routes only (never a path, URI or link): "Couldn't save to *Drive › Glossarion*" · "N books waiting · tap for details" (one per drain and destination, the same id replacing it: after 5 failed attempts, or at once for a full phone) and "Glossarion lost access to *…*" · "Tap to choose it again" → `/settings/cloud`; "1 book needs a save location" → that Book page's Output tab (several: `/settings/cloud`); "Upload to *Gofile* failed" when a share-link upload the user started fails while the app is hidden → the Book page. Progress uses the shared foreground notification: "Saving *Book.epub* to *Drive* · 45%" / "Uploading *Book.epub* to *Gofile* · 45%", shown only while no job holds the service (a running job keeps its own text). The cloud save joins a finishing job's service so it outlives the job (`native.ServiceLease`, the same holder logic as the sign-in), and its **Stop** stops the save when no job holds the service (the queue waits for the next resume or job). On iOS a save runs in its own background task and keeps the finished job's grant until it is done.
 
 ---
 
@@ -938,12 +940,17 @@ When failures exist, a pinned error chip **"3 failed – Retry"** sits at the to
 - **Glossary** (Book page Glossary tab equivalent for the workspace)
 - **Open in Library**
 - **Files**
+- **Send to cloud** (U10, §4.18): saves the book's outputs to the cloud destination now. Disabled with "Copied once the book is in the Library" while the workspace is still in Attachments, "Choose where to save books in Settings › Cloud sync" without a destination.
+- **Share file via link** (U10, §4.18): the same file and service sheets as the Book page.
+
+A Result card of a book also shows its **cloud status line** ("Saved to *Drive › Glossarion* · just now", "Waiting: …", "Couldn't save · tap to retry") and the turn workspace's saved **share links** with Copy / Share / Delete. `ChatFeature.bind_u10_card` resolves the turn's workspace on the io pool (a card bound in the last 2 s is skipped; service changes rebind the live cards at most once a second).
 
 **Library hand-off (automatic; device report #4).** There is no Migrate action. When a chat run of a book attachment (`library_core.RAW_IMPORT_EXTENSIONS`) finishes Done, `ChatFeature.auto_migrate` runs the desktop Migrate (`direct_text_store.migrate_attachment`): the workspace moves to the output root, only the newest top-level EPUB/PDF is kept, stored paths are rewritten, and the raw file is recorded in the Library registry. The raw stays where it is (no Library/Raw copy), so the raw-stem → workspace rule keeps working.
 - The move waits while a job is running or writing the workspace: it needs the jobs' `JOB_LOCK`, taken without waiting, and no active job; the next idle transition retries it.
 - It leaves alone workspaces whose job card still offers Resume or Retry failed, scratch chats, workspaces with no `translation_progress.json`, and non-book attachments.
 - A same-named Library folder is merged into silently only when it is the same book: its `source_epub.txt` points at the same raw file or identical content, and any translation it already holds is of the same chapters (pipeline `content_hash`; a freed Inbox name can hold another book). Otherwise the workspace stays and the snackbar "A Library book named X already exists" · **Merge…** opens "Attachment folder already exists" → **Merge and replace** / **Cancel** (also in the Attachments manager's ⋯, §2.17).
 - Success: snackbar "Added to the Library" · **Open book**; several in one sweep: "Added N books to the Library" · **Library**. Sweeps also run once after launch (books finished by earlier versions, or before the app was killed) and whenever the job queue goes idle.
+- U10: the move carries the book's cloud sync records and saved share links to the Library workspace inside the same migrate lock (a merge keeps the Library book's cloud documents); a book that cannot move yet (deferred, name clash) shows "Saves once the book is in the Library" on its cloud line. The cloud copy starts once the book is in the Library.
 
 **Open in Library** opens the Book page of the Library book the workspace became. Until the move the action is disabled with the ReasonChip "Added to the Library when the translation finishes" (non-book attachments: "Only books (EPUB, TXT, PDF, HTML) are added to the Library"). Resume / Retry failed of a workspace that moved into the Library open the Library's translate sheet (`ChatEnv.library_translate`).
 
@@ -1460,6 +1467,10 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 - **Raw source row:** file name, Share, "Re-link…" (Scan for raw).
 - **Storage line:** "Workspace 84 MB", with a "Files" link.
 - The workspace is the resolved one (§3.5): an organized book lists its workspace's compiled outputs plus the Library EPUB itself, and Compile writes into that workspace.
+- **Cloud line per compiled row (U10):** under "EPUB · 1.2 MB", one line for the cloud copy of that file ("Saved to *Drive › Glossarion* · 5 min ago", "Saving · 45%", "Waiting: the book is being compiled or translated", "Couldn't save · tap to retry", "Choose where to save · tap to choose", "Glossarion lost access · tap to reconnect", "Replaced: its cloud link changed"). Tapping retries, opens the save picker or opens Settings › Cloud sync & sharing. After a title change the line sits on the row of the file the record copies (the cloud file keeps its first name).
+- **Cloud & sharing section (U10):** the destination line; **Send now**; "Copy this book: Default / Always / Never" (an ActionSheet with the current choice checked); **Share file via link**; **Saved links** with Copy · Share (the system share sheet with the URL) · Delete (Gofile, Send, pixeldrain; it asks first) or Remove (transfer.it: removes it from the app only). Every control stays visible; without a destination or service it is disabled with its ReasonChip.
+- **Row menu (U10):** adds "Send to cloud now", "Choose where to save…" (save-locations mode) and "Share file via link".
+- File sizes are measured off the UI loop. A cloud or link change repaints only the output rows and the Cloud & sharing section (expanded workspace groups stay open).
 
 ### 3.10 TranslateSheet (Library-origin Plan)
 
@@ -1934,7 +1945,7 @@ Context & memory (rolling summary), Response handling (translation, truncation r
   - paths: Output, Library, Inbox, cache;
   - per-folder usage bars; clear caches (reader / covers / temp); ONNX models manager;
   - output folder choice (app storage or iOS Files-visible Documents; arbitrary SAF folders are not supported);
-  - Android "Mirror outputs to Downloads/Glossarion" (every finished output is copied there through MediaStore).
+  - Phone folder (Android 10+): where books go (U10: books reach Downloads/Glossarion/<book>/ only as the phone-folder destination of Settings › Cloud sync & sharing, overwritten in place under their first name), a link there and its "My cloud app isn't listed" help; the switch "Copy other outputs to Downloads/Glossarion" (Prefs `mirror_outputs`, the pre-U10 mirror key) copies the outputs that are not books (images, subtitles, glossaries, reports) once; chat runs are never copied from their run folder; a pre-U10 "on" becomes the phone-folder destination with automatic copies on, on first start. iOS shows the switch disabled with "Android only" (books are already in Files › On My iPhone › Glossarion); Android 9 with "Needs Android 10 or later" (the legacy branch needs WRITE_EXTERNAL_STORAGE, which the app does not request).
 - **Backup & restore:**
   - automatic backups list (72 h retention, shared); Create backup / Restore (confirm) / Delete;
   - Export config (keys excluded, or encrypted with a passphrase) / Import config;
@@ -1947,7 +1958,7 @@ Context & memory (rolling summary), Response handling (translation, truncation r
   - crash and freeze logs; "Share logs bundle" (secrets redacted); a previous-crash banner.
 - **Updates:** Check now · Check on startup · Skip version · release notes · "Download APK" / IPA links (external browser) when a release has a mobile file. Mobile builds are never published (download the APK/IPA artifact from the Build Mobile run), so a release normally shows "This release has no file for this device." and the release page link. There is no self-install.
 - **About:** version, build, Python / Flet versions, licenses, links, the in-app User guide (bundled docs Markdown), and the mascot.
-- **Danger zone:** "Reset settings to defaults". It confirms and creates an automatic backup first.
+- **Danger zone:** "Reset settings to defaults". It confirms and creates an automatic backup first. "Wipe app data" first lets the cloud sync give back every persisted folder / file permission (they live in the system and count toward Android's 128 / 512 limit) and stops a share-link upload (U10); its text says files copied to the cloud stay there and shared uploads stay on their service until the link expires. Deleting Library books whose files were shared via a link that Glossarion can delete (Gofile, Send, pixeldrain) first asks "Delete these uploads too" or "Keep them online until the link expires" (after the delete the app no longer can); the delete summary says what happened to them.
 
 ### 4.17 First-run welcome (`/welcome`; `PageView`, 5 steps; re-runnable from About)
 
@@ -1969,6 +1980,30 @@ Context & memory (rolling summary), Response handling (translation, truncation r
 If sign-in is skipped, Send stays in the `blocked` state, with the "Sign in with ChatGPT" fix action (§2.4), until an account or another model is set.
 
 ---
+
+### 4.18 Cloud sync & sharing (`/settings/cloud`, U10; mobile only)
+
+Settings home group **Data** (icon `CLOUD_OUTLINED`). Two independent opt-in features; nothing goes through Glossarion's developer (no account, server, OAuth client, developer key or telemetry). `services/cloud_sync.py` (`CloudSyncService`), `services/share_links.py` (`ShareLinkService`), screen `ui/screens/cloud_sync.py`.
+
+**Cloud sync: what is copied.** The Library's books (finished chat books auto-migrate into it): their compiled outputs EPUB / PDF / TXT / HTML, chosen from `library_core.list_compiled_outputs`, the top-level EPUB / PDF and the files the finishing job reported (newest reported file, else newest candidate; never the untranslated source or the PDF's debug HTML). One destination for all books, one folder per book there (the Library's layout; flat when the provider cannot make folders); a same-title book gets "Novel (2)". One-way push, always overwrite: a recompile replaces the cloud file (providers such as Drive keep versions); a title change keeps the cloud file's first name.
+
+**Destinations** (tiles; changing an existing one asks "Change destination?"):
+- **Choose a folder…**: the system folder picker (Android `ACTION_OPEN_DOCUMENT_TREE` + persisted permission; iOS Files folder picker + bookmark). The line reads "*Drive › Glossarion*", never a URI. Glossarion's own storage (Download/Glossarion, Android/data, the iOS app container) is refused: "That folder is Glossarion's own storage; choose a folder of your cloud app". Choosing the same folder again (after a reinstall) adopts files with the same names instead of adding copies.
+- **Save each file separately**: for apps not offered as a folder (Google Drive on many Android phones; Drive / OneDrive / Dropbox on iOS). A new output asks once where it goes (one "needs a save location" notification; Android `ACTION_CREATE_DOCUMENT`, iOS export once + bookmark); later compiles update that file. "Choose cloud file…" re-links an existing one.
+- **Phone folder (Downloads/Glossarion)**, Android 10+: `Downloads/Glossarion/<book>/<file>` through MediaStore, overwritten in place (same entry, same name); a backup app (TeraBox, FolderSync, Syncthing) can upload that folder. iOS: disabled tile with "Android only".
+- **Test** writes and deletes a probe file; **Forget destination** releases the permission and forgets the records (cloud files stay). A lost permission shows the red banner "Glossarion lost access to *…*" with **Choose again** (no confirmation; the records are kept) and **Forget**.
+
+**Opt-in.** "Copy finished books automatically" (off by default; ReasonChip "Choose a destination first" until a destination exists); format chips EPUB / PDF / TXT / HTML (all on); per book Default / Always / Never (Book page › Output). Copies start after a Library job is DONE (compile, translate, retranslate, Resolve QA, metadata, headers, async batch), after a chat book lands in the Library, on Send now, when sync or a format is turned on, at app start and resume, and after the destination is linked again.
+
+**Activity.** Summary, progress bar ("Saving *Book.epub* to *Drive* · 45%"), queue rows with their reason ("the book is being compiled or translated", "queued after a compile", "waiting for the book to move to the Library"), recent copies, **Retry now** ("Retrying N books").
+
+**Rules (critic-corrected).** A private snapshot of the file is copied into the cache before each write (a recompile cannot tear it); a book a job writes into waits for that job's end. Android writes with the mode chain `wt` → `rwt` → `w` and reads the length back; a provider that cannot truncate gets a new file, the old one deleted, the old name given back where the provider can rename ("Replaced: its cloud link changed"). A FileNotFoundException is "deleted" only when the folder answers and the file is not in it (then it is created again, once); offline it retries. A lost permission on one file affects only that book; the destination is "lost access" only when its folder no longer answers. Backoff 2 s, 1, 5, 15, 60 min, then every 6 h; after 5 attempts "Couldn't save" plus one notification; a full phone is its own error. Deleting a Library book drops its records and queue entry (cloud files stay). Process death while a picker is open: the answer still arrives at the next start, or the request is cleared.
+
+**Help texts.** "My cloud app isn't listed" (Android: phone folder + the backup app's folder backup; RSAF for Dropbox / OneDrive / pCloud / WebDAV through rclone; Save each file separately; Share; iOS: Files › On My iPhone › Glossarion, Save each file separately, Share). "What Glossarion can and can't see": only whether the phone accepted the file, never whether the cloud app finished the upload (full storage, signed out, Wi-Fi only stay invisible); one-way overwrite; reinstall adoption; replaced files.
+
+**Share file via link** (tap only; neutral wording). Services, each off until turned on here behind its consent sheet ("I have the right to share this file"; asked again when the text changes): **transfer.it** (browser hand-off only: Android saves the EPUB to Downloads/Glossarion, overwriting the entry an earlier hand-off of the same file made and naming the entry MediaStore really has, iOS shows its Files path; `https://transfer.it/start` opens in the in-app browser, the user pastes the link back; Glossarion never calls transfer.it), **Gofile** (official API, anonymous guest account reused; "Start a new guest account"), **Send** (send.vis.ee, end-to-end encrypted, the key in the link's `#` part; link options 5 min / 1 h / 1 day / 3 days, 1-20 downloads), **pixeldrain** (the user's own API key: password field emptied after Save, Check key, Remove key). Each consent says the file leaves the phone, whether the service can read it, that it sees the IP address and how long the link lasts. Flow: file choice (several outputs) → service list (reasons: off, needs a key, too large, an upload is running) → consent → pre-flight ("You already have a link for this file" · Upload again; a mobile-data warning over 50 MB) → upload sheet with progress, **Cancel upload** (once the whole file was sent it reads **Stop waiting**: the file may already be on the service, so it ends as "may have been uploaded", never "cancelled"), **Hide** ("Link ready" snackbar with Copy) → link sheet (Copy / Share / Done). Links are saved per book (Book page › Output, chat Result card). Gofile 429 is retried once, only with Retry-After ≤ 60 s; nothing is retried after a timeout once the whole file was sent. "About share links" explains it.
+
+**Storage.** Settings: Prefs `cloud_sync`; records `<data>/mobile_cloud.json`; share links `<data>/mobile_share_links.json` (Appendix B). No config.json key.
 
 ## 5. Component catalogue
 
@@ -2398,7 +2433,9 @@ chat/         chat_view.py header.py (+ ChatSearchBar) transcript.py composer.py
               send_state.py direct_text_rules.py run_request.py run_controller.py stream_bridge.py job_binding.py
               transcript_model.py; series_page.py (U9, optional)
 sheets/       plus_sheet.py (chat/plus_sheet.py re-exports it) chat_settings.py manual_glossary.py model_sheet.py
-screens/      output_editor.py (Edit output) files.py (FileBrowser) and the settings / jobs / accounts screens
+screens/      output_editor.py (Edit output) files.py (FileBrowser) and the settings / jobs / accounts screens;
+              cloud_sync.py (U10: Settings › Cloud sync & sharing, the CloudFacade / ShareFacade, U10Actions
+              shared by the Book page Output tab and the chat Result card, the notification texts)
 library/      library_view.py book_card.py filter_sheet.py selection.py delete_confirm.py scan_raw.py
               book_page.py overview_tab.py chapters_pane.py glossary_pane.py output_tab.py metadata_editor.py translate_sheet.py
 reader/       reader_view.py webview_reader.py native_reader.py chrome.py aa_sheet.py toc_drawer.py search_sheet.py live_panel.py
@@ -2461,7 +2498,30 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 - haptics and appearance mirrors;
 - `chat_auto_accept_glossary`: the All-chats "Always accept generated glossaries" (bool, default off);
 - job / background flags: `jobs_notification_permission_asked` (set only after a definite permission answer), `jobs_notifications_off_hint_shown` (the one-time "Notifications are off" snackbar), `jobs_battery_prompt_done`, `keep_screen_on_during_jobs`;
-- `qa_quick_sample_size_mobile_default` (bool): the one-time QA sample-size migration (a saved 1000 → 0) has run.
+- `qa_quick_sample_size_mobile_default` (bool): the one-time QA sample-size migration (a saved 1000 → 0) has run;
+- `cloud_sync` (U10): `{v:1, enabled, kinds:{epub,pdf,txt,html}, destination:{id, mode: folder|files|phone, platform, target (the picked folder's native ref), label, provider, provider_label, can_create, can_write, layout, linked_at, needs_relink, persisted} | null, pending_pick}`; `mirror_outputs` stays the Storage switch for the outputs that are not books.
+
+**`mobile_cloud.json`** (U10, `state/cloud_records.CloudRecordStore`; nothing secret)
+```
+{version:1,
+ records:{"<destination id>":{"<book key>":{identity, folder:{doc,name}|null, title,
+          files:{"<epub|pdf|txt|html>":{doc, name, base_name, parent, size, mtime_ns, sha1, source, synced_at,
+                                        remote_size, mode, status, error, note, dirty}}}}},
+ overrides:{"<book key>":"always"|"never"},
+ queue:[{key, identity, reason, attempts, next_at, last_error, added_at, manual, kinds, reported}]}
+```
+- `doc` / `parent` are the native refs (Android document URIs, iOS bookmarks, MediaStore URIs); they never appear in the UI state, notifications or logs. Records are keyed by the destination id (a hash of the picked folder), so an old destination never steers writes to a new one.
+
+**`mobile_share_links.json`** (U10)
+```
+{version:1, providers:{"<transferit|gofile|send|pixeldrain>":{enabled, consent_version, consent_at}},
+ secrets:{gofile_token:"ENC:…", pixeldrain_key:"ENC:…"}, send:{expire, downloads},
+ links:[{id, provider, book, source, name, size, sha256, created, expires, downloads_limit, url:"ENC:…",
+         delete:"ENC:…"}]}
+```
+- Secrets (the Gofile guest token, the pixeldrain key, every link URL: a Send link carries its key, every delete handle) are Fernet `ENC:` values from the app's API-key encryption; a device without it refuses the direct services.
+
+**Cache.** `<cache>/cloud_sync` and `<cache>/share_uploads` hold the private snapshots of a running copy / upload; leftovers are swept at start.
 
 **`config.json`** (shared) gets no new keys. Mobile writes only existing desktop keys, sparsely. Examples:
 - `epub_library_card_size`, `epub_library_page_size`;
@@ -2498,11 +2558,14 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 | Always accept generated glossaries | Mobile-only (Prefs + sidecar, default off); the desktop always asks | §2.11, §2.14 |
 | Library hand-off | Automatic auto-migrate of finished chat books; no Migrate / Organize / Undo controls | §2.12.4, §2.17, §3.4 |
 | QA sample size | Mobile default 0 (duplicate check off) for chat and Tools scans; desktop keeps 1000 | §4.4 |
+| Cloud sync (U10) | Mirror the Library's books (EPUB / PDF / TXT / HTML) into one destination picked once with the system picker (folder, one save location per file, or the Android phone folder); no developer credentials, no network code; one-way overwrite; off by default + per-book Default / Always / Never + per-format toggles; failure and "needs a save location" notifications only | §4.18 |
+| Share links (U10) | Tap only, each service off until enabled with its consent: transfer.it browser hand-off, Gofile, Send (end-to-end encrypted), pixeldrain (user's key); secrets encrypted in `mobile_share_links.json` | §4.18 |
 
 **Recorded mobile divergences (accepted in the plan)**
 - Chat switching during a run, queued sends (the `queue` state), delete message, and edit-and-resend versions.
 - Reader double page only on tablets in landscape. SDLXLIFF Notepad layout only on tablets.
-- **Output root.** It is limited to app storage or the iOS Files-visible Documents folder, plus the Android "Mirror outputs to Downloads/Glossarion" option. SAF is used for picking only. (U5: the mirror uses the native `save_to_downloads`, i.e. the MediaStore Downloads collection, which accepts only `Download/...` relative paths and also works below API 29; a Documents/Glossarion target would need the MediaStore Files collection in the native extension.)
+- **Output root.** It is limited to app storage or the iOS Files-visible Documents folder, plus the Android phone folder (Downloads/Glossarion). (U5: the mirror uses the native `save_to_downloads`, i.e. the MediaStore Downloads collection, which accepts only `Download/...` relative paths; below API 29 its legacy branch needs WRITE_EXTERNAL_STORAGE, which the app does not request, so Android 8-9 get no Downloads copy. A Documents/Glossarion target would need the MediaStore Files collection in the native extension.) U10 adds copies into the user's own cloud storage through the extension's document-destination API (`flet_glossarion_native` README "Document destinations (U10)": `pick_folder`, `pick_save_location`, `pick_document`, `list_children`, `create_file`, `create_folder`, `write_file`, `rename_document`, `stat`, `delete`, `query_root`, `release`, `list_grants`, `cancel_document_op`, `take_document_results`; Android SAF persisted grants, iOS security-scoped bookmarks; typed error codes `permission_lost`, `missing`, `unsupported_mode`, `provider_error`, `no_space`, `cancelled`, …). The output root itself stays in app storage.
+- **U10 cloud sync and share links** are mobile-only (§4.18; tests/parity/DISCREPANCIES.md "U10"). Book outputs reach Downloads/Glossarion only through the phone-folder destination (one entry per output, overwritten in place); the Storage switch copies the other outputs once.
 - Config is snapshotted at job start; desktop reads live widgets per file.
 - The Book page uses the Progress Manager status vocabulary. The Library-only "✔ Translated" / "⏳ Working" badges are not shown.
 - **Paging.** Chapter and library lists append pages instead of showing pager buttons. The page-size keys still round-trip and set the append increment.

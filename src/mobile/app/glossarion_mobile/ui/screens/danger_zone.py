@@ -21,6 +21,7 @@ block moved into the shared core (other_settings calls it too).
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
@@ -110,8 +111,10 @@ class DangerZoneScreen(PageScreen):
 
     def __init__(self, match: Any, ctx: Any, *, oauth: Any = None, paths: Any = None,
                  stop_stores: Optional[Callable[[], Any]] = None, exit_app: Optional[Callable[[], Any]] = None,
-                 on_reset: Optional[Callable[[], Any]] = None) -> None:
+                 on_reset: Optional[Callable[[], Any]] = None,
+                 before_wipe: Optional[Callable[[], Any]] = None) -> None:
         super().__init__(match, ctx)
+        self.before_wipe = before_wipe  # U10: cloud sync releases its persisted grants (async)
         self.oauth = oauth
         self.paths = paths
         self.stop_stores = stop_stores
@@ -142,7 +145,9 @@ class DangerZoneScreen(PageScreen):
             ]),
             section("Wipe app data", [
                 ft.Text("Deletes settings and backups, chats, sign-ins, imported files, outputs, the Library and caches "
-                        "from this device, then closes Glossarion. Logs are kept. This cannot be undone.",
+                        "from this device, then closes Glossarion. Logs are kept. This cannot be undone. Files already "
+                        "copied to your cloud stay there, and files shared via a link stay on that service until "
+                        "the link expires (delete a link first on the Book page if you want it gone now).",
                         theme_style=ft.TextThemeStyle.BODY_SMALL),
                 self.wipe_field,
                 self.wipe_button,
@@ -219,7 +224,15 @@ class DangerZoneScreen(PageScreen):
         if self.paths is None:
             self.say("App folders are unknown in this session")
             return []
-        failed = await self.io(wipe_app_data, self.paths, stop=self.stop_stores)
+        if self.before_wipe is not None:
+            try:
+                result = self.before_wipe()
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception:
+                log.exception("releasing the cloud grants before the wipe failed")
+        # PageScreen.io(fn, *args) passes no keyword arguments: bind ``stop`` first
+        failed = await self.io(functools.partial(wipe_app_data, self.paths, stop=self.stop_stores))
         if failed:
             log.warning("wipe left %d item(s): %s", len(failed), failed[:5])
         if self.exit_app is not None:

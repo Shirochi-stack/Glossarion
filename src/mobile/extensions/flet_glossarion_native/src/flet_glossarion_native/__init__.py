@@ -1,3 +1,8 @@
+from flet_glossarion_native.documents import (
+    DEFAULT_MODE_CHAIN,
+    DocumentError,
+    DocumentScope,
+)
 from flet_glossarion_native.native import EXTENSION_VERSION, GlossarionNative
 from flet_glossarion_native.types import (
     CHANNEL_JOBS_ACTION,
@@ -7,6 +12,8 @@ from flet_glossarion_native.types import (
     JOB_SERVICE_NOTIFICATION_ID,
     BackgroundTaskEvent,
     BackgroundTaskEventType,
+    DocumentEvent,
+    DocumentEventType,
     ForegroundEvent,
     ForegroundEventType,
     NotificationAction,
@@ -27,7 +34,12 @@ __all__ = [
     "CHANNEL_JOBS_ACTION",
     "CHANNEL_JOBS_DONE",
     "CHANNEL_JOBS_PROGRESS",
+    "DEFAULT_MODE_CHAIN",
     "DEFAULT_NOTIFICATION_CHANNELS",
+    "DocumentError",
+    "DocumentEvent",
+    "DocumentEventType",
+    "DocumentScope",
     "EXTENSION_VERSION",
     "ForegroundEvent",
     "ForegroundEventType",

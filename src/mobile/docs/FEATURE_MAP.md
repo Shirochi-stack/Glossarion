@@ -43,7 +43,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | Models | Model Manager |
 | Accounts | Sign-in providers; "Unavailable on mobile" section |
 | Profiles | Profiles & prompts |
-| Data › X | Storage / Backup / Import / Logs & diagnostics |
+| Data › X | Storage / Cloud sync & sharing (U10) / Backup / Import / Logs & diagnostics |
 | About › X | Updates, About, guides, Danger zone |
 | FileBrowser, TextEditor, ExportSheet, SourcePicker, MediaViewer, HtmlView | Shared components (UI_SPEC §5) |
 
@@ -53,7 +53,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 - **New**: a mobile addition.
 - **Excluded**: on the plan's exclusion list, or native-impossible. The feature is shown as a **disabled row with a ReasonChip** where users would look for it, never hidden, and its config values are preserved.
 - **Dependency rule**: ships when its packages resolve for Android and iOS (`check_mobile_wheels.py`). Otherwise it uses a REST equivalent, or shows a disabled row with "Needs <package> · not in this build". U9 outcomes: grpcio 1.81 + google-ai-generativelanguage, google-cloud-translate / -texttospeech / -vision are pinned; google-cloud-aiplatform is not installable (protobuf<7), so Vertex runs over REST; sentence-transformers and argostranslate stay disabled.
-- **(U3)**, **(U9)**: the milestone that ships the surface. Every milestone (U0-U9) has shipped; Series (optional, mobile only) shipped in U9.
+- **(U3)**, **(U9)**: the milestone that ships the surface. Every milestone (U0-U10) has shipped; Series (optional, mobile only) shipped in U9; cloud sync and share links (mobile only) in U10 (section 18).
 
 ---
 
@@ -179,7 +179,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 33 | Input / output token limits | Settings › Translation defaults; Plan card |  |
 | 34 | Context mode (Off / Contextual History / Rolling Summary Replace/Append) | Settings › Context & memory; Plan card |  |
 | 35 | Batch translation / request merging | Settings › Translation defaults; Settings › Processing › Request merging |  |
-| 36 | Output directory override | Data › Storage › Output folder | Adapted: output root limited to app storage / iOS Files-visible Documents (+ Android "Mirror outputs to Downloads/Glossarion"); arbitrary SAF folders are not supported |
+| 36 | Output directory override | Data › Storage › Output folder | Adapted: output root limited to app storage / iOS Files-visible Documents (+ Android phone folder Downloads/Glossarion: books through Cloud sync & sharing, overwritten in place; other outputs copied once); arbitrary SAF folders are not an output root (U10 copies books into a picked cloud folder instead) |
 | 37 | Save glossary copy in output | Settings › Glossary › General |  |
 | 38 | Multi API key pools | Keys |  |
 | 39 | Vertex AI credentials | ModelSheet route row; Settings › Endpoints › Vertex | Dependency rule (U9): google-cloud-aiplatform needs protobuf<7 and is not shipped, so Vertex runs through REST + google-auth (Gemini via google-genai `vertexai=True`, Claude via `AnthropicVertex`; the desktop code) |
@@ -554,7 +554,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 40 | RS Keys (rolling summary key pool) | Context & memory › KeyPoolTile |  |
 | 41 | Application Updates: Check for Updates + Check on startup | About › Updates | (U9) Install excluded |
 | 42 | Config Backup: Create Backup / Restore Backup | Data › Backup & restore |  |
-| 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android "Mirror outputs to Downloads/Glossarion") |
+| 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android phone folder Downloads/Glossarion: books through Cloud sync & sharing, overwritten in place; other outputs copied once) |
 | 44 | Auto DPI Scale / GUI Scale Factor / GUI Font Scale | Settings › Appearance › "Auto DPI / GUI scale" (disabled row + ReasonChip); Appearance › Text scale replaces it | **Excluded**: DPI scaling (the OS handles it); value preserved |
 | 45 | Enable streaming responses (OpenAI-compatible) | Settings › Response handling › Streaming (one switch) |  |
 | 46 | Stream thinking/reasoning logs | Settings › Response handling › Streaming (one switch) |  |
@@ -1052,7 +1052,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 4 | Notifications (progress + completion) | Native extension channels (spec §1.9): progress kept current while hidden, re-posted when swiped (Android 14+), glossary Accept / Review, real permission state on Settings › Notifications & background | Replaced |
 | 5 | Open-with / Share intent import | IntentRouter | Replaced |
 | 6 | Native file picker (SAF) with copy-to-Library | FileBridge | Replaced |
-| 7 | SD card / external volume detection | Data › Storage | Adapted: SAF is used for picking only; the output root is app storage / iOS Documents (+ Android mirror to Downloads/Glossarion) |
+| 7 | SD card / external volume detection | Data › Storage | Adapted: the output root is app storage / iOS Documents (+ Android phone folder Downloads/Glossarion: books through Cloud sync & sharing, overwritten in place; other outputs copied once); SAF / Files pickers choose import files and, since U10, a cloud folder or save location (Data › Cloud sync & sharing) |
 | 8 | Library: scan and list books | Library | Replaced |
 | 9 | Library: EPUB cover thumbnails | BookCard covers | Replaced |
 | 10 | Library: import file FAB and add scan folder | Library FAB + Scan for raw | Replaced |
@@ -1209,3 +1209,16 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | Manga "Process This Image" / Skip | Manga › Files per-file switch; Editor ⋯ |  |
 | Manga / Manhwa / Large Text font presets | Manga › Settings › Rendering preset chips |  |
 | PM image view: Mark as Skipped / Delete Selected | Book › Chapters image-grid variant |  |
+
+## 18. mobile-only additions (U10): cloud sync and share links
+
+Not desktop features (no inventory rows; tests/parity/DISCREPANCIES.md "U10"). UI_SPEC §4.18, §3.9, §2.12.4.
+
+| # | Feature | Mobile surface | Notes |
+|---|---|---|---|
+| a | Copy Library books into the user's own cloud folder (EPUB / PDF / TXT / HTML, one folder per book, overwritten on recompile) | Data › Cloud sync & sharing (destination tiles, switch, format chips, Activity); Book › Output cloud lines | **New** (U10): system picker only (Android SAF persisted grant, iOS bookmark); no developer credentials, no network code; off by default |
+| b | Save each file separately (cloud apps not offered as a folder) | Data › Cloud sync & sharing › Save each file separately; Book › Output "Choose where to save…" / "Choose cloud file…" | **New** (U10): one save location per output, later compiles update it; one "needs a save location" notification |
+| c | Phone folder Downloads/Glossarion (backup apps such as TeraBox) | Data › Cloud sync & sharing › Phone folder; Data › Storage "Phone folder" section | **New** (U10, Android 10+): replaces the pre-U10 mirror for books (same MediaStore entry updated in place); other outputs keep the copy-once switch |
+| d | Per-book Default / Always / Never and Send now | Book › Output › Cloud & sharing; chat Result card "Send to cloud" | **New** (U10) |
+| e | Share file via link: transfer.it hand-off, Gofile, Send (end-to-end encrypted), pixeldrain (user's key) | Book › Output › Share file via link + Saved links; chat Result card; Data › Cloud sync & sharing (service switches, consent sheets, pixeldrain key, Send options) | **New** (U10): tap only, every service off until enabled with consent; transfer.it is a browser hand-off (no API call); secrets encrypted |
+| f | Cloud / upload failure and "needs a save location" notifications | `jobs.action` notifications (routes only) | **New** (U10): failures only; progress in the shared foreground notification |

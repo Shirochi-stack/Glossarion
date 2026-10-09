@@ -346,8 +346,7 @@ class OAuthBridge:
         self._session: Any = None
         self._cancel = threading.Event()
         self._lock = threading.RLock()
-        self._fgs_started = False  # this sign-in started the foreground service
-        self._fgs_held = False  # this sign-in relies on the foreground service (started or shared)
+        self._lease: Any = None  # native.ServiceLease of the sign-in's foreground service (Android)
         self._fgs_failed = False  # Android: the sign-in service could not be started
         self._watch_task: Any = None  # checks the sign-in service once the browser is in front
         self._reopen_task: Any = None
@@ -974,68 +973,37 @@ class OAuthBridge:
     # user switches to another app to read a code) and freezes it 10 s later: the loopback
     # socket still accepts the browser's connection but no thread answers, so the page
     # spins with no error. The service keeps the process perceptible (never frozen).
+    # ``native.ServiceLease`` holds it (shared with a running job through ``ServiceHolds``).
 
-    def _holds(self) -> Any:
-        from glossarion_mobile.services.native import service_holds
+    @property
+    def _fgs_started(self) -> bool:
+        """This sign-in started the foreground service."""
+        return bool(self._lease is not None and self._lease.started)
 
-        return service_holds(self.native)
+    @property
+    def _fgs_held(self) -> bool:
+        """This sign-in relies on the foreground service (started, or shared with a job)."""
+        return bool(self._lease is not None and self._lease.held)
 
     async def _start_fgs(self, info: Optional[ProviderInfo] = None) -> None:
-        self._fgs_started = False
-        self._fgs_held = False
+        from glossarion_mobile.services.native import ServiceLease
+
+        self._lease = None
         self._fgs_failed = False
         if not self.is_android or self.native is None:
             return
         label = info.label if info is not None else "ChatGPT"
-        title, text = f"Signing in to {label}", "Waiting for sign-in…"
-        holds = self._holds()
-        try:
-            if await self.native.is_job_service_running():
-                if holds is None:
-                    return  # a translation already holds the foreground service
-                # Share the job's service: its end must not stop it while the browser is open.
-                holds.hold(SIGN_IN_HOLD, title, text)
-                self._fgs_held = True
-                return
-            started = bool(await self.native.start_job_service(title, text))
-        except Exception as exc:
-            log.warning("sign-in foreground service unavailable: %s (Android may pause Glossarion while "
-                        "the browser is open)", exc)
-            self._fgs_failed = True
-            return
-        if not started:
+        # Shares a running job's service (its end must not stop it while the browser is open).
+        self._lease = ServiceLease(self.native, SIGN_IN_HOLD)
+        if not await self._lease.acquire(f"Signing in to {label}", "Waiting for sign-in…") and self._lease.failed:
             log.warning("the sign-in foreground service did not start; Android may pause Glossarion while "
                         "the browser is open")
             self._fgs_failed = True
-            return
-        self._fgs_started = True
-        self._fgs_held = True
-        if holds is not None:
-            holds.hold(SIGN_IN_HOLD, title, text)
 
     async def _stop_fgs(self) -> None:
-        held, started = self._fgs_held, self._fgs_started
-        self._fgs_held = False
-        self._fgs_started = False
-        if not held or self.native is None:
-            return
-        holds = self._holds()
-        if holds is not None:
-            remaining = holds.release(SIGN_IN_HOLD)
-            if remaining is not None:
-                # A job still needs the service: give it back its notification.
-                title, text = remaining
-                try:
-                    await self.native.update_job_service(text=text, title=title)
-                except Exception:
-                    pass
-                return
-        elif not started:
-            return
-        try:
-            await self.native.stop_job_service()
-        except Exception:
-            pass
+        lease, self._lease = self._lease, None
+        if lease is not None and self.native is not None:
+            await lease.release()
 
     async def _watch_fgs(self) -> None:
         """Once the browser is in front: is the sign-in service still running? (A build whose service
@@ -1053,20 +1021,12 @@ class OAuthBridge:
     def _service_lost(self, reason: str) -> None:
         log.warning("the sign-in foreground service is gone (%s): Android may freeze Glossarion while the "
                     "browser is open, and the browser then hangs on the sign-in redirect", reason)
-        self._fgs_held = False
-        self._fgs_started = False
-        holds = self._holds()
-        if holds is not None:
-            holds.release(SIGN_IN_HOLD)
+        if self._lease is not None:
+            self._lease.drop()
         self._flag_stalled("service")
 
     def _owns_service_alone(self) -> bool:
-        if not self._fgs_held:
-            return False
-        holds = self._holds()
-        if holds is None:
-            return self._fgs_started
-        return holds.names() == [SIGN_IN_HOLD]
+        return bool(self._lease is not None and self._lease.owns_alone())
 
     async def _on_foreground_event(self, event: Mapping[str, Any]) -> None:
         """Foreground-service events (UI loop): the service died, or its notification's Stop was tapped."""

@@ -14,6 +14,13 @@
 * **📝 Review** (UI_SPEC §3.9 / §4.8): when the Review generator wrote ``review/review.md`` (or the
   Volume-mode ``review/combined_review/review.md``) in the workspace, a row opens it in Tools ›
   Review (``tools.review?out=<bid>``).
+* **Cloud & sharing** (U10, ``ui/screens/cloud_sync``): each compiled output's row shows its cloud state
+  ("Saved to Drive › Glossarion · 2 min ago", "Saving… 45%", "Choose where to save it", "Lost access ·
+  Reconnect"; tap it to act); the section has the destination line, **Send now**, "Copy this book:
+  Default / Always / Never", **Share file via link** and the book's saved links (Copy · Share · Delete).
+  The row sheet adds "Send to cloud now" and "Share file via link". Unavailable actions stay visible with
+  their ReasonChip. Cloud / share state is read on the io pool in ``reload`` and follows the services'
+  change events while the tab is mounted (``refresh_cloud``).
 
 The workspace is the book's resolved one (``progress_model.book_workspace``): an organized
 Library/Translated book lists, compiles and browses the workspace it came from.
@@ -21,17 +28,21 @@ Library/Translated book lists, compiles and browses the workspace it came from.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional
 
 import flet as ft
 
+from glossarion_mobile.services.library import book_identity
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import section_title
 from glossarion_mobile.ui.library.models import size_text
+from glossarion_mobile.ui.screens import cloud_sync as u10
 from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["OutputTab", "REVIEW_FILES", "WORKSPACE_GROUPS", "find_review", "workspace_groups", "workspace_size_text"]
@@ -167,9 +178,23 @@ class OutputTab:
         self.last_sheet: Optional[ActionSheet] = None
         self.media_viewer: Any = None
         self.group_builds = 0
+        # U10: the cloud-sync / share-link state of this book (read on the io pool in ``reload``)
+        self.workspace: str = ""
+        self.sizes: dict = {}  # compiled output -> bytes (measured on the io pool in ``reload``)
+        self.identity: str = ""  # the book's identity path (``book_identity``): cloud records and links key by it
+        self.cloud_state: dict = {}
+        self.book_cloud: dict = {}
+        self.links: list = []
+        self.providers: list = []
+        self.cloud_builds = 0
+        self._u10: Optional[u10.U10Actions] = None
+        self._cloud_unsubs: list = []
+        self._cloud_refreshing = False
+        self._cloud_again = False
 
     def build(self) -> ft.Control:
         self.outputs_column = ft.Column(spacing=4, key="out-files")
+        self.cloud_column = ft.Column(spacing=tokens.SPACING["xs"], key="out-cloud")
         self.groups_column = ft.Column(spacing=0, key="out-groups")
         self.compile_row = ft.Row([
             ft.FilledTonalButton(content="Compile EPUB", icon=ft.Icons.MENU_BOOK,
@@ -194,6 +219,8 @@ class OutputTab:
             section_title("Compiled outputs"),
             self.outputs_column,
             self.review_row,
+            section_title("Cloud & sharing"),
+            self.cloud_column,
             section_title("Compile"),
             self.compile_row,
             ft.Row([
@@ -227,10 +254,23 @@ class OutputTab:
             raw = service.raw_source(book)
             folder = pm.book_workspace(service, book)
             size = _folder_size(folder) if folder and os.path.isdir(folder) else None
-            return outputs, raw, size, find_review(folder), workspace_groups(folder)
+            identity = book_identity(book) or folder or ""
+            sizes: dict = {}
+            for path, _kind in outputs:
+                try:
+                    sizes[path] = os.path.getsize(path)
+                except OSError:
+                    pass
+            return (outputs, raw, size, find_review(folder), workspace_groups(folder), folder, identity,
+                    self._gather_cloud(identity), sizes)
 
-        self.outputs, self.raw, self.size, self.review, self.groups = await self.ctx.io(gather)
+        (self.outputs, self.raw, self.size, self.review, self.groups, folder, identity,
+         cloud, self.sizes) = await self.ctx.io(gather)
+        self.workspace = str(folder or "")
+        self.identity = str(identity or "")
+        self._apply_cloud(cloud)
         self.stale = False
+        self._subscribe_cloud()
         self._render()
 
     def open_review(self) -> Any:
@@ -249,34 +289,50 @@ class OutputTab:
         has_workspace = bool(pm.book_workspace(self.page.service, book))
         for button in self.compile_row.controls:
             button.disabled = not has_workspace
-        rows: list[ft.Control] = []
-        conflicts = list(book.get("compiled_conflicts") or [])
-        for index, (path, kind) in enumerate(self.outputs):
-            name = os.path.basename(path)
-            try:
-                meta = f"{kind.upper()} · {size_text(os.path.getsize(path))}"
-            except OSError:
-                meta = kind.upper()
-            if index == 0 and conflicts:
-                meta += f" · ⚠ +{len(conflicts)}"
-            rows.append(ft.ListTile(
-                leading=ft.Icon(getattr(ft.Icons, _KIND_ICONS.get(kind, "INSERT_DRIVE_FILE"))),
-                title=ft.Text(name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                subtitle=ft.Text(meta),
-                trailing=ft.IconButton(icon=ft.Icons.MORE_VERT, tooltip="Output actions", size_constraints=HIT_TARGET,
-                                       on_click=lambda e, p=path, k=kind: self.open_sheet(p, k)),
-                on_click=lambda e, p=path, k=kind: self.open_output(p, k),
-                key=f"out-file-{index}",
-            ))
-        if not rows:
-            rows.append(ft.Text("No compiled output yet. Compile the translation to create an EPUB or PDF.",
-                                color=ft.Colors.ON_SURFACE_VARIANT, key="out-none"))
-        self.outputs_column.controls = rows
+        self._render_outputs()
         self.groups_column.controls = self._group_controls()
         self.raw_row.subtitle = ft.Text(os.path.basename(self.raw) if self.raw else "The raw source file can't be found")
         self.storage_text.value = workspace_size_text(self.size) if self.size is not None else (
             "No output workspace" if not has_workspace else "Workspace …")
         self.ctx.push(self.list)
+
+    def _render_outputs(self) -> None:
+        """The compiled-output rows (with their cloud lines) and the Cloud & sharing section; a cloud / share
+        change repaints only these (``refresh_cloud``), so expanded workspace groups stay open."""
+        book = self.page.book
+        rows: list[ft.Control] = []
+        conflicts = list(book.get("compiled_conflicts") or [])
+        self.cloud_builds += 1
+        n = self.cloud_builds
+        cloud_rows = self.cloud_rows()
+        for index, (path, kind) in enumerate(self.outputs):
+            name = os.path.basename(path)
+            size = self.sizes.get(path)
+            meta = f"{kind.upper()} · {size_text(size)}" if size is not None else kind.upper()
+            if index == 0 and conflicts:
+                meta += f" · ⚠ +{len(conflicts)}"
+            subtitle: ft.Control = ft.Text(meta)
+            line = self.cloud_line(index)
+            if line is not None:
+                icon, text, tone = line
+                entry = cloud_rows.get(index) or {}
+                subtitle = ft.Column([ft.Text(meta), u10.status_row(
+                    icon, text, tone, key=f"out-cloud-line-{index}-{n}",
+                    on_click=lambda e, k=kind, en=entry: self.on_cloud_line(k, en))], spacing=2, tight=True)
+            rows.append(ft.ListTile(
+                leading=ft.Icon(getattr(ft.Icons, _KIND_ICONS.get(kind, "INSERT_DRIVE_FILE"))),
+                title=ft.Text(name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                subtitle=subtitle,
+                trailing=ft.IconButton(icon=ft.Icons.MORE_VERT, tooltip="Output actions", size_constraints=HIT_TARGET,
+                                       on_click=lambda e, p=path, k=kind: self.open_sheet(p, k)),
+                on_click=lambda e, p=path, k=kind: self.open_output(p, k),
+                key=f"out-file-{index}-{n}",
+            ))
+        if not rows:
+            rows.append(ft.Text("No compiled output yet. Compile the translation to create an EPUB or PDF.",
+                                color=ft.Colors.ON_SURFACE_VARIANT, key=f"out-none-{n}"))
+        self.outputs_column.controls = rows
+        self.cloud_column.controls = self._cloud_controls(n)
 
     def _group_controls(self) -> list:
         """One collapsible group per non-empty ``workspace_groups`` entry (fresh keys per render: Flet 1.0.3
@@ -367,6 +423,15 @@ class OutputTab:
                 items.append(ActionItem(option.label, (lambda o=option.id: self.ctx.spawn(self.export(o, path))),
                                         icon=option.icon, disabled_reason=option.disabled_reason,
                                         key=f"export-{option.id}"))
+        # U10: this book to the cloud now, and a share link for this file
+        entry = self.cloud_entry(kind) or {}
+        if entry.get("status") == "needs_pick":
+            items.append(ActionItem("Choose where to save…", lambda: self.ctx.spawn(self.choose_location(kind)),
+                                    icon="DRIVE_FILE_MOVE", key="output-cloud-pick"))
+        items.append(ActionItem(u10.SEND_NOW_LABEL, lambda: self.ctx.spawn(self.send_now()), icon="CLOUD_UPLOAD",
+                                disabled_reason=self.cloud_reason(), key="output-cloud"))
+        items.append(ActionItem(u10.SHARE_LABEL, lambda: self.ctx.spawn(self.actions.provider_sheet(path, self.identity)),
+                                icon="LINK", disabled_reason=self.share_reason(), key="output-share-link"))
         items.append(ActionItem("Delete", lambda: self.confirm_delete(path), icon="DELETE_OUTLINE", destructive=True,
                                 key="output-delete"))
         sheet = ActionSheet(items, title=os.path.basename(path), tablet=self.ctx.tablet)
@@ -436,3 +501,233 @@ class OutputTab:
             self.ctx.say("The raw source file can't be found")
             return None
         return self.ctx.spawn(self._share([self.raw]))
+
+    # ---- U10: cloud sync and share links ------------------------------------------------------------
+
+    def _extra(self, name: str) -> Any:
+        extras = getattr(self.ctx, "extras", None)
+        return extras.get(name) if isinstance(extras, dict) else None
+
+    @property
+    def actions(self) -> u10.U10Actions:
+        """The shared U10 actions (``ui/screens/cloud_sync``) over this context: the services come from
+        ``ctx.extras`` (``cloud_sync`` / ``share_links``, set by the Library feature)."""
+        if self._u10 is None:
+            files = self.ctx.files
+            self._u10 = u10.U10Actions(
+                cloud=self._extra("cloud_sync"), shares=self._extra("share_links"), page=self.ctx.page,
+                say=self.ctx.say, spawn=self.ctx.spawn, io=self.ctx.io, go=self.ctx.go,
+                copy_text=self.ctx.copy_text, share_text=getattr(files, "share_text", None) if files is not None else None,
+                show_in_files=getattr(files, "show_in_files", None) if files is not None else None,
+                open_url=self._extra("open_url"), read_clipboard=self._extra("read_clipboard"),
+                tablet=self.ctx.tablet, platform=self.ctx.platform)
+        return self._u10
+
+    def _gather_cloud(self, identity: str) -> dict:
+        """Blocking (io pool): the book's cloud and share-link state (keyed by its identity path)."""
+        actions = self.actions
+        return {
+            "state": actions.cloud.snapshot(),
+            "book": actions.cloud.book(identity) if identity else {},
+            "links": actions.shares.links_for(identity) if identity else [],
+            "providers": actions.shares.providers(),
+        }
+
+    def _apply_cloud(self, cloud: dict) -> None:
+        self.cloud_state = dict(cloud.get("state") or {})
+        self.book_cloud = dict(cloud.get("book") or {})
+        self.links = list(cloud.get("links") or [])
+        self.providers = list(cloud.get("providers") or [])
+
+    def _subscribe_cloud(self) -> None:
+        """Follow the services' change events (progress, a finished copy, a new link) while this Book page
+        lives; the subscriptions end with the page (``BookPageScreen.dispose`` runs its ``_unsubs``)."""
+        if self._cloud_unsubs:
+            return
+        actions = self.actions
+        for facade in (actions.cloud, actions.shares):
+            if facade.available:
+                self._cloud_unsubs.append(facade.subscribe(self._on_cloud_change))
+        owner = getattr(self.page, "_unsubs", None)
+        if isinstance(owner, list):
+            owner.append(self.unsubscribe_cloud)
+
+    def unsubscribe_cloud(self) -> None:
+        for unsub in self._cloud_unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._cloud_unsubs = []
+
+    def _on_cloud_change(self, *args: Any) -> None:
+        dispatcher = getattr(self.ctx, "dispatcher", None)
+        if dispatcher is not None and getattr(dispatcher, "bound", False) and not dispatcher.on_loop_thread():
+            dispatcher.post(self._schedule_cloud)
+            return
+        self._schedule_cloud()
+
+    def _schedule_cloud(self) -> None:
+        if self._cloud_refreshing:
+            self._cloud_again = True
+            return
+        self.ctx.spawn(self.refresh_cloud())
+
+    async def refresh_cloud(self) -> None:
+        """Re-read only the cloud / share-link state (no workspace walk) and repaint; a burst of progress
+        events is coalesced into one refresh at a time."""
+        if self._cloud_refreshing:
+            self._cloud_again = True
+            return
+        self._cloud_refreshing = True
+        try:
+            while True:
+                self._cloud_again = False
+                cloud = await self.ctx.io(self._gather_cloud, self.identity)
+                self._apply_cloud(cloud)
+                if getattr(self, "list", None) is not None:
+                    self._render_outputs()
+                    self.ctx.push(self.outputs_column, self.cloud_column)
+                if not self._cloud_again:
+                    break
+                await asyncio.sleep(0.25)
+        finally:
+            self._cloud_refreshing = False
+
+    @property
+    def destination_label(self) -> str:
+        return u10.destination_text(self.cloud_state.get("destination"))
+
+    def cloud_entry(self, kind: str) -> Optional[dict]:
+        entry = dict(self.book_cloud.get("files") or {}).get(kind)
+        return dict(entry) if isinstance(entry, dict) else None
+
+    def cloud_rows(self) -> dict:
+        """``{output row index: cloud entry}``: each kind's entry goes on the row of the file it copies (the
+        entry's ``path`` / ``source``), else on the first row of that kind (UI_SPEC §3.9 priority order)."""
+        rows: dict = {}
+        files = dict(self.book_cloud.get("files") or {})
+        for kind, entry in files.items():
+            if not isinstance(entry, dict):
+                continue
+            wanted = os.path.normcase(os.path.abspath(str(entry.get("path") or entry.get("source") or ""))) \
+                if (entry.get("path") or entry.get("source")) else ""
+            first = None
+            chosen = None
+            for index, (path, row_kind) in enumerate(self.outputs):
+                if row_kind != kind:
+                    continue
+                if first is None:
+                    first = index
+                if wanted and os.path.normcase(os.path.abspath(str(path))) == wanted:
+                    chosen = index
+                    break
+            index = chosen if chosen is not None else first
+            if index is not None:
+                rows[index] = dict(entry)
+        return rows
+
+    def cloud_line(self, index: int) -> Optional[tuple]:
+        """``(icon, text, tone)`` under output row ``index`` (None: nothing to show)."""
+        if not self.cloud_state.get("destination"):
+            return None
+        entry = self.cloud_rows().get(index)
+        if entry is None:
+            return None
+        kind = self.outputs[index][1] if 0 <= index < len(self.outputs) else ""
+        return u10.file_status_line(entry, dest_label=self.destination_label, kind=kind)
+
+    def on_cloud_line(self, kind: str, entry: dict) -> Any:
+        """Tap on a row's cloud line: pick a save location / reconnect / retry."""
+        status = str(entry.get("status") or "")
+        if status == "needs_pick":
+            return self.ctx.spawn(self.choose_location(kind))
+        if status in ("needs_relink", "revoked", "permission_lost"):
+            return self.actions.open_settings()
+        if status in ("failed", "error", "check", "missing"):
+            return self.ctx.spawn(self.send_now())
+        return None
+
+    def cloud_reason(self) -> Optional[str]:
+        return self.actions.cloud_reason(self.cloud_state, has_outputs=bool(self.outputs),
+                                         in_library=bool(self.book_cloud.get("in_library", True)))
+
+    def share_reason(self) -> Optional[str]:
+        return self.actions.share_reason(self.providers, has_outputs=bool(self.actions.shareable(self.outputs)))
+
+    async def send_now(self) -> dict:
+        result = await self.actions.send_now(self.identity, self.cloud_state)
+        await self.refresh_cloud()
+        return result
+
+    async def choose_location(self, kind: str) -> dict:
+        result = await self.actions.choose_save_location(self.identity, kind)
+        await self.refresh_cloud()
+        return result
+
+    def open_override(self) -> ActionSheet:
+        current = str(self.book_cloud.get("override") or "default")
+        sheet = self.actions.override_sheet(self.identity, current, on_done=lambda value: self.refresh_cloud())
+        self.last_sheet = sheet
+        return sheet
+
+    async def share_link(self) -> Any:
+        if self.stale:
+            await self.reload()
+        result = await self.actions.share_link(self.outputs, self.identity)
+        if isinstance(result, ActionSheet):
+            self.last_sheet = result
+        return result
+
+    def _cloud_controls(self, n: int) -> list:
+        """The Cloud & sharing section (fresh keys per render)."""
+        actions = self.actions
+        state = self.cloud_state
+        dest = state.get("destination")
+        override = str(self.book_cloud.get("override") or "default")
+        controls: list = []
+        if dest:
+            auto = bool(self.book_cloud.get("auto"))
+            text = f"Copies go to {self.destination_label} · " + (
+                "automatically after each compile" if auto else "only when you tap Send now")
+            icon, tone = ("SYNC_PROBLEM", "error") if dest.get("needs_relink") else ("CLOUD_OUTLINED", "ok")
+            if dest.get("needs_relink"):
+                text = f"Glossarion lost access to {self.destination_label} · Reconnect in Settings"
+            controls.append(u10.status_row(icon, text, tone, key=f"out-cloud-dest-{n}",
+                                           on_click=lambda e: actions.open_settings()))
+        else:
+            reason = actions.cloud_reason(state)
+            controls.append(ft.Row([
+                ft.Text("No cloud destination yet" if reason == u10.NO_DESTINATION_REASON else "Cloud sync",
+                        theme_style=ft.TextThemeStyle.BODY_MEDIUM, expand=True),
+                ft.TextButton(content="Set up", icon=ft.Icons.SETTINGS_OUTLINED, on_click=lambda e: actions.open_settings(),
+                              key=f"out-cloud-setup-{n}"),
+            ], wrap=True, key=f"out-cloud-dest-{n}"))
+        send_reason = self.cloud_reason()
+        override_label = dict((v, l) for v, l, _t in u10.OVERRIDES).get(override, "Default")
+        buttons: list = [
+            self._u10_button("Send now", "CLOUD_UPLOAD", send_reason, lambda e: self.ctx.spawn(self.send_now()),
+                             f"out-cloud-send-{n}"),
+            self._u10_button(f"Copy this book: {override_label}", "TUNE",
+                             u10.NO_SERVICE_REASON if not actions.cloud.available else None,
+                             lambda e: self.open_override(), f"out-cloud-override-{n}", outlined=True),
+            self._u10_button(u10.SHARE_LABEL, "LINK", self.share_reason(),
+                             lambda e: self.ctx.spawn(self.share_link()), f"out-share-link-{n}"),
+        ]
+        controls.append(ft.Row(buttons, wrap=True, spacing=8, run_spacing=4, key=f"out-cloud-buttons-{n}"))
+        if self.links:
+            controls.append(ft.Text(f"Saved links ({len(self.links)})", theme_style=ft.TextThemeStyle.LABEL_LARGE,
+                                    key=f"out-links-title-{n}"))
+            controls.extend(actions.link_rows(self.links, on_changed=self.refresh_cloud, key_prefix=f"out-link-{n}"))
+        return controls
+
+    @staticmethod
+    def _u10_button(label: str, icon: str, reason: Optional[str], on_click: Any, key: str,
+                    outlined: bool = False) -> ft.Control:
+        """An action button, or the disabled button with its ReasonChip (nothing hidden, UI_SPEC §0 item 6)."""
+        if reason:
+            return ft.Row([ft.OutlinedButton(content=label, icon=getattr(ft.Icons, icon, None), disabled=True),
+                           ReasonChip(reason=reason, detail=u10.reason_detail(reason))], spacing=4, tight=True, key=key)
+        if outlined:
+            return ft.OutlinedButton(content=label, icon=getattr(ft.Icons, icon, None), on_click=on_click, key=key)
+        return ft.FilledTonalButton(content=label, icon=getattr(ft.Icons, icon, None), on_click=on_click, key=key)

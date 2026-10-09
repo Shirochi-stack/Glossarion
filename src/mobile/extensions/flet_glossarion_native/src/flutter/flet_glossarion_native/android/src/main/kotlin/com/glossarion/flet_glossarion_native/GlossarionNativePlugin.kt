@@ -15,9 +15,12 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.provider.BaseColumns
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.system.Os
 import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.app.NotificationChannelCompat
@@ -44,9 +47,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * Android side of GlossarionNative (MethodChannel `glossarion_native/platform`).
  *
  * Dart -> Kotlin: attach, get_platform_info, clear_shared, init_notifications,
- * show_notification, cancel_notification, save_to_downloads.
+ * show_notification, cancel_notification, save_to_downloads, and the document
+ * destination methods handled by [DocumentDestinations] (pick_folder, ...).
  * Kotlin -> Dart: `share` {items}, `notification` {notification_id, action_id,
- * payload, launched_app}.
+ * payload, launched_app}, `document` {type, op_id, ...}.
  *
  * Items received before Dart calls `attach` (cold start) are queued and
  * returned by `attach`; later ones are pushed. File copies and Downloads
@@ -59,13 +63,15 @@ class GlossarionNativePlugin :
     FlutterPlugin,
     MethodChannel.MethodCallHandler,
     ActivityAware,
-    PluginRegistry.NewIntentListener {
+    PluginRegistry.NewIntentListener,
+    PluginRegistry.ActivityResultListener {
 
     private var appContext: Context? = null
     private var channel: MethodChannel? = null
     private var activityBinding: ActivityPluginBinding? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var io: ExecutorService? = null
+    private var documents: DocumentDestinations? = null
 
     // Main-thread state.
     private var dartAttached = false
@@ -81,6 +87,12 @@ class GlossarionNativePlugin :
         channel = MethodChannel(binding.binaryMessenger, CHANNEL).also {
             it.setMethodCallHandler(this)
         }
+        documents = DocumentDestinations(
+            binding.applicationContext,
+            mainHandler,
+            isDartAttached = { dartAttached && channel != null },
+            sendToDart = { event -> channel?.invokeMethod("document", event) },
+        )
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -88,6 +100,8 @@ class GlossarionNativePlugin :
         channel = null
         io?.shutdown()
         io = null
+        documents?.dispose()
+        documents = null
         dartAttached = false
     }
 
@@ -96,25 +110,37 @@ class GlossarionNativePlugin :
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activityBinding = binding
         binding.addOnNewIntentListener(this)
+        binding.addActivityResultListener(this)
+        documents?.activity = binding.activity
         handleIntent(binding.activity.intent, initial = true)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         activityBinding?.removeOnNewIntentListener(this)
+        activityBinding?.removeActivityResultListener(this)
         activityBinding = null
+        // A picker that is open stays pending: its answer reaches the recreated activity.
+        documents?.activity = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
         activityBinding = binding
         binding.addOnNewIntentListener(this)
+        binding.addActivityResultListener(this)
+        documents?.activity = binding.activity
     }
 
     override fun onDetachedFromActivity() {
         activityBinding?.removeOnNewIntentListener(this)
+        activityBinding?.removeActivityResultListener(this)
         activityBinding = null
+        documents?.activity = null
     }
 
     override fun onNewIntent(intent: Intent): Boolean = handleIntent(intent, initial = false)
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean =
+        documents?.onActivityResult(requestCode, resultCode, data) ?: false
 
     // ----------------------------------------------------------------- intents
 
@@ -286,6 +312,11 @@ class GlossarionNativePlugin :
             result.error("not_attached", "GlossarionNativePlugin is not attached to an engine", null)
             return
         }
+        val docs = documents
+        if (docs != null && docs.handles(call.method)) {
+            docs.handle(call, result)
+            return
+        }
         try {
             when (call.method) {
                 "attach" -> {
@@ -299,6 +330,7 @@ class GlossarionNativePlugin :
                             "shared" to shared,
                             "notifications" to notifications,
                             "launch_notification" to launchNotification,
+                            "document_results" to (documents?.onDartAttach() ?: emptyList()),
                         )
                     )
                 }
@@ -363,6 +395,10 @@ class GlossarionNativePlugin :
         info["save_to_downloads"] = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
             hasLegacyWritePermission(context)
         info["continued_processing"] = false
+        // Document destinations (SAF). AOSP caps persisted URI grants per app at
+        // 128 before Android 11 and 512 from Android 11 (oldest trimmed first).
+        info["documents"] = true
+        info["persisted_grant_limit"] = if (Build.VERSION.SDK_INT >= 30) 512 else 128
         info["shared_dir"] = sharedRoot(context).absolutePath
         info["cache_dir"] = context.cacheDir.absolutePath
         info["files_dir"] = context.filesDir.absolutePath
@@ -527,6 +563,8 @@ class GlossarionNativePlugin :
         val displayName = call.argument<String>("display_name")
         val mimeType = call.argument<String>("mime_type")
         val subdir = call.argument<String>("subdir")
+        val replaceUri = call.argument<String>("replace_uri")
+        val reportName = call.argument<Boolean>("report_name") == true
         val executor = io
         if (executor == null) {
             result.error("not_attached", "executor unavailable", null)
@@ -534,8 +572,15 @@ class GlossarionNativePlugin :
         }
         executor.execute {
             try {
-                val saved = saveToDownloads(context, File(path), displayName, mimeType, subdir)
-                mainHandler.post { result.success(saved) }
+                val saved = saveToDownloads(context, File(path), displayName, mimeType, subdir, replaceUri)
+                // report_name (save_to_downloads_entry): {"uri", "name"} - MediaStore may have named a new
+                // entry "name (1).ext"; an entry overwritten in place keeps its first name.
+                val payload: Any? = if (reportName && saved != null) {
+                    hashMapOf<String, Any?>("uri" to saved, "name" to downloadsEntryName(context, saved))
+                } else {
+                    saved
+                }
+                mainHandler.post { result.success(payload) }
             } catch (e: Exception) {
                 Log.e(TAG, "save_to_downloads failed", e)
                 mainHandler.post { result.error("save_failed", e.toString(), null) }
@@ -543,12 +588,19 @@ class GlossarionNativePlugin :
         }
     }
 
+    /**
+     * Copy [source] to Download/<subdir>. With [replaceUri] (a URI this method returned earlier)
+     * the entry is overwritten in place when it is still Glossarion's: same URI, same file name
+     * (DISPLAY_NAME is never changed, so a backup app watching the folder sees an update instead of
+     * a new file). A failed in-place write throws instead of adding a second copy.
+     */
     private fun saveToDownloads(
         context: Context,
         source: File,
         displayName: String?,
         mimeType: String?,
         subdir: String?,
+        replaceUri: String? = null,
     ): String? {
         if (!source.isFile) throw IOException("Source file not found: ${source.path}")
         val mime = mimeType?.takeIf { it.isNotEmpty() } ?: guessMime(source.name) ?: "application/octet-stream"
@@ -557,6 +609,12 @@ class GlossarionNativePlugin :
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
+            if (!replaceUri.isNullOrEmpty()) {
+                val existing = Uri.parse(replaceUri)
+                if (ownsDownloadsEntry(context, existing) && overwriteDownloadsEntry(resolver, existing, source)) {
+                    return existing.toString()
+                }
+            }
             val relativePath = if (folder.isEmpty()) {
                 Environment.DIRECTORY_DOWNLOADS
             } else {
@@ -596,10 +654,106 @@ class GlossarionNativePlugin :
         val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val dir = if (folder.isEmpty()) downloads else File(downloads, folder)
         if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create ${dir.path}")
+        if (!replaceUri.isNullOrEmpty() && replaceUri.startsWith("/")) {
+            val previous = File(replaceUri)
+            if (previous.isFile && previous.parentFile?.canonicalPath == dir.canonicalPath) {
+                source.copyTo(previous, overwrite = true, bufferSize = COPY_BUFFER)
+                MediaScannerConnection.scanFile(context, arrayOf(previous.absolutePath), arrayOf(mime), null)
+                return previous.absolutePath
+            }
+        }
         val dest = uniqueFile(dir, name)
         source.copyTo(dest, overwrite = false, bufferSize = COPY_BUFFER)
         MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), arrayOf(mime), null)
         return dest.absolutePath
+    }
+
+    /** The display name of an entry [saveToDownloads] returned (a MediaStore URI or a legacy file path). */
+    private fun downloadsEntryName(context: Context, saved: String): String? {
+        if (saved.startsWith("/")) return File(saved).name
+        return try {
+            context.contentResolver.query(
+                Uri.parse(saved),
+                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** True when [uri] is a MediaStore row this app still owns (other apps' rows are not visible). */
+    private fun ownsDownloadsEntry(context: Context, uri: Uri): Boolean {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) return false
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(BaseColumns._ID, MediaStore.MediaColumns.OWNER_PACKAGE_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) {
+                    false
+                } else {
+                    val index = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                    val owner = if (index >= 0 && !cursor.isNull(index)) cursor.getString(index) else null
+                    owner == null || owner == context.packageName
+                }
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Overwrite our own Downloads entry in place. False when it cannot be opened at all (the caller
+     * then adds a new entry); throws when writing fails after it was opened (never a duplicate).
+     */
+    private fun overwriteDownloadsEntry(resolver: ContentResolver, uri: Uri, source: File): Boolean {
+        for (mode in arrayOf("wt", "rwt", "rw")) {
+            val opened: ParcelFileDescriptor? = try {
+                resolver.openFileDescriptor(uri, mode)
+            } catch (e: Exception) {
+                null
+            }
+            val pfd = opened ?: continue
+            try {
+                val out = FileOutputStream(pfd.fileDescriptor)
+                var written = 0L
+                FileInputStream(source).use { input ->
+                    val buffer = ByteArray(COPY_BUFFER)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                        written += n
+                    }
+                }
+                out.flush()
+                // MediaStore entries are real files: cut a longer old copy ("rw" does not truncate).
+                if (pfd.statSize >= 0) Os.ftruncate(pfd.fileDescriptor, written)
+                try {
+                    pfd.fileDescriptor.sync()
+                } catch (e: Exception) {
+                    // best effort
+                }
+                pfd.close()
+                return true
+            } catch (e: Exception) {
+                try {
+                    pfd.closeWithError("Glossarion: overwrite failed")
+                } catch (closeError: Exception) {
+                    // already closed
+                }
+                throw IOException("Could not overwrite the Downloads entry", e)
+            }
+        }
+        return false
     }
 
     private fun hasLegacyWritePermission(context: Context): Boolean =
@@ -625,7 +779,7 @@ class GlossarionNativePlugin :
 
         private fun sharedRoot(context: Context): File = File(context.cacheDir, SHARED_DIR)
 
-        private fun guessMime(name: String?): String? {
+        internal fun guessMime(name: String?): String? {
             if (name.isNullOrEmpty()) return null
             val ext = name.substringAfterLast('.', "").lowercase()
             if (ext.isEmpty()) return null
@@ -641,7 +795,7 @@ class GlossarionNativePlugin :
             }
         }
 
-        private fun safeFileName(raw: String?, mime: String?): String {
+        internal fun safeFileName(raw: String?, mime: String?): String {
             var name = (raw ?: "").substringAfterLast('/')
             name = name.map { ch ->
                 if (ch.code < 32 || "\\/:*?\"<>|".indexOf(ch) >= 0) '_' else ch

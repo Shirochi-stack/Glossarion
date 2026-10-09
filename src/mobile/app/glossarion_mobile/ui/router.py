@@ -224,6 +224,7 @@ ROUTES: tuple[RouteSpec, ...] = (
     _settings_page("appearance", "Appearance", "U2"),
     _settings_page("notifications", "Notifications", "U3"),
     _settings_page("storage", "Storage", "U2"),
+    _settings_page("cloud", "Cloud sync & sharing", "U10"),
     _settings_page("backup", "Backup & restore", "U2"),
     _settings_page("import", "Import from desktop", "U2"),
     _settings_page("logs", "Logs & diagnostics", "U1"),

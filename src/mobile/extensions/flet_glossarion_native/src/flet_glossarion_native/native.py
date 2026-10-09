@@ -7,17 +7,30 @@ companion app, there is no Dart service: every method then returns a safe
 default without touching the client, and never raises.
 """
 
+import asyncio
 import logging
 import os
-from typing import Any, Optional, Sequence, Union
+import uuid
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import flet as ft
 
+from flet_glossarion_native.documents import (
+    DEFAULT_MODE_CHAIN,
+    PICKER_TIMEOUT,
+    QUERY_TIMEOUT,
+    DocumentError,
+    error_result,
+    normalize_modes,
+    normalize_result,
+    write_timeout,
+)
 from flet_glossarion_native.types import (
     CHANNEL_JOBS_PROGRESS,
     DEFAULT_NOTIFICATION_CHANNELS,
     JOB_SERVICE_NOTIFICATION_ID,
     BackgroundTaskEvent,
+    DocumentEvent,
     ForegroundEvent,
     NotificationAction,
     NotificationButton,
@@ -74,6 +87,37 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _new_op_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _ref_arg(value: Any) -> Optional[dict[str, Any]]:
+    """A document reference as a plain map for the channel.
+
+    Refs are the dicts the native side returned (see ``documents.REF_KEYS``). A bare string is
+    accepted for convenience: an Android tree URI (``.../tree/<id>`` without ``/document/``) is a
+    folder, any other string a document URI.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return {str(k): v for k, v in value.items()}
+    if isinstance(value, str) and value:
+        if "/tree/" in value and "/document/" not in value:
+            return {"kind": "folder", "uri": value}
+        return {"kind": "file", "document": value}
+    return None
+
+
+async def _file_size(path: Optional[str]) -> int:
+    if not path:
+        return 0
+    try:
+        return int(await asyncio.to_thread(os.path.getsize, path))
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
 @ft.control("GlossarionNative")
 class GlossarionNative(ft.Service):
     """Android foreground service, notifications, share/open-with intake,
@@ -102,6 +146,9 @@ class GlossarionNative(ft.Service):
 
     on_notification: Optional[ft.EventHandler[NotificationEvent]] = None
     """A notification from show_notification() was tapped or one of its actions pressed."""
+
+    on_document: Optional[ft.EventHandler[DocumentEvent]] = None
+    """Document destinations: write progress and picker answers that arrived late."""
 
     def init(self):
         super().init()
@@ -189,6 +236,7 @@ class GlossarionNative(ft.Service):
             "continued_processing": False,
             "notifications_enabled": False,
             "save_to_downloads": False,
+            "documents": False,
         }
         reason = self._unavailable_reason()
         if reason is not None:
@@ -438,15 +486,293 @@ class GlossarionNative(ft.Service):
         display_name: str,
         mime_type: str,
         subdir: str = "Glossarion",
+        replace_uri: Optional[str] = None,
     ) -> Optional[str]:
         """Android: copy ``path`` into public Downloads/<subdir> (MediaStore on
         API 29+, legacy file write on 26-28 when WRITE_EXTERNAL_STORAGE is
-        granted). Returns the content URI / file path, or None."""
+        granted). Returns the content URI / file path, or None.
+
+        ``replace_uri``: the URI an earlier call returned. When that entry still
+        belongs to Glossarion it is overwritten in place (same URI returned, its
+        file name is never changed, so a backup app watching the folder sees an
+        update, not a new file). Otherwise a new entry is added as without it.
+        A failed in-place write raises on the native side (None here) instead of
+        adding a second copy."""
         args = {
             "path": str(path),
             "display_name": display_name,
             "mime_type": mime_type,
             "subdir": subdir,
+            "replace_uri": str(replace_uri) if replace_uri else None,
         }
         result = await self._call("save_to_downloads", args, default=None, timeout=_LONG_TIMEOUT)
         return str(result) if result else None
+
+    async def save_to_downloads_entry(
+        self,
+        path: str,
+        display_name: str,
+        mime_type: str,
+        subdir: str = "Glossarion",
+        replace_uri: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """``save_to_downloads`` that also says which name the entry has: ``{"uri", "name"}`` (MediaStore keeps
+        names unique in a folder, so a new entry may be ``name (1).ext``; an entry overwritten in place keeps
+        its first name). ``name`` is None when the platform did not say (an older build answers the URI only).
+        None when nothing was saved."""
+        args = {
+            "path": str(path),
+            "display_name": display_name,
+            "mime_type": mime_type,
+            "subdir": subdir,
+            "replace_uri": str(replace_uri) if replace_uri else None,
+            "report_name": True,
+        }
+        result = await self._call("save_to_downloads", args, default=None, timeout=_LONG_TIMEOUT)
+        if isinstance(result, dict):
+            uri = result.get("uri")
+            if not uri:
+                return None
+            name = result.get("name")
+            return {"uri": str(uri), "name": str(name) if name else None}
+        return {"uri": str(result), "name": None} if result else None
+
+    # ---------------------------------------------------- document destinations
+    #
+    # A folder or file the user picked once in the system picker (Android SAF,
+    # iOS Files), written to later without asking again. See documents.py for the
+    # reference / result shapes and the error codes. Every method returns a
+    # result dict and never raises; elsewhere the answer is
+    # {"ok": False, "error": "unavailable"}.
+
+    async def _doc_call(
+        self, method: str, arguments: dict[str, Any], *, timeout: Optional[float]
+    ) -> dict[str, Any]:
+        reason = self._unavailable_reason()
+        if reason is not None:
+            return error_result(DocumentError.UNAVAILABLE, reason)
+        try:
+            result = await self._invoke_method(method, arguments, timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning("GlossarionNative.%s timed out", method)
+            return error_result(DocumentError.TIMEOUT, f"{method} did not answer in time")
+        except Exception as ex:
+            message = str(ex)
+            lowered = message.lower()
+            if any(marker in lowered for marker in _MISSING_SERVICE_MARKERS):
+                self._native_unavailable_reason = f"no Dart service: {message}"
+                logger.info("GlossarionNative unavailable: %s", message)
+                return error_result(DocumentError.UNAVAILABLE, self._native_unavailable_reason)
+            # The message can carry content URIs: log the type only.
+            logger.warning("GlossarionNative.%s failed: %s", method, type(ex).__name__)
+            code = DocumentError.BAD_ARGS if "bad_args" in lowered else DocumentError.PROVIDER_ERROR
+            return error_result(code, message)
+        return normalize_result(result)
+
+    async def pick_folder(
+        self, *, initial: Any = None, op_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Let the user pick a folder once; Glossarion keeps write access to it.
+
+        Android: ``ACTION_OPEN_DOCUMENT_TREE`` + ``takePersistableUriPermission``
+        (only the flags actually granted). iOS: Files folder picker + minimal
+        bookmark. Answer: ``{"ok": True, "target": ref, "persisted": bool}`` or
+        ``{"ok": False, "error": "cancelled" | "busy" | "unavailable" | ...}``.
+        ``target["own_folder"]`` is True for Glossarion's own storage, which the
+        app must refuse as a cloud destination. ``initial`` (a ref) opens the
+        picker there on Android 8+."""
+        args = {"op_id": op_id or _new_op_id(), "initial": _ref_arg(initial)}
+        return await self._doc_call("pick_folder", args, timeout=PICKER_TIMEOUT)
+
+    async def pick_save_location(
+        self,
+        name: str,
+        mime_type: str,
+        source_path: Optional[str] = None,
+        *,
+        initial: Any = None,
+        mode_chain: Sequence[str] = DEFAULT_MODE_CHAIN,
+        op_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Ask once where one file goes (for cloud apps that do not offer folders).
+
+        Android: ``ACTION_CREATE_DOCUMENT`` (title ``name``) + persisted grant;
+        with ``source_path`` the file is written right away through the same
+        mode chain as :meth:`write_file`. iOS: the export picker moves a copy of
+        ``source_path`` (an empty file without it) to the chosen place and keeps
+        a bookmark to it. Answer: ``{"ok": True, "document": ref, "write":
+        write_result | None}``; later updates use ``write_file(document, ...)``."""
+        args = {
+            "op_id": op_id or _new_op_id(),
+            "name": str(name),
+            "mime_type": mime_type,
+            "source_path": str(source_path) if source_path else None,
+            "initial": _ref_arg(initial),
+            "mode_chain": list(normalize_modes(mode_chain) or DEFAULT_MODE_CHAIN),
+        }
+        result = await self._doc_call("pick_save_location", args, timeout=PICKER_TIMEOUT)
+        if isinstance(result.get("write"), Mapping):
+            result["write"] = normalize_result(result["write"])
+        return result
+
+    async def pick_document(
+        self,
+        mime_types: Optional[Sequence[str]] = None,
+        *,
+        initial: Any = None,
+        op_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Pick an existing file to keep updating (re-link a cloud copy).
+
+        Android ``ACTION_OPEN_DOCUMENT`` + persisted grant; iOS open picker +
+        bookmark. Answer: ``{"ok": True, "document": ref}``."""
+        args = {
+            "op_id": op_id or _new_op_id(),
+            "mime_types": [str(m) for m in (mime_types or ()) if m],
+            "initial": _ref_arg(initial),
+        }
+        return await self._doc_call("pick_document", args, timeout=PICKER_TIMEOUT)
+
+    async def list_children(
+        self, folder: Any, *, names: Optional[Sequence[str]] = None
+    ) -> dict[str, Any]:
+        """Items directly inside ``folder``: ``{"ok": True, "children": [ref, ...],
+        "complete": bool}``. ``names`` limits the answer to those display names
+        (adopt-by-name before creating; cloud listings may lag, ``complete`` is
+        False while the provider is still loading)."""
+        args = {"folder": _ref_arg(folder), "names": list(names) if names is not None else None}
+        return await self._doc_call("list_children", args, timeout=QUERY_TIMEOUT)
+
+    async def create_file(
+        self, folder: Any, name: str, mime_type: str, *, on_exists: str = "rename"
+    ) -> dict[str, Any]:
+        """Create an empty file in ``folder``: ``{"ok": True, "document": ref,
+        "created": bool, "adopted": bool}``.
+
+        ``on_exists``: ``rename`` (the provider / iOS picks ``name (1).ext``),
+        ``adopt`` (return the existing item instead) or ``fail`` (error
+        ``exists`` with the existing ``document``). A first create that throws is
+        retried once after the name was looked up again, so an eventually
+        consistent provider (Drive) does not end up with two copies."""
+        args = {"folder": _ref_arg(folder), "name": str(name), "mime_type": mime_type, "on_exists": on_exists}
+        return await self._doc_call("create_file", args, timeout=QUERY_TIMEOUT)
+
+    async def create_folder(
+        self, parent: Any, name: str, *, on_exists: str = "adopt"
+    ) -> dict[str, Any]:
+        """Create (or by default adopt) a sub-folder: ``{"ok": True, "folder": ref,
+        "created": bool, "adopted": bool}``."""
+        args = {"folder": _ref_arg(parent), "name": str(name), "on_exists": on_exists}
+        return await self._doc_call("create_folder", args, timeout=QUERY_TIMEOUT)
+
+    async def write_file(
+        self,
+        target_or_doc: Any,
+        source_path: str,
+        *,
+        name: Optional[str] = None,
+        mime_type: Optional[str] = None,
+        on_exists: str = "rename",
+        mode_chain: Sequence[str] = DEFAULT_MODE_CHAIN,
+        verify: bool = True,
+        op_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Stream ``source_path`` (a private snapshot copy) into a document.
+
+        ``target_or_doc`` is a file ref (overwrite it) or a folder ref (create
+        ``name`` in it first, like :meth:`create_file`). Android tries the modes
+        of ``mode_chain`` in order; ``w``/``rw`` (non-truncating) are used only
+        when the new file is not shorter than the cloud copy, the written length
+        is read back (``verified_size``) and a stale tail is reported as
+        ``size_mismatch`` with ``needs_replace``. iOS stages the copy and swaps
+        it in under file coordination. ``on_document`` progress events carry
+        ``op_id``. Answer on success: ``{"ok": True, "document": ref, "created":
+        bool, "mode": str, "written": int, "verified_size": int | None, ...}``.
+
+        ``timeout`` defaults to 120 s + 1 s per MiB (max 2 h). When Python stops
+        waiting, the native copy is cancelled through :meth:`cancel_document_op`
+        and the answer is error ``timeout``."""
+        modes = normalize_modes(mode_chain)
+        op = op_id or _new_op_id()
+        if not modes:
+            return error_result(DocumentError.BAD_ARGS, "mode_chain lists no valid mode", op_id=op)
+        if timeout is None:
+            timeout = write_timeout(await _file_size(source_path))
+        args = {
+            "op_id": op,
+            "ref": _ref_arg(target_or_doc),
+            "source_path": str(source_path) if source_path else None,
+            "name": name,
+            "mime_type": mime_type,
+            "on_exists": on_exists,
+            "mode_chain": list(modes),
+            "verify": bool(verify),
+        }
+        result = await self._doc_call("write_file", args, timeout=timeout)
+        if result.get("error") == DocumentError.TIMEOUT.value:
+            await self.cancel_document_op(op)
+        result.setdefault("op_id", op)
+        return result
+
+    async def rename_document(self, document: Any, name: str) -> dict[str, Any]:
+        """Rename a document inside its folder: ``{"ok": True, "document": ref}`` with the new name.
+
+        Android ``DocumentsContract.renameDocument`` (the provider may answer with a new URI, so keep the
+        returned ref); iOS a coordinated move inside the same picked folder. The cloud sync gives a copy
+        it had to replace (create new + delete old) its first name back. Errors: ``exists`` (the name is
+        taken), ``unavailable`` (the provider or a single exported file cannot be renamed), else like
+        :meth:`stat` (``missing`` / ``permission_lost`` with their scope)."""
+        args = {"document": _ref_arg(document), "name": str(name)}
+        return await self._doc_call("rename_document", args, timeout=QUERY_TIMEOUT)
+
+    async def stat(self, document: Any) -> dict[str, Any]:
+        """Fresh name / size / mtime / flags: ``{"ok": True, "document": ref}``."""
+        return await self._doc_call("stat", {"document": _ref_arg(document)}, timeout=QUERY_TIMEOUT)
+
+    async def delete(self, document: Any) -> dict[str, Any]:
+        """Delete a document (cloud apps usually keep it in their trash).
+        ``{"ok": True}``; a document that is already gone answers error ``missing``."""
+        return await self._doc_call("delete", {"document": _ref_arg(document)}, timeout=QUERY_TIMEOUT)
+
+    async def query_root(self, target: Any) -> dict[str, Any]:
+        """Is the destination still usable? ``{"ok": True, "target": ref}`` with
+        fresh ``can_write`` / ``can_create`` / ``persisted`` (iOS: a refreshed
+        bookmark when the old one went stale), else ``permission_lost`` /
+        ``missing`` with ``scope == "target"`` or ``provider_error``."""
+        return await self._doc_call("query_root", {"target": _ref_arg(target)}, timeout=QUERY_TIMEOUT)
+
+    async def release(self, target: Any) -> bool:
+        """Give up a kept permission (Android ``releasePersistableUriPermission`` of
+        the folder or single file; a URI string from :meth:`list_grants` works
+        too). iOS keeps nothing outside the app's data: True. Files already in the
+        cloud are not touched."""
+        if isinstance(target, str):
+            args = {"target": target}
+        else:
+            args = {"target": _ref_arg(target)}
+        return _as_bool(await self._call("release", args, default=False, timeout=QUERY_TIMEOUT))
+
+    async def list_grants(self) -> list[dict[str, Any]]:
+        """Android's persisted permissions (``uri``, ``read``, ``write``,
+        ``persisted_time``, ``tree``) for clean-up and the per-app limit
+        (``get_platform_info()["persisted_grant_limit"]``). iOS: []."""
+        result = await self._call("list_grants", {}, default=[], timeout=QUERY_TIMEOUT)
+        if not isinstance(result, list):
+            return []
+        return [dict(item) for item in result if isinstance(item, Mapping)]
+
+    async def cancel_document_op(self, op_id: str) -> bool:
+        """Stop a running write_file() (checked between 1 MiB chunks)."""
+        if not op_id:
+            return False
+        return _as_bool(await self._call("cancel_document_op", {"op_id": str(op_id)}, default=False))
+
+    async def take_document_results(self) -> list[dict[str, Any]]:
+        """Picker answers that arrived after their call was gone (see
+        ``DocumentEventType.PICK_RESULT``), oldest first; they are removed.
+        Call once at start-up and on each ``pick_result`` event."""
+        result = await self._call("take_document_results", default=[])
+        if not isinstance(result, list):
+            return []
+        return [dict(item) for item in result if isinstance(item, Mapping)]

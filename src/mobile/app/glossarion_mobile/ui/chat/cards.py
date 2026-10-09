@@ -18,6 +18,12 @@ actions" (Read · Share/Export · Compile ▾ EPUB / PDF · QA scan · Open outp
 Open in Library: a finished book's workspace moves into the Library by itself, so the card links
 to its Library book); an action that cannot run is shown disabled with a ReasonChip, nothing
 hidden (``set_action_reason`` sets a reason the chat works out on the io pool).
+
+U10: the Result also has **Send to cloud** and **Share file via link**, a cloud status line ("Saved to
+Drive › Glossarion · 2 min ago", "Copied once the book is in the Library", "Lost access · Reconnect") and
+the workspace's saved links (Copy · Share · Delete). The chat binds them (``set_u10``, from
+``ChatFeature.bind_u10_card``); the card runs those two actions through the bound handler, and until it is
+bound they stay disabled ("Not available in this session").
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
 from glossarion_mobile.ui.chat.job_binding import CardPhase
 from glossarion_mobile.ui.chat.stream_bridge import segment_processing_label
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.screens.cloud_sync import NO_SERVICE_REASON, SHARE_LABEL, reason_detail, status_row
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = [
@@ -53,6 +60,7 @@ __all__ = [
     "JobCard",
     "NO_GLOSSARY_FILE_TEXT",
     "RequestSheet",
+    "U10_ACTIONS",
     "glossary_preview",
     "glossary_question",
     "material_surface",
@@ -72,14 +80,21 @@ ATTACHMENT_ACTIONS = (
     ("progress", "Progress", "TIMELINE", None),
     ("retry", "Retry failed", "REPLAY", None),
     ("library", "Open in Library", "LOCAL_LIBRARY", None),
+    ("cloud", "Send to cloud", "CLOUD_UPLOAD", None),
+    ("share_link", SHARE_LABEL, "LINK", None),
 )
+#: The U10 actions the card runs through its bound handler (``JobCard.set_u10``), not ``on_action``.
+U10_ACTIONS = ("cloud", "share_link")
 #: "Open in Library" while the turn's workspace is still in the chat's Attachments folder: the
 #: chat moves a finished book into the Library by itself (no Migrate step on mobile).
 LIBRARY_WAIT_REASON = "Added to the Library when the translation finishes"
 #: Attachment actions that start disabled for a reason other than a later milestone (the chat view
-#: replaces a default through ``JobCard.set_action_reason`` once it knows better).
+#: replaces a default through ``JobCard.set_action_reason`` once it knows better; the U10 two until the
+#: chat binds them, ``set_u10``).
 ATTACHMENT_ACTION_REASONS = {
     "library": LIBRARY_WAIT_REASON,
+    "cloud": NO_SERVICE_REASON,
+    "share_link": NO_SERVICE_REASON,
 }
 
 
@@ -563,6 +578,11 @@ class JobCard(ft.Container):
         self.plan_box = ft.Column([], spacing=8, tight=True, visible=False)
         # UI_SPEC §2.12.4 Result: the turn's output files (tap: open / share)
         self.outputs_row = ft.Row([], wrap=True, spacing=6, run_spacing=4, visible=False, key="job-outputs")
+        # U10: the cloud status line and the saved share links (``set_u10``)
+        self.u10_box = ft.Column([], spacing=4, tight=True, visible=False, key="job-u10")
+        self.u10_handler: Optional[Callable[[str], Any]] = None
+        self.u10_state: dict = {}
+        self.u10_builds = 0
         self.buttons = ft.Row([], wrap=True, spacing=8, run_spacing=4)
         self.action_buttons: dict = {}
         # ``icon`` / ``meta``: a tool job's card (a QA scan) names its own icon and summary line
@@ -589,6 +609,7 @@ class JobCard(ft.Container):
                 self.ocr_tile,
                 self.report_tile,
                 self.outputs_row,
+                self.u10_box,
                 self.buttons,
             ],
             spacing=6,
@@ -602,11 +623,21 @@ class JobCard(ft.Container):
 
     # ---- state ----------------------------------------------------------------------------
 
+    def _run_action(self, action_id: str) -> Any:
+        """A button tap: the U10 actions go to the bound handler (``set_u10``), the rest to ``on_action``."""
+        if action_id in U10_ACTIONS and self.u10_handler is not None:
+            return self.u10_handler(action_id)
+        if self.on_action is not None:
+            return self.on_action(action_id)
+        return None
+
     def _button(self, action_id: str, label: str, kind: str = "tonal", disabled_reason: Optional[str] = None) -> ft.Control:
-        handler = (lambda e, a=action_id: self.on_action(a)) if self.on_action else None
+        handler = ((lambda e, a=action_id: self._run_action(a))
+                   if (self.on_action or (action_id in U10_ACTIONS and self.u10_handler is not None)) else None)
         if disabled_reason:
             button: ft.Control = ft.Row(
-                [ft.OutlinedButton(content=label, disabled=True), ReasonChip(reason=disabled_reason)], spacing=4, tight=True
+                [ft.OutlinedButton(content=label, disabled=True),
+                 ReasonChip(reason=disabled_reason, detail=reason_detail(disabled_reason))], spacing=4, tight=True
             )
         elif kind == "filled":
             button = ft.FilledButton(content=label, on_click=handler)
@@ -628,6 +659,68 @@ class JobCard(ft.Container):
         self.action_reasons[action_id] = reason
         self.set_phase(self.phase, status=self.status)
 
+    def set_u10(self, state: dict, handler: Optional[Callable[[str], Any]] = None) -> bool:
+        """U10 on the Result (``ChatFeature.bind_u10_card`` works it out on the io pool): ``cloud_reason`` /
+        ``share_reason`` (None: enabled), ``status`` (``(icon, text, tone)`` or None) with ``on_status`` (tap),
+        ``links`` (saved share links) rendered by ``actions`` (``cloud_sync.U10Actions.link_rows``, whose
+        ``on_links_changed`` re-binds). ``handler(action_id)`` runs Send to cloud / Share file via link.
+
+        Returns False when nothing visible changed (the same status, links and reasons, the handler already
+        bound): the rows and buttons stay as they are, so a re-bind neither rebuilds nor pushes them and a
+        tap on a link row never lands on a row that was just replaced."""
+        self.u10_state = dict(state or {})
+        first_handler = handler is not None and self.u10_handler is None
+        if handler is not None:
+            self.u10_handler = handler
+        signature = self._u10_signature(self.u10_state)
+        if not first_handler and signature == getattr(self, "_u10_sig", None):
+            self._u10_visibility()
+            return False
+        self._u10_sig = signature
+        self.u10_builds += 1
+        n = self.u10_builds
+        controls: list = []
+        status = self.u10_state.get("status")
+        if status:
+            icon, text, tone = status
+            on_status = self.u10_state.get("on_status")
+            controls.append(status_row(icon, text, tone, key=f"job-u10-status-{n}",
+                                       on_click=(lambda e: on_status()) if callable(on_status) else None))
+        links = list(self.u10_state.get("links") or ())
+        actions = self.u10_state.get("actions")
+        if links and actions is not None:
+            controls.append(ft.Text(f"Share links ({len(links)})", theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
+                                    key=f"job-u10-links-{n}"))
+            controls.extend(actions.link_rows(links, on_changed=self.u10_state.get("on_links_changed"),
+                                              key_prefix=f"job-link-{n}"))
+        self.u10_box.controls = controls
+        reasons = {"cloud": self.u10_state.get("cloud_reason"), "share_link": self.u10_state.get("share_reason")}
+        changed = any(self.action_reasons.get(a, ATTACHMENT_ACTION_REASONS.get(a)) != r or a not in self.action_reasons
+                      for a, r in reasons.items())
+        self.action_reasons.update(reasons)
+        if changed or first_handler:
+            self.set_phase(self.phase, status=self.status)
+        else:
+            self._u10_visibility()
+        return True
+
+    @staticmethod
+    def _u10_signature(state: dict) -> tuple:
+        """What ``set_u10`` shows: the status line, the saved links (id, provider, url, expiry, delete) and the
+        two action reasons."""
+        links = []
+        for link in state.get("links") or ():
+            get = link.get if isinstance(link, dict) else (lambda name, _l=link: getattr(_l, name, None))
+            links.append(tuple(str(get(name)) for name in ("id", "provider", "url", "expires", "can_delete",
+                                                             "name", "expired")))
+        status = state.get("status")
+        return (tuple(status) if status else None, tuple(links), state.get("cloud_reason"),
+                state.get("share_reason"), callable(state.get("on_status")))
+
+    def _u10_visibility(self) -> None:
+        name = self.phase.name
+        self.u10_box.visible = bool(self.u10_box.controls) and not self.phase.live and name not in ("plan", "queued")
+
     def set_phase(self, phase: CardPhase, *, status: str = "") -> None:
         self.phase = phase
         self.status = status
@@ -638,6 +731,8 @@ class JobCard(ft.Container):
         self.plan_box.visible = name == "plan"
         if hasattr(self, "outputs_row"):
             self.outputs_row.visible = bool(self.outputs) and not live and name not in ("plan", "queued")
+        if hasattr(self, "u10_box"):
+            self._u10_visibility()
         self.action_buttons = {}
         buttons: list[ft.Control] = []
         if name == "plan":

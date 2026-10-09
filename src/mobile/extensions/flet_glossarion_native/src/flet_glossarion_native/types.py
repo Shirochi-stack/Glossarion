@@ -24,6 +24,8 @@ __all__ = [
     "CHANNEL_JOBS_DONE",
     "CHANNEL_JOBS_PROGRESS",
     "DEFAULT_NOTIFICATION_CHANNELS",
+    "DocumentEvent",
+    "DocumentEventType",
     "ForegroundEvent",
     "ForegroundEventType",
     "JOB_SERVICE_NOTIFICATION_ID",
@@ -83,6 +85,18 @@ class BackgroundTaskEventType(str, Enum):
     """The system expired the continued-processing task or the user cancelled it."""
     CONTINUED_FAILED = "continued_failed"
     """Submitting the continued-processing request failed."""
+
+
+class DocumentEventType(str, Enum):
+    """``DocumentEvent.type`` values (document destinations)."""
+
+    PROGRESS = "progress"
+    """A write_file() copy advanced: ``written`` of ``total`` bytes (at most 4 per second)."""
+    PICK_RESULT = "pick_result"
+    """A picker answered after the call that opened it was gone (the activity or the whole process
+    was recreated while the system picker was open) or Glossarion restarted while a picker was open
+    (``status == "cancelled"``). ``result`` is the answer the call would have returned; the same
+    items are also kept for ``take_document_results()``: de-duplicate by ``op_id``."""
 
 
 class NotificationImportance(str, Enum):
@@ -243,6 +257,23 @@ class BackgroundTaskEvent(ft.Event["GlossarionNative"]):
     task_name: Optional[str] = None
     identifier: Optional[str] = None
     reason: Optional[str] = None
+
+
+@dataclass
+class DocumentEvent(ft.Event["GlossarionNative"]):
+    """Document-destination event (see :class:`DocumentEventType`)."""
+
+    type: str = ""
+    op_id: Optional[str] = None
+    """The ``op_id`` of the write_file() / pick call it belongs to."""
+    written: Optional[int] = None
+    total: Optional[int] = None
+    kind: Optional[str] = None
+    """Picker kind for ``pick_result``: ``folder``, ``save_location`` or ``document``."""
+    status: Optional[str] = None
+    """``ok``, ``cancelled`` or ``error`` for ``pick_result``."""
+    result: Optional[dict[str, Any]] = None
+    """The full pick answer (``{"ok": ..., "target"/"document": ...}``) for ``pick_result``."""
 
 
 @dataclass

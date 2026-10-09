@@ -44,6 +44,7 @@ SCREEN_ROUTES = (
     "settings.prefill",
     "settings.appearance",
     "settings.storage",
+    "settings.cloud",
     "settings.backup",
     "settings.import",
     "settings.about",
@@ -246,9 +247,20 @@ class AccountsProfilesFeature:
         paths = self._paths()
         return str(paths.temp) if paths is not None else None
 
+    async def _before_wipe(self) -> None:
+        """Before "Wipe app data" (U10): the cloud sync gives back every persisted folder / file grant and a
+        share-link upload stops (its records go with the data folder)."""
+        cloud = getattr(self.app, "cloud_sync", None)
+        if cloud is not None:
+            await cloud.wipe()
+        shares = getattr(self.app, "share_links", None)
+        if shares is not None:
+            await shares.wipe()
+
     def _stop_stores(self) -> None:
         """Before a wipe: stop every debounced saver without flushing (the old state must not come back)."""
-        for target in (self.store, getattr(self.app, "prefs", None), getattr(self.chat, "chats", None)):
+        cloud_store = getattr(getattr(self.app, "cloud_sync", None), "store", None)
+        for target in (self.store, getattr(self.app, "prefs", None), getattr(self.chat, "chats", None), cloud_store):
             saver = getattr(target, "_saver", None)
             if saver is not None:
                 try:
@@ -302,7 +314,19 @@ class AccountsProfilesFeature:
         if name == "settings.storage":
             from glossarion_mobile.ui.screens.storage import StorageScreen
 
-            return StorageScreen(match, ctx, paths=self._paths(), platform=self._platform())
+            return StorageScreen(match, ctx, paths=self._paths(), platform=self._platform(),
+                                 files=getattr(app, "files", None), cloud=lambda: getattr(app, "cloud_sync", None))
+        if name == "settings.cloud":
+            # U10 Settings › Cloud sync & sharing (the services install after this feature: read late)
+            from glossarion_mobile.ui.screens.cloud_sync import CloudSyncScreen
+
+            files = getattr(app, "files", None)
+            opener = getattr(app, "opener", None)
+            return CloudSyncScreen(match, ctx, cloud=lambda: getattr(app, "cloud_sync", None),
+                                   shares=lambda: getattr(app, "share_links", None), platform=self._platform(),
+                                   open_url=getattr(opener, "launch", None) if opener is not None else None,
+                                   share_text=getattr(files, "share_text", None) if files is not None else None,
+                                   show_in_files=getattr(files, "show_in_files", None) if files is not None else None)
         if name == "settings.backup":
             from glossarion_mobile.ui.screens.backup import BackupScreen
 
@@ -341,7 +365,7 @@ class AccountsProfilesFeature:
             chat_view = getattr(app, "chat_view", None)
             return DangerZoneScreen(
                 match, ctx, oauth=self.oauth, paths=self._paths(), stop_stores=self._stop_stores,
-                exit_app=self.exit_app,
+                exit_app=self.exit_app, before_wipe=self._before_wipe,
                 on_reset=(lambda: chat_view.apply_settings_changed()) if chat_view is not None else None,
             )
         return None

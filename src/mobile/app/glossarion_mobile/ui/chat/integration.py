@@ -213,6 +213,20 @@ class ChatFeature:
         self._sweeping = False
         self._sweep_again = False
         self.startup_task: Any = None
+        # U10 (Send to cloud / Share file via link on Result cards): the shared actions, the bound cards
+        # (id -> [weakref, workspace resolver, last bind time]) and the services' change subscriptions
+        self._u10: Any = None
+        self._u10_cards: dict = {}
+        self._u10_unsubs: list = []
+        self._u10_subscribed: set = set()  # "cloud" / "shares": each subscribed once it is installed
+        self._u10_rebinding = False
+        self._u10_again = False
+        self._u10_full = True  # the next re-bind re-reads every card (a link / provider / cloud state change)
+        self._u10_seq: Any = None  # the cloud sync's ``state_seq`` at the last full re-bind
+        # Moves the startup sweep made before the cloud sync was installed (it installs after the chat):
+        # handed over by ``attach_cloud_sync`` (``CloudSyncService.install``).
+        self._cloud_moves: list = []
+        self._cloud_moves_lock = threading.Lock()
 
     # ---- threading -------------------------------------------------------------------------
 
@@ -298,6 +312,8 @@ class ChatFeature:
         env.profile_service = ProfileService(env.store)
         # the chats' / series' profile re-check, also run at Send when a chat names an unknown profile
         env.reconcile_profiles = self.reconcile_profile_overrides
+        # U10: ChatView hands every Result card to this (Send to cloud / Share file via link, cloud status, links)
+        env.bind_u10_card = self.bind_u10_card
         return env
 
     def attach(self) -> None:
@@ -1160,7 +1176,39 @@ class ChatFeature:
             self._merge_approved.discard(_norm(folder))
             self._record_raw_blocking(source)
             self.runs.relocate_output(cid, folder, target)
+            self._cloud_moved(folder, target, merge)  # U10: records follow (a merge keeps the Library book's)
+            shares = getattr(self.app, "share_links", None)
+            if shares is not None:  # U10: the book's saved share links follow it into the Library
+                try:
+                    shares.relocate_blocking(folder, target)
+                except Exception:
+                    log.exception("moving the share links of a migrated workspace failed")
             return done(MIGRATE_MOVED, "merged" if merge else "moved", target=target)
+
+    def _cloud_moved(self, folder: str, target: str, merged: bool) -> None:
+        """Worker thread (inside the migrate lock): tell the cloud sync a chat book moved into the Library; before
+        the cloud sync is installed (the startup sweep runs while later features install) the move waits for
+        ``attach_cloud_sync``, so a book the sweep moved is still queued once sync is there."""
+        with self._cloud_moves_lock:
+            cloud = getattr(self.app, "cloud_sync", None)
+            if cloud is None:
+                self._cloud_moves.append((str(folder), str(target), bool(merged)))
+                return
+        try:
+            cloud.on_workspace_moved(folder, target, merged=merged)
+        except Exception:
+            log.exception("moving the cloud sync records failed")
+
+    def attach_cloud_sync(self, cloud: Any) -> int:
+        """``CloudSyncService.install`` (after ``app.cloud_sync`` is set): the moves made before it existed."""
+        with self._cloud_moves_lock:
+            moves, self._cloud_moves = self._cloud_moves, []
+        for folder, target, merged in moves:
+            try:
+                cloud.on_workspace_moved(folder, target, merged=merged)
+            except Exception:
+                log.exception("moving the cloud sync records failed")
+        return len(moves)
 
     async def auto_migrate(self, cid: Any, folder: str) -> dict:
         """``auto_migrate_blocking`` on the io pool, then its snackbar."""
@@ -1173,6 +1221,12 @@ class ChatFeature:
         the Library are refreshed but the caller shows one summary), a name clash's (its action opens
         the merge dialog; once per workspace and session)."""
         status = outcome.get("status")
+        cloud = getattr(self.app, "cloud_sync", None)
+        if cloud is not None and status in (MIGRATE_DEFERRED, MIGRATE_COLLISION):
+            try:
+                cloud.on_migrate_outcome(outcome)  # U10: "saves once the book is in the Library"
+            except Exception:
+                log.debug("cloud sync migrate outcome failed", exc_info=True)
         if status == MIGRATE_MOVED:
             self._announce_moved(outcome.get("target", ""), outcome.get("source", ""), outcome.get("cid"),
                                  quiet=quiet)
@@ -1458,12 +1512,226 @@ class ChatFeature:
         sheet.show(self.page)
         return sheet
 
+    # ---- U10: Send to cloud / Share file via link on the Result card ----------------------------------
+
+    def u10_actions(self) -> Any:
+        """The shared U10 actions (``ui/screens/cloud_sync.U10Actions``, the Book page uses the same): the
+        cloud-sync and share-link services are read when used (``app.cloud_sync`` / ``app.share_links`` are
+        installed after the chat)."""
+        app = self.app
+        tablet = bool(getattr(getattr(app, "shell", None), "tablet", False))
+        if self._u10 is None:
+            from glossarion_mobile.ui.screens.cloud_sync import U10Actions
+
+            files = getattr(app, "files", None)
+            opener = getattr(app, "opener", None)
+            clipboard = getattr(app, "clipboard", None)
+            navigate = getattr(app, "navigate_to", None)
+            self._u10 = U10Actions(
+                cloud=lambda: getattr(app, "cloud_sync", None), shares=lambda: getattr(app, "share_links", None),
+                page=self.page, say=getattr(app, "notify", None), spawn=self._spawn, io=self._run_io,
+                go=(lambda name, params=None: navigate(name, params)) if navigate is not None else None,
+                copy_text=getattr(app, "_copy_text", None),
+                share_text=getattr(files, "share_text", None) if files is not None else None,
+                show_in_files=getattr(files, "show_in_files", None) if files is not None else None,
+                open_url=getattr(opener, "launch", None) if opener is not None else None,
+                read_clipboard=getattr(clipboard, "get", None) if clipboard is not None else None,
+                tablet=tablet, platform="android" if self.is_android else ("ios" if self.is_ios else "desktop"))
+        self._u10.tablet = tablet
+        return self._u10
+
+    def bind_u10_card(self, card: Any, resolve: Callable[[], Any], live: bool = False, *, force: bool = False) -> Any:
+        """ChatView, for every Result card it renders: bind Send to cloud / Share file via link and the cloud
+        status + saved links of the card's turn workspace (``resolve()`` -> ``(folder, in_attachments)``,
+        blocking: run on the io pool). A card bound in the last 2 s is left alone unless ``force``. Returns the
+        task (None when nothing was scheduled)."""
+        if card is None or live:
+            return None
+        import weakref
+
+        key = id(card)
+        entry = self._u10_cards.get(key)
+        now = time.monotonic()
+        if entry is not None and entry[0]() is card and not force and now - entry[2] < 2.0:
+            entry[1] = resolve
+            return None
+        self._u10_cards[key] = [weakref.ref(card), resolve, now]
+        self._u10_subscribe()
+        return self._spawn(self._u10_bind(card, resolve))
+
+    def _u10_card_state(self, resolve: Callable[[], Any]) -> dict:
+        """Blocking: what a Result card shows and allows for U10 (``JobCard.set_u10``)."""
+        from glossarion_mobile.ui.chat.chat_ops import workspace_outputs
+        from glossarion_mobile.ui.screens.cloud_sync import book_status_line, compiled_kinds
+
+        value = resolve()
+        folder, in_attachments = value if isinstance(value, tuple) else (value, None)
+        folder = str(folder or "")
+        if in_attachments is None:
+            in_attachments = not folder or "attachments" in {part.lower() for part in os.path.normpath(folder).split(os.sep)}
+        kinds = compiled_kinds()
+        outputs = []
+        if folder and os.path.isdir(folder):
+            outputs = [(str(p), str(k)) for p, k in workspace_outputs(folder) if str(k) in kinds]
+        actions = self.u10_actions()
+        cloud_state = actions.cloud.snapshot()
+        book = actions.cloud.book(folder) if folder and not in_attachments else {}
+        providers = actions.shares.providers()
+        links = actions.shares.links_for(folder) if folder else []
+        in_library = bool(folder) and not in_attachments
+        line = book_status_line(cloud_state, book, in_library=in_library, has_outputs=bool(outputs))
+        return {
+            "workspace": folder,
+            "in_library": in_library,
+            "outputs": outputs,
+            "cloud_reason": actions.cloud_reason(cloud_state, has_outputs=bool(outputs), in_library=in_library),
+            "share_reason": actions.share_reason(providers, has_outputs=bool(actions.shareable(outputs))),
+            "status": line[:3] if line else None,
+            "status_action": line[3] if line else None,
+            "links": links,
+            "actions": actions,
+        }
+
+    async def _u10_bind(self, card: Any, resolve: Callable[[], Any]) -> Optional[dict]:
+        try:
+            state = await self._run_io(self._u10_card_state, resolve)
+        except Exception:
+            log.debug("the Result card's cloud state failed", exc_info=True)
+            return None
+        folder = state.get("workspace") or ""
+        entry = self._u10_cards.get(id(card))
+        if entry is not None and entry[0]() is card:
+            entry[3:] = [folder]  # the card's workspace: progress re-binds only the card of the book being copied
+        action = state.get("status_action")
+        if action:
+            state["on_status"] = lambda a=action, f=folder, c=card, r=resolve: self._u10_status_tap(a, f, c, r)
+        state["on_links_changed"] = lambda c=card, r=resolve: self.bind_u10_card(c, r, force=True)
+        changed = card.set_u10(state, handler=lambda a, c=card, r=resolve: self._spawn(self.u10_card_action(a, c, r)))
+        push = getattr(card, "push", None)
+        if callable(push) and changed is not False:  # nothing visible changed: no patch
+            push()
+        return state
+
+    def _u10_status_tap(self, action: str, folder: str, card: Any, resolve: Callable[[], Any]) -> Any:
+        actions = self.u10_actions()
+        if action == "settings":
+            return actions.open_settings()
+        if action == "retry":
+            return self._spawn(self.u10_card_action("cloud", card, resolve))
+        if action == "book":
+            return self._spawn(self._open_book_output(folder))
+        return None
+
+    async def _open_book_output(self, folder: str) -> Optional[str]:
+        """The Book page's Output tab of the Library book ``folder`` became (a save location to choose)."""
+        bid = await self.library_book(folder)
+        navigate = getattr(self.app, "navigate_to", None)
+        if not bid or navigate is None:
+            return None
+        try:
+            navigate("library.book", {"bid": bid}, {"tab": "output"})
+        except TypeError:
+            navigate("library.book", {"bid": bid})
+        return bid
+
+    async def u10_card_action(self, action: str, card: Any, resolve: Callable[[], Any]) -> Any:
+        """Result card › Send to cloud / Share file via link (the card's own turn workspace)."""
+        actions = self.u10_actions()
+        state = await self._run_io(self._u10_card_state, resolve)
+        folder = state.get("workspace") or ""
+        result: Any = None
+        if action == "cloud":
+            reason = state.get("cloud_reason")
+            if reason:
+                actions.explain(reason)
+            else:
+                result = await actions.send_now(folder)
+        elif action == "share_link":
+            reason = state.get("share_reason")
+            if reason:
+                actions.explain(reason)
+            else:
+                result = await actions.share_link(state.get("outputs") or [], folder)
+        self.bind_u10_card(card, resolve, force=True)
+        return result
+
+    def _u10_subscribe(self) -> None:
+        """Follow each service's change events once it is installed (they install after the chat)."""
+        actions = self.u10_actions()
+        for name, facade in (("cloud", actions.cloud), ("shares", actions.shares)):
+            if name not in self._u10_subscribed and facade.available:
+                self._u10_subscribed.add(name)
+                self._u10_unsubs.append(facade.subscribe(self._u10_changed))
+
+    def _u10_changed(self, *args: Any) -> None:
+        """A cloud-sync / share-link change (any thread): re-bind the live Result cards, at most once a
+        second (progress events come several times a second). A share upload's progress (``"upload"``)
+        changes nothing a card shows; links / providers re-read every card."""
+        kind = args[0] if args else None
+        if kind == "upload":
+            return
+        if kind is not None:
+            self._u10_full = True
+        self._post(self._u10_schedule)
+
+    def _u10_schedule(self) -> None:
+        if self._u10_rebinding:
+            self._u10_again = True
+            return
+        self._spawn(self._u10_rebind_all())
+
+    def _u10_targets(self) -> Optional[str]:
+        """Which cards the next re-bind reads: None = all (a records / settings / link change), else the book
+        key being copied (write progress only: ``CloudSyncService.state_seq`` did not move), '' = none."""
+        cloud = getattr(self.app, "cloud_sync", None)
+        seq = getattr(cloud, "state_seq", None)
+        if getattr(self, "_u10_full", True) or seq is None or seq != getattr(self, "_u10_seq", None):
+            self._u10_full = False
+            self._u10_seq = seq
+            return None
+        inflight = getattr(cloud, "inflight_key", None)
+        try:
+            return str(inflight() or "") if callable(inflight) else ""
+        except Exception:
+            return None
+
+    async def _u10_rebind_all(self) -> int:
+        from glossarion_mobile.state.cloud_records import book_key
+
+        self._u10_rebinding = True
+        count = 0
+        try:
+            while True:
+                self._u10_again = False
+                await asyncio.sleep(1.0)
+                targets = self._u10_targets()
+                for key, entry in list(self._u10_cards.items()):
+                    card = entry[0]()
+                    if card is None:
+                        self._u10_cards.pop(key, None)
+                        continue
+                    if targets is not None:
+                        workspace = entry[3] if len(entry) > 3 else None
+                        if not targets or not workspace or book_key(workspace) != targets:
+                            continue
+                    entry[2] = time.monotonic()
+                    await self._u10_bind(card, entry[1])
+                    count += 1
+                if not self._u10_again:
+                    break
+        finally:
+            self._u10_rebinding = False
+        return count
+
     def close(self) -> None:
-        for unsub in self._unsubs:
+        for unsub in self._unsubs + self._u10_unsubs:
             try:
                 unsub()
             except Exception:
                 pass
         self._unsubs = []
+        self._u10_unsubs = []
+        self._u10_subscribed = set()
+        self._u10_cards = {}
         self.runs.detach()
         self.chats.close()

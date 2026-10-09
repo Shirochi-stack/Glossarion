@@ -1,7 +1,7 @@
 """U9 Integrate: every milestone has shipped, so nothing in the real app is a placeholder any more.
 
 * Every route in ``ui/router.py`` carries a milestone inside ``ui/screens/base.SHIPPED_MILESTONES``
-  (U0-U9), and every milestone in that set is one the plan defines.
+  (U0-U10), and every milestone in that set is one the plan defines.
 * The real app on a fake Flet session (every feature installed by ``app.py``): each static view or
   full-screen route, plus the Series and compose routes, builds a feature screen, never a
   ``PlaceholderScreen`` ("This screen arrives in U…"); the Settings home shows no "Arrives in"
@@ -44,7 +44,7 @@ def test_every_route_milestone_has_shipped():
     from glossarion_mobile.ui.router import ROUTES
     from glossarion_mobile.ui.screens.base import SHIPPED_MILESTONES
 
-    assert SHIPPED_MILESTONES == frozenset(f"U{n}" for n in range(10))
+    assert SHIPPED_MILESTONES == frozenset(f"U{n}" for n in range(11))  # U10: Settings › Cloud sync & sharing
     outside = [(spec.name, spec.milestone) for spec in ROUTES if spec.milestone not in SHIPPED_MILESTONES]
     assert outside == []
     assert {spec.name for spec in ROUTES if spec.milestone == "U9"} == {"series", "settings.updates"}

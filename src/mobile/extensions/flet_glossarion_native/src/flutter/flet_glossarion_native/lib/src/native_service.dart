@@ -22,12 +22,29 @@ const int _kJobServiceId = 41100;
 const String _kNotificationIconMetaData =
     'com.glossarion.native.notification_icon';
 
+/// Document-destination methods (U10). They exist on Android
+/// (DocumentDestinations.kt) and iOS (DocumentDestinations.swift) and answer a
+/// result map `{ok, error, message, ...}`; see flet_glossarion_native/documents.py.
+const Set<String> _kDocumentMethods = <String>{
+  'pick_folder',
+  'pick_save_location',
+  'pick_document',
+  'list_children',
+  'create_file',
+  'create_folder',
+  'write_file',
+  'rename_document',
+  'stat',
+  'delete',
+  'query_root',
+};
+
 /// Flet service behind the Python `GlossarionNative` control.
 ///
 /// Python -> Dart: `control.addInvokeMethodListener` (method names below).
 /// Dart -> Python: `control.triggerEvent` with `share`, `foreground`,
-/// `background_task` and `notification` (payload keys = Python dataclass
-/// fields in flet_glossarion_native/types.py).
+/// `background_task`, `notification` and `document` (payload keys = Python
+/// dataclass fields in flet_glossarion_native/types.py).
 class GlossarionNativeService extends FletService {
   GlossarionNativeService({required super.control});
 
@@ -36,6 +53,9 @@ class GlossarionNativeService extends FletService {
   final Completer<void> _ready = Completer<void>();
   final List<Map<String, dynamic>> _shared = <Map<String, dynamic>>[];
   final Set<String> _sharedIds = <String>{};
+  /// Picker answers whose call was gone (activity / process recreated while
+  /// the system picker was open); Python collects them with take_document_results.
+  final List<Map<String, dynamic>> _documentResults = <Map<String, dynamic>>[];
   Map<String, dynamic>? _launchNotification;
   StreamSubscription<List<SharedMediaFile>>? _shareSubscription;
   bool _taskCallbackAdded = false;
@@ -127,6 +147,14 @@ class GlossarionNativeService extends FletService {
             }
           }
         }
+        final dynamic documentResults = result['document_results'];
+        if (documentResults is List) {
+          for (final dynamic d in documentResults) {
+            if (d is Map) {
+              _documentResults.add(_stringMap(d));
+            }
+          }
+        }
       }
     } catch (e) {
       _lastError = 'attach: $e';
@@ -172,6 +200,15 @@ class GlossarionNativeService extends FletService {
       case 'background_task':
         if (args is Map) {
           control.triggerEvent('background_task', _stringMap(args));
+        }
+        return null;
+      case 'document':
+        if (args is Map) {
+          final Map<String, dynamic> event = _stringMap(args);
+          if (event['type'] == 'pick_result') {
+            _documentResults.add(event);
+          }
+          control.triggerEvent('document', event);
         }
         return null;
       default:
@@ -318,6 +355,33 @@ class GlossarionNativeService extends FletService {
           return null;
         case 'save_to_downloads':
           return _isAndroid ? await _platform('save_to_downloads', args) : null;
+        case 'pick_folder':
+        case 'pick_save_location':
+        case 'pick_document':
+        case 'list_children':
+        case 'create_file':
+        case 'create_folder':
+        case 'write_file':
+        case 'rename_document':
+        case 'stat':
+        case 'delete':
+        case 'query_root':
+          if (!_isMobile) return _defaultResult(name);
+          final dynamic answer = await _platform(name, args);
+          return answer is Map ? answer : _defaultResult(name);
+        case 'release':
+        case 'cancel_document_op':
+          return _isMobile ? (await _platform(name, args)) == true : false;
+        case 'list_grants':
+          if (!_isMobile) return <dynamic>[];
+          final dynamic grants = await _platform('list_grants', args);
+          return grants is List ? grants : <dynamic>[];
+        case 'take_document_results':
+          await _waitReady();
+          final List<Map<String, dynamic>> taken =
+              List<Map<String, dynamic>>.from(_documentResults);
+          _documentResults.clear();
+          return taken;
         default:
           throw Exception('Unknown GlossarionNative method: $name');
       }
@@ -334,7 +398,22 @@ class GlossarionNativeService extends FletService {
   }
 
   dynamic _defaultResult(String name) {
+    if (_kDocumentMethods.contains(name)) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'unavailable',
+        'message': 'Document destinations are not available on this platform',
+        'scope': null,
+        'retryable': false,
+      };
+    }
     switch (name) {
+      case 'release':
+      case 'cancel_document_op':
+        return false;
+      case 'list_grants':
+      case 'take_document_results':
+        return <dynamic>[];
       case 'begin_background_task':
         return -1;
       case 'init_notifications':

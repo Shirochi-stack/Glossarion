@@ -28,7 +28,7 @@ __all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "RO
 log = logging.getLogger("glossarion.ui")
 
 # Milestones whose surfaces exist in this build.
-SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8", "U9"})
+SHIPPED_MILESTONES = frozenset({"U0", "U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8", "U9", "U10"})
 #: Reason for a route of a shipped milestone that nothing implements (its feature failed to install;
 #: the app's ``_install_*`` wrapper logged why).
 NOT_IN_BUILD = "Not available in this build"

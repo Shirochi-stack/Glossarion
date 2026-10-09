@@ -11,8 +11,10 @@ so they are registered before the Dart service starts.
 plain dicts/lists, applies an outer timeout to every native call (a Dart side
 that never answers must not hang the UI), and fans events out to Python
 callbacks. Its ``service_holds`` (``ServiceHolds``) records who needs the
-Android foreground service (jobs, a sign-in waiting in the browser), so one of
-them finishing never stops the service under the other.
+Android foreground service (jobs, a sign-in waiting in the browser, a cloud
+save or a share-link upload), so one of them finishing never stops the service
+under the other; ``ServiceLease`` is one such holder's join / start / hand back
+/ stop logic (sign-in, U10 cloud sync and share links use it).
 
 The extension is imported lazily: importing this module never imports
 ``flet_glossarion_native``.
@@ -30,11 +32,22 @@ from typing import Any, Awaitable, Callable, Optional
 
 log = logging.getLogger("glossarion.native")
 
-__all__ = ["NativeStub", "NativeBridge", "ServiceHolds", "create_native", "load_extension", "service_holds", "to_plain"]
+__all__ = ["DOCUMENT_METHODS", "METHOD_TIMEOUTS", "NativeStub", "NativeBridge", "ServiceHolds", "ServiceLease",
+           "create_native", "load_extension", "service_holds", "to_plain"]
 
-EVENTS = ("share", "foreground", "background_task", "notification")
+# ``document``: U10 document-destination events (write progress, picker answers that outlived their call).
+EVENTS = ("share", "foreground", "background_task", "notification", "document")
 # Outer guard only; the extension applies its own per-call timeouts (20-30 s).
 DEFAULT_TIMEOUT = 45.0
+#: Calls the extension bounds with its own longer timeout (``save_to_downloads`` copies a whole file: 900 s,
+#: ``flet_glossarion_native._LONG_TIMEOUT``): the outer guard waits longer, or Python would report a failure
+#: while the native copy still runs (the copy-once mirror, Save to Downloads, the transfer.it handoff).
+METHOD_TIMEOUTS = {"save_to_downloads": 960.0, "save_to_downloads_entry": 960.0}
+#: Document destinations (U10, ``flet_glossarion_native`` documents API): off-device every one answers
+#: ``{"ok": False, "error": "unavailable"}``. The cloud sync calls them on the extension directly
+#: (``cloud_sync.NativeDocs``): the extension bounds each one itself (pickers 1 h, writes by size).
+DOCUMENT_METHODS = ("pick_folder", "pick_save_location", "pick_document", "list_children", "create_file",
+                    "create_folder", "write_file", "rename_document", "stat", "delete", "query_root")
 
 
 def to_plain(value: Any, _depth: int = 0) -> Any:
@@ -73,6 +86,7 @@ class NativeStub:
         self.on_foreground = handlers.get("on_foreground")
         self.on_background_task = handlers.get("on_background_task")
         self.on_notification = handlers.get("on_notification")
+        self.on_document = handlers.get("on_document")
 
     async def get_platform_info(self) -> dict:
         return {"platform": "desktop", "native": False, "stub": True, "unavailable_reason": self.reason}
@@ -127,6 +141,56 @@ class NativeStub:
 
     async def save_to_downloads(self, *args: Any, **kwargs: Any) -> Optional[str]:
         return None
+
+    # ---- document destinations (U10): the extension's answers off-device -------------------------------
+
+    def _no_documents(self) -> dict:
+        return {"ok": False, "error": "unavailable", "message": self.reason, "scope": None, "retryable": False}
+
+    async def pick_folder(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def pick_save_location(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def pick_document(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def list_children(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def create_file(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def create_folder(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def write_file(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def rename_document(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def stat(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def delete(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def query_root(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_documents()
+
+    async def release(self, *args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def list_grants(self) -> list:
+        return []
+
+    async def cancel_document_op(self, *args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def take_document_results(self) -> list:
+        return []
 
 
 def load_extension():
@@ -224,6 +288,146 @@ def service_holds(native: Any) -> Optional[ServiceHolds]:
     return holds if isinstance(holds, ServiceHolds) else None
 
 
+class ServiceLease:
+    """One holder's share of the Android foreground service (the sign-in's logic, extracted so the U10
+    cloud sync and share links reuse it instead of copying it).
+
+    ``acquire`` joins a running service through ``ServiceHolds`` (a job's) or starts it; ``join`` does
+    the same synchronously for a service another holder keeps running (the cloud sync joins a finishing
+    job's service inside the transition callback, before ``BackgroundExecution.job_finished`` runs);
+    ``update`` remembers this holder's notification text and shows it while nobody else holds the
+    service; ``release`` gives the notification back to the remaining holder, or stops the service when
+    nobody is left (unless ``keep_service`` says a queued job takes it over); ``drop`` forgets the hold
+    when the service is already gone. Loop-thread only. ``native`` is a ``NativeBridge`` (or a fake with
+    its ``is_job_service_running`` / ``start_job_service`` / ``update_job_service`` / ``stop_job_service``).
+    """
+
+    def __init__(self, native: Any, name: str) -> None:
+        self.native = native
+        self.name = name
+        self.title = ""
+        self.text = ""
+        self.started = False  # this lease started the service
+        self.held = False  # this lease relies on the service (started or shared)
+        self.failed = False  # the service could not be started
+
+    def holds(self) -> Optional[ServiceHolds]:
+        return service_holds(self.native)
+
+    def join(self, title: str, text: str, *, holder: str) -> bool:
+        """Synchronous: share the service *holder* holds (or this lease holds already); False otherwise."""
+        holds = self.holds()
+        if holds is None or (holder not in holds and self.name not in holds):
+            return False
+        holds.hold(self.name, title, text)
+        self.title, self.text = str(title), str(text)
+        self.held = True
+        return True
+
+    async def acquire(self, title: str, text: str, *, may_start: bool = True) -> bool:
+        """Hold the service; False when it could not be started (``failed``), may not be started now
+        (``may_start=False``: Android 12+ forbids starting one from the background) or runs without
+        ``ServiceHolds`` (someone else's service that cannot be shared)."""
+        self.started = self.held = self.failed = False
+        self.title, self.text = str(title), str(text)
+        if self.native is None:
+            return False
+        holds = self.holds()
+        try:
+            if await self.native.is_job_service_running():
+                if holds is None:
+                    return False  # someone else's service, and no way to share it
+                holds.hold(self.name, title, text)
+                self.held = True
+                return True
+            if not may_start:
+                return False
+            started = bool(await self.native.start_job_service(title, text))
+        except Exception as exc:
+            log.warning("foreground service for %s unavailable: %s", self.name, exc)
+            self.failed = True
+            return False
+        if not started:
+            log.warning("the foreground service for %s did not start", self.name)
+            self.failed = True
+            return False
+        self.started = self.held = True
+        if holds is not None:
+            holds.hold(self.name, title, text)
+        return True
+
+    def owns_alone(self) -> bool:
+        """This lease is the only holder (its notification is the one shown)."""
+        if not self.held:
+            return False
+        holds = self.holds()
+        if holds is None:
+            return self.started
+        return holds.names() == [self.name]
+
+    def remember(self, text: str, title: Optional[str] = None) -> None:
+        """This holder's notification text, shown again when the other holders release the service."""
+        if not self.held:
+            return
+        self.title = self.title if title is None else str(title)
+        self.text = str(text)
+        holds = self.holds()
+        if holds is not None and self.name in holds:
+            holds.hold(self.name, self.title, self.text)
+
+    async def update(self, text: str, title: Optional[str] = None) -> bool:
+        """New notification text; shown only while this lease holds the service alone (a job's progress
+        keeps the notification while it runs). True when it was sent to the notification."""
+        if not self.held:
+            return False
+        self.remember(text, title)
+        if not self.owns_alone():
+            return False
+        try:
+            await self.native.update_job_service(text=self.text, title=self.title)
+        except Exception:
+            return False
+        return True
+
+    async def release(self, *, keep_service: Optional[Callable[[], bool]] = None) -> None:
+        """Give the service up: the remaining holder gets its notification back, else the service stops
+        (not when ``keep_service()`` says a queued job takes it over)."""
+        held, started = self.held, self.started
+        self.held = self.started = False
+        if not held or self.native is None:
+            return
+        holds = self.holds()
+        if holds is not None:
+            remaining = holds.release(self.name)
+            if remaining is not None:
+                # Another holder still needs the service: give it back its notification.
+                title, text = remaining
+                try:
+                    await self.native.update_job_service(text=text, title=title)
+                except Exception:
+                    pass
+                return
+        elif not started:
+            return
+        if keep_service is not None:
+            try:
+                if keep_service():
+                    return
+            except Exception:
+                log.debug("keep_service check failed", exc_info=True)
+        try:
+            await self.native.stop_job_service()
+        except Exception:
+            pass
+
+    def drop(self) -> None:
+        """The service is gone (``destroyed`` / ``timeout``): forget the hold without stopping anything."""
+        self.held = self.started = False
+        holds = self.holds()
+        if holds is not None:
+            holds.release(self.name)
+
+
 class NativeBridge:
     """Timeout-guarded, normalising wrapper around ``GlossarionNative``/``NativeStub``."""
 
@@ -270,10 +474,11 @@ class NativeBridge:
         func = getattr(self.native, method, None)
         if func is None:
             return default
+        limit = max(self.timeout, METHOD_TIMEOUTS.get(method, 0.0))
         try:
-            result = await asyncio.wait_for(func(*args, **kwargs), self.timeout)
+            result = await asyncio.wait_for(func(*args, **kwargs), limit)
         except asyncio.TimeoutError:
-            log.warning("native %s timed out after %ss", method, self.timeout)
+            log.warning("native %s timed out after %ss", method, limit)
             return default
         return to_plain(result)
 

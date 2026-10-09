@@ -35,6 +35,15 @@ Export
   Downloads/Glossarion" (``GlossarionNative.save_to_downloads``, MediaStore)
   · iOS "Show in Files" (``shareddocuments://``, Documents is Files-visible).
 
+Phone folder (Android 10+)
+  ``Downloads/Glossarion`` through MediaStore. Since U10 books (EPUB, PDF, TXT,
+  HTML) go there only as the cloud sync's phone-folder destination
+  (``services/cloud_sync``: one entry per output, overwritten in place). The
+  Storage switch ``MIRROR_PREF`` copies the other finished outputs there once
+  (``ui/screens/storage.mirror_output``) through ``save_to_downloads``, which is
+  also the manual "Save to Downloads". ``phone_folder_reason`` says why the
+  folder cannot be written on this device (ReasonChip text).
+
 Blocking work never runs on the UI loop: the sync methods are called through
 ``run_io`` (``UiDispatcher.run_in_thread`` in the app). Flet objects are
 created lazily by factories, so this module imports without Flet.
@@ -54,6 +63,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional, Sequence
 
 __all__ = [
     "BOOK_EXTENSIONS",
+    "DOWNLOADS_SUBDIR",
     "ExportOption",
     "FileBridge",
     "FolderPickUnavailable",
@@ -61,6 +71,11 @@ __all__ = [
     "ImportedFile",
     "ImportedFolder",
     "LIBRARY_EXTENSIONS",
+    "MIRROR_PREF",
+    "PHONE_FOLDER_LABEL",
+    "PHONE_FOLDER_NEEDS_ANDROID_10",
+    "PHONE_FOLDER_NOT_IN_BUILD",
+    "PHONE_FOLDER_ONLY_ANDROID",
     "SAVE_CONFIRM_BYTES",
     "SaveResult",
     "mime_type_for",
@@ -84,6 +99,19 @@ SAVE_CONFIRM_BYTES = 200 * 1024 * 1024
 _COPY_CHUNK = 1024 * 1024
 _MAX_NAME = 180
 _RESERVED = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
+
+#: Android's public ``Download/<DOWNLOADS_SUBDIR>`` folder (MediaStore Downloads, Android 10+): "Save to
+#: Downloads", the copy-once mirror of the other outputs and the cloud sync's phone-folder destination.
+DOWNLOADS_SUBDIR = "Glossarion"
+PHONE_FOLDER_LABEL = "Downloads/Glossarion"
+#: ``Prefs`` switch (Settings › Storage; the pre-U10 "Mirror outputs" key): copy the finished outputs
+#: that are not books into ``Downloads/Glossarion`` once. Books follow the U10 destination; the cloud
+#: sync turns a pre-U10 "on" into the phone-folder destination.
+MIRROR_PREF = "mirror_outputs"
+#: ``FileBridge.phone_folder_reason`` results (ReasonChip text).
+PHONE_FOLDER_ONLY_ANDROID = "Android only"
+PHONE_FOLDER_NEEDS_ANDROID_10 = "Needs Android 10 or later"
+PHONE_FOLDER_NOT_IN_BUILD = "Not available in this build"
 
 
 class FolderPickUnavailable(Exception):
@@ -284,6 +312,7 @@ class FileBridge:
         self.native = native
         self.run_io: RunIo = run_io or _default_run_io
         self.files_visible_root = files_visible_root
+        self._platform_info: Optional[dict] = None  # native platform facts, once known (phone folder)
 
     # ---- locations ------------------------------------------------------------------------
 
@@ -561,6 +590,18 @@ class FileBridge:
             return False
         return True
 
+    async def share_text(self, text: str, *, title: Optional[str] = None) -> bool:
+        """The system share sheet for a short text (U10: a share link's URL; never logged)."""
+        if not text:
+            return False
+        share = self._get_share()
+        try:
+            await share.share_text(str(text), title=title)
+        except Exception as exc:
+            log.warning("share text failed: %s", type(exc).__name__)
+            return False
+        return True
+
     async def save_as(self, path: str, *, confirmed: bool = False) -> SaveResult:
         """FilePicker.save_file with the file's bytes (mobile needs ``src_bytes``)."""
         try:
@@ -591,11 +632,50 @@ class FileBridge:
             await self.run_io(write)
         return SaveResult(bool(location), location=location, size=size)
 
-    async def save_to_downloads(self, path: str) -> Optional[str]:
+    async def save_to_downloads(self, path: str, *, replace_uri: Optional[str] = None, entry: bool = False) -> Any:
+        """Android: a copy of ``path`` in ``Downloads/Glossarion`` (a taken name becomes ``name (1).ext``); the
+        MediaStore URI, or None. ``replace_uri``: an entry an earlier call returned is overwritten in place when it
+        is still Glossarion's (same URI, same name), else a new one is added. ``entry``: ``{"uri", "name"}``
+        with the name the entry really has (``name`` None when the platform cannot say)."""
         if self.platform != "android" or self.native is None:
             return None
-        return await self.native.call("save_to_downloads", path, os.path.basename(path), mime_type_for(path),
-                                      "Glossarion", default=None)
+        args = (path, os.path.basename(path), mime_type_for(path), DOWNLOADS_SUBDIR)
+        if entry:
+            extension = getattr(self.native, "native", None)
+            if callable(getattr(extension, "save_to_downloads_entry", None)):
+                found = await self.native.call("save_to_downloads_entry", *args, replace_uri=replace_uri, default=None)
+                return found if isinstance(found, dict) and found.get("uri") else None
+            uri = await self.native.call("save_to_downloads", *args, replace_uri=replace_uri, default=None)
+            return {"uri": str(uri), "name": None} if uri else None
+        if replace_uri:
+            return await self.native.call("save_to_downloads", *args, replace_uri=replace_uri, default=None)
+        return await self.native.call("save_to_downloads", *args, default=None)
+
+    async def phone_folder_reason(self) -> Optional[str]:
+        """None when ``Downloads/Glossarion`` can be written here, else why not (ReasonChip text): Android
+        only (iOS keeps outputs in the Files-visible Documents/Glossarion already), Android 10 or later
+        (MediaStore Downloads; the app does not ask for the legacy storage permission) or not in this
+        build (no native service). The platform facts are read once."""
+        if self.platform != "android":
+            return PHONE_FOLDER_ONLY_ANDROID
+        if self.native is None:
+            return PHONE_FOLDER_NOT_IN_BUILD
+        info = self._platform_info
+        if info is None:
+            getter = getattr(self.native, "platform_info", None)
+            try:
+                info = await getter() if callable(getter) else await self.native.call("get_platform_info", default={})
+            except Exception as exc:
+                log.info("platform info unavailable: %s", exc)
+                info = {}
+            info = info if isinstance(info, dict) else {}
+            if info.get("native"):
+                self._platform_info = info  # the facts do not change while the app runs
+        if not info.get("native"):
+            return PHONE_FOLDER_NOT_IN_BUILD
+        if not info.get("save_to_downloads"):
+            return PHONE_FOLDER_NEEDS_ANDROID_10
+        return None
 
     async def show_in_files(self, path: str) -> bool:
         if self.platform != "ios" or self.url_launcher is None:

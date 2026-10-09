@@ -16,6 +16,7 @@ The delete itself runs on the io pool (``execute_delete``); there is no undo.
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
@@ -221,6 +222,8 @@ class DeleteFlow:
         self.on_done = on_done
         self.view: Optional[DeleteConfirmView] = None
         self.dialog: Optional[ConfirmDialog] = None
+        self.links_sheet: Any = None
+        self.delete_remote_links = False  # U10: also delete the books' share-link uploads on their services
         self.plan: Any = None
         self.report: Any = None
 
@@ -242,6 +245,39 @@ class DeleteFlow:
                 return plan
             self.ctx.say("Nothing to delete — none of the selected cards point at a file or folder on disk.")
             return plan
+        counter = getattr(service, "deletable_links_blocking", None)
+        links = await self.ctx.io(counter, list(books)) if callable(counter) else 0
+        if links:
+            return self.ask_links(int(links))
+        return self.confirm()
+
+    def ask_links(self, count: int) -> Any:
+        """U10: the books have share-link uploads Glossarion can delete on their services; once the books are
+        gone it no longer can. Delete them too, or keep them online until they expire (then the delete)."""
+        from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+
+        plural = count != 1
+
+        def choose(delete_remote: bool) -> Any:
+            self.delete_remote_links = delete_remote
+            return self.confirm()
+
+        sheet = ActionSheet([
+            ActionItem(f"Delete {'these uploads' if plural else 'this upload'} too", lambda: choose(True),
+                       icon="DELETE_SWEEP", destructive=True, key="delete-links-remote"),
+            ActionItem(f"Keep {'them' if plural else 'it'} online until the link expires", lambda: choose(False),
+                       icon="LINK", key="delete-links-keep"),
+        ], title=f"{count} file{'s' if plural else ''} of {'these books' if len(self.plan.targets) != 1 else 'this book'} "
+                 f"{'are' if plural else 'is'} shared via a link",
+            subtitle="After the delete Glossarion can no longer remove the upload from the service.",
+            tablet=bool(getattr(self.ctx, "tablet", False)))
+        self.links_sheet = sheet
+        self.ctx.show(sheet)
+        return sheet
+
+    def confirm(self) -> Any:
+        """The desktop confirmation: the simple Yes / Cancel, or the keyword view."""
+        plan = self.plan
         if not plan.needs_keyword:
             self.dialog = simple_confirm(plan.targets, lambda: self.run(None), plan.simple_prompt)
             self.ctx.show(self.dialog)
@@ -274,7 +310,11 @@ class DeleteFlow:
                 dispatcher.post(view.set_progress, done, total, label)
 
         try:
-            self.report = await self.ctx.io(service.execute_delete_blocking, self.plan, selected, progress)
+            if self.delete_remote_links:
+                execute = functools.partial(service.execute_delete_blocking, delete_remote_links=True)
+            else:
+                execute = service.execute_delete_blocking
+            self.report = await self.ctx.io(execute, self.plan, selected, progress)
         except Exception as exc:
             self.ctx.say(f"Delete failed: {exc}")
             if view is not None:

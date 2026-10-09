@@ -228,6 +228,9 @@ class BackgroundExecution:
         # the service as not started yet and leave it running.
         self._transition_lock: Optional[asyncio.Lock] = None
         self._transition_loop: Any = None
+        # U10 (iOS): job_finished kept the job's background task / continued processing for a cloud save
+        # (the 'cloud' ServiceHolds holder); the outcome to report when ``release_kept_background`` ends them.
+        self._kept_background: Optional[bool] = None
 
     # ---- helpers --------------------------------------------------------------------------
 
@@ -542,13 +545,12 @@ class BackgroundExecution:
             self.service_running = False
             self.service_job = None
         if self.is_ios:
-            if self.continued_started:
-                await self._native("finish_continued_processing", snap.state is JobState.DONE)
-                self.continued_started = False
-                self.continued_id = None
-            if self.bg_task_id >= 0:
-                await self._native("end_background_task", self.bg_task_id)
-                self.bg_task_id = -1
+            holds = service_holds(self.native)
+            if holds is not None and any(name != JOBS_HOLD for name in holds.names()):
+                # U10: a cloud save still runs in this grant; its release ends it (release_kept_background)
+                self._kept_background = snap.state is JobState.DONE
+            else:
+                await self._end_ios_background(snap.state is JobState.DONE)
         self._sync_ticker()  # the queue drained: nothing left to keep current
         if self.wakelock_on and self.wakelock is not None:
             try:
@@ -557,6 +559,29 @@ class BackgroundExecution:
             except Exception as exc:
                 log.info("wakelock disable failed: %s", exc)
             self.wakelock_on = False
+
+    async def _end_ios_background(self, success: bool) -> None:
+        if self.continued_started:
+            await self._native("finish_continued_processing", success)
+            self.continued_started = False
+            self.continued_id = None
+        if self.bg_task_id >= 0:
+            await self._native("end_background_task", self.bg_task_id)
+            self.bg_task_id = -1
+
+    async def release_kept_background(self) -> None:
+        """U10 (iOS): the cloud save that kept the finished job's background grant is done: end it, unless
+        another holder still saves or a new job took the grant over (its own end releases it)."""
+        kept, self._kept_background = self._kept_background, None
+        if kept is None or not self.is_ios:
+            return
+        holds = service_holds(self.native)
+        if holds is not None and any(name != JOBS_HOLD for name in holds.names()):
+            self._kept_background = kept
+            return
+        if self._active() is not None:
+            return
+        await self._end_ios_background(kept)
 
     # ---- the ticker: the notification stays current while the app is hidden ------------------------
 

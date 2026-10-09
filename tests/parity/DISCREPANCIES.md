@@ -4216,3 +4216,44 @@ file changes; the one desktop-side file is a test (the last bullet).
   its distinct-count check depend on the runner's speed); tests/test_mobile_compat_patches_api.py::
   test_run_oauth_flow_keeps_desktop_behaviour joins the fake browser thread before it reads the /success page
   (Python application run 37942574181 failed on that race). No product code changes for either.
+
+## U10 cloud sync and share links (mobile only; no desktop change)
+
+Owner decisions 2026-10-09. The desktop has no counterpart: no `src/*.py` desktop module changed and
+`config.json` gets no key (UI_SPEC §4.18, Appendix B; FEATURE_MAP section 18).
+
+- **Cloud sync** (`services/cloud_sync.py`, `state/cloud_records.py`): the mobile Library's books (EPUB / PDF /
+  TXT / HTML, chosen from `library_core.list_compiled_outputs` + the top-level EPUB / PDF + the finishing job's
+  reported files) are copied into ONE destination the user picks with the system picker: a folder (Android SAF
+  persisted tree grant, iOS bookmark), one save location per file, or the Android phone folder
+  (Downloads/Glossarion/<book>, MediaStore entry overwritten in place). One-way overwrite; the cloud file keeps its
+  first name; off by default + per-book Default / Always / Never + per-format toggles. Settings: Prefs `cloud_sync`;
+  records `<data>/mobile_cloud.json`. No network code, no developer credentials.
+- **Phone folder vs the pre-U10 mirror**: books reach Downloads/Glossarion only as the phone-folder destination;
+  the Storage switch (`mirror_outputs`) now copies only the outputs that are not books, once, and never from a
+  chat run's temporary run root (it raced with the chat moving it). A pre-U10 "on" becomes the phone-folder
+  destination with sync on, on first start (the user had opted in). `NativeBridge` waits 960 s for
+  `save_to_downloads` (the extension's own 900 s limit; the 45 s guard reported large copies as failed while the
+  native copy ran: `native.METHOD_TIMEOUTS`).
+- **Share links** (`services/share_links.py`, `services/share_providers/`): tap only, each service off until enabled
+  with its consent sheet; transfer.it is a browser hand-off (no request to transfer.it / MEGA); Gofile (guest
+  account), Send (send.vis.ee, end-to-end encrypted, timvisee/send v3 protocol over `websockets` with AES-GCM from
+  the pinned `cryptography`), pixeldrain (the user's key). `<data>/mobile_share_links.json`; tokens, keys, link URLs
+  and delete handles are `ENC:` values from the app's API-key encryption (never plaintext, never logged). HTTP uses
+  `http.client` so the backend's optional HTTP logger (which patches requests / httpx) cannot log a token.
+- **Native extension** (`flet_glossarion_native` README "Document destinations (U10)"): `pick_folder`,
+  `pick_save_location`, `pick_document`, `list_children`, `create_file`, `create_folder`, `write_file`,
+  `rename_document`, `stat`, `delete`, `query_root`, `release`, `list_grants`, `cancel_document_op`,
+  `take_document_results`, and `save_to_downloads(replace_uri=)`; the manifest adds only `<queries>`
+  DOCUMENTS_PROVIDER (no storage permission). Swift is checked statically here; its first compile is the iOS CI
+  build.
+- **Foreground service holders**: the sign-in's join / start / hand back / stop logic moved into
+  `native.ServiceLease`; the sign-in (`OAuthBridge`), the cloud save (`cloud_sync.Keepalive`) and share-link
+  uploads use it (one implementation). iOS: `BackgroundExecution.job_finished` keeps the finished job's background
+  grant while a cloud save holds it (`release_kept_background`). The cloud save's notification **Stop** stops the
+  save only when no job holds the service.
+- **Book deletion / wipe**: deleting a Library book drops its cloud records, queue entry and saved share links (the
+  cloud files and uploads stay); "Wipe app data" releases every persisted URI grant first and stops a share-link
+  upload.
+- **Self-test**: the smoke suite gains `share_link_crypto` (RFC 8188 aes128gcm example vector with the bundled
+  cryptography + the websockets sync client import; no network), so the device build proves Send can work.

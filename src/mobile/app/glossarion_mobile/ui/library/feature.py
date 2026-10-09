@@ -260,6 +260,16 @@ class LibraryFeature:
             ctx.mono = mono_family(self.page)  # type: ignore[attr-defined]
         except Exception:
             ctx.mono = tokens.MONO_FAMILIES.get(self._platform(), "monospace")  # type: ignore[attr-defined]
+        # U10 (Book page › Output: cloud status, Send now, Share file via link): the services install after the
+        # Library, so the Output tab reads them late (ui/screens/cloud_sync.U10Actions)
+        opener = getattr(app, "opener", None)
+        clipboard = getattr(app, "clipboard", None)
+        ctx.extras.update({
+            "cloud_sync": lambda: getattr(app, "cloud_sync", None),
+            "share_links": lambda: getattr(app, "share_links", None),
+            "open_url": getattr(opener, "launch", None) if opener is not None else None,
+            "read_clipboard": getattr(clipboard, "get", None) if clipboard is not None else None,
+        })
         return ctx
 
     # ---- screens --------------------------------------------------------------------------------

@@ -300,6 +300,32 @@ def check_fernet(ctx: Context) -> dict[str, Any]:
     }
 
 
+def check_share_link_crypto(ctx: Context) -> dict[str, Any]:
+    """U10 Send share links: RFC 8188 aes128gcm (the example vector) with the bundled cryptography, and the
+    websockets sync client the upload uses. No network."""
+    import base64
+    import io
+
+    ctx.need("cryptography.hazmat.primitives.ciphers.aead")
+    websockets_client = ctx.need("websockets.sync.client")
+    from glossarion_mobile.services.share_providers import send_e2ee
+
+    def b64(text: str) -> bytes:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+    body = b64("I1BsxtFttlv3u_Oo94xnmwAAEAAA-NAVub2qFgBEuQKRapoZu-IxkIva3MEB1PD-ly8Thjg")
+    plain = b"I am the walrus"
+    chunks = [c for c, _ in send_e2ee.ece_encrypt(io.BytesIO(plain).read, len(plain), b64("yqdlZ-tYemfogSmv7Ws5PQ"),
+                                                    salt=body[:16], rs=4096)]
+    if b"".join(chunks) != body:
+        raise AssertionError("aes128gcm does not reproduce the RFC 8188 example")
+    keys = send_e2ee.Keychain()
+    if len(keys.auth_key) != 64 or len(keys.meta_key) != 16:
+        raise AssertionError("Send key derivation sizes are wrong")
+    return {"ece": "rfc8188", "websockets": getattr(importlib.import_module("websockets"), "__version__", None),
+            "client": websockets_client.__name__}
+
+
 _PILLOW_FEATURES = (("jpg", "codec"), ("zlib", "codec"), ("webp", "module"), ("freetype2", "module"))
 
 
@@ -620,6 +646,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("thread_stack", check_thread_stack),
         ("library_reader", check_library_reader),
         ("glossary_qa", check_glossary_qa),
+        ("share_link_crypto", check_share_link_crypto),
     ),
     "e2e": _e2e_checks(),
 }

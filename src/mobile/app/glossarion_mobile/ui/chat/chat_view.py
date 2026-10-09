@@ -975,6 +975,12 @@ class ChatView:
                item.actions, phase.name)
         self._io_extra(key, lambda it=item: self._library_reason(it),
                        lambda reason, c=card: c.set_action_reason("library", reason), card)
+        # U10: Send to cloud / Share file via link, the cloud status line and the saved share links of the
+        # turn's own workspace (ChatFeature.bind_u10_card resolves it on the io pool; Result cards only)
+        bind_u10 = getattr(self.env, "bind_u10_card", None)
+        if callable(bind_u10):
+            bind_u10(card, lambda it=item: self._job_workspace_state(it),
+                     phase.live or phase.name in ("plan", "queued"))
         if not phase.live and phase.name != "plan":
             key = ("failed", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
                    item.actions, phase.name)

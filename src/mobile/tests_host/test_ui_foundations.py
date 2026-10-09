@@ -261,7 +261,7 @@ def test_route_table_is_consistent():
     assert len(names) == len(set(names))
     for spec in ROUTES:
         assert spec.presentation in ("root", "view", "sheet", "fullscreen", "handled"), spec
-        assert spec.milestone in {f"U{i}" for i in range(10)}, spec
+        assert spec.milestone in {f"U{i}" for i in range(11)}, spec
         assert spec.parent is None or spec.parent in ROUTES_BY_NAME, spec
         if spec.is_static and spec.alias_of is None:
             assert parse_route(spec.pattern).name == spec.name

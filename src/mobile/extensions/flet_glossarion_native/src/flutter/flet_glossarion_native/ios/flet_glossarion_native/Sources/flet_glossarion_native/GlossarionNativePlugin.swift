@@ -8,8 +8,10 @@ import UserNotifications
 /// Dart -> Swift: attach, get_platform_info, clear_shared, init_notifications,
 /// show_notification, cancel_notification, begin_background_task,
 /// end_background_task, background_time_remaining, start_continued_processing,
-/// update_continued_processing, finish_continued_processing.
-/// Swift -> Dart: "share" {items}, "notification" {...}, "background_task" {...}.
+/// update_continued_processing, finish_continued_processing, and the document
+/// destination methods handled by DocumentDestinations (pick_folder, ...).
+/// Swift -> Dart: "share" {items}, "notification" {...}, "background_task" {...},
+/// "document" {type, op_id, ...}.
 ///
 /// "Open in" / "Copy to Glossarion" file URLs are copied (security-scoped,
 /// coordinated) into tmp/shared/<batch>/ and returned as shared items. The
@@ -58,6 +60,16 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
 
   private let ioQueue = DispatchQueue(label: "com.glossarion.native.io", qos: .userInitiated)
 
+  /// Document destinations (U10): folder / file pickers with bookmarks and coordinated writes.
+  private lazy var documents = DocumentDestinations(
+    send: { [weak self] event in
+      self?.channel?.invokeMethod("document", arguments: event)
+    },
+    isDartAttached: { [weak self] in
+      self?.dartAttached ?? false
+    }
+  )
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = GlossarionNativePlugin()
     let channel = FlutterMethodChannel(name: channelName, binaryMessenger: registrar.messenger())
@@ -75,12 +87,17 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     let args = call.arguments as? [String: Any] ?? [:]
+    if DocumentDestinations.methods.contains(call.method) {
+      documents.handle(call.method, args, result: result)
+      return
+    }
     switch call.method {
     case "attach":
       dartAttached = true
       var response: [String: Any] = [
         "shared": pendingShared,
         "notifications": pendingNotifications,
+        "document_results": documents.onDartAttach(),
       ]
       if let launch = launchNotification {
         response["launch_notification"] = launch
@@ -150,6 +167,7 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
       "continued_processing": GlossarionNativePlugin.continuedProcessingSupported,
       "background_refresh_available": UIApplication.shared.backgroundRefreshStatus == .available,
       "save_to_downloads": false,
+      "documents": true,
       "fgs_types": [String](),
       "shared_dir": GlossarionNativePlugin.sharedRoot().path,
     ]
@@ -747,7 +765,7 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     return FileManager.default.temporaryDirectory.appendingPathComponent("shared", isDirectory: true)
   }
 
-  private static func safeFileName(_ raw: String) -> String {
+  static func safeFileName(_ raw: String) -> String {
     let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters)
     var name = raw.components(separatedBy: forbidden).joined(separator: "_")
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -784,7 +802,7 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     return candidate
   }
 
-  private static func mimeType(forExtension rawExtension: String) -> String? {
+  static func mimeType(forExtension rawExtension: String) -> String? {
     switch rawExtension.lowercased() {
     case "epub": return "application/epub+zip"
     case "pdf": return "application/pdf"

@@ -169,6 +169,11 @@ class GlossarionApp:
         self.webview_bridge: Any = None
         self.updates_feature: Any = None
         self.series: Any = None
+        # U10: CloudSyncService.install sets cloud_sync (Library books -> a folder of the user's own cloud
+        # app, chosen once in the system picker); _install_share_links sets share_links (opt-in "Share file
+        # via link": every provider off until enabled + consented in Settings › Cloud sync & sharing).
+        self.cloud_sync: Any = None
+        self.share_links: Any = None
         self.keyboard: Any = None
         self.freeze_watchdog: Any = None
 
@@ -260,6 +265,8 @@ class GlossarionApp:
         await self._install_webview_bridge()  # authnd/ + search/gemini through a hidden WebView (U9)
         await self._install_updates()  # About › Updates + the startup check (U9)
         await self._install_series()  # optional chat Series (U9; after the chat and the Library)
+        await self._install_cloud()  # U10 cloud sync (after the jobs, the chat and the Library)
+        await self._install_share_links()  # U10 share links (after files, the Library and the chat)
         self._install_keyboard()  # Ctrl+= / Ctrl+- / Ctrl+0 text size on hardware keyboards (U9)
         self._install_diagnostics()  # HTTP log / payload / memory switches, cache cap, freeze watchdog (U9)
         self.dispatcher.spawn(self._after_ready())
@@ -434,6 +441,55 @@ class GlossarionApp:
             await SeriesFeature.install(self)  # sets self.series; wraps shell.screen_factory
         except Exception:
             log.exception("series feature unavailable; Series actions stay disabled")
+
+    async def _install_cloud(self) -> None:
+        """U10: finished Library books copied into a folder of the user's own cloud app through the system
+        picker (``services.cloud_sync``; no network, no developer credentials). Its queue drains at start."""
+        try:
+            from glossarion_mobile.services.cloud_sync import CloudSyncService
+
+            await CloudSyncService.install(self)  # sets self.cloud_sync (and library.cloud_sync)
+        except Exception:
+            log.exception("cloud sync unavailable; Settings › Cloud sync & sharing shows it as unavailable")
+
+    async def _install_share_links(self) -> None:
+        """U10 "Share file via link" (``services/share_links.py``): the transfer.it browser handoff, Gofile,
+        Send (end-to-end encrypted) and pixeldrain; nothing uploads without the user's tap."""
+        try:
+            from glossarion_mobile.services.share_links import ShareLinkService
+
+            self.share_links = ShareLinkService.from_app(self)
+            await self.share_links.load()
+            if self.library is not None:
+                self.library.share_links = self.share_links  # deleted books drop their links
+            self.share_links.subscribe(self._on_share_link_change)
+        except Exception:
+            log.exception("share links unavailable; Share file via link stays disabled")
+
+    def _on_share_link_change(self, kind: str) -> None:
+        """U10: an upload the user started failed while the app is hidden -> one notification (failures only,
+        like the cloud sync; the route opens the Book page, never a path or a link)."""
+        shares = self.share_links
+        background = getattr(self.jobs, "background", None)
+        if kind != "upload" or shares is None or getattr(background, "app_visible", True):
+            return
+        try:
+            state = shares.state  # ShareLinkService.state is a property (an UploadState), never a call
+            if state.phase != "failed":
+                return
+            from glossarion_mobile.services.cloud_sync import CloudNotifier
+            from glossarion_mobile.services.share_providers import provider_info
+            from glossarion_mobile.ui.screens.cloud_sync import share_failed_notice
+
+            label = provider_info(state.provider).label
+            bid = None
+            if state.book and self.library is not None:
+                bid = self.library.bid_for({"output_folder": state.book, "name": os.path.basename(state.book)})
+            title, body, route = share_failed_notice(state.name, label, state.message, bid)
+            notifier = CloudNotifier(getattr(self.jobs, "notifications", None), self.native)
+            self.dispatcher.spawn(notifier.show(f"share:{state.provider}", title, body, route))
+        except Exception:
+            log.exception("the share-link failure notification failed")
 
     def _install_diagnostics(self) -> None:
         """Logs & diagnostics at launch (U9, ``services.logs``): re-apply the HTTP logging / Save payloads /
@@ -771,6 +827,12 @@ class GlossarionApp:
                     resumed()
                 except Exception:
                     log.exception("%s.app_resumed failed", type(screen).__name__)
+        cloud = getattr(self, "cloud_sync", None)
+        if cloud is not None:
+            try:
+                cloud.on_lifecycle(name)  # hidden: Android drains only under a foreground service; resume: drain
+            except Exception:
+                log.exception("cloud sync lifecycle failed")
         if self.spike is not None:
             await self.spike.on_lifecycle(e)
 

@@ -1847,8 +1847,9 @@ def test_feature_on_the_real_app_renders_every_page(app_env, caplog, monkeypatch
                 built.append(type(screen).__name__)
                 await asyncio.sleep(0.3)  # did_show work (account status, folder usage, backups) runs off the loop
             assert built == ["AccountsScreen", "ProfilesScreen", "ProfileDetailScreen", "PrefillScreen",
-                             "AppearanceScreen", "StorageScreen", "BackupScreen", "DesktopImportScreen", "AboutScreen",
-                             "DangerZoneScreen", "NotificationsScreen", "WelcomeScreen"]
+                             "AppearanceScreen", "StorageScreen", "CloudSyncScreen", "BackupScreen",
+                             "DesktopImportScreen", "AboutScreen", "DangerZoneScreen", "NotificationsScreen",
+                             "WelcomeScreen"]  # CloudSyncScreen: Settings › Cloud sync & sharing (U10)
             assert feature.screens_built == list(SCREEN_ROUTES)
             errors = [r for r in caplog.records if r.levelno >= 40 and r.name.startswith("glossarion")]
             assert not errors, [r.getMessage() for r in errors]
@@ -1868,7 +1869,7 @@ def test_feature_on_the_real_app_renders_every_page(app_env, caplog, monkeypatch
             assert not Path(store._token_file).exists() and "authgem2" not in feature.sync_signed_in()
             await app.navigate(build_route("settings"))
             home = app.shell.top_screen
-            for name in ("settings.appearance", "settings.storage", "settings.backup", "settings.import",
+            for name in ("settings.appearance", "settings.storage", "settings.cloud", "settings.backup", "settings.import",
                          "settings.about", "settings.danger", "settings.profiles", "settings.prefill", "settings.accounts"):
                 assert name in home.implemented, name
                 tile = home.route_tiles.get(name)

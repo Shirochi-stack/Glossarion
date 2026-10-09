@@ -9,6 +9,10 @@ native pieces Flet does not ship:
   local notifications; "Save to Downloads" through MediaStore.
 - **iOS**: "Open in"/"Copy to Glossarion" file intake, local notifications,
   `beginBackgroundTask` and the iOS 26 `BGContinuedProcessingTask`.
+- **Both (U10)**: document destinations: a folder or file the user picks once
+  in the system picker (Android Storage Access Framework, iOS Files), written to
+  later without asking again. This is how finished books reach the user's own
+  cloud app; Glossarion makes no network request for it.
 
 It is installed by `flet build` through `[tool.flet].dev_packages` in
 `src/mobile/pyproject.toml` (`extensions/flet_glossarion_native`, resolved
@@ -36,10 +40,15 @@ src/flutter/flet_glossarion_native/  Dart package / Flutter plugin
   android/src/main/kotlin/com/glossarion/flet_glossarion_native/
     GlossarionNativePlugin.kt        MethodChannel glossarion_native/platform
     ShareReceiverActivity.kt         VIEW/SEND/SEND_MULTIPLE trampoline
+    DocumentDestinations.kt          SAF pickers, persisted grants, mode-chain writes (U10)
   ios/flet_glossarion_native/Package.swift   SwiftPM (Flutter 3.44 default)
   ios/flet_glossarion_native.podspec         CocoaPods fallback, same sources
   ios/flet_glossarion_native/Sources/flet_glossarion_native/GlossarionNativePlugin.swift
+  ios/flet_glossarion_native/Sources/flet_glossarion_native/DocumentDestinations.swift
+src/flet_glossarion_native/documents.py       document-destination contract (refs, results, error codes)
+src/flet_glossarion_native/documents_fake.py  in-memory provider answering like DocumentDestinations.kt (tests)
 tests/test_native_defaults.py        host tests (defaults, marshalling, cross-language contract)
+tests/test_document_destinations.py  U10 API, fake-provider semantics, Dart/Kotlin/Swift static checks
 ```
 
 ## Python API
@@ -52,6 +61,7 @@ native = GlossarionNative(
     on_foreground=on_foreground,        # ForegroundEvent(type, button_id, is_timeout)
     on_background_task=on_background,   # BackgroundTaskEvent(type, task_id, task_name, identifier, reason)
     on_notification=on_notification,   # NotificationEvent(notification_id, action_id, payload, launched_app)
+    on_document=on_document,           # DocumentEvent(type, op_id, written, total, kind, status, result)
 )
 ```
 
@@ -68,7 +78,17 @@ constructor, so they are registered before the Dart service starts.
 | `start_job_service(title, text, *, buttons, wake_lock, wifi_lock, ...)`, `update_job_service`, `stop_job_service`, `is_job_service_running` | flutter_foreground_task | `False` (use the iOS calls below) | `False` / no-op |
 | `begin_background_task(name, *, expiration_title, expiration_body, expiration_payload)`, `end_background_task`, `background_time_remaining` | `-1` / no-op / `None` | UIApplication background task | same |
 | `start_continued_processing(identifier=None, title, subtitle, *, strategy="fail", expiration_*)`, `update_continued_processing`, `finish_continued_processing` | `False` | iOS 26 BGContinuedProcessingTask | `False` |
-| `save_to_downloads(path, display_name, mime_type, subdir="Glossarion")` | MediaStore Downloads | `None` | `None` |
+| `save_to_downloads(path, display_name, mime_type, subdir="Glossarion", replace_uri=None)` | MediaStore Downloads; `replace_uri` overwrites our own entry in place | `None` | `None` |
+| `save_to_downloads_entry(...)` (same arguments) | the same call with `report_name`: `{"uri", "name"}`, the name MediaStore gave the entry (`name (1).ext` when taken) | `None` | `None` |
+| `pick_folder(*, initial, op_id)` | `ACTION_OPEN_DOCUMENT_TREE` + persisted grant | Files folder picker + minimal bookmark | `{"ok": False, "error": "unavailable"}` |
+| `pick_save_location(name, mime_type, source_path=None, *, initial, mode_chain, op_id)` | `ACTION_CREATE_DOCUMENT` + grant (+ first write) | export picker moves a copy, bookmark | same |
+| `pick_document(mime_types=None, *, initial, op_id)` | `ACTION_OPEN_DOCUMENT` + grant | open picker + bookmark | same |
+| `list_children(folder, *, names=None)`, `create_file(folder, name, mime_type, *, on_exists="rename")`, `create_folder(parent, name, *, on_exists="adopt")` | `DocumentsContract` under the tree grant | coordinated `FileManager` calls | same |
+| `write_file(target_or_doc, source_path, *, name, mime_type, on_exists, mode_chain=("wt","rwt","w"), verify=True, op_id, timeout)` | mode chain + read-back length | staged copy swapped in (`replaceItemAt`) | same |
+| `rename_document(document, name)` | `DocumentsContract.renameDocument` (keep the returned ref: the URI may change; `unavailable` without rename support, `exists` when the name is taken) | coordinated move inside the picked folder (`unavailable` for a single exported file) | same |
+| `stat(document)`, `delete(document)`, `query_root(target)` | query / `deleteDocument` / root query + grant check | resource values / `.forDeleting` / reachability | same |
+| `release(target)`, `list_grants()` | `releasePersistableUriPermission`, `persistedUriPermissions` | `True` / `[]` (bookmarks are app data) | `False` / `[]` |
+| `cancel_document_op(op_id)`, `take_document_results()` | stop a write; late picker answers | same | `False` / `[]` |
 
 All methods are coroutines and must run on Flet's event loop. From a worker
 thread (the job thread), use
@@ -181,6 +201,95 @@ deep links itself.
   `"android.permission.WRITE_EXTERNAL_STORAGE" = { maxSdkVersion = "28" }` and
   request it at runtime.
 
+## Document destinations (U10)
+
+The user picks a place once in the system picker; Glossarion keeps write
+access and later writes finished books there. The user's cloud app (Drive,
+Nextcloud, iCloud Drive, or anything else with a document provider, including
+RSAF for rclone remotes) uploads them with the user's own account. There is no
+developer account, OAuth client or network code. `documents.py` holds the
+contract shared by Python, Kotlin, Swift and the fake:
+
+- **References** are plain JSON dicts the app stores and passes back:
+  `platform`, `kind` (`folder` / `file`), `id` (FNV-1a/64 of the tree URI or
+  folder path: key cloud records by the destination's `id`), Android `uri`
+  (tree) + `document`, iOS `bookmark` + `root` + `path`, `name`, `size`,
+  `mtime`, `provider`, `provider_label`, `can_write`, `can_create`,
+  `persisted`, `own_folder` (Glossarion's own storage: the app refuses it).
+- **Results** are `{"ok", "error", "message", "scope", "retryable", ...}`.
+  Error codes: `cancelled`, `permission_lost`, `missing`, `unsupported_mode`,
+  `provider_error`, `no_space`, `source_missing`, `source_changed`,
+  `read_only`, `size_mismatch`, `exists`, `busy`, `unavailable`, `timeout`,
+  `bad_args`. `scope` is `target` (re-link the destination), `document` (only
+  this file) or `source`.
+
+Android (`DocumentDestinations.kt`):
+
+- Pickers persist only the flags the picker granted (`data.flags &
+  (READ|WRITE)`; asking for more throws). A pick survives activity recreation:
+  the pending call is kept in the engine-scoped plugin and the
+  `ActivityResultListener` follows every attach/detach. When the whole process
+  was recreated, the answer is still persisted and arrives as a
+  `document` event `pick_result` (and through `take_document_results()`); a
+  picker left open across a process death is reported as `cancelled` on the
+  next attach.
+- `write_file` streams the caller's private snapshot in 1 MiB chunks through
+  `openFileDescriptor` with the mode chain `wt` -> `rwt` -> `w`. A
+  FileNotFoundException is not "deleted": Drive throws it for an unsupported
+  mode and Nextcloud while offline. A document is `missing` only when the tree
+  root answers and the document does not (`proven: True`); otherwise the
+  answer is `provider_error` (retry). The non-truncating modes `w` / `rw` are
+  used only when the new file is not shorter than the cloud copy, the tail is
+  cut with `ftruncate` when the descriptor is a real file, and the written
+  length is read back with `'r'` + `statSize` (never `COLUMN_SIZE`). A stale
+  tail answers `size_mismatch` with `needs_replace`; when no mode fits the
+  answer is `unsupported_mode` with `needs_replace`, and the caller creates a
+  new file and deletes the old one (then `rename_document` gives the new copy
+  the old name back where the provider can rename). On failure the descriptor is closed with
+  `closeWithError` (only providers with an `OnCloseListener` drop the partial
+  file) and `remote_damaged` says whether the cloud copy may now be cut short.
+- `create_file` looks for same-name items first (`on_exists`: `rename`,
+  `adopt`, `fail`). A create that throws is retried once after 1.5 s, and a
+  file that appeared anyway (Drive is eventually consistent) is adopted. A
+  provider's `UnsupportedOperationException` ("Create not supported", AOSP's
+  default) - and for `create_folder` an `IllegalArgumentException` refusing the
+  directory type - answers `read_only` with `create_unsupported: true` (not
+  retried): the cloud sync then lays the books out flat in the picked folder.
+- A save location (`pick_save_location`) inside Glossarion's own folder
+  (`own_folder`) is not written: the empty document the Save dialog made is
+  deleted and the answer carries `own_folder: true`, so the app refuses it with
+  nothing left behind.
+- `save_to_downloads(..., replace_uri=)` overwrites Glossarion's own
+  MediaStore entry in place and never changes `DISPLAY_NAME`, so a backup app
+  watching Download/Glossarion sees an update instead of a new file.
+- The manifest declares `<queries>` for `android.content.action.DOCUMENTS_PROVIDER`
+  (package visibility, not a permission). No storage permission is added.
+  `get_platform_info()` reports `persisted_grant_limit` (128 before Android
+  11, 512 from 11; the oldest grants are trimmed silently).
+
+iOS (`DocumentDestinations.swift`):
+
+- Folder picks use the iOS 13 initializers (`documentTypes: ["public.folder"]`),
+  so no iOS 14 framework is linked into the 13.0 target; `forExporting:` sits
+  behind `#available(iOS 14.0, *)` with the `.moveToService` fallback.
+- References are minimal bookmarks. Items inside a picked folder carry the
+  folder's bookmark (`root`) and their relative `path`. A child bookmark that
+  now resolves outside the folder or into a `.Trash` folder (iCloud "Recently
+  Deleted") counts as `missing`. A stale bookmark is refreshed and returned in
+  the new reference.
+- Writes copy the snapshot into the destination volume's replacement
+  directory (progress, cancel), then swap it in under `NSFileCoordinator`
+  (`.forReplacing` + `replaceItemAt` / `moveItem`). The cloud file never holds
+  half-written bytes, and the old version does not have to be downloaded
+  first. Without a replacement directory the write is in place (`mode:
+  "in_place"`, warning `non_atomic`).
+- Glossarion only writes while it runs: the app wraps a drain in
+  `begin_background_task` / continued processing. The File Provider extension
+  then uploads on its own schedule.
+
+The app cannot see whether the cloud app finished uploading (quota full,
+signed out, Wi-Fi only): it can only report that the file was handed over.
+
 ## Notifications and desugaring
 
 **Decision: notifications are native (NotificationCompat on Android,
@@ -291,6 +400,22 @@ to every plugin.
 - **Wheel.** `pip wheel` contains every Dart/Kotlin/Swift/Gradle/podspec file
   under `flutter/flet_glossarion_native/`.
 - **Python.** `tests/test_native_defaults.py` passes (89 tests).
+
+**U10 document destinations (2026-10-09):**
+
+- **Kotlin.** `DocumentDestinations.kt` + the updated plugin compile with
+  kotlinc 2.2.20 against `android-36` `android.jar`, `androidx.core:core:1.15.0`
+  and the Flutter 3.44.8 embedding (stub `R`), without errors or warnings
+  (the U0 toolchain in the session scratchpad).
+- **Dart.** `dart analyze lib` (Flutter 3.44.8): no new issue (the
+  `dart:io` unnecessary-import info is older).
+- **Swift.** `DocumentDestinations.swift` is **not** type-checked (no Xcode);
+  `tests/test_document_destinations.py` checks it statically (balance,
+  method names, error codes, event and reference keys, no iOS 14-only API
+  outside `#available`). The iOS CI build is its first compile.
+- **Python.** The same test file runs the Android semantics through
+  `documents_fake.py`. Provider behaviour needs the device checklist in the
+  U10 report.
 
 **Only CI or a device can prove:**
 

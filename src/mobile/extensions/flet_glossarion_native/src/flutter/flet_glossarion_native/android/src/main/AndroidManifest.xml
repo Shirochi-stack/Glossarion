@@ -14,6 +14,11 @@
     intent.getData().toString() as a route on onNewIntent).
   * The pyproject [tool.flet.android.permission] table already requests these
     permissions; they are repeated here so the plugin is self-contained.
+  * <queries> DOCUMENTS_PROVIDER (U10 document destinations) is package
+    visibility, not a permission: it lets the app name the cloud app behind a
+    picked folder (resolveContentProvider) and keeps third-party document
+    providers reachable after a reboot ("Unknown authority" otherwise). No
+    storage permission is added; the system picker grants access per folder.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -21,6 +26,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <queries>
+        <intent>
+            <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+        </intent>
+    </queries>
 
     <application>
 
