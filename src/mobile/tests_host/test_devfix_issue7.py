@@ -474,10 +474,13 @@ async def _settings_qa_tile(app):
 
 
 async def _shutdown(tf, app) -> None:
+    """What the app does when it goes to the background (settings integration on_lifecycle): flush
+    config.json AND Prefs. Without the Prefs flush a fast runner lost the one-time migration flag."""
     try:
-        store = getattr(app, "config_store", None)
-        if store is not None:
-            store.flush()
+        for name in ("config_store", "prefs"):
+            target = getattr(app, name, None)
+            if target is not None:
+                target.flush()
     finally:
         app.jobs.close()
         await tf._stop(app)
