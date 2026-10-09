@@ -1,7 +1,9 @@
 """Host tests for About › Updates (U9): ``services/updates.py`` and ``ui/screens/updates.py``.
 
 * asset classification and the per-device choice (APK for this ABI, release-signed first; the
-  AltStore source and IPAs on iOS; desktop-only releases offer nothing, which is not an error);
+  IPAs on iOS; desktop-only releases offer nothing, which is not an error). Mobile builds are
+  never published (owner's rule, 2026-10-09), so the files only the removed release job wrote
+  (``altstore-source.json``, ``<prefix>_mobile_SHA256SUMS.txt``) are not mobile assets any more;
 * ``UpdateService`` runs the desktop checker (``update_core.HeadlessUpdateChecker``) on a real
   ``MobileConfigStore``: the shared keys ``last_update_check_time`` / ``skipped_versions`` /
   ``auto_update_check`` are the only ones written, the 30-minute cache and the skip behave as
@@ -61,9 +63,8 @@ def _mobile_release(tag: str = "v9.15.0", *, debug_only: bool = False) -> dict:
     names = [f"{PREFIX}_Android_arm64-v8a_debugsigned.apk", f"{PREFIX}_Android_x86_64_debugsigned.apk"]
     if not debug_only:
         names += [f"{PREFIX}_Android_arm64-v8a.apk", f"{PREFIX}_Android_x86_64.apk", f"{PREFIX}_Android.aab"]
-    names += [f"{PREFIX}_iOS_unsigned.ipa", f"{PREFIX}_iOS.ipa", "altstore-source.json",
-              f"{PREFIX}_mobile_SHA256SUMS.txt", "Glossarion v9.15.0.exe", "L_Glossarion_Lite v9.15.0.exe",
-              "Glossarion_v9.15.0_MAC.dmg", "Glossarion-9.15.0-Linux.zip"]
+    names += [f"{PREFIX}_iOS_unsigned.ipa", f"{PREFIX}_iOS.ipa", "Glossarion v9.15.0.exe",
+              "L_Glossarion_Lite v9.15.0.exe", "Glossarion_v9.15.0_MAC.dmg", "Glossarion-9.15.0-Linux.zip"]
     return {"tag_name": tag, "body": "## What's new\n\n* faster", "html_url": f"https://github.com/x/y/releases/tag/{tag}",
             "published_at": "2026-10-09T10:00:00Z", "assets": [_asset(n) for n in names]}
 
@@ -84,8 +85,9 @@ def _desktop_release(tag: str = "v9.15.0") -> dict:
     (f"{PREFIX}_Android.aab", "aab"),
     (f"{PREFIX}_iOS_unsigned.ipa", "ipa"),
     (f"{PREFIX}_iOS.ipa", "ipa_signed"),
-    ("altstore-source.json", "altstore"),
-    (f"{PREFIX}_mobile_SHA256SUMS.txt", "checksums"),
+    # written only by the removed release job: never a mobile asset now
+    ("altstore-source.json", None),
+    (f"{PREFIX}_mobile_SHA256SUMS.txt", None),
     ("Glossarion v9.15.0.exe", None),
     ("Glossarion_v9.15.0_MAC.dmg", None),
     ("random_Android_arm64-v8a.apk", None),
@@ -110,22 +112,37 @@ def test_android_picks_this_abi_release_signed_first():
 
 
 @needs_requests
-def test_ios_offers_the_altstore_source_and_ipas():
+def test_ios_offers_the_ipas():
     downloads = up.select_downloads(_mobile_release(), "ios", "arm64")
-    assert downloads.available and downloads.apk is None
-    assert downloads.altstore.name == "altstore-source.json" and downloads.ipa.kind == "ipa"
-    assert downloads.ipa_signed.kind == "ipa_signed" and downloads.checksums.kind == "checksums"
-    links = dict(up.altstore_links(downloads.altstore.url))
-    assert links["AltStore"] == "altstore://source?url=" + (GH + "altstore-source.json").replace(":", "%3A").replace("/", "%2F")
-    assert links["SideStore"].startswith("sidestore://source?url=https%3A%2F%2Fgithub.com%2F")
+    assert downloads.available and downloads.apk is None and downloads.other_apks == []
+    assert downloads.ipa.name == f"{PREFIX}_iOS_unsigned.ipa" and downloads.ipa.kind == "ipa"
+    assert downloads.ipa_signed.name == f"{PREFIX}_iOS.ipa" and downloads.ipa_signed.kind == "ipa_signed"
+    release = _mobile_release()
+    release["assets"] = [a for a in release["assets"] if a["name"] != f"{PREFIX}_iOS.ipa"]
+    unsigned_only = up.select_downloads(release, "ios", "arm64")
+    assert unsigned_only.available and unsigned_only.ipa_signed is None
+
+
+@needs_requests
+def test_no_altstore_source_or_checksums_support():
+    """The AltStore source and the checksums file came only from the removed release job."""
+    assert not hasattr(up, "altstore_links") and not hasattr(up, "ALTSTORE_SOURCE_ASSET")
+    fields = set(up.MobileDownloads.__dataclass_fields__)
+    assert fields == {"platform", "apk", "other_apks", "ipa", "ipa_signed"}
+    # an old release that still carries those files next to the desktop ones offers nothing
+    release = _desktop_release()
+    release["assets"] += [_asset("altstore-source.json", 900), _asset(f"{PREFIX}_mobile_SHA256SUMS.txt", 400)]
+    for platform in ("android", "ios"):
+        assert not up.select_downloads(release, platform, "arm64").available
 
 
 @needs_requests
 def test_desktop_only_release_offers_nothing():
     for platform in ("android", "ios", "windows"):
         downloads = up.select_downloads(_desktop_release(), platform, "arm64")
-        assert not downloads.available and downloads.apk is None and downloads.altstore is None
+        assert not downloads.available and downloads.apk is None and downloads.ipa is None
     assert not up.select_downloads(None, "android", "arm64").available
+    assert not up.select_downloads({"tag_name": "v9.15.0"}, "ios", "arm64").available  # no assets key
     # a forged asset URL is never offered
     release = _mobile_release()
     release["assets"] = [dict(a, browser_download_url="http://evil.invalid/x") for a in release["assets"]]
@@ -392,20 +409,29 @@ def test_screen_ios_and_desktop_only_rows():
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.screens.updates import UpdatesScreen
 
-    screen = UpdatesScreen(parse_route("/settings/updates"), _Ctx(), service=_FakeService(_result("ios")))
-    screen.build_body()
+    opened: list = []
+    screen = UpdatesScreen(parse_route("/settings/updates"), _Ctx(), service=_FakeService(_result("ios")),
+                           open_url=opened.append)
+    body = screen.build_body()
+    assert not any("AltStore" in t or "SideStore" in t for t in _texts(body))
     asyncio.run(screen.check_now())
     texts = _texts(screen.release_holder.content)
-    assert "Add to AltStore" in texts and "Add to SideStore" in texts
     assert any(t.startswith("Unsigned IPA (") for t in texts) and any(t.startswith("Signed IPA (") for t in texts)
+    assert not any("AltStore" in t or "SideStore" in t for t in texts)
+    assert "This release has no file for this device." not in texts
+    ipa_tile = next(c for c in screen.release_holder.content.content.controls
+                    if str(getattr(c, "key", "")).startswith("updates-ipa-") and "signed" not in str(c.key))
+    ipa_tile.on_click(None)
+    assert opened == [GH + f"{PREFIX}_iOS_unsigned.ipa"]
 
-    desktop = _result("android", _desktop_release())
-    screen = UpdatesScreen(parse_route("/settings/updates"), _Ctx(), service=_FakeService(desktop))
-    screen.build_body()
-    asyncio.run(screen.check_now())
-    texts = _texts(screen.release_holder.content)
-    assert "This release has no file for this device." in texts and "Release page" in texts
-    assert not any(t.startswith("Download APK") for t in texts)
+    for platform in ("android", "ios"):
+        desktop = _result(platform, _desktop_release())
+        screen = UpdatesScreen(parse_route("/settings/updates"), _Ctx(), service=_FakeService(desktop))
+        screen.build_body()
+        asyncio.run(screen.check_now())
+        texts = _texts(screen.release_holder.content)
+        assert "This release has no file for this device." in texts and "Release page" in texts
+        assert not any(t.startswith(("Download APK", "Unsigned IPA", "Signed IPA")) for t in texts)
 
 
 def _fake_app(platform="android", *, is_mobile=True, test=False, runtime="android"):

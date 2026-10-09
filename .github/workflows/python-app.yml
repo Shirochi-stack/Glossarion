@@ -225,7 +225,7 @@ jobs:
         PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
       run: uv run --locked python tools/host_smoke.py --simulate android --bundle app/backend --json build/host_smoke_android.json
 
-    - name: Mobile CI and release gating (no tag trigger, gated release job, optional suites)
+    - name: Mobile CI policy (no tag trigger, never publishes, optional suites)
       working-directory: src/mobile
       env:
         PYTHONUTF8: '1'

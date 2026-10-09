@@ -416,7 +416,7 @@ class GlossarionApp:
 
     async def _install_updates(self) -> None:
         """About › Updates (Check now, Check on startup, skip version, release notes, APK /
-        AltStore links) over the GUI-free ``update_core`` (U9). The mobile app is not
+        IPA links) over the GUI-free ``update_core`` (U9). The mobile app is never
         published, so "no mobile asset" is a normal answer."""
         try:
             from glossarion_mobile.ui.screens.updates import UpdatesFeature

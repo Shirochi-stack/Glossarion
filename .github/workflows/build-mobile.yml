@@ -1,16 +1,16 @@
-# Glossarion Mobile (Android + iOS): Flet 1.0.3 build, device smoke tests and release.
+# Glossarion Mobile (Android + iOS): Flet 1.0.3 build and device smoke tests.
 #
-#   prepare ---------+-- android -- android-smoke ----+
-#   wheels-android --+-- android-ui-tests (flet test) |
-#   wheels-ios ------+-- ios -------------------------+-- release (manual opt-in only, see below)
-#                    +-- ios-signed (Apple secrets) --+
-#                    +-- ios-simulator-smoke ---------+
+#   prepare ---------+-- android -- android-smoke
+#   wheels-android --+-- android-ui-tests (flet test)
+#   wheels-ios ------+-- ios
+#                    +-- ios-signed (Apple secrets)
+#                    +-- ios-simulator-smoke
 #
 # Optional device suites (policy lines in the workflow env below; README "Optional device suites"):
 #   ios-simulator-smoke  IOS_SIMULATOR_SMOKE_POLICY  self-test on an iPhone simulator (required since U9)
 #   android-ui-tests     ANDROID_UI_TESTS_POLICY     `flet test` UI tests (src/mobile/tests) on the emulator
 # 'optional' = runs only when its dispatch input says 'on', and never fails the run (continue-on-error).
-# 'required' = runs by default ('auto') for its platform, fails the run, and the release job needs it.
+# 'required' = runs by default ('auto') for its platform and fails the run.
 # Promoting a suite once it has passed in CI is that one line.
 #
 # wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
@@ -30,14 +30,7 @@
 # Optional repository variables: IOS_EXPORT_METHOD (default release-testing), IOS_SIGNING_CERTIFICATE
 # (default "Apple Distribution", or "Apple Development" for the debugging/development export method).
 #
-# Publishing policy: this workflow never publishes on its own. It has no tag trigger, and
-# build-all.yml does not call it, so pushing a v* tag (by anyone holding a token) cannot ship the
-# mobile app. The release job runs only for a manual run (workflow_dispatch; a workflow_call has no
-# publish_release input) on a tag with the publish_release input ticked AND the repository variable
-# MOBILE_RELEASE_ENABLED set to 'true' (not set by default). It creates the tag's release or appends
-# to the one the desktop tag workflows made, and refuses to replace any asset that is not a mobile
-# asset (src/mobile/ci/release_assets.py). The APK/IPA artifacts are kept for 7 days.
-# src/mobile/tests_host/test_ci_release.py pins all of this.
+# This workflow never publishes; the APK/IPA are downloadable run artifacts kept 7 days.
 #
 # Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
 # Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
@@ -73,12 +66,7 @@ on:
         description: APK size experiment - compressed native libraries (smaller APK, bigger install)
         type: boolean
         default: false
-      publish_release:
-        description: Publish the mobile assets to this tag's GitHub release (also needs repository variable MOBILE_RELEASE_ENABLED=true)
-        type: boolean
-        default: false
   workflow_call:
-    # No publish_release input here: a calling workflow can never reach the release job.
     inputs:
       targets:
         description: all, android or ios
@@ -138,9 +126,9 @@ env:
   BUNDLED_PY: '3.13'
   APP_PACKAGE: com.glossarion.app
   # Optional device suites: 'optional' (off unless asked, non-blocking) or 'required' (on by
-  # default, blocking, needed by the release job). Flip a line to 'required' once its suite has
-  # passed in CI (README "Optional device suites"). The iOS simulator smoke passed in Build Mobile
-  # run 37728461336 (96da1ec6) and is required since U9; the Android UI tests stay optional until
+  # default, blocking). Flip a line to 'required' once its suite has passed in CI (README
+  # "Optional device suites"). The iOS simulator smoke passed in Build Mobile run 37728461336
+  # (96da1ec6) and is required since U9; the Android UI tests stay optional until
   # `flet test android` has passed once in CI.
   IOS_SIMULATOR_SMOKE_POLICY: required
   ANDROID_UI_TESTS_POLICY: optional
@@ -157,8 +145,6 @@ jobs:
       build_version: ${{ steps.meta.outputs.build_version }}
       build_number: ${{ steps.meta.outputs.build_number }}
       artifact_prefix: ${{ steps.meta.outputs.artifact_prefix }}
-      is_release: ${{ steps.meta.outputs.is_release }}
-      tag: ${{ steps.meta.outputs.tag }}
       run_android: ${{ steps.opts.outputs.run_android }}
       run_ios: ${{ steps.opts.outputs.run_ios }}
       emulator_smoke: ${{ steps.opts.outputs.emulator_smoke }}
@@ -260,14 +246,12 @@ jobs:
         id: version
         run: uv run --no-project python src/mobile/tools/version_info.py --github-output
 
-      - name: Release metadata
+      - name: Build metadata
         id: meta
         env:
           VI_BUILD_VERSION: ${{ steps.version.outputs.build_version }}
           VI_BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
           VI_ARTIFACT_PREFIX: ${{ steps.version.outputs.artifact_prefix }}
-          VI_IS_RELEASE: ${{ steps.version.outputs.is_release }}
-          VI_REF_TAG: ${{ steps.version.outputs.ref_tag }}
         run: |
           if [ -z "$VI_BUILD_VERSION" ] || [ -z "$VI_BUILD_NUMBER" ]; then
             echo "::error::version_info.py --github-output did not write build_version and build_number."
@@ -277,25 +261,10 @@ jobs:
             *[!0-9]*) echo "::error::build_number '$VI_BUILD_NUMBER' is not an integer."; exit 1 ;;
           esac
           prefix="${VI_ARTIFACT_PREFIX:-Glossarion_v${VI_BUILD_VERSION}}"
-          # version_info.py decides (pushed refs/tags/v* tag); fall back to the ref when it is silent.
-          is_release="${VI_IS_RELEASE:-false}"
-          tag="${VI_REF_TAG:-}"
-          if [ -z "$VI_IS_RELEASE" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            is_release=true
-            tag="$GITHUB_REF_NAME"
-          fi
-          if [ "$is_release" = true ] && [ -z "$tag" ]; then
-            tag="$GITHUB_REF_NAME"
-          fi
-          if [ "$is_release" = true ] && [ "$tag" != "v$VI_BUILD_VERSION" ]; then
-            echo "::warning title=Tag and version differ::Tag $tag does not match APP_VERSION $VI_BUILD_VERSION in src/app_version.py; the mobile builds are versioned $VI_BUILD_VERSION."
-          fi
           {
             echo "build_version=$VI_BUILD_VERSION"
             echo "build_number=$VI_BUILD_NUMBER"
             echo "artifact_prefix=$prefix"
-            echo "is_release=$is_release"
-            echo "tag=$tag"
           } | tee -a "$GITHUB_OUTPUT"
           {
             echo "## Glossarion Mobile $VI_BUILD_VERSION"
@@ -305,7 +274,6 @@ jobs:
             echo "| Build version | \`$VI_BUILD_VERSION\` |"
             echo "| Build number (versionCode / CFBundleVersion) | \`$VI_BUILD_NUMBER\` |"
             echo "| Artifact prefix | \`$prefix\` |"
-            echo "| Release | \`$is_release\` ${tag:+(\`$tag\`)} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Probe optional signing secrets
@@ -435,8 +403,8 @@ jobs:
           retention-days: 1
 
   # ==========================================================================
-  # wheels-android / wheels-ios: the security pins' mobile wheels (mobile-wheels.yml; cached,
-  # always rebuilt for a publish_release run). An iOS wheel failure never blocks Android.
+  # wheels-android / wheels-ios: the security pins' mobile wheels (mobile-wheels.yml; cached).
+  # An iOS wheel failure never blocks Android.
   # ==========================================================================
   wheels-android:
     name: Mobile wheels (Android)
@@ -444,7 +412,6 @@ jobs:
     uses: ./.github/workflows/mobile-wheels.yml
     with:
       platform: android
-      fresh: ${{ inputs.publish_release == true }}
 
   wheels-ios:
     name: Mobile wheels (iOS)
@@ -452,7 +419,6 @@ jobs:
     uses: ./.github/workflows/mobile-wheels.yml
     with:
       platform: ios
-      fresh: ${{ inputs.publish_release == true }}
 
   # ==========================================================================
   # android: APKs split per ABI (+ AAB when the upload keystore exists)
@@ -1330,115 +1296,3 @@ jobs:
           path: mobile-smoke-logs/
           if-no-files-found: warn
           retention-days: 14
-
-  # ==========================================================================
-  # release: manual opt-in only (see the publishing policy at the top). Creates the tag's release
-  # or appends to it (softprops/action-gh-release); never replaces an asset it does not own.
-  # ==========================================================================
-  release:
-    name: Publish mobile assets to the GitHub release
-    needs: [prepare, android, android-smoke, android-ui-tests, ios, ios-signed, ios-simulator-smoke]
-    if: >-
-      !cancelled()
-      && github.event_name == 'workflow_dispatch'
-      && inputs.publish_release == true
-      && vars.MOBILE_RELEASE_ENABLED == 'true'
-      && needs.prepare.result == 'success'
-      && needs.prepare.outputs.is_release == 'true'
-      && needs.android.result == 'success'
-      && needs.ios.result == 'success'
-      && (needs.android-smoke.result == 'success' || needs.android-smoke.result == 'skipped')
-      && (needs.ios-signed.result == 'success' || needs.ios-signed.result == 'skipped')
-      && (needs.prepare.outputs.ios_simulator_smoke_blocking != 'true' || needs.ios-simulator-smoke.result == 'success')
-      && (needs.prepare.outputs.ui_tests_blocking != 'true' || needs.android-ui-tests.result == 'success')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: write
-    # Serialises mobile publishes for a tag. The desktop tag workflows (build-linux.yml,
-    # build-macos.yml) publish to the same release without this group: softprops/action-gh-release
-    # resolves the shared-tag create race, and release_assets.py check refuses any file that would
-    # replace a non-mobile asset, so the mobile job only creates the release or appends to it.
-    concurrency:
-      group: github-release-${{ github.ref }}
-      cancel-in-progress: false
-    env:
-      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
-      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-      ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
-      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-    steps:
-      - name: Checkout (release tools)
-        uses: actions/checkout@v7
-        with:
-          sparse-checkout: |
-            src/mobile/tools
-            src/mobile/ci
-            src/mobile/app/glossarion_mobile
-
-      - name: Download Android artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: Z_Glossarion-Android-*
-          merge-multiple: true
-          path: dist
-
-      - name: Download unsigned IPA
-        uses: actions/download-artifact@v8
-        with:
-          name: Z_Glossarion-iOS-Unsigned
-          path: dist
-
-      - name: Download signed IPA
-        if: needs.ios-signed.result == 'success'
-        uses: actions/download-artifact@v8
-        with:
-          name: Z_Glossarion-iOS-Signed
-          path: dist
-
-      - name: Write AltStore source (points at the unsigned IPA asset)
-        run: >-
-          python3 src/mobile/tools/altstore_source.py
-          --ipa "dist/${ARTIFACT_PREFIX}_iOS_unsigned.ipa" --tag "$RELEASE_TAG"
-          --repo "$GITHUB_REPOSITORY" --out dist/altstore-source.json
-
-      - name: Checksums
-        run: python3 src/mobile/ci/release_assets.py checksums --dist dist --prefix "$ARTIFACT_PREFIX"
-
-      - name: Check the asset set and never clobber desktop assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          release_json="$RUNNER_TEMP/release.json"
-          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json" 2> "$RUNNER_TEMP/release.err"; then
-            if grep -q "HTTP 404" "$RUNNER_TEMP/release.err"; then
-              echo '{}' > "$release_json"  # no release yet: softprops creates it
-            else
-              cat "$RUNNER_TEMP/release.err"
-              exit 1
-            fi
-          fi
-          python3 src/mobile/ci/release_assets.py check --dist dist --prefix "$ARTIFACT_PREFIX" --release-json "$release_json"
-          {
-            echo "## Mobile release assets ($RELEASE_TAG)"
-            echo
-            echo '```'
-            ls -la dist
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload to Release (create or append)
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          files: dist/*
-          fail_on_unmatched_files: true
-          # Only mobile-named files are uploaded (checked above), so this replaces at most our
-          # own assets from an earlier run for the same tag.
-          overwrite_files: true
-          # The name, body and prerelease flag of a release the desktop made stay as they are;
-          # 'legacy' lets GitHub pick the latest release by date and version, so publishing
-          # mobile files for an older tag never makes it the latest.
-          make_latest: legacy
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

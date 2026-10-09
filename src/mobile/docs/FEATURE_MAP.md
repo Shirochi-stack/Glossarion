@@ -132,7 +132,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 68 | 📄 Load Glossary (toolbar) | Plan card glossary chip → PlanGlossarySheet › Load file…; Glossaries › Import → Use as manual glossary |  |
 | 69 | Splash screen + parallel module preload | Native splash, then the chat shell immediately; background warm import; Send `blocked` "Preparing engine…" + drawer status chip until it ends | Adapted: native splash, then the shell at once; until the warm import ends Send shows `blocked` "Preparing engine…" and the drawer status chip says so (no separate Boot View); undecryptable keys: Settings home notice |
 | 70 | First-run Welcome wizard | `/welcome` (step 1 = Sign in with ChatGPT for the default `authgpt/gpt-6-luna`); About › Welcome guide |  |
-| 71 | Update checker | About › Updates (Check now · Check on startup · Skip this version · release notes; `update_core`) | (U9) Self-install excluded; links to the APK for the device ABI / AltStore; a release without a mobile build says so |
+| 71 | Update checker | About › Updates (Check now · Check on startup · Skip this version · release notes; `update_core`) | (U9) Self-install excluded; links to the APK for the device ABI / the IPA when a release has one; mobile builds are never published (download the APK/IPA artifact from the Build Mobile run), so a release without a mobile build says so |
 | 72 | Theme / scaling | Settings › Appearance (theme, accent, text scale) | DPI scaling excluded; the OS handles it |
 | 73 | Keyboard: F11 fullscreen, Ctrl+/-/0 zoom | Chat ⋯ › Text size; Reader pinch → Aa font size; MediaViewer pinch zoom; Ctrl ± 0 on tablet keyboards | F11 n/a: mobile is always full screen |
 | 74 | Config load/decrypt/sanitize/auto-encrypt/save/backup | Automatic (config_store); Data › Backup; "keys could not be decrypted" banner |  |
@@ -1025,7 +1025,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 34 | Model Provider Information | ModelSheet ⓘ |  |
 | 35 | Check for Updates (manual) | About › Updates › Check now | (U9) |
 | 36 | Check for updates on startup | About › Updates | (U9) Once per session, only when a release has a file for this device |
-| 37 | Install downloaded update | About › Updates "Download APK" / AltStore link | **Excluded**: self-installing updates |
+| 37 | Install downloaded update | About › Updates "Download APK" / IPA link | **Excluded**: self-installing updates |
 | 38 | Automatic config backup before every save | Data › Backup (list) | Automatic |
 | 39 | Create config backup (manual) | Data › Backup › Create |  |
 | 40 | Config Backup Manager (restore/delete/open folder) | Data › Backup (restore / delete) | Adapted: no "open folder" |

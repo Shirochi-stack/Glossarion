@@ -1945,7 +1945,7 @@ Context & memory (rolling summary), Response handling (translation, truncation r
   - Debug mode; Check environment (redacted); HTTP logging; Save payloads; memory stats;
   - **Run self-test** (`/__selftest__?suite=smoke`), with a PASS/FAIL result card;
   - crash and freeze logs; "Share logs bundle" (secrets redacted); a previous-crash banner.
-- **Updates:** Check now · Check on startup · Skip version · release notes · "Download APK" (external browser) / "Open AltStore source". There is no self-install.
+- **Updates:** Check now · Check on startup · Skip version · release notes · "Download APK" / IPA links (external browser) when a release has a mobile file. Mobile builds are never published (download the APK/IPA artifact from the Build Mobile run), so a release normally shows "This release has no file for this device." and the release page link. There is no self-install.
 - **About:** version, build, Python / Flet versions, licenses, links, the in-app User guide (bundled docs Markdown), and the mascot.
 - **Danger zone:** "Reset settings to defaults". It confirms and creates an automatic backup first.
 

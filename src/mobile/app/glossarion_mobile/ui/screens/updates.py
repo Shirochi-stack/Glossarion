@@ -2,9 +2,9 @@
 
 **Check now** · **Check on startup** (the shared ``auto_update_check``) · **Skip this version** ·
 release notes · "Download APK" (Android: the APK for this device's ABI, opened in the browser)
-or "Add to AltStore / SideStore" + the IPA links (iOS). There is no self-install. The checks
-are the desktop's (``services.updates.UpdateService`` over ``update_core``); most releases carry
-no mobile files (the owner publishes them by hand, if ever), which the screen says plainly.
+or the IPA links (iOS), when a release has such a file. There is no self-install. The checks
+are the desktop's (``services.updates.UpdateService`` over ``update_core``); mobile builds are
+never published, so releases carry no mobile files, which the screen says plainly.
 
 ``await UpdatesFeature.install(app)`` wires the route into the shell's screen factory, marks
 the page implemented on the Settings home and runs the quiet startup check: once per session,
@@ -88,8 +88,9 @@ class UpdatesScreen(PageScreen):
                 self.startup_switch,
             ], key="updates-version"),
             self.release_holder,
-            ft.Text("Glossarion never installs updates by itself: Android opens the APK in your browser, "
-                    "iOS adds the AltStore source to AltStore or SideStore.",
+            ft.Text("Glossarion never installs updates by itself: a download link opens in your browser. "
+                    "Mobile builds are not published with GitHub releases, so a release usually has "
+                    "no file for this device.",
                     theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                     key="updates-note"),
         ])
@@ -154,13 +155,7 @@ class UpdatesScreen(PageScreen):
         return rows
 
     def _ios_rows(self, downloads: Any) -> list:
-        from glossarion_mobile.services.updates import altstore_links
-
         rows: list[ft.Control] = []
-        if downloads.altstore is not None:
-            for label, url in altstore_links(downloads.altstore.url):
-                rows.append(self._link_tile(f"Add to {label}", url, ft.Icons.STOREFRONT,
-                                            f"updates-{label.lower()}-{self._builds}"))
         if downloads.ipa is not None:
             rows.append(self._link_tile(f"Unsigned IPA ({downloads.ipa.size_mb:.0f} MB)", downloads.ipa.url,
                                         ft.Icons.DOWNLOAD, f"updates-ipa-{self._builds}"))
@@ -311,7 +306,7 @@ class UpdatesFeature:
         return ctx
 
     def open_url(self, url: str) -> Any:
-        """External application: the browser downloads an APK, AltStore/SideStore take their links."""
+        """External application: the browser downloads an APK or IPA, or shows the release page."""
         launcher = getattr(self.app, "url_launcher", None)
         if launcher is None:
             return None

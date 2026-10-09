@@ -3568,8 +3568,11 @@ Pinned by `tests/test_update_core.py` (oracle: `git show 1cd68178:src/update_man
   writes, check times, release state and message boxes on 12 scripted GitHub scenarios × silent × force_show.
 - Mobile: `HeadlessUpdateChecker` runs the same check on the mobile config (same `auto_update_check`,
   `last_update_check_time`, `skipped_versions` keys); About › Updates picks the APK for the device ABI or the
-  AltStore / SideStore links on iOS. The mobile app is never published (owner's rule), so a release without a
-  mobile asset is a normal answer ("…has no Android build. See the release page."). Self-install stays excluded.
+  IPA links on iOS when a release has one. Mobile builds are never published (owner's decision 2026-10-09: the
+  release job, `publish_release`, `ci/release_assets.py` and `tools/altstore_source.py` were removed; download the
+  APK/IPA artifact from the Build Mobile run), so a release without a mobile asset is the normal answer
+  ("…has no Android build. See the release page."); the AltStore source / checksum assets are no longer
+  recognised. Self-install stays excluded.
 
 
 ## U9 Tier B (plan dependency rule; src/mobile/pyproject.toml, tests_host/test_tier_b.py)
@@ -3681,7 +3684,8 @@ Pinned by `tests/parity/test_u9_gap_round3.py` (oracle: `git show 96da1ec6`) and
 - CI: python-app runs `tests/parity/test_u9_extractions.py`, `test_u9_gap_moves.py`, `test_u9_gap_round3.py`
   and `test_u9_gap_round4.py` (they pin the U9 desktop rewires; `git show` of 96da1ec6 needs the full
   history the job already fetches). Build Mobile: `IOS_SIMULATOR_SMOKE_POLICY: required` (passed in run
-  37728461336); the Android UI tests stay optional. The release job stays manual-only and gated.
+  37728461336); the Android UI tests stay optional. Build Mobile never publishes (no release job since
+  2026-10-09; download the APK/IPA artifact from the Build Mobile run, kept 7 days).
 
 ### Second review round (U9; mobile and test-only, no desktop change)
 - **Series glossary prefill.** The chat view keeps one "Provide Manual Glossary" source for every chat, and

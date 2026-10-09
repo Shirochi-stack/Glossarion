@@ -1,24 +1,27 @@
-"""CI and release tests for ``.github/workflows/build-mobile.yml`` (U9) and its release tools.
+"""CI tests for ``.github/workflows/build-mobile.yml`` (U9): no publishing, triggers, device suites.
 
-Pins the owner's no-release rule (2026-10-06) and the U9 CI plumbing:
+Pins the owner's decision (2026-10-09: "remove the publishing part of the workflow, we won't be
+ever using it like this") and the U9 CI plumbing:
 
+* the mobile app is never published by CI: build-mobile.yml has no release / publish job, no
+  ``publish_release`` input, no ``MOBILE_RELEASE_ENABLED`` gate, no release upload (softprops,
+  ``gh release``, upload-release actions, the GitHub API's releases), no ``GITHUB_TOKEN`` use
+  and no write permission anywhere, so a ``workflow_call`` cannot publish either (a called
+  workflow's token never exceeds its own ``contents: read``); the reusable wheels workflow and
+  composite action it uses publish nothing; no other workflow uploads a mobile file; the
+  release-only tools (``ci/release_assets.py``, ``tools/altstore_source.py``) are gone;
+* the APK / AAB / IPA are downloadable run artifacts kept 7 days;
 * triggers: only ``workflow_dispatch`` and ``workflow_call``; no push / tag / schedule trigger;
-  ``publish_release`` is a dispatch-only input; ``build-all.yml`` and every other workflow
-  leave ``build-mobile.yml`` alone; APK / AAB / IPA artifacts keep 7-day retention;
-* the release job's ``if:`` is evaluated (a small GitHub-expression evaluator below) for
-  push, tag, workflow_call and dispatch contexts: it is reachable only from a manual run on a
-  tag with ``publish_release`` ticked and ``vars.MOBILE_RELEASE_ENABLED == 'true'``, after the
-  builds (and every *required* optional suite) passed;
+  ``build-all.yml`` and every other workflow leave ``build-mobile.yml`` alone;
+* the prepare job computes the version, build number and artifact prefix (run under bash) and
+  has no release / tag detection; every ``needs.prepare.outputs.*`` the jobs read exists;
 * the optional device suites (iOS simulator smoke, Android UI tests): the prepare step's
   shell is run under bash for each input / policy combination; flipping a policy line to
   ``required`` is a one-line change that makes the suite default-on and blocking (the iOS
   smoke is required since U9, the Android UI tests stay optional); the iOS smoke keeps the
-  launch-environment trigger (never ``simctl openurl``);
-* ``tools/altstore_source.py`` writes what the old inline step wrote (a frozen copy of that
-  heredoc is run on the same IPA) and points at the unsigned IPA asset;
-* ``ci/release_assets.py``: complete mobile-only sets, sha256sum-format checksums, and the
-  never-clobber guard against desktop assets of the same release;
-* every asset name the workflow writes is one the in-app update check recognises;
+  launch-environment trigger (never ``simctl openurl``); a small GitHub-expression evaluator
+  below dry-runs the jobs' ``if:`` / ``continue-on-error``;
+* every APK / AAB / IPA name the build jobs write is one the in-app update check recognises;
 * ``ci/apk_size_report.py`` and ``tools/build.py`` (dry runs).
 
 Run from src/mobile:
@@ -27,12 +30,10 @@ Run from src/mobile:
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import math
 import os
-import plistlib
 import re
 import shutil
 import subprocess
@@ -46,17 +47,19 @@ MOBILE_DIR = Path(__file__).resolve().parents[1]
 REPO = MOBILE_DIR.parents[1]
 WORKFLOWS = REPO / ".github" / "workflows"
 BUILD_MOBILE = WORKFLOWS / "build-mobile.yml"
+MOBILE_WHEELS = WORKFLOWS / "mobile-wheels.yml"
+WHEELHOUSE_ACTION = REPO / ".github" / "actions" / "mobile-wheelhouse" / "action.yml"
 APP_DIR = MOBILE_DIR / "app"
 for path in (MOBILE_DIR / "tools", MOBILE_DIR / "ci", APP_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-import altstore_source  # noqa: E402
 import apk_size_report  # noqa: E402
-import release_assets  # noqa: E402
 from glossarion_mobile.services.updates import classify_asset  # noqa: E402
 
 yaml = pytest.importorskip("yaml")
+
+PREFIX = "Glossarion_v9.15.0"
 
 
 def _load(path: Path) -> dict:
@@ -66,6 +69,12 @@ def _load(path: Path) -> dict:
 def _triggers(workflow: dict) -> dict:
     # PyYAML (YAML 1.1) reads the bare key `on` as the boolean True.
     return workflow.get("on", workflow.get(True)) or {}
+
+
+def _code(path: Path) -> str:
+    """The file without its comment lines (comments may say what the workflow does not do)."""
+    return "\n".join(line for line in path.read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))
 
 
 @pytest.fixture(scope="module")
@@ -255,7 +264,141 @@ def test_expression_evaluator_semantics():
 
 
 # ---------------------------------------------------------------------------
-# triggers, inputs, other workflows, retention
+# no publishing (owner's decision, 2026-10-09)
+# ---------------------------------------------------------------------------
+
+BUILD_JOBS = {"prepare", "wheels-android", "wheels-ios", "android", "android-smoke", "android-ui-tests", "ios",
+              "ios-signed", "ios-simulator-smoke"}
+DISPATCH_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests", "android_legacy_packaging"}
+CALL_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests"}
+SIGNING_SECRETS = {"ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
+                   "IOS_DIST_CERT_P12_BASE64", "IOS_DIST_CERT_PASSWORD", "IOS_PROVISIONING_PROFILE_BASE64",
+                   "IOS_TEAM_ID"}
+
+# Anything that creates a release, uploads to one, pushes a tag or talks to the releases API.
+PUBLISH_PATTERNS = (
+    r"action-gh-release", r"create-release", r"upload-release", r"release-action", r"automatic-releases",
+    r"gh-action-pypi-publish", r"\bgh\s+(?:release|api)\b", r"/releases\b", r"\bgit\s+(?:push|tag)\b",
+    r"GITHUB_TOKEN", r"github\.token", r"\bGH_TOKEN\b",
+    # store / tester distribution (TestFlight, App Store Connect, Google Play, Firebase)
+    r"\baltool\b", r"\bfastlane\b", r"testflight", r"\btransporter\b", r"upload-google-play", r"androidpublisher",
+    r"appdistribution",
+)
+# What only the removed release job had.
+RELEASE_JOB_LEFTOVERS = (r"publish_release", r"MOBILE_RELEASE_ENABLED", r"is_release", r"altstore", r"SHA256SUMS",
+                         r"release_assets", r"github-release-", r"make_latest", r"overwrite_files")
+
+
+def _uses(workflow: dict) -> list:
+    out = []
+    for job in (workflow.get("jobs") or {}).values():
+        out.append(str(job.get("uses", "")))
+        out += [str(step.get("uses", "")) for step in job.get("steps", []) or []]
+    return [u for u in out if u]
+
+
+def _permission_values(node, found=None) -> list:
+    """Every value under any ``permissions`` key, anywhere in a loaded workflow."""
+    found = [] if found is None else found
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "permissions":
+                if isinstance(value, dict):
+                    found += [str(v) for v in value.values()]
+                else:
+                    found.append(str(value))  # read-all / write-all
+            else:
+                _permission_values(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _permission_values(item, found)
+    return found
+
+
+def test_workflow_has_no_release_or_publish_job(wf):
+    jobs = wf["jobs"]
+    assert set(jobs) == BUILD_JOBS  # a new job is a deliberate change here
+    for job_id, job in jobs.items():
+        label = f"{job_id} {job.get('name', '')}".lower()
+        assert "release" not in label and "publish" not in label and "deploy" not in label, job_id
+        assert job.get("environment") is None, job_id  # no deployment environment either
+    for uses in _uses(wf):
+        lowered = uses.lower()
+        assert "release" not in lowered and "publish" not in lowered, uses
+    code = _code(BUILD_MOBILE)
+    for pattern in PUBLISH_PATTERNS + RELEASE_JOB_LEFTOVERS:
+        assert not re.search(pattern, code, re.I), pattern
+    # the one comment line that states the rule
+    header = BUILD_MOBILE.read_text(encoding="utf-8").split("\nname:", 1)[0]
+    assert "# This workflow never publishes; the APK/IPA are downloadable run artifacts kept 7 days." in header
+    assert "release job" not in header and "publish_release" not in header
+
+
+def test_no_publish_release_input(wf):
+    triggers = _triggers(wf)
+    dispatch = triggers["workflow_dispatch"]["inputs"]
+    call = triggers["workflow_call"] or {}
+    assert set(dispatch) == DISPATCH_INPUTS
+    assert set(call.get("inputs") or {}) == CALL_INPUTS
+    for name in set(dispatch) | set(call.get("inputs") or {}):
+        assert "publish" not in name and "release" not in name, name
+    text = BUILD_MOBILE.read_text(encoding="utf-8")
+    assert "publish_release" not in text and "inputs.publish" not in text
+    # repository variables: only the iOS signing knobs
+    assert set(re.findall(r"\bvars\.([A-Za-z0-9_]+)", text)) == {"IOS_EXPORT_METHOD", "IOS_SIGNING_CERTIFICATE"}
+
+
+def test_permissions_are_read_only(wf):
+    assert wf["permissions"] == {"contents": "read"}
+    values = _permission_values(wf)
+    assert values == ["read"]  # the top-level block only; no job raises it
+    for job_id, job in wf["jobs"].items():
+        assert "permissions" not in job, job_id
+    code = _code(BUILD_MOBILE)
+    assert not re.search(r":\s*write\b", code) and "write-all" not in code
+    assert "contents: write" not in BUILD_MOBILE.read_text(encoding="utf-8")
+
+
+def test_workflow_call_cannot_publish(wf):
+    """A caller gets the same build jobs: the called workflow's token never exceeds its own
+    ``contents: read``, it accepts only the signing secrets, and nothing it calls publishes."""
+    call = _triggers(wf)["workflow_call"]
+    assert set(call.get("inputs") or {}) == CALL_INPUTS
+    assert set(call.get("secrets") or {}) == SIGNING_SECRETS
+    assert all(not (spec or {}).get("required") for spec in (call.get("secrets") or {}).values())
+    assert not (call.get("outputs") or {})  # nothing is handed back to a caller to upload
+    assert wf["permissions"] == {"contents": "read"}
+    secrets_used = set(re.findall(r"\bsecrets\.([A-Za-z0-9_]+)", BUILD_MOBILE.read_text(encoding="utf-8")))
+    assert secrets_used <= SIGNING_SECRETS, secrets_used - SIGNING_SECRETS
+    # the reusable wheels workflow: plain build inputs, no secrets, read-only, never fresh by default
+    for job_id in ("wheels-android", "wheels-ios"):
+        job = wf["jobs"][job_id]
+        assert job["uses"] == "./.github/workflows/mobile-wheels.yml"
+        assert set(job["with"]) == {"platform"} and "secrets" not in job, job_id
+    wheels = _load(MOBILE_WHEELS)
+    assert wheels["permissions"] == {"contents": "read"} and set(_permission_values(wheels)) == {"read"}
+    assert _triggers(wheels)["workflow_call"]["inputs"]["fresh"]["default"] is False
+    assert not (_triggers(wheels)["workflow_call"].get("secrets") or {})
+    # neither it nor the composite action the build jobs use publishes anything
+    for path in (MOBILE_WHEELS, WHEELHOUSE_ACTION):
+        code = _code(path)
+        for pattern in PUBLISH_PATTERNS:
+            assert not re.search(pattern, code, re.I), (path.name, pattern)
+    for uses in _uses(wheels) + [str(s.get("uses", "")) for s in _load(WHEELHOUSE_ACTION)["runs"].get("steps", [])]:
+        assert "release" not in uses.lower() and "publish" not in uses.lower(), uses
+
+
+def test_release_only_tools_are_gone():
+    assert not (MOBILE_DIR / "ci" / "release_assets.py").exists()
+    assert not (MOBILE_DIR / "tools" / "altstore_source.py").exists()
+    for script in sorted((MOBILE_DIR / "ci").glob("*.sh")):
+        text = script.read_text(encoding="utf-8")
+        for pattern in PUBLISH_PATTERNS:
+            assert not re.search(pattern, text, re.I), (script.name, pattern)
+
+
+# ---------------------------------------------------------------------------
+# triggers, other workflows, retention
 # ---------------------------------------------------------------------------
 
 def test_build_mobile_has_only_manual_and_call_triggers(wf):
@@ -270,35 +413,23 @@ def test_build_mobile_has_only_manual_and_call_triggers(wf):
                          on_block, re.M)
 
 
-def test_publish_release_is_dispatch_only_and_off_by_default(wf):
-    triggers = _triggers(wf)
-    dispatch = triggers["workflow_dispatch"]["inputs"]
-    assert dispatch["publish_release"]["type"] == "boolean" and dispatch["publish_release"]["default"] is False
-    call_inputs = (triggers["workflow_call"] or {}).get("inputs") or {}
-    assert "publish_release" not in call_inputs
-    # The wheels jobs only rebuild fresh for a publish run; nothing else reads the input.
-    text = BUILD_MOBILE.read_text(encoding="utf-8")
-    uses = re.findall(r"inputs\.publish_release[^\n]*", text)
-    assert all("== true" in line for line in uses), uses
-
-
-def _uses(workflow: dict) -> list:
-    out = []
-    for job in (workflow.get("jobs") or {}).values():
-        out.append(str(job.get("uses", "")))
-        out += [str(step.get("uses", "")) for step in job.get("steps", []) or []]
-    return out
-
-
-def test_no_other_workflow_calls_build_mobile():
+def test_no_other_workflow_calls_build_mobile_or_ships_mobile_files():
+    mobile_file = re.compile(r"\.(?:apk|aab|ipa)\b|android|ios|mobile|altstore", re.I)
     for path in WORKFLOWS.glob("*.y*ml"):
         if path.name == BUILD_MOBILE.name:
             continue
         workflow = _load(path)
         assert not any("build-mobile" in uses for uses in _uses(workflow)), path.name
-        code = "\n".join(line for line in path.read_text(encoding="utf-8").splitlines()
-                         if not line.lstrip().startswith("#"))
+        code = _code(path)
         assert "MOBILE_RELEASE_ENABLED" not in code and "build-mobile.yml" not in code, path.name
+        # nor names a mobile build artifact or file (e.g. a cross-run download + `gh release upload`)
+        assert not re.search(r"Z_Glossarion-(?:Android|iOS)|\.(?:apk|aab|ipa)\b", code, re.I), path.name
+        # the desktop tag workflows' release uploads carry desktop files only
+        for job in (workflow.get("jobs") or {}).values():
+            for step in job.get("steps", []) or []:
+                if "release" in str(step.get("uses", "")).lower():
+                    files = str((step.get("with") or {}).get("files", ""))
+                    assert files and not mobile_file.search(files), (path.name, files)
     build_all = _load(WORKFLOWS / "build-all.yml")
     assert set(_triggers(build_all)) == {"workflow_dispatch"}
     assert not any("mobile" in str(job.get("uses", "")) for job in build_all["jobs"].values())
@@ -317,101 +448,23 @@ def test_device_artifacts_keep_seven_days(wf):
     assert set(seen.values()) == {7}
 
 
-# ---------------------------------------------------------------------------
-# release job reachability (dry run of its `if:`)
-# ---------------------------------------------------------------------------
-
-def _release_ctx(**over) -> dict:
-    ctx = {
-        "github": {"event_name": "workflow_dispatch", "ref": "refs/tags/v9.15.0"},
-        "inputs": {"publish_release": True, "targets": "all"},
-        "vars": {"MOBILE_RELEASE_ENABLED": "true"},
-        "needs": {
-            "prepare": {"result": "success", "outputs": {"is_release": "true", "ios_simulator_smoke_blocking": "false",
-                                                          "ui_tests_blocking": "false"}},
-            "android": {"result": "success"}, "android-smoke": {"result": "success"},
-            "android-ui-tests": {"result": "skipped"}, "ios": {"result": "success"},
-            "ios-signed": {"result": "skipped"}, "ios-simulator-smoke": {"result": "skipped"},
-        },
-    }
-    for path, value in over.items():
-        node = ctx
-        parts = path.split("__")
-        for part in parts[:-1]:
-            node = node.setdefault(part.replace("_dash_", "-"), {})
-        key = parts[-1].replace("_dash_", "-")
-        if value is _DEL:
-            node.pop(key, None)
-        else:
-            node[key] = value
-    return ctx
-
-
-_DEL = object()
-
-
-def test_release_job_is_reachable_only_from_a_gated_manual_run(wf):
-    release = wf["jobs"]["release"]
-    cond = release["if"]
-    assert set(release["needs"]) == {"prepare", "android", "android-smoke", "android-ui-tests", "ios", "ios-signed",
-                                     "ios-simulator-smoke"}
-    assert release["permissions"] == {"contents": "write"}
-    assert gh_eval(cond, _release_ctx()) is True  # the one way in
-
-    blocked = {
-        "tag push": dict(github__event_name="push", inputs={}),
-        "branch push": dict(github__event_name="push", github__ref="refs/heads/main", inputs={}),
-        # workflow_call: the caller's event, and no publish_release input exists for a call
-        "called from a tag push": dict(github__event_name="push", inputs={"targets": "all"}),
-        "called from a manual run": dict(inputs={"targets": "all", "emulator_smoke": True}),
-        "publish_release unticked": dict(inputs__publish_release=False),
-        "variable unset": dict(vars={}),
-        "variable not 'true'": dict(vars__MOBILE_RELEASE_ENABLED="1"),
-        "not a tag": dict(needs__prepare__outputs__is_release="false"),
-        "prepare failed": dict(needs__prepare__result="failure"),
-        "android failed": dict(needs__android__result="failure"),
-        "ios failed": dict(needs__ios__result="failure"),
-        "emulator smoke failed": dict(needs__android_dash_smoke__result="failure"),
-        "signed IPA failed": dict(needs__ios_dash_signed__result="failure"),
-        "pull request": dict(github__event_name="pull_request"),
-        "schedule": dict(github__event_name="schedule"),
-    }
-    for label, over in blocked.items():
-        assert gh_eval(cond, _release_ctx(**over)) is False, label
-    assert gh_eval(cond, _release_ctx(), status="cancelled") is False
-
-    # optional suites never block; a required one must pass
-    assert gh_eval(cond, _release_ctx(needs__ios_dash_simulator_dash_smoke__result="failure")) is True
-    assert gh_eval(cond, _release_ctx(needs__android_dash_ui_dash_tests__result="failure")) is True
-    required_ios = dict(needs__prepare__outputs__ios_simulator_smoke_blocking="true")
-    assert gh_eval(cond, _release_ctx(**required_ios, needs__ios_dash_simulator_dash_smoke__result="failure")) is False
-    assert gh_eval(cond, _release_ctx(**required_ios, needs__ios_dash_simulator_dash_smoke__result="success")) is True
-    required_ui = dict(needs__prepare__outputs__ui_tests_blocking="true")
-    assert gh_eval(cond, _release_ctx(**required_ui, needs__android_dash_ui_dash_tests__result="failure")) is False
-    assert gh_eval(cond, _release_ctx(**required_ui, needs__android_dash_ui_dash_tests__result="success")) is True
-
-
-def test_release_steps_use_the_tools_and_append_only(wf):
-    steps = wf["jobs"]["release"]["steps"]
-    runs = "\n".join(str(step.get("run", "")) for step in steps)
-    assert "src/mobile/tools/altstore_source.py" in runs and "python3 - <<" not in runs
-    assert "release_assets.py checksums " in runs and "release_assets.py check " in runs
-    assert runs.index("release_assets.py checksums ") < runs.index("release_assets.py check ")
-    upload = next(step for step in steps if str(step.get("uses", "")).startswith("softprops/action-gh-release@"))
-    assert upload["uses"] == "softprops/action-gh-release@v3"
-    assert upload["with"]["files"] == "dist/*" and upload["with"]["fail_on_unmatched_files"] is True
-    assert upload["with"]["make_latest"] == "legacy" and "draft" not in upload["with"]
-    assert "body" not in upload["with"] and "name" not in upload["with"]
-    concurrency = wf["jobs"]["release"]["concurrency"]
-    assert concurrency["group"] == "github-release-${{ github.ref }}" and concurrency["cancel-in-progress"] is False
-    # the tools run before the upload
-    names = [step.get("name", "") for step in steps]
-    assert names.index("Check the asset set and never clobber desktop assets") < names.index(
-        "Upload to Release (create or append)")
+def test_signed_builds_still_upload_their_artifacts(wf):
+    """Signing stays: the keystore makes release-signed APKs + the AAB, the Apple secrets a signed IPA."""
+    android = wf["jobs"]["android"]
+    names = [step.get("name", "") for step in android["steps"]]
+    assert "Configure release signing" in names and "Build AAB" in names and "Upload AAB" in names
+    ios_signed = wf["jobs"]["ios-signed"]
+    assert ios_signed["if"] == "needs.prepare.outputs.run_ios == 'true' && needs.prepare.outputs.has_ios_signing == 'true'"
+    upload = next(step for step in ios_signed["steps"] if step.get("name") == "Upload signed IPA")
+    assert upload["with"]["name"] == "Z_Glossarion-iOS-Signed" and upload["with"]["path"] == "dist/*.ipa"
+    ctx = {"needs": {"prepare": {"outputs": {"run_ios": "true", "has_ios_signing": "true"}}}}
+    assert gh_eval(ios_signed["if"], ctx) is True
+    ctx["needs"]["prepare"]["outputs"]["has_ios_signing"] = "false"
+    assert gh_eval(ios_signed["if"], ctx) is False
 
 
 # ---------------------------------------------------------------------------
-# optional device suites: the prepare step under bash
+# the prepare job under bash: run options and build metadata
 # ---------------------------------------------------------------------------
 
 def _bash():
@@ -423,30 +476,72 @@ def _bash():
     return shutil.which("bash")
 
 
-def _opts_script(workflow: dict) -> str:
-    step = next(s for s in workflow["jobs"]["prepare"]["steps"] if s.get("id") == "opts")
-    return step["run"]
+def _step(workflow: dict, step_id: str) -> dict:
+    return next(s for s in workflow["jobs"]["prepare"]["steps"] if s.get("id") == step_id)
 
 
-def _run_opts(tmp_path, workflow: dict, **inputs) -> dict:
+def _run_step(tmp_path, workflow: dict, step_id: str, env_extra: dict) -> dict:
+    """Run a prepare step's shell like the runner does; its $GITHUB_OUTPUT lines as a dict
+    (``__summary__``: the job summary; ``__rc__`` / ``__err__`` on failure)."""
     bash = _bash()
     if bash is None:
         pytest.skip("bash not available")
-    script = tmp_path / "opts.sh"
-    script.write_bytes(_opts_script(workflow).encode("utf-8"))
-    out = tmp_path / "github_output.txt"
+    script = tmp_path / f"{step_id}.sh"
+    script.write_bytes(_step(workflow, step_id)["run"].encode("utf-8"))
+    out = tmp_path / f"{step_id}_output.txt"
     out.write_text("", encoding="utf-8")
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("IN_", "GITHUB_"))}
+    summary = tmp_path / f"{step_id}_summary.md"
+    summary.write_text("", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("IN_", "GITHUB_", "VI_"))}
     env.update({k: str(v) for k, v in workflow.get("env", {}).items()})
-    env.update({f"IN_{k.upper()}": ("true" if v is True else "false" if v is False else str(v))
-                for k, v in inputs.items()})
+    env.update(env_extra)
     env["GITHUB_OUTPUT"] = out.as_posix()
+    env["GITHUB_STEP_SUMMARY"] = summary.as_posix()
     proc = subprocess.run([bash, "--noprofile", "--norc", "-eo", "pipefail", script.as_posix()], env=env,
                           capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         return {"__rc__": proc.returncode, "__err__": proc.stdout + proc.stderr}
-    return dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines() if "=" in line)
+    result = dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines() if "=" in line)
+    result["__summary__"] = summary.read_text(encoding="utf-8")
+    return result
 
+
+def _run_opts(tmp_path, workflow: dict, **inputs) -> dict:
+    env = {f"IN_{k.upper()}": ("true" if v is True else "false" if v is False else str(v)) for k, v in inputs.items()}
+    result = _run_step(tmp_path, workflow, "opts", env)
+    result.pop("__summary__", None)
+    return result
+
+
+def test_build_metadata_without_release_detection(tmp_path, wf):
+    prepare = wf["jobs"]["prepare"]
+    outputs = prepare["outputs"]
+    assert {"build_version", "build_number", "artifact_prefix"} <= set(outputs)
+    assert not any("release" in key or key == "tag" for key in outputs), sorted(outputs)
+    # every prepare output a job reads exists
+    read = set(re.findall(r"needs\.prepare\.outputs\.([A-Za-z0-9_]+)", BUILD_MOBILE.read_text(encoding="utf-8")))
+    assert read and read <= set(outputs), read - set(outputs)
+    meta = _step(wf, "meta")
+    assert meta["name"] == "Build metadata"
+    assert set(meta["env"]) == {"VI_BUILD_VERSION", "VI_BUILD_NUMBER", "VI_ARTIFACT_PREFIX"}
+    # a tag run and a branch run produce the same three values, and nothing about a release
+    for ref in ("refs/tags/v9.15.0", "refs/heads/main", "refs/tags/v1.0.0"):
+        env = {"VI_BUILD_VERSION": "9.15.0", "VI_BUILD_NUMBER": "9150000", "VI_ARTIFACT_PREFIX": "",
+               "GITHUB_REF": ref, "GITHUB_REF_NAME": ref.rsplit("/", 1)[-1]}
+        result = _run_step(tmp_path, wf, "meta", env)
+        summary = result.pop("__summary__")
+        assert result == {"build_version": "9.15.0", "build_number": "9150000", "artifact_prefix": PREFIX}, ref
+        assert "Build number" in summary and "Release" not in summary and "Tag" not in summary
+    given = _run_step(tmp_path, wf, "meta", {"VI_BUILD_VERSION": "9.15.0", "VI_BUILD_NUMBER": "9150001",
+                                             "VI_ARTIFACT_PREFIX": "Glossarion_v9.15.0"})
+    assert given["build_number"] == "9150001" and given["artifact_prefix"] == PREFIX
+    assert _run_step(tmp_path, wf, "meta", {"VI_BUILD_VERSION": "9.15.0", "VI_BUILD_NUMBER": "9.15"}).get("__rc__")
+    assert _run_step(tmp_path, wf, "meta", {"VI_BUILD_VERSION": "", "VI_BUILD_NUMBER": "9150000"}).get("__rc__")
+
+
+# ---------------------------------------------------------------------------
+# optional device suites: the prepare step under bash
+# ---------------------------------------------------------------------------
 
 def test_suite_policies_today(wf):
     # U9: the iOS simulator smoke passed in Build Mobile run 37728461336 (96da1ec6) and is required; the
@@ -513,7 +608,7 @@ def test_promoting_a_suite_is_one_line(tmp_path, wf, policy, suite, platform_inp
     assert _run_opts(tmp_path, flipped, **{suite: "off"})[suite] == "false"
     other = "android" if platform_input == "ios" else "ios"
     assert _run_opts(tmp_path, flipped, targets=other)[suite] == "false"
-    # the job then fails the run (continue-on-error false) and the release needs it
+    # the job then fails the run (continue-on-error false)
     job = flipped["jobs"]["ios-simulator-smoke" if suite == "ios_simulator_smoke" else "android-ui-tests"]
     ctx = {"needs": {"prepare": {"outputs": {f"{suite}_blocking": out[f"{suite}_blocking"]}}}}
     assert gh_eval(job["continue-on-error"], ctx) is False
@@ -547,180 +642,12 @@ def test_android_ui_tests_job_runs_flet_test_on_the_emulator(wf):
 
 
 # ---------------------------------------------------------------------------
-# AltStore source
+# artifact names and the in-app update check
 # ---------------------------------------------------------------------------
-
-# The inline writer the release job ran before U9 (build-mobile.yml at 1cd68178), frozen.
-LEGACY_ALTSTORE_WRITER = r'''
-import datetime, json, os, pathlib, plistlib, zipfile
-
-dist = pathlib.Path("dist")
-prefix = os.environ["ARTIFACT_PREFIX"]
-tag = os.environ["RELEASE_TAG"]
-repo = os.environ["GITHUB_REPOSITORY"]
-ipa = dist / f"{prefix}_iOS_unsigned.ipa"
-with zipfile.ZipFile(ipa) as archive:
-    plist_name = next(
-        name for name in archive.namelist()
-        if name.startswith("Payload/") and name.endswith(".app/Info.plist") and name.count("/") == 2
-    )
-    info = plistlib.loads(archive.read(plist_name))
-releases = f"https://github.com/{repo}/releases"
-privacy = {key: value for key, value in info.items()
-           if key.startswith("NS") and key.endswith("UsageDescription")}
-source = {
-    "name": "Glossarion",
-    "identifier": f"{info['CFBundleIdentifier']}.source",
-    "sourceURL": f"{releases}/latest/download/altstore-source.json",
-    "website": f"https://github.com/{repo}",
-    "apps": [{
-        "name": "Glossarion",
-        "bundleIdentifier": info["CFBundleIdentifier"],
-        "developerName": "Glossarion contributors",
-        "subtitle": "AI novel and manga translator",
-        "localizedDescription": "Translate novels, EPUBs, PDFs and manga with your own AI models.",
-        "iconURL": f"https://raw.githubusercontent.com/{repo}/{tag}/src/mobile/app/assets/icon.png",
-        "tintColor": "E18F98",
-        "category": "utilities",
-        "appPermissions": {"entitlements": [], "privacy": privacy},
-        "versions": [{
-            "version": info["CFBundleShortVersionString"],
-            "buildVersion": str(info["CFBundleVersion"]),
-            "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "localizedDescription": f"Glossarion {tag}",
-            "downloadURL": f"{releases}/download/{tag}/{ipa.name}",
-            "size": ipa.stat().st_size,
-            "minOSVersion": str(info.get("MinimumOSVersion", "13.0")),
-        }],
-    }],
-    "news": [],
-}
-(dist / "altstore-source.json").write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
-'''
-
-PREFIX = "Glossarion_v9.15.0"
-INFO = {
-    "CFBundleIdentifier": "com.glossarion.app", "CFBundleShortVersionString": "9.15.0", "CFBundleVersion": "9150000",
-    "MinimumOSVersion": "13.0", "CFBundleExecutable": "Runner",
-    "NSLocalNetworkUsageDescription": "Glossarion connects to model servers on your local network.",
-    "NSCameraUsageDescription": "Not used", "UIFileSharingEnabled": True,
-}
-
-
-def _ipa(path: Path, info: dict, *, binary: bool = False) -> Path:
-    fmt = plistlib.FMT_BINARY if binary else plistlib.FMT_XML
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("Payload/Runner.app/Info.plist", plistlib.dumps(info, fmt=fmt))
-        archive.writestr("Payload/Runner.app/Frameworks/App.framework/Info.plist", plistlib.dumps({"x": 1}))
-        archive.writestr("Payload/Runner.app/Runner", b"\0" * 4096)
-    return path
-
-
-def test_altstore_source_matches_the_legacy_inline_writer(tmp_path):
-    dist = tmp_path / "dist"
-    dist.mkdir()
-    ipa = _ipa(dist / f"{PREFIX}_iOS_unsigned.ipa", INFO)
-    env = dict(os.environ, ARTIFACT_PREFIX=PREFIX, RELEASE_TAG="v9.15.0", GITHUB_REPOSITORY="owner/repo")
-    subprocess.run([sys.executable, "-I", "-c", LEGACY_ALTSTORE_WRITER], cwd=str(tmp_path), env=env, check=True,
-                   timeout=60)
-    legacy = json.loads((dist / "altstore-source.json").read_text(encoding="utf-8"))
-    out = tmp_path / "new.json"
-    assert altstore_source.main(["--ipa", str(ipa), "--tag", "v9.15.0", "--repo", "owner/repo", "--out", str(out)]) == 0
-    new = json.loads(out.read_text(encoding="utf-8"))
-    for doc in (legacy, new):
-        date = doc["apps"][0]["versions"][0].pop("date")
-        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", date)
-    assert new == legacy
-    version = new["apps"][0]["versions"][0]
-    assert version["downloadURL"] == f"https://github.com/owner/repo/releases/download/v9.15.0/{PREFIX}_iOS_unsigned.ipa"
-    assert version["size"] == ipa.stat().st_size and version["buildVersion"] == "9150000"
-    assert new["sourceURL"] == "https://github.com/owner/repo/releases/latest/download/altstore-source.json"
-    assert set(new["apps"][0]["appPermissions"]["privacy"]) == {"NSLocalNetworkUsageDescription", "NSCameraUsageDescription"}
-    assert out.read_bytes().endswith(b"}\n")
-
-
-def test_altstore_source_options_and_errors(tmp_path, monkeypatch, capsys):
-    ipa = _ipa(tmp_path / f"{PREFIX}_iOS_unsigned.ipa", dict(INFO, MinimumOSVersion=None) | {"MinimumOSVersion": "15.0"},
-               binary=True)
-    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-    assert altstore_source.main(["--ipa", str(ipa), "--tag", "v9.15.0", "--date", "2026-10-09T00:00:00Z",
-                                 "--source-url", "https://example.invalid/s.json"]) == 0
-    doc = json.loads((tmp_path / "altstore-source.json").read_text(encoding="utf-8"))
-    assert doc["sourceURL"] == "https://example.invalid/s.json" and doc["website"] == "https://github.com/o/r"
-    assert doc["apps"][0]["versions"][0]["date"] == "2026-10-09T00:00:00Z"
-    assert doc["apps"][0]["versions"][0]["minOSVersion"] == "15.0"
-    empty = tmp_path / "empty.ipa"
-    with zipfile.ZipFile(empty, "w") as archive:
-        archive.writestr("Payload/Runner.app/Frameworks/X.framework/Info.plist", b"x")
-    assert altstore_source.main(["--ipa", str(empty), "--tag", "v1", "--repo", "o/r"]) == 1
-    (tmp_path / "bad.ipa").write_bytes(b"not a zip")
-    assert altstore_source.main(["--ipa", str(tmp_path / "bad.ipa"), "--tag", "v1", "--repo", "o/r"]) == 1
-    no_version = _ipa(tmp_path / "nov.ipa", {"CFBundleIdentifier": "x"})
-    assert altstore_source.main(["--ipa", str(no_version), "--tag", "v1", "--repo", "o/r"]) == 1
-    assert "no CFBundleShortVersionString" in capsys.readouterr().err
-
-
-# ---------------------------------------------------------------------------
-# release assets
-# ---------------------------------------------------------------------------
-
-def _dist(tmp_path, names) -> Path:
-    dist = tmp_path / "dist"
-    dist.mkdir(exist_ok=True)
-    for name in names:
-        (dist / name).write_bytes(name.encode("utf-8") * 3)
-    return dist
-
-
-def test_expected_set_and_problems():
-    names = release_assets.expected_names(PREFIX, debug_signed=True, aab=False, signed_ipa=False)
-    assert names == {f"{PREFIX}_Android_arm64-v8a_debugsigned.apk", f"{PREFIX}_Android_x86_64_debugsigned.apk",
-                     f"{PREFIX}_iOS_unsigned.ipa", "altstore-source.json", f"{PREFIX}_mobile_SHA256SUMS.txt"}
-    assert release_assets.set_problems(names, PREFIX) == []
-    full = release_assets.expected_names(PREFIX, debug_signed=False, aab=True, signed_ipa=True)
-    assert release_assets.set_problems(full, PREFIX) == []
-    assert any("missing" in p for p in release_assets.set_problems(names - {"altstore-source.json"}, PREFIX))
-    assert any("not a mobile release asset" in p for p in release_assets.set_problems(names | {"notes.txt"}, PREFIX))
-    assert any("does not start with" in p
-               for p in release_assets.set_problems(names | {"Glossarion_v9.14.0_iOS.ipa"}, PREFIX))
-    mixed = names | {f"{PREFIX}_Android_x86_64.apk"}
-    assert any("mixed" in p for p in release_assets.set_problems(mixed, PREFIX))
-    # every mobile name the release writes is one the app's update check recognises
-    assert all(classify_asset(name) for name in full | names)
-
-
-def test_never_clobber_desktop_assets():
-    names = release_assets.expected_names(PREFIX, debug_signed=False, aab=False, signed_ipa=False)
-    desktop = {"assets": [{"name": "Glossarion v9.15.0.exe"}, {"name": "Glossarion_v9.15.0_MAC.dmg"},
-                          {"name": f"{PREFIX}_Android_arm64-v8a.apk"}]}  # our own asset from an earlier run
-    assert release_assets.clobber_problems(names, desktop) == []
-    assert release_assets.clobber_problems(names, {}) == [] and release_assets.clobber_problems(names, None) == []
-    clash = release_assets.clobber_problems(names | {"Glossarion v9.15.0.exe"}, desktop)
-    assert clash and "not a mobile asset" in clash[0]
-
-
-def test_checksums_and_check_cli(tmp_path, capsys):
-    names = sorted(release_assets.expected_names(PREFIX, debug_signed=True, aab=False, signed_ipa=False)
-                   - {f"{PREFIX}_mobile_SHA256SUMS.txt"})
-    dist = _dist(tmp_path, names)
-    assert release_assets.main(["checksums", "--dist", str(dist), "--prefix", PREFIX]) == 0
-    sums = (dist / f"{PREFIX}_mobile_SHA256SUMS.txt").read_bytes().decode("utf-8")
-    expected = "".join(f"{hashlib.sha256((dist / n).read_bytes()).hexdigest()}  {n}\n" for n in names)
-    assert sums == expected  # sha256sum format, LF, the sums file itself excluded
-    release = tmp_path / "release.json"
-    release.write_text(json.dumps({"assets": [{"name": "Glossarion v9.15.0.exe"}]}), encoding="utf-8")
-    assert release_assets.main(["check", "--dist", str(dist), "--prefix", PREFIX, "--release-json", str(release)]) == 0
-    release.write_text("{}", encoding="utf-8")
-    assert release_assets.main(["check", "--dist", str(dist), "--prefix", PREFIX, "--release-json", str(release)]) == 0
-    (dist / "Glossarion v9.15.0.exe").write_bytes(b"x")
-    release.write_text(json.dumps({"assets": [{"name": "Glossarion v9.15.0.exe"}]}), encoding="utf-8")
-    assert release_assets.main(["check", "--dist", str(dist), "--prefix", PREFIX, "--release-json", str(release)]) == 1
-    assert "::error title=Mobile release assets::" in capsys.readouterr().out
-
 
 def test_workflow_asset_names_are_known_to_the_update_check(wf):
     """The names the build jobs write (Collect APKs, Collect AAB, IPA packaging) classify as
-    mobile assets in services/updates.py, and the release's own files too."""
+    mobile files in services/updates.py; nothing else the workflow writes does."""
     text = BUILD_MOBILE.read_text(encoding="utf-8")
     templates = set(re.findall(r'"?(?:dist/)?\$\{ARTIFACT_PREFIX\}(_[A-Za-z0-9_.${}-]+)"?', text))
     rendered = set()
@@ -735,6 +662,9 @@ def test_workflow_asset_names_are_known_to_the_update_check(wf):
     for name in rendered:
         if name.endswith((".apk", ".aab", ".ipa")):
             assert classify_asset(name) is not None, name
+        else:
+            assert classify_asset(name) is None, name  # e.g. the simulator zip
+    assert classify_asset("altstore-source.json") is None and classify_asset(f"{PREFIX}_mobile_SHA256SUMS.txt") is None
 
 
 # ---------------------------------------------------------------------------

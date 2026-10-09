@@ -6,19 +6,18 @@ The release check is the desktop's: ``update_core.HeadlessUpdateChecker`` runs t
 ``config.json`` through :class:`StoreConfigHost`, so desktop and mobile share
 ``auto_update_check``, ``last_update_check_time`` and ``skipped_versions``.
 
-What is mobile-only is the asset choice: a release carries the files ``build-mobile.yml``
-publishes (only when the owner runs its gated release job by hand):
+What is mobile-only is the asset choice. Mobile builds are never published (owner's rule,
+2026-10-09): ``build-mobile.yml`` only keeps the APK/IPA as run artifacts, so GitHub releases
+are desktop-only and "no file for this phone" is the ordinary answer, never an error. A release
+asset is offered only when it carries a name the build jobs write:
 
     <prefix>_Android_<abi>[_debugsigned].apk   Android, one per ABI (arm64-v8a, x86_64)
     <prefix>_Android.aab                       Play bundle (never offered in the app)
-    <prefix>_iOS_unsigned.ipa                  AltStore / SideStore
+    <prefix>_iOS_unsigned.ipa                  unsigned IPA (sideloading)
     <prefix>_iOS.ipa                           signed IPA (devices in the provisioning profile)
-    altstore-source.json                       AltStore source (src/mobile/tools/altstore_source.py)
-    <prefix>_mobile_SHA256SUMS.txt             checksums
 
-Most releases are desktop-only, so "no file for this phone" is an ordinary answer, never an
-error. Nothing here installs anything: Android opens the APK link in the browser, iOS hands
-the AltStore source to AltStore / SideStore. Importing this module imports no backend module.
+Nothing here installs anything: a download link opens in the browser. Importing this module
+imports no backend module.
 """
 
 from __future__ import annotations
@@ -29,16 +28,14 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
-from urllib.parse import quote
 
 __all__ = [
-    "ALTSTORE_SOURCE_ASSET", "MobileAsset", "MobileDownloads", "StoreConfigHost", "UPDATE_CONFIG_KEYS",
-    "UpdateResult", "UpdateService", "altstore_links", "classify_asset", "releases_page", "select_downloads",
+    "MobileAsset", "MobileDownloads", "StoreConfigHost", "UPDATE_CONFIG_KEYS", "UpdateResult", "UpdateService",
+    "classify_asset", "releases_page", "select_downloads",
 ]
 
 log = logging.getLogger("glossarion.updates")
 
-ALTSTORE_SOURCE_ASSET = "altstore-source.json"
 #: config.json keys the moved desktop methods read and write (shared with the desktop).
 UPDATE_CONFIG_KEYS = ("auto_update_check", "last_update_check_time", "skipped_versions")
 
@@ -52,11 +49,9 @@ def _core() -> Any:
 
 
 def classify_asset(name: str) -> Optional[str]:
-    """``apk`` / ``aab`` / ``ipa`` (unsigned) / ``ipa_signed`` / ``altstore`` / ``checksums`` for a
-    mobile release asset (the names build-mobile.yml writes), else None (desktop files)."""
+    """``apk`` / ``aab`` / ``ipa`` (unsigned) / ``ipa_signed`` for a mobile build file (the names
+    the build-mobile.yml build jobs write), else None (desktop files and anything else)."""
     lower = os.path.basename(str(name or "")).lower()
-    if lower == ALTSTORE_SOURCE_ASSET:
-        return "altstore"
     if "glossarion" not in lower:
         return None
     if _APK.search(lower):
@@ -67,8 +62,6 @@ def classify_asset(name: str) -> Optional[str]:
         return "ipa"
     if lower.endswith("_ios.ipa"):
         return "ipa_signed"
-    if lower.endswith("_mobile_sha256sums.txt"):
-        return "checksums"
     return None
 
 
@@ -96,15 +89,13 @@ class MobileDownloads:
     other_apks: list = field(default_factory=list)
     ipa: Optional[MobileAsset] = None
     ipa_signed: Optional[MobileAsset] = None
-    altstore: Optional[MobileAsset] = None
-    checksums: Optional[MobileAsset] = None
 
     @property
     def available(self) -> bool:
         if self.platform == "android":
             return self.apk is not None or bool(self.other_apks)
         if self.platform == "ios":
-            return self.altstore is not None or self.ipa is not None or self.ipa_signed is not None
+            return self.ipa is not None or self.ipa_signed is not None
         return False
 
 
@@ -143,17 +134,7 @@ def select_downloads(release: Optional[dict], platform: str, arch: str) -> Mobil
             out.ipa = asset
         elif asset.kind == "ipa_signed" and out.ipa_signed is None:
             out.ipa_signed = asset
-        elif asset.kind == "altstore" and out.altstore is None:
-            out.altstore = asset
-        elif asset.kind == "checksums" and out.checksums is None:
-            out.checksums = asset
     return out
-
-
-def altstore_links(source_url: str) -> list:
-    """``[(label, url)]`` that add an AltStore source in AltStore and SideStore."""
-    encoded = quote(str(source_url or ""), safe="")
-    return [("AltStore", f"altstore://source?url={encoded}"), ("SideStore", f"sidestore://source?url={encoded}")]
 
 
 def releases_page() -> str:
