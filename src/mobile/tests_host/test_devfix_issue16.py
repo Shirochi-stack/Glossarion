@@ -776,6 +776,18 @@ def test_owner_issue16_resume_after_the_chats_profile_was_renamed_or_deleted(iso
         from glossarion_mobile.ui.screens.profiles import ProfileService
 
         server.set_delay("translation", 0.05)  # a run long enough to stop in the middle
+        # After 3 chapter replies the fake model answers slowly, so the Stop lands with most of the book
+        # left on any runner (Build Mobile 37977210280: a fast runner finished every chapter first and
+        # 'the resumed run sent nothing'). Normal speed again before Resume.
+        pace = {"replies": 0, "slow_after": 3}
+
+        def pace_replies(record):
+            if record.kind == "translation":
+                pace["replies"] += 1
+                if pace["slow_after"] is not None and pace["replies"] >= pace["slow_after"]:
+                    server.set_delay("translation", 1.0)
+
+        server.on_response.append(pace_replies)
         defaults = prompt_profiles.profile_state_from_config({}).default_prompts
         universal_line = _signature_line(defaults["Universal"])
         book = fixtures.build_tiny_epub(picks / "resume_book.epub", chapters=30)
@@ -821,6 +833,8 @@ def test_owner_issue16_resume_after_the_chats_profile_was_renamed_or_deleted(iso
             for thread in list(runs.finish_threads):
                 await asyncio.to_thread(thread.join, 60)
             await driver.pump(300)
+            pace["slow_after"] = None
+            server.set_delay("translation", 0.05)
 
             # ---- Manage…: the chat's profile is renamed / deleted (the global profile stays) -------------------
             service = ProfileService(store)
