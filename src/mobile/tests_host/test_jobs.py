@@ -510,6 +510,71 @@ def test_api_client_log_records_reach_the_job_and_are_detached_after_it(tmp_path
     service.close()
 
 
+def test_headers_job_routes_each_api_record_once_and_leaves_no_handler(tmp_path, monkeypatch):
+    """Tools › Translate headers (DF2 verify): the shared ``translate_headers_now`` attaches the API client log
+    handler to its own view (the desktop re-attach), whose ``append_log`` is the job's log. The kind runs
+    without JobService's host handler (``KindInfo.own_client_logs``) and detaches the view's when the headers are
+    done: each record reaches the job once (before: twice, two handlers), and no handler outlives the job (before:
+    the view's stayed on the loggers and every later job's records were appended to the finished headers job)."""
+    import logging
+
+    if str(SRC_DIR) not in sys.path:
+        sys.path.append(str(SRC_DIR))
+    pytest.importorskip("job_runner")
+    headers_core = pytest.importorskip("translate_headers_standalone")
+    fake = FakeBackend(str(tmp_path / "out"))
+    loggers = ("unified_api_client", "httpx", "requests.packages.urllib3", "openai")
+
+    class RealScopeBackend(JobBackend):
+        def make_owner(self, config, *, host):
+            owner = FakeOwner(fake, config, host)
+            owner.api_client = None  # translate_headers_now attaches, then stops at its API client check
+            owner._build_epub_compile_env = lambda folder: None
+            owner.model_var = "gpt-x"
+            fake.owners.append(owner)
+            return owner
+
+        def reset_for_new_run(self, kind):
+            return 1
+
+        def request_stop(self, *, graceful, wait_for_chunks, force, set_stop_requested, log, **kwargs):
+            set_stop_requested()
+
+    def outer_ids() -> dict:
+        return {name: [getattr(h, "outer_id", None) for h in logging.getLogger(name).handlers
+                       if getattr(h, "outer_id", None) is not None] for name in loggers}
+
+    def run_now(gui, model, api_key, *, headers_runner=None, rebuild_epub=True):
+        logging.getLogger("unified_api_client").info("Created the API client (GLSETUP)")
+        headers_runner(gui)  # the REAL translate_headers_now: _attach_logging_handlers(gui) at its start
+        logging.getLogger("unified_api_client").info("📤 Sending API call (GLDUP)")  # what UnifiedClient logs
+        logging.getLogger("httpx").info('HTTP Request: POST http://127.0.0.1/v1 "HTTP/1.1 200 OK" (GLDUP)')
+
+    monkeypatch.setattr(headers_core, "run_translate_headers_now", run_now)
+    before = outer_ids()
+    book = epub(tmp_path)
+    folder = tmp_path / "out" / "book"
+    folder.mkdir(parents=True)
+    service = JobService(jobs_dir=tmp_path / "jobs", config_store=FakeStore(), backend=RealScopeBackend())
+    try:
+        job_id = service.submit(JobSpec("translate_headers", "Book", (book,),
+                                        params={"targets": [{"source": book, "folder": str(folder)}],
+                                                "rebuild_epub": False}))
+        assert service.wait_idle(TIMEOUT)
+        lines = service.read_log_tail(job_id)
+        for marker, count in (("Sending API call (GLDUP)", 1), ("HTTP Request: POST", 1), ("GLSETUP", 1)):
+            found = [line for line in lines if marker in line]
+            assert len(found) == count, (marker, found)
+        assert outer_ids() == before, (before, outer_ids())
+        logging.getLogger("unified_api_client").info("a later job's record (GLLATER)")
+        assert not any("GLLATER" in line for line in service.read_log_tail(job_id))
+    finally:
+        service.close()
+        for name in loggers:  # never leak a handler into the next test, whatever happened
+            lg = logging.getLogger(name)
+            lg.handlers = [h for h in lg.handlers if getattr(h, "outer_id", None) in before[name]]
+
+
 # ==========================================================================
 # Stop semantics
 # ==========================================================================

@@ -46,6 +46,7 @@ from glossarion_mobile.state.app_state import AppState, JobStripModel
 from glossarion_mobile.ui import text_scale as ts
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.chat_view import ChatView
+from glossarion_mobile.ui.chat.header import narrow_header
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.responsive import Layout, SizeClass, layout_for
@@ -764,10 +765,12 @@ class AppShell:
                 self.nav_drawer.width = new.drawer_width
             chat = self.chat_layout()
             current = self.chat_view.layout
-            if (chat.output_row, chat.compact_text, chat.text_scale) != (current.output_row, current.compact_text,
-                                                                         current.text_scale):
+            if (chat.output_row, chat.compact_text, chat.text_scale, narrow_header(chat.width)) != (
+                    current.output_row, current.compact_text, current.text_scale, narrow_header(current.width)):
                 # the composer's output-mode control follows the chat column, which also
-                # changes inside a class on tablets (UI_SPEC §2.3); no shell rebuild
+                # changes inside a class on tablets (UI_SPEC §2.3), and the narrow-phone header
+                # (a scratch chat's compact actions below 400 dp) follows a resize inside the phone
+                # class (split screen, a pop-up window, a display-size change); no shell rebuild
                 self.chat_view.apply_layout(chat)
             return False
         self.layout = new

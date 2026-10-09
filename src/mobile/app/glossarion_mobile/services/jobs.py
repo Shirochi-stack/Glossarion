@@ -100,6 +100,7 @@ __all__ = [
     "ACTIVE_STATES",
     "ISSUE_LABELS",
     "classify_issue",
+    "client_log_handlers",
     "format_duration",
     "is_glossary_question",
     "issue_label",
@@ -833,6 +834,33 @@ def _read_json(path: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def client_log_handlers(outer: Any) -> Iterator[None]:
+    """The desktop ``_attach_gui_logging_handlers`` for ``outer`` (anything with ``append_log``) while the
+    block runs: the shared GUI-free attach (``translate_headers_standalone._attach_logging_handlers``: the
+    ``unified_api_client``, ``httpx``, ``requests.packages.urllib3`` and ``openai`` loggers), and every
+    handler of ``outer`` (``outer_id``) detached again at the end - also one a shared function attached to
+    it again meanwhile (``translate_headers_now`` re-attaches to its view: the same ``outer_id`` replaces
+    ours, so a record is never written twice)."""
+    attached = False
+    try:
+        import translate_headers_standalone as headers_core
+
+        headers_core._attach_logging_handlers(outer)
+        attached = True
+    except Exception:
+        log.debug("the API client log handlers could not be attached", exc_info=True)
+    try:
+        yield
+    finally:
+        if attached:
+            outer_id = id(outer)
+            for logger in [logging.getLogger()] + [
+                    v for v in list(logging.Logger.manager.loggerDict.values()) if isinstance(v, logging.Logger)]:
+                if any(getattr(h, "outer_id", None) == outer_id for h in logger.handlers):
+                    logger.handlers = [h for h in logger.handlers if getattr(h, "outer_id", None) != outer_id]
+
+
 class JobBackend:
     """Lazy bridge to the shared GUI-free modules; tests pass a fake with the same methods.
 
@@ -886,25 +914,11 @@ class JobBackend:
         (``unified_api_client`` turns its print()s into them: "Sending API call", the streamed text, the
         retry notices; httpx, openai) reach the job's ``host.append_log`` - its log, request stream and
         live listeners - as the desktop GuiLogHandler sends them to the log panel. The shared GUI-free
-        attach (``translate_headers_standalone._attach_logging_handlers``); detached when the job ends
-        (each job has its own host)."""
-        attached = False
-        try:
-            import translate_headers_standalone as headers_core
-
-            headers_core._attach_logging_handlers(host)
-            attached = True
-        except Exception:
-            log.debug("the API client log handlers could not be attached", exc_info=True)
-        try:
+        attach (``client_log_handlers``); detached when the job ends (each job has its own host). A kind
+        whose shared code attaches its own handler (``KindInfo.own_client_logs``: the headers job) runs
+        without this one, or every record would reach the job twice."""
+        with client_log_handlers(host):
             yield
-        finally:
-            if attached:
-                outer = id(host)
-                for logger in [logging.getLogger()] + [
-                        v for v in list(logging.Logger.manager.loggerDict.values()) if isinstance(v, logging.Logger)]:
-                    if any(getattr(h, "outer_id", None) == outer for h in logger.handlers):
-                        logger.handlers = [h for h in logger.handlers if getattr(h, "outer_id", None) != outer]
 
     def reset_for_new_run(self, kind: str) -> Any:
         stop_control = self._module("stop_control")
@@ -1521,8 +1535,12 @@ class JobService:
 
     # ---- interrupted / resume -------------------------------------------------------------------------------
 
-    def resume(self, job_id: str) -> Optional[str]:
+    def resume(self, job_id: str, params: Optional[Mapping[str, Any]] = None) -> Optional[str]:
         """Resubmit an interrupted, stopped or failed job's spec (the backend resumes from its progress).
+
+        ``params``: the spec's params as the caller resubmits them (the chat's Resume moves the turn
+        index, the request number and a prompt profile that no longer exists: ``ChatRuns.resubmit``);
+        omitted, the spec runs as it was.
 
         An Interrupted job that was already resumed (its entry resolved ``resumed``) is refused:
         a second Resume (launch banner, Jobs page, the chat) would run the same work twice."""
@@ -1535,7 +1553,7 @@ class JobService:
                     return None
         if snap is None:
             return None
-        new_id = self.submit(snap.spec)
+        new_id = self.submit(snap.spec if params is None else replace(snap.spec, params=dict(params)))
         if from_interrupted:
             self._resolve_interrupted(job_id, "resumed")
         return new_id
@@ -1999,7 +2017,9 @@ class JobService:
                         self._issue_stop(job, pending_mode)
                 self._transition(job, JobState.RUNNING, only_from={JobState.STARTING})
                 ctx = JobContext(self, job, owner=owner, host=host, config=config)
-                client_logs = getattr(self.backend, "client_logs", None)
+                # the kind's shared code may attach the API client log handler itself (the headers job's
+                # translate_headers_now, to its view): a second one would write every record twice
+                client_logs = None if getattr(kind, "own_client_logs", False) else getattr(self.backend, "client_logs", None)
                 with (client_logs(host) if callable(client_logs) else contextlib.nullcontext()), \
                         self._watching(job, host), self._draining(job):
                     result = kind.run(ctx)

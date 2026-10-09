@@ -99,7 +99,7 @@ def _model_and_key(owner: Any) -> tuple:
 
 
 def run(ctx: Any) -> dict:
-    from glossarion_mobile.services.jobs import JobError
+    from glossarion_mobile.services.jobs import JobError, client_log_handlers
 
     owner = ctx.owner
     params = ctx.params or {}
@@ -131,7 +131,12 @@ def run(ctx: Any) -> dict:
         return result
 
     model, api_key = _model_and_key(owner)
-    headers_core.run_translate_headers_now(view, model, api_key, headers_runner=runner, rebuild_epub=False)
+    # The API client's log records reach the job through ONE handler, the view's: translate_headers_now
+    # attaches it at its start (the desktop re-attach, same outer id), so this kind runs without JobService's
+    # host handler (``own_client_logs``) and attaches the view's from here on (the API client set-up logs
+    # too). It is detached when the headers are done, so it never outlives the job.
+    with client_log_handlers(view):
+        headers_core.run_translate_headers_now(view, model, api_key, headers_runner=runner, rebuild_epub=False)
     result = counts.get("result")
     successful, failed = result if isinstance(result, tuple) else (0, len(targets))
     ctx.set_result(headers_successful=successful, headers_failed=failed)
@@ -160,5 +165,6 @@ def run(ctx: Any) -> dict:
 
 
 KINDS = {
-    "translate_headers": {"verb": "Translating headers", "icon": "TITLE", "stop_kind": "translation", "run": run},
+    "translate_headers": {"verb": "Translating headers", "icon": "TITLE", "stop_kind": "translation", "run": run,
+                          "own_client_logs": True},
 }

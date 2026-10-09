@@ -28,9 +28,20 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-__all__ = ["DEFAULT_TIMEOUT", "RETRYABLE_ACTION_ERRORS", "UiDriver", "UiTimeout", "retryable_action_error"]
+__all__ = ["DEFAULT_TIMEOUT", "RETRYABLE_ACTION_ERRORS", "UiDriver", "UiTimeout", "regex_literal",
+           "retryable_action_error"]
 
 DEFAULT_TIMEOUT = float(os.environ.get("GLOSSARION_UI_TIMEOUT", "60"))
+
+#: The regular-expression syntax characters (ECMAScript's SyntaxCharacter, the same set in Python's ``re``):
+#: escaping exactly these keeps a pattern valid for Dart's RegExp in either mode and for ``re``.
+_REGEX_SYNTAX = re.compile(r"([\\^$.|?*+()\[\]{}])")
+
+
+def regex_literal(text: str) -> str:
+    """``text`` as a regular expression that matches it literally (``find_by_text_containing``'s pattern).
+    ``re.escape`` also escapes spaces and ``#&~-``, which Dart's RegExp rejects in unicode mode."""
+    return _REGEX_SYNTAX.sub(r"\\\1", str(text))
 
 #: Errors a device tap / text entry can hit while its target is still settling; ``UiDriver`` scrolls
 #: a step (or pumps) and retries them until the action's deadline:
@@ -94,8 +105,10 @@ class UiDriver:
         if text is not None:
             return await self.t.find_by_text(text)
         if contains is not None:
-            # Flutter's find.textContaining: keep flows to plain words (no regex characters).
-            return await self.t.find_by_text_containing(contains)
+            # Flet's RemoteTester takes a regular expression (Flutter's find.textContaining with a RegExp):
+            # a flow's text is a literal, so its regex characters are escaped ("Completed (" threw
+            # FormatException 'Unterminated group' on the emulator); the host tester matches the same pattern.
+            return await self.t.find_by_text_containing(regex_literal(contains))
         if tooltip is not None:
             return await self.t.find_by_tooltip(tooltip)
         raise ValueError("a finder needs key, text, contains or tooltip")

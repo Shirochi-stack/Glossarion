@@ -15,7 +15,7 @@ from typing import Any
 
 __all__ = [
     "ATTACH_TOOLTIP", "CONFIG_NAME", "EPUB_NAME", "chat_translate_and_migrate", "dismiss_welcome", "go_home",
-    "import_desktop_config", "library_book_chapters", "open_drawer", "open_settings", "run_selftest",
+    "import_desktop_config", "library_book_chapters", "open_drawer", "open_settings", "POP_SETTLE", "run_selftest",
     "SCROLL_TIMEOUT", "smoke_navigation", "ui_config", "wait_home", "write_ui_config",
 ]
 
@@ -75,11 +75,31 @@ async def wait_home(d: Any, timeout: float = 180.0) -> None:
     await d.wait(tooltip=ATTACH_TOOLTIP, timeout=timeout)
 
 
+#: How long ``go_home`` waits for a Back to land before it presses another (a device only).
+POP_SETTLE = 5.0
+
+
 async def go_home(d: Any, max_steps: int = 6) -> None:
-    for _ in range(max_steps):
-        if await d.count(tooltip="Open navigation"):
+    """Back to the chat home, one screen at a time. A screen's own app-bar Back (Flutter's BackButton,
+    tooltip "Back") is tapped when it has one, else the system Back is pressed, and the home is waited
+    for before another Back. On a device a pop is a round trip (Flutter -> the app's on_view_pop -> the
+    patch back): the old loop looked 300 ms after a system Back, pressed again, and that second Back
+    reached the root route, where Android finishes the activity under the test (Build Mobile run
+    37940790686: "Remote tester connection was closed"). An app-bar Back can never do that. The host
+    tester handles the pop before ``back`` returns (``events_land_at_once``), so it does not wait."""
+    from ui_driver import UiTimeout
+
+    settle = 0.0 if getattr(getattr(d, "t", None), "events_land_at_once", False) else POP_SETTLE
+    for step in range(max_steps):
+        if await d.exists(tooltip="Open navigation", timeout=settle if step else 0.0):
             return
-        await d.back()
+        if await d.count(tooltip="Back"):
+            try:
+                await d.tap(tooltip="Back", timeout=settle or None)
+            except UiTimeout:
+                pass  # the Back went away meanwhile: the previous pop landed
+        else:
+            await d.back()
     await d.wait(tooltip="Open navigation", timeout=10)
 
 

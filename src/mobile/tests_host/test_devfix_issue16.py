@@ -742,6 +742,129 @@ def test_owner_issue16_a_stale_chat_profile_at_send_runs_the_inherited_profile(i
     _run_with_server(scenario)
 
 
+async def _end_run(app, run) -> None:
+    """Teardown: force-stop the run's job if it still runs and wait for the chat's finish."""
+    service = app.job_service
+    job_id = getattr(run, "job_id", None)
+    if job_id is None:
+        return
+    snap = service.snapshot(job_id)
+    if snap is not None and not snap.is_terminal:
+        service.request_stop(job_id, force=True, reason="test teardown")
+    await asyncio.to_thread(service.wait_idle, 60)
+    for thread in list(app.chat_feature.runs.finish_threads):
+        await asyncio.to_thread(thread.join, 60)
+
+
+@pytest.mark.parametrize("change", ["rename", "delete"])
+def test_owner_issue16_resume_after_the_chats_profile_was_renamed_or_deleted(isolated, change):
+    """DF2 verify: a book in a chat with its own profile (Casual KR) is stopped; the profile is renamed or deleted
+    under Manage (``ProfileService``, ``keep_active`` like Settings › Profiles & prompts); the ended card's Resume.
+    The resumed run follows the rename (the same prompt, under its new name) or, deleted, runs the inherited All
+    chats profile (Wuxia House Style) - never the backend's silent first profile (Universal), which is what a
+    Resume of the Send-time JobSpec params ran."""
+    picks = isolated
+    tf = _foundations()
+
+    async def scenario(server, captured):
+        import flows
+        import prompt_profiles
+        from glossarion_mobile.diagnostics import fixtures
+        from glossarion_mobile.diagnostics.fake_llm_server import FAKE_MODEL
+        from glossarion_mobile.ui.chat.cards import JobCard
+        from glossarion_mobile.ui.chat.job_binding import progress_counts
+        from glossarion_mobile.ui.screens.profiles import ProfileService
+
+        server.set_delay("translation", 0.05)  # a run long enough to stop in the middle
+        defaults = prompt_profiles.profile_state_from_config({}).default_prompts
+        universal_line = _signature_line(defaults["Universal"])
+        book = fixtures.build_tiny_epub(picks / "resume_book.epub", chapters=30)
+        app, page, tester, driver = await _host_driver(tf, {book.name: book})
+        runs = app.chat_feature.runs
+        run = resumed = None
+        try:
+            await flows.wait_home(driver)
+            store = app.config_store
+            profiles = dict(store.get("prompt_profiles") or {})
+            profiles.update(_old_desktop_profiles(defaults))
+            store.set_many({**flows.ui_config(server.url, FAKE_MODEL), "prompt_profiles": profiles,
+                            "active_profile": WUXIA})
+            store.flush()
+            await flows.go_home(driver)
+            await driver.tap(tooltip="New chat")
+            await driver.wait(key="transcript-empty", timeout=30)
+            view = app.chat_view
+            cid = view.cid
+            chats = app.chat_feature.chats
+            chats.set_override(cid, "profile", CASUAL)
+            view.apply_settings_changed()
+            await driver.tap(tooltip=flows.ATTACH_TOOLTIP)
+            await driver.pick_file(book.name, lambda: driver.tap(key="attach-files"))
+            await driver.wait(contains=book.stem, timeout=60)
+            await driver.tap(key="send-idle_ready", timeout=60)
+            await driver.wait(text="Ready to translate", timeout=60)
+            await driver.tap(text="Start")
+            if await driver.exists(text="Keep translations running", timeout=3):
+                await driver.tap(text="Not now")
+            run = await _until(lambda: runs.run_for(cid) if runs.run_for(cid) is not None
+                               and runs.run_for(cid).job_id is not None else None, 60)
+            assert run is not None, "Start did not submit the chat's job"
+
+            def completed(r) -> int:
+                return progress_counts(app.job_service.snapshot(r.job_id)).get("completed", 0)
+
+            assert await _until(lambda: completed(run) >= 3, 120), "the first run translated nothing"
+            first = _prompt_text(captured)
+            assert MARKERS[CASUAL] in first and universal_line not in first
+            await _tap_control(tester, view.live_job_card.action_buttons["stop"])
+            assert await _until(lambda: not run.live, 120) and run.state == "stopped", run.state
+            for thread in list(runs.finish_threads):
+                await asyncio.to_thread(thread.join, 60)
+            await driver.pump(300)
+
+            # ---- Manage…: the chat's profile is renamed / deleted (the global profile stays) -------------------
+            service = ProfileService(store)
+            if change == "rename":
+                service.save(CASUAL, RENAMED, profiles[CASUAL], keep_active=True)
+                expected_marker, expected_name = MARKERS[CASUAL], RENAMED
+            else:
+                service.delete_or_reset(CASUAL, keep_active=True)
+                expected_marker, expected_name = MARKERS[WUXIA], None
+            assert CASUAL not in (store.get("prompt_profiles") or {}) and store.get("active_profile") == WUXIA
+            await driver.pump(300)
+
+            # ---- Resume on the ended card ----------------------------------------------------------------------
+            mark = len(captured)
+            ended = [getattr(s, "card", s) for s in view.transcript.messages]
+            ended = [c for c in ended if isinstance(c, JobCard) and "resume" in c.action_buttons]
+            assert len(ended) == 1, "no ended card with Resume"
+            await _tap_control(tester, ended[0].action_buttons["resume"])
+            resumed = await _until(lambda: runs.run_for(cid) if runs.run_for(cid) is not run
+                                   and runs.run_for(cid) is not None and runs.run_for(cid).live else None, 30)
+            assert resumed is not None, "Resume did not start a run"
+            assert await _until(lambda: len(captured) - mark >= 3, 120), "the resumed run sent nothing"
+            prompt = _prompt_text(captured[mark:])
+            used = (resumed.params.get("config_overrides") or {}).get("active_profile")
+            ran = ("Universal" if universal_line in prompt else "the expected profile" if expected_marker in prompt
+                   else "another profile")
+            assert expected_marker in prompt and universal_line not in prompt, (
+                f"after the chat's profile {CASUAL!r} was {change}d, its Resume ran {ran} "
+                f"(config_overrides active_profile={used!r})")
+            assert used == expected_name, used
+        except Exception:
+            for row in tester.dump(120):
+                print(row)
+            raise
+        finally:
+            for r in (resumed, run):
+                if r is not None:
+                    await _end_run(app, r)
+            app.jobs.close()
+            await tf._stop(app)
+
+    _run_with_server(scenario)
+
+
 # ---- Settings › Translation › Profile & System Prompt ------------------------------------------------------
 
 

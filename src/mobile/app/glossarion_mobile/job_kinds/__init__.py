@@ -82,6 +82,9 @@ class KindInfo:
     stop_kind: str  # stop_control.reset_for_new_run(kind=...)
     run: Callable[[Any], Any]
     resumable: bool = True
+    #: The adapter routes the API client's log records itself (``services.jobs.client_log_handlers``):
+    #: JobService then attaches no handler of its own to the job's host (``JobBackend.client_logs``).
+    own_client_logs: bool = False
 
 
 _CACHE: dict[str, KindInfo] = {}

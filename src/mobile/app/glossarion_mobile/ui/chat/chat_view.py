@@ -310,6 +310,21 @@ def workspace_failed_count(folder: str) -> Optional[int]:
                if isinstance(entry, Mapping) and str(entry.get("status") or "") in ("failed", "qa_failed"))
 
 
+def known_profile_names(env: Any) -> Optional[list]:
+    """The prompt profile names a run can use (``env.profile_service``: the loaded shared core's listing), or
+    None when they are unknown here (no desktop core: every name is taken as it is)."""
+    service = getattr(env, "profile_service", None)
+    if service is None:
+        return None
+    try:
+        listing = service.core_listing()  # None: no desktop core here, the names are unknown
+    except Exception:
+        listing = None
+    if listing is None or not listing.names:
+        return None
+    return list(listing.names)
+
+
 class ChatView:
     def __init__(
         self,
@@ -1190,16 +1205,20 @@ class ChatView:
         segments = run.stream.segments()
         current = str(segments[-1].get("label") or "") if segments else ""
         card.set_progress(counts.get("fraction"), progress_line(snapshot, eta=self._eta), current)
-        # the turn's committed cards (the glossary gate's) stay listed above the run's live ones (desktop);
-        # once the finish has committed the run's cards (the run is still live while it finishes) they are
-        # both: the committed ones are listed, as the Result will list them (matched by request number - the
-        # commit's label ends in "Request N" and may be renamed, e.g. the header batch's; the shared commit
-        # drops lifecycle-only rows such as the EPUB metadata request's)
+        # the turn's committed cards (the glossary gate's, an earlier run's before a Resume / Retry failed)
+        # stay listed above the run's live ones (desktop); once the finish has committed THIS run's cards
+        # (the run is still live while it is "finishing") they are both: the committed ones are listed, as
+        # the Result will list them (matched by request number - the commit's label ends in "Request N" and
+        # may be renamed, e.g. the header batch's; the shared commit drops lifecycle-only rows such as the
+        # EPUB metadata request's). Only this run's commits count (``ChatRun.committed_from``): a stopped
+        # run's cards can carry the same numbers as the resumed run's live requests.
         saved = card.saved_requests
         rows = segments
         if saved and segments:
             live_numbers = {segment_request_number(s) for s in segments} - {0}
-            if live_numbers & {label_request_number(s.get("label")) for s in saved}:
+            base = int(getattr(run, "committed_from", 0) or 0)
+            own = {label_request_number(s.get("label")) for s in saved if int(s.get("index", -1)) >= base}
+            if run.state == "finishing" and live_numbers & own:
                 rows = []
             else:
                 live_labels = {str(s.get("label") or "") for s in segments} - {""}
@@ -1498,14 +1517,10 @@ class ChatView:
         chats = self.env.chats
         overrides = dict(chats.overrides(cid))
         name = overrides.get("profile")
-        service = getattr(self.env, "profile_service", None)
-        if not name or service is None:
+        if not name:
             return overrides
-        try:
-            listing = service.core_listing()  # None: no desktop core here, the names are unknown
-        except Exception:
-            listing = None
-        if listing is None or not listing.names or name in listing.names:
+        names = known_profile_names(self.env)
+        if names is None or name in names:
             return overrides
         reconcile = getattr(self.env, "reconcile_profiles", None)
         if callable(reconcile):
@@ -1514,9 +1529,19 @@ class ChatView:
             except Exception:
                 log.exception("re-checking the chats' prompt profiles failed")
             overrides = dict(chats.overrides(cid))
-        if overrides.get("profile") and overrides["profile"] not in listing.names:
+        if overrides.get("profile") and overrides["profile"] not in names:
             overrides.pop("profile", None)
         return overrides
+
+    def resume_profile(self, cid: str, name: str) -> Optional[str]:
+        """Resume / Retry failed (``ChatRuns.resubmit``): the prompt profile the resumed run uses for the
+        ``name`` it was sent with. A profile that still exists stays (the run keeps its Send-time settings);
+        one renamed or deleted since gives way to the chat's profile now (``run_overrides``: a rename
+        followed, a gone one cleared), or None: the run inherits - never the backend's silent first profile."""
+        names = known_profile_names(self.env)
+        if names is None or name in names:
+            return name
+        return self.run_overrides(cid).get("profile") or None
 
     async def _submit(self, cid: str, text: str, record: Optional[dict], settings: DirectTextSettings,
                       output_mode: str, manual: Optional[ManualGlossarySource], user_index: Optional[int],
@@ -2400,9 +2425,11 @@ class ChatView:
         if self.env is None or self.env.runs is None:
             return
 
+        cid = self.cid
+
         async def go() -> None:
             try:
-                run = await self.env.runs.resubmit(self.cid)
+                run = await self.env.runs.resubmit(cid, profile_check=lambda name: self.resume_profile(cid, name))
             except Exception as exc:
                 self.notify(f"Could not resume: {exc}")
                 return

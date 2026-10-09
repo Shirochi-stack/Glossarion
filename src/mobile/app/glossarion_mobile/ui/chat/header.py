@@ -38,12 +38,20 @@ from glossarion_mobile.state.app_state import ChatContext
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ChatHeader", "ChatSearchBar", "MENU_ITEMS", "NARROW_HEADER_DP", "SCROLL_TINT_PX"]
+__all__ = ["ChatHeader", "ChatSearchBar", "MENU_ITEMS", "NARROW_HEADER_DP", "SCROLL_TINT_PX", "narrow_header"]
 
 SCROLL_TINT_PX = 4
 
 #: Window widths (dp) below which a scratch chat's header actions are compact (see the module docstring).
 NARROW_HEADER_DP = 400
+
+
+def narrow_header(width: Any) -> bool:
+    """A window ``width`` (dp) below ``NARROW_HEADER_DP``: a scratch chat's header actions are compact."""
+    try:
+        return 0 < float(width or 0) < NARROW_HEADER_DP
+    except (TypeError, ValueError):
+        return False
 
 # (action id, label) for the ⋯ menu. "Move to Series…" (U9, optional Series) shows only once the
 # SeriesFeature sets ``on_move_series`` and never in a scratch chat (scratch chats are not saved).
@@ -287,10 +295,7 @@ class ChatHeader:
 
     def set_width(self, width: float) -> None:
         """The window width (dp): below ``NARROW_HEADER_DP`` a scratch chat's actions are compact."""
-        try:
-            self.narrow = 0 < float(width or 0) < NARROW_HEADER_DP
-        except (TypeError, ValueError):
-            self.narrow = False
+        self.narrow = narrow_header(width)
         self._sync_actions()
 
     def _sync_actions(self) -> None:

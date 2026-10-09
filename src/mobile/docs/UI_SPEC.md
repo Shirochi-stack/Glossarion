@@ -350,7 +350,7 @@ On iOS the same text goes to local notifications (action category Accept / Revie
 - **Scratch toggle** (`chat_bubble_outline` drawn dashed via a custom icon asset):
   - shown only while the chat is empty;
   - in a scratch chat it becomes a "Scratch" chip plus a `TextButton("Save")`.
-  - On phones narrower than 400 dp (`ChatHeader.set_width`, `NARROW_HEADER_DP`) a scratch chat's Save is an `IconButton(save_outlined)` and New chat moves into ⋯ as its first item: the four actions (~217 dp) would otherwise leave a title slot narrower than the "custom" chip (a RenderFlex overflow at 320-360 dp).
+  - On phones narrower than 400 dp (`ChatHeader.set_width`, `NARROW_HEADER_DP`) a scratch chat's Save is an `IconButton(save_outlined)` and New chat moves into ⋯ as its first item: the four actions (~217 dp) would otherwise leave a title slot narrower than the "custom" chip (a RenderFlex overflow at 320-360 dp). A resize within the phone class (split screen, a pop-up window, a display-size change while the app runs) applies the rule again (`AppShell._apply_layout`).
 - **New chat** (`edit_square`). The current chat is reused if it is empty (desktop `_new_chat` rule).
 - **⋯** (`PopupMenuButton`):
   - (New chat, only while the button above is folded in) · Chat settings · Attachments (N) · Jump to… · Search in chat · Text size · Move to Series… (U9) · Export chat · Delete chat.
@@ -889,8 +889,8 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
 **Current item.** The last request label (bodySmall).
 
 **Requests (N)** (`ExpansionTile`, open while the job runs, like Jobs › job; a Result's stays closed)
-- The turn's request cards: the cards the run already committed (the glossary gate freezes its phase into the chat; an earlier run of the same turn) followed by the live ones, in spine order. Once the run's finish has committed its cards (the run is still live for a moment) the committed rows are listed, as the Result lists them (matched by request number; the shared commit drops lifecycle-only rows such as the EPUB metadata request's). Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
-- The rows and their streamed text come from the job's log, which carries the API client's log records too (`JobBackend.client_logs`, the desktop GuiLogHandler: "Sending API call", the streamed text), so they stream while the job runs.
+- The turn's request cards: the cards the run already committed (the glossary gate freezes its phase into the chat; an earlier run of the same turn) followed by the live ones, in spine order. Once the run's finish has committed its cards (the run is still live for a moment, "finishing") the committed rows are listed, as the Result lists them (matched by request number among the cards this run committed, never an earlier run's; the shared commit drops lifecycle-only rows such as the EPUB metadata request's). Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
+- The rows and their streamed text come from the job's log, which carries the API client's log records too (`JobBackend.client_logs`, the desktop GuiLogHandler: "Sending API call", the streamed text), so they stream while the job runs. One handler per job, removed when it ends: the Translate headers job's shared code attaches it to its own view instead (`KindInfo.own_client_logs`).
 - The newest `direct_text_rendered_card_limit` rows are shown; "↑ Show N earlier requests (M hidden)" adds a page. Jump-to and search open the list on the target request.
 - Tapping a row opens a `RequestSheet` with the full streaming content and thinking.
 - These cards are persisted as v2 assistant messages exactly as desktop does.
@@ -909,7 +909,7 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
 
 **Status line**, one of:
 - "Done · 48/48 chapters"
-- "Stopped · 12/48 chapters" → **Resume**, which resubmits the same JobSpec; the backend resumes from progress and chunks
+- "Stopped · 12/48 chapters" → **Resume**, which resubmits the same JobSpec; the backend resumes from progress and chunks. Three params follow the chat as it is now: the turn's index, the chat's next request number (the resumed run's cards do not repeat the stopped run's "Request N") and a prompt profile renamed or deleted since Send, which gives way to the chat's profile now (a rename is followed) or is inherited (`ChatView.resume_profile`; never the backend's silent first profile). A profile that still exists stays as sent. Retry failed and an Interrupted job's Resume do the same.
 - "Finished with issues · 3 failed"
 
 When failures exist, a pinned error chip **"3 failed – Retry"** sits at the top.
@@ -2070,7 +2070,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `QuickActionChips` (`chat/quick_chips.py`) | ≤ 5 contextual chips | per context · dismissed | `Row(scroll=AUTO)`, `Chip(on_click=…)` |
 | `Transcript` (`chat/transcript.py`) | Rendered window of message cards + loader rows + "↓ new" FAB | loading · window · streaming tail · scrolled up (FAB + badge) | `ListView(build_controls_on_demand=False, on_scroll=…)` over a Python window; items keyed `ft.ScrollKey(mid)`; `FloatingActionButton(mini=True)`; `Shimmer` |
 | `UserBubble` (`chat/messages.py`) | Right-aligned bubble; collapses past 12 lines | collapsed · expanded | `Container`, `Text`; long-press `GestureDetector` → ActionSheet. "Select text" opens a `SelectableTextSheet` (no `SelectionArea` on the bubble, because touch long-press would start a selection) |
-| `UserFileCard` (`chat/messages.py`) | Type icon, name, "EXT · size", role label + prompt | ready · missing file | `Container(on_click=…, on_long_press=…)` |
+| `UserFileCard` (`chat/messages.py`) | Type icon, name, "EXT · size", role label + prompt | ready · missing file | `Container(on_click=…, on_long_press=…)`, a loose `Flexible` capped at 320 dp (never wider than the transcript column: 296 dp on a 320 dp phone) |
 | `AssistantMessage` (`chat/messages.py`) | Header row · ThinkingDisclosure · content · media · MessageActionsRow | pending · streaming · done · long (truncated + "Show full translation") · missing body · error | `Column`, `Row`, `CircleAvatar`, `Markdown(selectable=True, extension_set=GITHUB_WEB)` |
 | `ThinkingDisclosure` (`chat/thinking.py`) | "▸ Thinking (N tokens)" row → mono body (the last 50,000 chars) | live (shimmer) · collapsed summary · expanded · no stream | `GestureDetector` + `AnimatedSwitcher`, `Shimmer`, `Markdown` in a mono `Container` |
 | `MessageActionsRow` (`chat/messages.py`, the card's action row) | Copy · Retranslate · Show source · Share · ⋯ (18 dp icons, 48 dp targets) + VersionSwitcher | visible · auto-folded (older replies) · copied (✓ for 1.6 s) | `Row`, `IconButton(tooltip=…)`, `Clipboard`, `Share` |

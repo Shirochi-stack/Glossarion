@@ -1074,6 +1074,7 @@ def test_run_oauth_flow_keeps_desktop_behaviour(authgpt, monkeypatch):
 
     monkeypatch.setattr(authgpt, "begin_oauth", spy_begin)
     pages = []
+    visitors = []
 
     def browser(url, *args, **kwargs):
         state = parse_qs(urlparse(url).query)["state"][0]
@@ -1083,15 +1084,22 @@ def test_run_oauth_flow_keeps_desktop_behaviour(authgpt, monkeypatch):
             pages.append((status, headers.get("Location")))
             pages.append(_http_get("127.0.0.1", port, "/success"))
 
-        threading.Thread(target=visit, daemon=True).start()
+        visitor = threading.Thread(target=visit, daemon=True)
+        visitors.append(visitor)
+        visitor.start()
         return True
 
     monkeypatch.setattr(authgpt.webbrowser, "open", browser)
     tokens = authgpt.run_oauth_flow(timeout=20)
+    # run_oauth_flow returns once the session is done and closed; the browser may still be reading the
+    # /success page it was answered (CI run 37942574181 asserted before the visitor appended it)
+    for visitor in visitors:
+        visitor.join(10)
 
     assert begin_calls[0] == ((), {"timeout": 20, "persist": False, "dual_stack": False, "auto_close": False})
     session = begin_calls[1]
     assert len(session._servers) == 1 and session.store is None
+    assert len(pages) == 2, pages
     assert pages[0] == (302, f"http://localhost:{port}/success")
     assert pages[1][0] == 200 and pages[1][2] == LEGACY_SUCCESS_HTML
     assert tokens["access_token"] == "access-1" and tokens["refresh_token"] == "refresh-1"

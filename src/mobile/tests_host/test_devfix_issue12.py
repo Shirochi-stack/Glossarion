@@ -44,6 +44,11 @@ page's source) reports.
    number a committed label ends in, " · Request N"; the header commit renames its card and the
    shared commit drops lifecycle-only rows). Transient (it lasts until the run ends) and not seen in
    the natural runs above.
+5. ``test_resume_lists_the_resumed_runs_live_requests`` (found by the DF2 verify): Stop, then the ended
+   card's Resume. While the resumed job translates, its card lists the stopped run's committed cards
+   followed by the resumed run's live requests, which continue the chat's request numbers. Before the
+   fix the resumed run reused the stopped run's request numbers, the card took every live row for an
+   already committed one, and it stayed frozen at the stopped run's rows for the whole resumed run.
 
 Real data stays untouched: the app runs in temp FLET_APP_STORAGE_* dirs (the bootstrap points HOME,
 OUTPUT_DIRECTORY, GLOSSARION_LIBRARY_DIR, GLOSSARION_DATA_DIR and CONFIG_FILE there; asserted below),
@@ -457,6 +462,10 @@ async def _owner_flow(iso, server, body, *, chapters: int = CHAPTERS, glossary: 
     epub = _book(iso.picks, chapters)
     tf = _UF._foundations()
     app, tester, driver = await _UF._host_driver(tf, {EPUB_NAME: epub})
+    # The card's "Chapter n/210" moves on ProgressWatcher's polls of translation_progress.json (the app's
+    # 2 s default): a fast runner translates the fake book in a few polls (CI saw 42, 84, 170, 210). Poll
+    # often, so the card's own repaint cadence (280-900 ms) bounds what the sampler sees, on any runner.
+    app.job_service.watcher_interval = 0.2
     stop = asyncio.Event()
     sampler = None
     run = None
@@ -681,8 +690,9 @@ def test_book_card_stays_live_through_the_glossary_gate(iso, offline):
         requests = [s["cards"][0]["requests"] for s in seen]
         # How many distinct counts a sampler sees depends on the runner's speed: the card repaints on
         # the stream timer (280-900 ms) and the fake server finishes 210 chapters in a few seconds on
-        # CI (Build Mobile 37937223020 saw 42, 84, 170, 210). What matters: intermediate progress was
-        # shown, it only rose, and it reached the end of the book.
+        # CI (Build Mobile 37937223020 saw 42, 84, 170, 210 with the 2 s progress poll; _owner_flow
+        # polls every 0.2 s). What matters: intermediate progress was shown, it only rose, and it
+        # reached the end of the book.
         distinct = sorted(set(chapters))
         assert len(distinct) >= 3 and any(0 < n < CHAPTERS for n in distinct), distinct[:20]
         assert max(chapters) >= 150, distinct[:20]
@@ -865,4 +875,104 @@ def test_a_render_while_the_run_commits_lists_each_request_once(iso, offline, mo
 
     with _server(0.0) as server:
         asyncio.run(_owner_flow(iso, server, body, chapters=12, glossary="off"))
+    _assert_offline(offline)
+
+
+# ==========================================================================
+# 5. Found by the DF2 verify: the resumed run's live requests are on its card
+# ==========================================================================
+
+
+def test_resume_lists_the_resumed_runs_live_requests(iso, offline):
+    """A 40-chapter book, glossary off: ■ Stop after 8 chapters, then the ended card's Resume. While the
+    resumed job translates, the running card lists the stopped run's committed cards followed by the
+    resumed run's live requests (UI_SPEC §2.12.3: "the cards the run already committed (… an earlier run
+    of the same turn) followed by the live ones"), "Requests (N)" grows with them, and their rows are on
+    screen. The resumed run's requests continue the chat's request numbers, as a new Send would."""
+    from glossarion_mobile.ui.chat.stream_bridge import segment_request_number
+
+    chapters = 40
+    seen: dict = {}
+
+    async def body(ctx):
+        app, run, probe = ctx.app, ctx.run, ctx.probe
+        view = app.chat_view
+        runs = app.chat_feature.runs
+
+        # ---- ■ Stop mid-book ------------------------------------------------------------------------
+        assert await _until(lambda: probe.job()["completed"] >= 8, RUN_TIMEOUT), probe.describe()
+        await _tap(probe, view.live_job_card.action_buttons["stop"])
+        await _finished(app, run)
+        assert run.state == "stopped", run.state
+        committed = probe.committed_labels()
+        assert len(committed) >= 8, committed
+        next_number = probe.chats.request_count(probe.cid) + 1
+        assert next_number > int(run.params.get("request_number") or 0), (next_number, run.params.get("request_number"))
+
+        # ---- Resume on the ended card -------------------------------------------------------------
+        ended = probe.job_cards()[0]
+        assert "resume" in ended.action_buttons
+        await _tap(probe, ended.action_buttons["resume"])
+
+        def resumed_run():
+            current = runs.run_for(probe.cid)
+            return current if current is not None and current is not run and current.live else None
+
+        assert await _until(lambda: resumed_run() is not None, 30)
+        resumed = resumed_run()
+        resume_t = time.monotonic()
+        assert resumed.params.get("request_number") == next_number, resumed.params.get("request_number")
+        assert await _until(lambda: len(resumed.stream.segments() or []) >= 5, RUN_TIMEOUT), probe.describe()
+        await asyncio.sleep(1.2)  # a stream tick (280-900 ms) and the next snapshot
+
+        # ---- the running card: the stopped run's rows, then the resumed run's live ones -----------------
+        sample = probe.sample("resumed run")
+        assert sample["job"]["state"] == "RUNNING" and sample["run_state"] == "running", sample
+        card = view.live_job_card
+        assert card is not None and len(sample["cards"]) == 1 and sample["cards"][0]["id"] == id(card), sample
+        c = sample["cards"][0]
+        assert c["live"] and c["mounted"] and c["phase"] == "running" and c["title"] == EPUB_NAME, c
+        labels = _labels(card)
+        assert labels[:len(committed)] == committed, labels[:len(committed) + 2]
+        live_segments = resumed.stream.segments() or []
+        live_labels = [str(s.get("label") or "") for s in live_segments]
+        shown_live = labels[len(committed):]
+        assert shown_live, (f"the resumed run's live requests are not on its card: {c['tile']}, "
+                            f"live segments {live_labels[:3]}")
+        # the same requests in the same order, a repaint behind at most (a request's label turns from
+        # "Request N" into its chapter once its content is classified, so compare the request numbers)
+        shown_numbers = [segment_request_number(s) for s in card.request_segments[len(committed):]]
+        live_numbers = [segment_request_number(s) for s in live_segments]
+        assert shown_numbers == live_numbers[:len(shown_numbers)] and \
+            len(live_numbers) - len(shown_numbers) <= REPAINT_LAG, (shown_numbers[:5], live_numbers[:5])
+        assert c["tile"] == f"Requests ({len(labels)})" and len(labels) > len(committed), c
+        numbers = [segment_request_number(s) for s in live_segments if segment_request_number(s)]
+        assert numbers and min(numbers) >= next_number, (numbers[:5], next_number)
+        assert set(shown_live) & probe.visible_texts(rows=True), "the live request rows are not on screen"
+        seen["committed"] = committed
+
+        # ---- the end: Done, the stopped run's cards first ----------------------------------------------
+        await _finished(app, resumed)
+        await _stop_sampling(ctx)
+        assert resumed.state == "done" and resumed.error is None, (resumed.state, resumed.error)
+        # every sample of the resumed run: the committed rows, never a row twice, and the live rows follow
+        bad = []
+        for s in probe.samples:
+            if s["t"] < resume_t or not s["run_live"] or len(s["cards"]) != 1:
+                continue
+            count = s["cards"][0]["requests"]
+            if count < len(committed):
+                bad.append(("lost the committed cards", s))
+            elif count > len(committed) + s["live_segments"]:
+                bad.append(("a request is listed twice", s))
+            elif s["steady"] and s["run_state"] == "running" and \
+                    count < len(committed) + s["live_segments"] - REPAINT_LAG:
+                bad.append(("the rows do not follow the resumed job", s))
+        assert not bad, "\n".join(f"{why}: {s}" for why, s in bad[:5])
+        result = _check_result(probe, committed, "done", f"Done · {chapters}/{chapters} chapters")
+        assert len(result["labels"]) > len(committed), result["state"]
+
+    with _server(0.08) as server:  # a resumed run long enough to sample
+        asyncio.run(_owner_flow(iso, server, body, chapters=chapters, glossary="off"))
+    assert seen.get("committed"), "the scenario did not reach the resumed run"
     _assert_offline(offline)

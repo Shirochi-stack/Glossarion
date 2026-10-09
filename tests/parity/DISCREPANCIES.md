@@ -4165,3 +4165,54 @@ byte-identical.
   the app, `hitTestWarningShouldBeFatal` so a missed tap fails and is retried) and uninstalls a leftover app;
   `UiDriver.pump` sends int milliseconds; `dismiss_welcome(first_run=True)` waits for the Welcome of a fresh
   install. tests_host/test_ui_flows.py runs both flows at 320 dp with a check for unflexed ellipsizing Row texts.
+
+### DF2 verify fixes (mobile and test-only; no desktop change)
+
+The second-pass verify of device fixes part 2 (`git diff 55c46555..9cf6ef1a`) found these. No desktop source
+file changes; the one desktop-side file is a test (the last bullet).
+
+- Resume / Retry failed / an Interrupted job's Resume: the running JobCard listed none of the resumed run's live
+  requests ("Requests (N)" frozen at the stopped run's cards, no streamed text: the owner's #12/#14 symptom on
+  every Resume). Its "the finish has committed this run's cards" check matched any committed "Request N" against
+  the live request numbers, and a resumed run reused the stopped run's start number. The check now runs only
+  while the run is "finishing" and only against the cards this run committed (`ChatRun.committed_from`), and a
+  resumed run gets the chat's next request number (`request_count + 1`, what a new Send gets; the dialog's
+  `_next_conversation_request_number`). Test: tests_host/test_devfix_issue12.py::
+  test_resume_lists_the_resumed_runs_live_requests.
+- Resume after the chat's prompt profile was renamed or deleted (Stop, Manage…, Resume): `ChatRuns.resubmit`
+  re-checks the Send-time `active_profile` (`ChatView.resume_profile`: kept while it exists, else the chat's
+  profile now, which followed a rename, or none so the run inherits) and derives the extraction method it
+  switched again (`run_request.replace_profile`); `JobService.resume` takes the re-checked params for an
+  Interrupted job. Before, the gone name reached the backend, which ran the first profile (Universal), the
+  silent fallback the "Chat settings prompt profiles" section rules out. Tests: tests_host/test_chat.py::
+  test_resume_rechecks_a_send_time_profile_that_no_longer_exists, tests_host/test_devfix_issue16.py::
+  test_owner_issue16_resume_after_the_chats_profile_was_renamed_or_deleted.
+- Tools › Translate headers: the shared `translate_headers_now` attaches the API client log handler to its own
+  view (the desktop re-attach; there the view is the main window, so it replaces the window's handler). On
+  mobile that was a second handler next to `JobBackend.client_logs`' host handler: each record reached the job
+  twice, and the view's handler outlived the job, so later jobs' records were appended to the finished headers
+  job. The kind now runs without the host handler (`KindInfo.own_client_logs`) and attaches and removes the
+  view's itself (`services.jobs.client_log_handlers`, which `client_logs` uses too). Test: tests_host/
+  test_jobs.py::test_headers_job_routes_each_api_record_once_and_leaves_no_handler.
+- Chat header on narrow phones: a resize within the phone size class (split screen, a pop-up window, a
+  display-size change while the app runs) applies the below-400-dp rule again (`AppShell._apply_layout` also
+  compares `header.narrow_header`). Test: tests_host/test_devfix_issue18.py::
+  test_scratch_chat_header_follows_a_resize_within_the_phone_class.
+- Chat cards at the CI emulator's 320 dp (the optional Android UI tests' Flutter errors): the user file card is a
+  loose Flexible capped at 320 dp (the fixed 320 dp card overflowed the 296 dp transcript column by 24 px), and
+  the JobCard and the batch Plan card paint their surface with a flat Material `Card` (`cards.material_surface`;
+  UI_SPEC's component table lists both as `Card`) instead of a coloured Container, so their ExpansionTile headers
+  no longer report "ListTile background color or ink splashes may be invisible". Tests: tests_host/
+  test_devfix_issue18.py::test_job_cards_paint_their_tiles_on_a_material and
+  ::test_user_file_card_and_plan_card_fit_a_320_dp_phone.
+- Android UI test driver: `UiDriver` sends a `contains` finder's text as an escaped regular expression (Flet's
+  RemoteTester takes a pattern; "Completed (" threw FormatException 'Unterminated group') and the host tester
+  searches with the same pattern; `flows.go_home` taps a screen's app-bar Back when it has one and lets each pop
+  land before another Back (a second system Back reached the root route and Android finished the activity:
+  "Remote tester connection was closed"); the device conftest sends adb's Back off the event loop. Tests:
+  tests_host/test_ui_flows.py::test_contains_finders_are_literal_text_on_the_device_and_the_host and
+  ::test_go_home_lets_a_pop_land_before_another_back.
+- Test-only: tests_host/test_devfix_issue12.py polls translation progress every 0.2 s (the app's 2 s default made
+  its distinct-count check depend on the runner's speed); tests/test_mobile_compat_patches_api.py::
+  test_run_oauth_flow_keeps_desktop_behaviour joins the fake browser thread before it reads the /success page
+  (Python application run 37942574181 failed on that race). No product code changes for either.

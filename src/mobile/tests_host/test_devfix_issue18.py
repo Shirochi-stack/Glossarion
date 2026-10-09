@@ -20,7 +20,12 @@ This acceptance test checks it end to end on the real objects, headlessly:
   subtitle measured 236 px). No RenderFlex overflow, the subtitle ellipsized but still shown, the
   "custom" chip whole - for a fresh chat, a chat with "This chat only" overrides (the owner's case),
   and a scratch chat with overrides (two more header actions). The pre-fix row (no flex) is run
-  through the same model and must reproduce the CI overflow, so the model would catch a regression.
+  through the same model and must reproduce the CI overflow, so the model would catch a regression. A resize
+  within the phone class (411 -> 360 / 320 dp, 360 -> 411 dp) re-applies the narrow-phone header (DF2 verify).
+* The transcript's cards at 320 dp (DF2 verify, the next CI errors): the user file card fits the 296 dp
+  transcript column (the fixed 320 dp card overflowed by 24 px, the CI log's number, through the same model),
+  and every ExpansionTile header of the JobCard / Plan card / batch Plan card sits on a Material ("ListTile
+  background color or ink splashes may be invisible" under a coloured Container).
 * The device test driver changes on the host twin: the device smoke flow (first run: Welcome -> Skip,
   drawer, Library, Settings, the lower Settings groups, self-test) at 320 dp, with the header layout
   checked on every pump; ``UiDriver`` pumps int milliseconds; the device tests treat every run as a
@@ -389,6 +394,173 @@ def test_scratch_chat_header_with_custom_chip_fits(app_env, width):
             assert header.scratch_chip.visible and header.save_scratch_button.visible
             layout = header_layout(wire(_phone_bar(page, header)), width, header)
             assert_header_fits(layout, width=width, state="scratch chat with 'This chat only' overrides", custom=True)
+        finally:
+            app.jobs.close()
+            await tf._stop(app)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+@pytest.mark.parametrize("start,end", [(411, 360), (411, 320), (360, 411)])
+def test_scratch_chat_header_follows_a_resize_within_the_phone_class(app_env, start, end):
+    """The window changes width inside the phone size class (split screen, a pop-up window, a display-size
+    change while the app runs: ``page.on_resize`` -> ``app.on_resize``). The narrow-phone header follows it:
+    below 400 dp the scratch chat's actions are compact and the subtitle row fits; above, they are not.
+    Before the fix the shell re-applied the chat layout only when the composer's state changed, so the
+    header kept the start width's actions (411 -> 320 dp: a 43 px overflow)."""
+    import types
+
+    from glossarion_mobile.ui.chat.header import NARROW_HEADER_DP
+
+    tf = _foundations()
+
+    async def scenario():
+        _m, conn, session, page, app = await tf._start("android", width=start)
+        try:
+            view = app.chat_view
+            header = view.header
+            cid = view._on_new_scratch()
+            assert cid and await _until(lambda: header.scratch_chip.visible)
+            view._on_model_sheet_select("model", LONG_MODEL, True)
+            assert await _until(lambda: header.custom_badge.visible), "the 'custom' chip did not appear"
+            assert header.narrow == (start < NARROW_HEADER_DP), (start, header.narrow)
+            page.width = end
+            app.on_resize(types.SimpleNamespace(width=end, height=800))
+            assert app.shell.size_class.value == "phone"
+            narrow = end < NARROW_HEADER_DP
+            assert header.narrow == narrow and header.compact_actions == narrow, \
+                (start, end, header.narrow, header.compact_actions)
+            layout = header_layout(wire(_phone_bar(page, header)), end, header)
+            assert_header_fits(layout, width=end, state=f"scratch chat resized from {start} dp", custom=True)
+        finally:
+            app.jobs.close()
+            await tf._stop(app)
+
+    asyncio.run(scenario())
+
+
+# ---- the transcript's cards at the CI emulator's 320 dp (Build Mobile run 37940790686) ----------------
+
+
+def _ink_problems(root) -> list:
+    """``(tile, coloured Container)`` pairs: an ExpansionTile (its header is a ListTile) or a ListTile whose
+    nearest surface is a Container with a background colour (Flutter: a DecoratedBox) instead of a Material
+    (a Card). Flutter reports "ListTile background color or ink splashes may be invisible", a failure under
+    ``flet test``. Invisible controls are checked too (a tile shown later must be fine as well); an
+    ExpansionTile's own children are not (they are the content's business, e.g. the Run options' settings
+    tiles, the shared settings component)."""
+    import flet as ft
+    from host_tester import _children
+
+    problems: list = []
+
+    def walk(control, surface) -> None:
+        if isinstance(control, (ft.ExpansionTile, ft.ListTile)):
+            if surface is not None:
+                problems.append((control, surface))
+            return
+        if isinstance(control, ft.Card):
+            surface = None
+        elif isinstance(control, ft.Container) and getattr(control, "bgcolor", None) is not None:
+            surface = control
+        for child in _children(control):
+            walk(child, surface)
+
+    walk(root, None)
+    return problems
+
+
+def _contains(root, target) -> bool:
+    from host_tester import _children
+
+    return root is target or any(_contains(child, target) for child in _children(root))
+
+
+@needs_flet
+def test_job_cards_paint_their_tiles_on_a_material(app_env):
+    """The running / Result JobCard (Requests, OCR, Extraction report tiles), the Plan card's Run options
+    and the batch Plan card: every ExpansionTile header sits on the card's Material surface. A tile in a
+    coloured Container is caught by the same check (the cards before the fix)."""
+    import types
+
+    import flet as ft
+
+    from glossarion_mobile.ui.chat.batch_plan import BatchPlanCard
+    from glossarion_mobile.ui.chat.cards import JobCard
+    from glossarion_mobile.ui.chat.job_binding import CardPhase
+
+    record = {"name": "book.epub", "extension": ".epub", "size": 1024}
+    card = JobCard(attachment=record, phase=CardPhase("running"), requests_expanded=True)
+    card.set_requests([{"label": "Chapter 1 · Request 1", "content": "Hello", "phase": "text"}])
+    card.report_tile.visible = True
+    assert all(_contains(card, tile) for tile in (card.requests_tile, card.ocr_tile, card.report_tile))
+    assert _ink_problems(card) == []
+    plan = JobCard(attachment=record, phase=CardPhase("plan"))
+    plan.set_plan([ft.ExpansionTile(title="Run options", dense=True)])
+    assert _ink_problems(plan) == []
+    run_options = types.SimpleNamespace(control=ft.ExpansionTile(title="Run options", dense=True))
+    batch = BatchPlanCard(files=["a.epub", "b.epub"], run_options=run_options)
+    assert _contains(batch, run_options.control) and _ink_problems(batch) == []
+    before = ft.Container(content=ft.Column([ft.ExpansionTile(title="Requests (1)", dense=True)]),
+                          bgcolor=ft.Colors.SURFACE_CONTAINER, border_radius=16)
+    assert len(_ink_problems(before)) == 1
+
+
+@needs_flet
+def test_user_file_card_and_plan_card_fit_a_320_dp_phone(app_env, tmp_path):
+    """The CI flow on the real app at 320 dp: ＋ › Files with the self-test EPUB, Send. The chat's file card
+    (an end-aligned Row) gets the transcript column, 320 - 2 × 12 dp: its card is a loose Flexible capped at
+    320 dp, so it takes 296 dp and nothing overflows (the fixed 320 dp card overflowed by 24 px, the CI
+    log's number, which the same layout model reproduces). The Plan card's tiles sit on a Material."""
+    import flet as ft
+    import flows
+    from glossarion_mobile.diagnostics import fixtures
+    from glossarion_mobile.diagnostics.fake_llm_server import FAKE_MODEL
+    from glossarion_mobile.ui import tokens
+    from glossarion_mobile.ui.chat.cards import JobCard
+    from glossarion_mobile.ui.chat.messages import UserFileCard
+
+    epub = fixtures.build_tiny_epub(tmp_path / flows.EPUB_NAME, chapters=3)
+    twin = _load("_glossarion_ui_flows_issue18_cards", Path(__file__).with_name("test_ui_flows.py"))
+    tf = _foundations()
+    width = 320
+
+    async def scenario():
+        app, tester, driver = await twin._host_driver(tf, {epub.name: epub}, width=width)
+        try:
+            await flows.wait_home(driver)
+            store = app.config_store
+            store.set_many(flows.ui_config("http://127.0.0.1:9/v1", FAKE_MODEL))
+            store.flush()
+            await flows.go_home(driver)
+            await driver.tap(tooltip="New chat")
+            await driver.tap(tooltip=flows.ATTACH_TOOLTIP)
+            await driver.pick_file(epub.name, lambda: driver.tap(key="attach-files"))
+            await driver.wait(contains=epub.stem, timeout=60)
+            await driver.tap(key="send-idle_ready", timeout=60)
+            await driver.wait(text="Ready to translate", timeout=60)
+            view = app.chat_view
+            cards = [getattr(slot, "card", slot) for slot in view.transcript.messages]
+            files = [c for c in cards if isinstance(c, UserFileCard)]
+            assert len(files) == 1, [type(c).__name__ for c in cards]
+            gutter = tokens.SPACING["md"]
+            assert view.transcript.padding == ft.Padding.all(gutter)
+            column = width - 2 * gutter
+            row = wire(files[0])
+            layout = layout_row(row, column)
+            card_node = _find(row, files[0].card._i)
+            assert layout["overflow"] == 0, layout
+            assert layout["sizes"][files[0].card._i] == (320.0, float(column)), layout["sizes"]
+            assert card_node.get("expand") is True and card_node.get("expand_loose") is True
+            fixed = copy.deepcopy(row)
+            node = _find(fixed, files[0].card._i)
+            node.pop("expand", None)
+            node.pop("expand_loose", None)
+            assert layout_row(fixed, column)["overflow"] == pytest.approx(24), "the model no longer reproduces CI"
+            plans = [c for c in cards if isinstance(c, JobCard)]
+            assert plans and all(_ink_problems(c) == [] for c in plans)
+            assert _ink_problems(view.transcript) == []
         finally:
             app.jobs.close()
             await tf._stop(app)

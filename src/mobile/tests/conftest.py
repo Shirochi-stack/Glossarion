@@ -108,7 +108,8 @@ def ui(flet_app, device, request):
             handle.write(line + "\n")
 
     async def back() -> None:
-        device.key("KEYCODE_BACK")
+        # off the event loop, like scroll(): the RemoteTester socket keeps being served while adb runs
+        await asyncio.to_thread(device.key, "KEYCODE_BACK")
 
     # The app asks for the notification permission before its first job (a system dialog the
     # Flutter tester cannot answer): grant it up front, as android_smoke.sh installs with -g.

@@ -7,7 +7,8 @@ the screens they walk through, are checked without Flutter. It mirrors Flutter's
 * the tree is the open dialogs / sheets (top-most first), the top view (with its app bar and
   drawer) and the page overlay; invisible controls and their children are not in it;
 * ``find_by_text`` matches a ``Text`` value or a string label (``content`` / ``title`` /
-  ``label`` / ``text``) a control renders as text; ``find_by_text_containing`` a substring;
+  ``label`` / ``text``) a control renders as text; ``find_by_text_containing`` a regular expression
+  found in a text (like Flet's RemoteTester; ``UiDriver`` escapes a flow's literal text);
   ``find_by_tooltip`` a tooltip; ``find_by_key`` a key (string or ``ValueKey`` value);
 * ``tap`` sends the event Flutter would: ``click`` (or ``tap`` / ``select``) to the nearest
   enabled control with a handler, a switch / checkbox toggles and sends ``change``, a tab sends
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
@@ -103,6 +105,10 @@ def _texts(control: Any) -> list:
 
 
 class PyTester:
+    #: The app handles a dispatched event before ``dispatch`` returns (no client round trip): a ``view_pop``
+    #: the driver's ``back`` sends has landed when it returns. On a device it has not (``flows.go_home``).
+    events_land_at_once = True
+
     def __init__(self, session: Any, page: Any) -> None:
         self.session = session
         self.page = page
@@ -156,7 +162,8 @@ class PyTester:
         return self._register([c for c in self._walk() if text in _texts(c)])
 
     async def find_by_text_containing(self, pattern: str) -> HostFinder:
-        return self._register([c for c in self._walk() if any(pattern in t for t in _texts(c))])
+        regex = re.compile(pattern)  # a regular expression, as on the device (an invalid one raises here too)
+        return self._register([c for c in self._walk() if any(regex.search(t) for t in _texts(c))])
 
     async def find_by_tooltip(self, value: str) -> HostFinder:
         return self._register([c for c in self._walk() if _tooltip(c) == value])

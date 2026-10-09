@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.chat.cards import material_surface
 from glossarion_mobile.ui.chat.direct_text_rules import attachment_icon, format_attachment_size
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import icon_data
@@ -102,10 +103,10 @@ class BatchPlanCard(ft.Container):
         if run_options is not None:
             controls.append(run_options.control)
         controls.append(ft.Row(buttons, wrap=True, spacing=8, run_spacing=4))
-        self.content = ft.Column(controls, spacing=6, tight=True)
-        self.bgcolor = ft.Colors.SURFACE_CONTAINER
-        self.border_radius = tokens.RADII["plan_card"]
-        self.padding = ft.Padding.all(12)
+        # the Run options ExpansionTile's header needs a Material right above it (``cards.material_surface``)
+        self.body = ft.Column(controls, spacing=6, tight=True)
+        self.content = material_surface(self.body, bgcolor=ft.Colors.SURFACE_CONTAINER,
+                                        radius=tokens.RADII["plan_card"], padding=ft.Padding.all(12))
 
     def _act(self, action: str, *args: Any) -> Any:
         if self.on_action is None:

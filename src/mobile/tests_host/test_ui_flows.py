@@ -442,6 +442,117 @@ def test_ci_dest_library_timeout_was_the_welcome_race(monkeypatch):
     assert skipped and device.welcome_skipped and device.drawer_open_on_root
 
 
+class _PopDevice(_ModelTester):
+    """A phone with the Library pushed over the chat home, under ``flet test``. The system Back (adb) reaches
+    Flutter ``key_ms`` after it was sent; Flutter hands the pop to the app (``view_pop`` -> ``on_view_pop``)
+    and the Library View goes ``pop_ms`` later (the round trip). A system Back that reaches Flutter while the
+    home is the only route finishes the activity: the tester's connection closes. ``app_bar_back``: the
+    Library's AppBar shows Flutter's BackButton (tooltip "Back"); a tap pops through the same round trip but
+    can never reach the root route."""
+
+    def __init__(self, clock: _Clock, *, key_ms: int = 200, pop_ms: int = 150, app_bar_back: bool = False) -> None:
+        super().__init__(clock)
+        self.key_ms, self.pop_ms, self.app_bar_back = key_ms, pop_ms, app_bar_back
+        self.routes = ["/", "/library"]
+        self.events: list = []  # (time, "key" | "pop")
+        self.system_backs = 0
+        self.finished = False
+
+    def _advance(self) -> None:
+        while True:
+            due = sorted(e for e in self.events if e[0] <= self.clock.t)
+            if not due:
+                return
+            when, kind = due[0]
+            self.events.remove(due[0])
+            if kind == "key":
+                if len(self.routes) > 1:
+                    self.events.append((when + self.pop_ms / 1000.0, "pop"))
+                else:
+                    self.finished = True  # Android finishes the activity under the test
+            elif len(self.routes) > 1:
+                self.routes.pop()
+
+    def visible(self) -> set:
+        import flows
+
+        self._advance()
+        if self.finished:
+            raise ConnectionError("Remote tester connection was closed.")
+        if len(self.routes) > 1:
+            return {("tooltip", "Back")} if self.app_bar_back else set()
+        return {("tooltip", "Open navigation"), ("tooltip", flows.ATTACH_TOOLTIP)}
+
+    async def system_back(self) -> None:
+        self.system_backs += 1
+        self.events.append((self.clock.t + self.key_ms / 1000.0, "key"))
+
+    async def tap(self, finder) -> None:
+        self._advance()
+        if self.finders[finder.id] == ("tooltip", "Back") and len(self.routes) > 1:
+            self.events.append((self.clock.t + self.pop_ms / 1000.0, "pop"))
+
+
+@pytest.mark.parametrize("app_bar_back", [False, True], ids=["system-back", "app-bar-back"])
+def test_go_home_lets_a_pop_land_before_another_back(monkeypatch, app_bar_back):
+    """test_ui_smoke on the emulator (Build Mobile run 37940790686): "ConnectionError: Remote tester connection
+    was closed" after "tap key=dest-library", "back", "back". go_home looked for the home 300 ms after a system
+    Back, pressed Back again, and that one reached the root route once the first pop had landed. Now it taps
+    the screen's own app-bar Back when there is one and waits for the home before another Back."""
+    import flows
+    import ui_driver
+
+    clock = _Clock()
+    monkeypatch.setattr(ui_driver, "time", clock)
+
+    async def old_go_home(d, max_steps: int = 6) -> None:  # the loop before the fix
+        for _ in range(max_steps):
+            if await d.count(tooltip="Open navigation"):
+                return
+            await d.back()
+
+    async def run(go_home):
+        device = _PopDevice(clock, app_bar_back=app_bar_back)
+        driver = ui_driver.UiDriver(device, back=device.system_back, log=lambda *_a: None)
+        await go_home(driver)
+        return device
+
+    with pytest.raises(ConnectionError, match="connection was closed"):
+        asyncio.run(run(old_go_home))
+    device = asyncio.run(run(flows.go_home))
+    assert device.routes == ["/"] and not device.finished
+    assert device.system_backs == (0 if app_bar_back else 1), device.system_backs
+
+
+def test_contains_finders_are_literal_text_on_the_device_and_the_host():
+    """Android UI tests (Build Mobile run 37940790686): ``flows.library_book_chapters`` taps
+    ``contains="Completed ("``; Flet's RemoteTester takes a regular expression, so the emulator threw
+    "FormatException: Unterminated group" while the host's substring test passed. ``UiDriver`` now sends the
+    flow's text as an escaped pattern (only the regex syntax characters, valid for Dart's RegExp in either mode)
+    and the host tester searches with the same regular expression."""
+    import re
+
+    import ui_driver
+
+    sent: list = []
+
+    class Recorder(_ModelTester):
+        def visible(self) -> set:
+            return set()
+
+        async def find_by_text_containing(self, pattern):
+            sent.append(pattern)
+            return await super().find_by_text_containing(pattern)
+
+    asyncio.run(ui_driver.UiDriver(Recorder(_Clock()), log=lambda *_a: None).find(contains="Completed ("))
+    assert sent == [r"Completed \("]
+    for text in ("Completed (", "Ch.001", "PASS · ", "Not Translated 0", "Added to Library: a+b [1]{2}.epub", "x|y^$\\"):
+        pattern = ui_driver.regex_literal(text)
+        assert re.fullmatch(pattern, text) and re.search(pattern, f"… {text} …"), (text, pattern)
+        # escapes only ECMAScript syntax characters (a space, '·' or '-' escaped is an error in Dart unicode mode)
+        assert not re.search(r"\\[^\\^$.|?*+()\[\]{}]", pattern), pattern
+
+
 class _MissedHitTest(RuntimeError):
     """What Flet's RemoteTester raises for Flutter's fatal hit-test check (the driver patch)."""
 

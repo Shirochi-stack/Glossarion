@@ -76,6 +76,7 @@ from glossarion_mobile.ui.chat.run_request import (
     job_params,
     job_title,
     prepare_direct_text_run,
+    replace_profile,
     user_turn,
 )
 from glossarion_mobile.ui.chat.stream_bridge import RunStream
@@ -126,6 +127,28 @@ def turn_key(params: Any, job_id: Any = None) -> Optional[str]:
     return f"job:{job_id}" if job_id is not None else None
 
 
+def _rechecked_profile(params: dict, check: Optional[Callable[[str], Optional[str]]]) -> dict:
+    """``params`` with its Send-time prompt profile (``config_overrides["active_profile"]``) re-checked:
+    ``check(name)`` answers the profile to run with (the same name while it exists) or None (the run
+    inherits). A changed answer is written through ``run_request.replace_profile`` (the extraction method
+    the profile switches follows it, like at Send)."""
+    overrides = params.get("config_overrides")
+    name = overrides.get("active_profile") if isinstance(overrides, Mapping) else None
+    if not callable(check) or not isinstance(name, str) or not name:
+        return params
+    try:
+        profile = check(name)
+    except Exception:
+        log.exception("re-checking the resumed run's prompt profile failed")
+        return params
+    if profile == name:
+        return params
+    log.info("resumed run: prompt profile %r no longer exists, running with %r", name, profile or "(inherited)")
+    params = dict(params)
+    params["config_overrides"] = replace_profile(overrides, profile or None)
+    return params
+
+
 def _snapshot_time(snapshot: Any) -> float:
     """When a remembered job last changed (finished, else started, else created)."""
     for name in ("finished", "started", "created"):
@@ -156,6 +179,10 @@ class ChatRun:
     title: str = ""
     started: float = field(default_factory=time.time)
     kind: str = DIRECT_TEXT_JOB_KIND  # the JobSpec kind (Resume resubmits the same kind)
+    #: The chat's message count when the run started: the request cards THIS run commits (the glossary
+    #: gate's, the finish's) are the chat's messages from here on; the turn's earlier cards (a stopped
+    #: run's, before a Resume) are not (``ChatView._update_live_job_card``).
+    committed_from: int = 0
 
     @property
     def live(self) -> bool:
@@ -278,6 +305,14 @@ class ChatRuns:
             return fn(*args)
         return await self.run_io(fn, *args)
 
+    def _message_count(self, cid: str) -> int:
+        """The chat's message count now (``ChatRun.committed_from``; 0 when the store cannot tell)."""
+        reader = getattr(self.store, "messages", None)
+        try:
+            return len(reader(cid)) if callable(reader) else 0
+        except Exception:
+            return 0
+
     async def send(
         self,
         cid: Any,
@@ -318,7 +353,7 @@ class ChatRuns:
             self._could_not_start(cid, exc)
             raise
         chat_run = ChatRun(cid=cid, run=run, stream=RunStream(auto_scroll_disabled=settings.disable_auto_scroll),
-                           user_index=int(user_index))
+                           user_index=int(user_index), committed_from=self._message_count(cid))
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
             self.runs[cid] = chat_run
@@ -382,7 +417,8 @@ class ChatRuns:
             self._could_not_start(cid, exc)
             raise
         chat_run = ChatRun(cid=cid, run=run, stream=RunStream(auto_scroll_disabled=settings.disable_auto_scroll),
-                           user_index=int(user_index), kind=GENERATE_MEDIA_JOB_KIND)
+                           user_index=int(user_index), kind=GENERATE_MEDIA_JOB_KIND,
+                           committed_from=self._message_count(cid))
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
             self.runs[cid] = chat_run
@@ -486,6 +522,7 @@ class ChatRuns:
                 params=dict(params),
                 title=str(getattr(spec, "title", "") or ""),
                 kind=job_kind(snapshot) or DIRECT_TEXT_JOB_KIND,
+                committed_from=self._message_count(cid),
             )
             chat_run.stream.provider = self._stream_provider(chat_run)
             self.runs[cid] = chat_run
@@ -714,9 +751,17 @@ class ChatRuns:
                 return True
         return False
 
-    async def resubmit(self, cid: Any) -> Optional[ChatRun]:
+    async def resubmit(self, cid: Any, *,
+                       profile_check: Optional[Callable[[str], Optional[str]]] = None) -> Optional[ChatRun]:
         """Resume / Retry failed: the same JobSpec params (same run root), so the pipeline continues
         from its ``translation_progress.json`` and only redoes missing or failed chapters.
+
+        Three params follow the chat as it is now: the turn's index (``user_index``), the chat's next
+        request number (``request_number``, as a new Send would get: the resumed run's cards do not
+        repeat the stopped run's "Request N") and a prompt profile that no longer exists:
+        ``profile_check(name)`` (``ChatView.resume_profile``) answers the profile to run with, None to
+        inherit; a profile renamed or deleted since Send never reaches the backend, which would silently
+        use the first profile (owner decisions #15 / #16). A profile that still exists stays as sent.
 
         An Interrupted job (killed app) is resumed through ``JobService.resume``, which resolves
         its Interrupted entry, so the Jobs page and the launch banner cannot run it again."""
@@ -732,18 +777,23 @@ class ChatRuns:
             return None  # the run's turn was deleted: nothing to resume into
         params = dict(params)
         params["user_index"] = user_index  # a new submission records the turn where it is now
+        counter = getattr(self.store, "request_count", None)
+        if "request_number" in params and callable(counter):
+            params["request_number"] = counter(cid) + 1
+        params = _rechecked_profile(params, profile_check)
         resumed = DirectTextRun.from_dict(run_dict)
         chat_run = ChatRun(
             cid=cid, run=resumed, user_index=user_index,
             stream=RunStream(),
             params=params, title=title or job_title(resumed), kind=kind,
+            committed_from=self._message_count(cid),
         )
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
             self.runs[cid] = chat_run
             self.status.pop(cid, None)
         self.store.set_running(cid, True)
-        job_id = self.jobs.resume(interrupted_id) if interrupted_id else None
+        job_id = self.jobs.resume(interrupted_id, params=params) if interrupted_id else None
         if not job_id:
             session_title = str((self.store.session(cid) or {}).get("title") or "Chat")
             inputs = () if kind == GENERATE_MEDIA_JOB_KIND else (resumed.source_path,)

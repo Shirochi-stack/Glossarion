@@ -1543,6 +1543,92 @@ def test_relaunch_card_state_and_resume_resolve_the_interrupted_job(desktop_stor
         adapter.close()
 
 
+def test_resume_rechecks_a_send_time_profile_that_no_longer_exists(desktop_store_cls, tmp_path):
+    """Resume / Retry failed (DF2 verify; owner decisions #15 / #16): a run sent with a profile that was renamed or
+    deleted before the Resume runs with the chat's profile now (``profile_check``: ``ChatView.resume_profile``) or
+    inherits one, never with the gone name (the backend would silently use the first profile); the extraction
+    method that profile switched follows it, the rest of the overrides stays; a profile that still exists stays as
+    sent. The resumed run continues the chat's request numbers. Both paths: this session's stopped run (a new
+    submission) and an Interrupted job after a kill (``JobService.resume`` with the re-checked params)."""
+    from glossarion_mobile import job_kinds
+    from glossarion_mobile.services.jobs import JobService, JobSnapshot, JobState, Progress
+    from glossarion_mobile.state.setting_writes import extraction_method_for_profile
+
+    jobs = FakeJobService()
+    adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
+    run = asyncio.run(runs.send("5", text="안녕하세요", attachment=None, settings=DirectTextSettings(), output_mode="text",
+                                overrides={"profile": "Korean_BeautifulSoup", "model": "gpt-x"}))
+    sent = dict(jobs.submitted[0].params["config_overrides"])
+    assert sent["active_profile"] == "Korean_BeautifulSoup" and sent["model"] == "gpt-x"
+    assert sent.get("text_extraction_method") == extraction_method_for_profile("Korean_BeautifulSoup")
+    jobs.publish("RUNNING")
+    for line in CARD_LINES:
+        jobs.line(line)
+    runs.request_stop("5")
+    Path(run.run.expected_output).parent.mkdir(parents=True, exist_ok=True)
+    Path(run.run.expected_output).write_text("Hello there, translated", encoding="utf-8")
+    jobs.publish("DONE")  # the graceful stop let the request finish: its card is committed
+    _finish_all(runs)
+    assert not run.live and run.state == "stopped" and adapter.request_count("5") >= 1
+    asked: list = []
+
+    def renamed(name):
+        asked.append(name)
+        return "My KR style"
+
+    again = asyncio.run(runs.resubmit("5", profile_check=renamed))
+    resent = jobs.submitted[-1].params
+    assert asked == ["Korean_BeautifulSoup"] and again is not None
+    assert resent["config_overrides"] == {"model": "gpt-x", "active_profile": "My KR style"}, resent["config_overrides"]
+    assert resent["request_number"] == adapter.request_count("5") + 1 > jobs.submitted[0].params["request_number"]
+    jobs.publish("CANCELLED")
+    _finish_all(runs)
+    # the profile still exists: the run keeps it; gone without a chat profile: the run inherits
+    asyncio.run(runs.resubmit("5", profile_check=lambda name: name))
+    assert jobs.submitted[-1].params["config_overrides"] == {"model": "gpt-x", "active_profile": "My KR style"}
+    jobs.publish("CANCELLED")
+    _finish_all(runs)
+    asyncio.run(runs.resubmit("5", profile_check=lambda name: None))
+    assert jobs.submitted[-1].params["config_overrides"] == {"model": "gpt-x"}
+    jobs.publish("CANCELLED")
+    _finish_all(runs)
+    adapter.close()
+
+    # an Interrupted job (the app was killed): JobService.resume runs the re-checked params
+    root = tmp_path / "killed"
+    root.mkdir()
+    _desktop_history(root)
+    killed_adapter = _adapter(desktop_store_cls, root, save_delay=0.01)
+    before_kill = FakeJobService()
+    killed_run = asyncio.run(ChatRuns(killed_adapter, JobsAdapter(before_kill), temp_dir=str(root)).send(
+        "5", text="안녕", attachment=None, settings=DirectTextSettings(), output_mode="text",
+        overrides={"profile": "Gone KR"}))
+    killed = JobSnapshot(id="killedjob002", spec=before_kill.submitted[0], state=JobState.RUNNING, created=1.0,
+                         started=2.0, progress=Progress(total=12, completed=3))
+    jobs_dir = root / "jobs"
+    jobs_dir.mkdir()
+    (jobs_dir / "active.state").write_text(json.dumps({"version": 1, "saved_at": 3.0, "active": killed.to_dict(),
+                                                       "queue": []}), encoding="utf-8")
+    ran: list = []
+    info = job_kinds.KindInfo(kind="direct_text", verb="Translating", icon="CHAT", stop_kind="translation",
+                              run=lambda ctx: ran.append(dict(ctx.params)))
+    service = JobService(jobs_dir=str(jobs_dir), backend=_ChatBackend(), kinds=lambda kind: info,
+                         config_loader=lambda: {})
+    relaunched = ChatRuns(killed_adapter, JobsAdapter(service), temp_dir=str(root))
+    relaunched.attach()
+    try:
+        resumed = asyncio.run(relaunched.resubmit("5", profile_check=lambda name: None if name == "Gone KR" else name))
+        assert resumed is not None and service.wait_idle(TIMEOUT_S)
+        _finish_all(relaunched)
+        assert service.interrupted == ()  # resolved "resumed" by the chat's Resume
+        assert len(ran) == 1 and ran[0]["user_index"] == killed_run.user_index, ran
+        assert "active_profile" not in ran[0]["config_overrides"], ran[0]["config_overrides"]
+    finally:
+        relaunched.detach()
+        service.close()
+        killed_adapter.close()
+
+
 def test_ended_card_labels():
     from glossarion_mobile.services.jobs import JobSnapshot, JobSpec, JobState, Progress
     from glossarion_mobile.ui.chat.job_binding import ended_card, ended_kind

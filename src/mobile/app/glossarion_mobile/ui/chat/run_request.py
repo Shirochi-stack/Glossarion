@@ -64,6 +64,7 @@ __all__ = [
     "build_run_options",
     "job_params",
     "prepare_direct_text_run",
+    "replace_profile",
     "run_options_dict",
     "user_turn",
 ]
@@ -231,6 +232,22 @@ def config_overrides(overrides: Optional[Mapping[str, Any]]) -> dict:
         method = extraction_method_for_profile(out["active_profile"])
         if method is not None:
             out["text_extraction_method"] = method
+    return out
+
+
+def replace_profile(overrides: Optional[Mapping[str, Any]], profile: Optional[str]) -> dict:
+    """A JobSpec's ``config_overrides`` with its prompt profile replaced by ``profile`` (None: the run
+    inherits it): ``active_profile`` and the extraction method that profile switched
+    (:func:`config_overrides`) are derived again; everything else (model, target language, the Plan
+    card's run options) is kept."""
+    out = dict(overrides or {})
+    old = out.pop("active_profile", None)
+    if old and "text_extraction_method" in out:
+        from glossarion_mobile.state.setting_writes import extraction_method_for_profile
+
+        if out["text_extraction_method"] == extraction_method_for_profile(old):
+            out.pop("text_extraction_method")
+    out.update(config_overrides({"profile": profile} if profile else {}))
     return out
 
 

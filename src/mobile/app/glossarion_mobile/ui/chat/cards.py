@@ -55,6 +55,7 @@ __all__ = [
     "RequestSheet",
     "glossary_preview",
     "glossary_question",
+    "material_surface",
     "save_text_keep_bom",
 ]
 
@@ -475,6 +476,23 @@ def _request_row(segment: dict, on_open: Optional[Callable[[dict], Any]]) -> ft.
     )
 
 
+def material_surface(content: ft.Control, *, bgcolor: Any, radius: float, padding: Any) -> ft.Card:
+    """A card's coloured, rounded surface painted by a Material (a flat Flutter ``Card``), not by a decorated
+    ``Container``. A ``ListTile`` (every ``ExpansionTile`` header: Requests, Run options, the report) paints
+    its background and ink on the nearest Material; a coloured DecoratedBox in between hides them, and
+    Flutter reports "ListTile background color or ink splashes may be invisible", which fails the Android UI
+    tests (Build Mobile run 37940790686). Same look: no elevation, no margin, the radius clips like the
+    Container's did."""
+    return ft.Card(
+        content=ft.Container(content=content, padding=padding),
+        bgcolor=bgcolor,
+        elevation=0,
+        margin=ft.Margin.all(0),
+        shape=ft.RoundedRectangleBorder(radius=radius),
+        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+    )
+
+
 class JobCard(ft.Container):
     """Plan / Queued / Running / Result card for one attachment turn."""
 
@@ -552,7 +570,7 @@ class JobCard(ft.Container):
         ext = str(self.attachment.get("extension") or "")
         if meta is None:
             meta = f"{attachment_kind_label(ext)} · {format_attachment_size(self.attachment.get('size'))}" if self.attachment else ""
-        self.content = ft.Column(
+        self.body = ft.Column(
             [
                 ft.Row(
                     [ft.Icon(icon_data(icon_name), color=ft.Colors.PRIMARY), self.title_text, self.ring],
@@ -576,9 +594,9 @@ class JobCard(ft.Container):
             spacing=6,
             tight=True,
         )
-        self.bgcolor = ft.Colors.SURFACE_CONTAINER
-        self.border_radius = tokens.RADII["plan_card"]
-        self.padding = ft.Padding.all(12)
+        # the ExpansionTiles' headers need a Material right above them (``material_surface``)
+        self.content = material_surface(self.body, bgcolor=ft.Colors.SURFACE_CONTAINER,
+                                        radius=tokens.RADII["plan_card"], padding=ft.Padding.all(12))
         self.title_text.value = str(self.attachment.get("name") or "Attachment")
         self.set_phase(phase)
 

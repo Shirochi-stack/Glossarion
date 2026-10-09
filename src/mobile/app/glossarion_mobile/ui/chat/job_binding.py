@@ -408,14 +408,15 @@ class JobsAdapter:
         fn = getattr(self.jobs, "cancel_queued", None)
         return fn(job_id) if callable(fn) else None
 
-    def resume(self, job_id: Any) -> Any:
+    def resume(self, job_id: Any, params: Optional[Mapping[str, Any]] = None) -> Any:
         """``JobService.resume``: resubmit a remembered job's spec and resolve its Interrupted
-        entry; the new job id, or None (unknown / already resumed / no such service call)."""
+        entry; the new job id, or None (unknown / already resumed / no such service call).
+        ``params``: the spec's params as the chat resubmits them (``ChatRuns.resubmit``)."""
         fn = getattr(self.jobs, "resume", None)
         if job_id is None or not callable(fn):
             return None
         try:
-            return fn(job_id)
+            return fn(job_id) if params is None else fn(job_id, params=dict(params))
         except Exception:
             log.exception("resuming job %s failed", job_id)
             return None

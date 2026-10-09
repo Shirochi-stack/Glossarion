@@ -175,7 +175,12 @@ class UserFileCard(ft.Row):
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
             border_radius=tokens.RADII["user_file_card"],
             padding=ft.Padding.all(12),
+            # 320 dp at most, never wider than the transcript column: a loose Flexible in the end-aligned
+            # Row, so on a 320 dp phone (296 dp inside the transcript's 12 dp gutters) the card takes 296
+            # dp instead of overflowing it by 24 (the Android UI tests' RenderFlex overflow)
             width=320,
+            expand=True,
+            expand_loose=True,
             on_click=(lambda e: on_tap(self)) if on_tap else None,
             on_long_press=(lambda e: on_long_press(self)) if on_long_press else None,
         )
