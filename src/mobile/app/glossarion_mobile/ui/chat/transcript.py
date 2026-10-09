@@ -12,7 +12,9 @@ control only shows:
 * the rendered cards, then the live tail (streaming cards, approval card, plan).
 
 Following the tail: ``follow_tail`` is True while the user is within one screen of
-the bottom (``on_scroll`` events); ``scroll_to_end`` jumps with ``offset=-1``.
+the bottom (``on_scroll`` events); ``scroll_to_end`` jumps with ``offset=-1``, and an animated
+jump checks once more after ``LATE_LAYOUT_SECONDS`` (a slow device lays a new card out after the
+first scroll, which then stopped at the old end).
 
 Loading at the edges (UI_SPEC §2.8, desktop ``_update_history_window_for_scroll``): a user scroll
 towards the start within ``EDGE_LOAD_PX`` of it (or a pull past the top) while cards are hidden
@@ -43,8 +45,8 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET, EmptyState
 from glossarion_mobile.ui.components.pull_to_refresh import is_overscroll, is_top_pull
 
-__all__ = ["CardSlot", "EARLIER_TEMPLATE", "EDGE_LOAD_PX", "EMPTY_BODY", "EMPTY_TITLE", "LATER_TEMPLATE",
-           "SUGGESTIONS", "Transcript"]
+__all__ = ["CardSlot", "EARLIER_TEMPLATE", "EDGE_LOAD_PX", "EMPTY_BODY", "EMPTY_TITLE", "LATE_LAYOUT_SECONDS",
+           "LATER_TEMPLATE", "SUGGESTIONS", "Transcript"]
 
 EMPTY_TITLE = "What would you like to translate?"
 EMPTY_BODY = (
@@ -65,6 +67,11 @@ LATER_TEMPLATE = "Scroll for newer messages ({n} hidden) ↓"
 EDGE_LOAD_PX = 600.0
 #: after a load or a programmatic scroll, edge loads wait this long (the client lays out first)
 EDGE_HOLD_SECONDS = 0.35
+#: an animated ``scroll_to_end`` (a send, a Plan, ↓) scrolls again this long after its first scroll: a slow
+#: device lays the new card out after that one, which then stops at the old end (the 320x640 CI emulator
+#: left the Plan card's Start under the composer, Build Mobile 37980702888). The streaming repaints
+#: (``duration`` 0) scroll again on their next tick anyway.
+LATE_LAYOUT_SECONDS = 0.6
 
 
 class CardSlot(ft.Container):
@@ -243,17 +250,19 @@ class Transcript(ft.ListView):
     async def scroll_to_end(self, duration: int = 200, settle: float = 0.15) -> None:
         """Jump to the newest card once the client has laid out the latest update - unless the user left
         the end meanwhile ("↑ earlier", a jump, an edge load during the settle): every caller starts this
-        only while following the tail, so a change during the wait is the user's and wins."""
+        only while following the tail, so a change during the wait is the user's and wins. An animated
+        jump scrolls once more after ``LATE_LAYOUT_SECONDS``, under the same rule."""
         import asyncio
 
-        if settle:
-            await asyncio.sleep(settle)  # scroll_to before layout would stop at the old max extent
-        if not self.follow_tail or self.hidden_after:
-            return
-        try:
-            await self.scroll_to(offset=-1, duration=duration)
-        except Exception:
-            pass
+        for wait in (settle, LATE_LAYOUT_SECONDS) if duration else (settle,):
+            if wait:
+                await asyncio.sleep(wait)  # scroll_to before layout would stop at the old max extent
+            if not self.follow_tail or self.hidden_after:
+                return
+            try:
+                await self.scroll_to(offset=-1, duration=duration)
+            except Exception:
+                pass
 
     def _load(self, handler: Optional[Callable[..., Any]]) -> None:
         """A loader row's tap (the guaranteed path: a short transcript sends no scroll events)."""
