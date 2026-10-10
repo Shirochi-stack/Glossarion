@@ -1001,6 +1001,8 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             leaks = []
             for root in {data_dir, Path(rb.get_paths().cache), Path(rb.get_paths().temp)}:
                 for path in root.rglob("*"):
+                    if "tiktoken" in path.parts:  # the bundled BPE cache copy: base64 text, chance matches
+                        continue
                     if path.is_file() and path.stat().st_size < 64 * 1024 * 1024:
                         blob = path.read_bytes().decode("utf-8", "replace")
                         leaks += [f"{name} in {path.relative_to(root)}" for name in _leaked(blob, secrets)]

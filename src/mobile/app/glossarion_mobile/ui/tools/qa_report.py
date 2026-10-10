@@ -139,10 +139,11 @@ class QaReportScreen(Screen):
         self.raw = raw
         self._render_summary()
         use_webview = False
-        try:
-            use_webview = bool(self.ctx.webview_ok())
-        except Exception:
-            use_webview = False
+        if self.summary is None:  # U13 item 3: the parsed report is the app's view; HTML only without the JSON
+            try:
+                use_webview = bool(self.ctx.webview_ok())
+            except Exception:
+                use_webview = False
         if use_webview:
             try:
                 self._show_webview(raw)

@@ -1914,7 +1914,8 @@ def test_result_card_qa_scans_the_turn_workspace(desktop_store_cls, isolated_env
             # its own card: Job · Report · Chapters
             card = next(c for c in _cards(view, JobCard) if c.title_text.value == "QA scan · book")
             buttons = {b.key: b for b in card.buttons.controls}
-            assert set(buttons) == {"qajob-job", "qajob-report", "qajob-chapters"}
+            assert set(buttons) == {"qajob-job", "qajob-report", "qajob-chapters", "qajob-run",  # U13 item 3
+                                    "qajob-multipass", "qajob-multipass-mode"}
             buttons["qajob-report"].on_click(None)
             await _settle(calls)
             assert calls.notes[-1][0] == "The scan has not finished yet" and went == []

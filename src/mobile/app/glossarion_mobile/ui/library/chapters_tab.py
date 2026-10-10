@@ -240,7 +240,10 @@ class ChaptersTab:
         self.list_holder = ft.Container(expand=True, key="ch-list-holder")
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="ch-bulk")
-        header = ft.Row([self.folder_chip, self.mode], spacing=8, wrap=True)
+        # U13 item 1: the desktop "Run Translation" for this book: pending / failed chapters are translated
+        self.run_button = ft.FilledTonalButton(content="Run translation", icon=ft.Icons.PLAY_ARROW, key="ch-run",
+                                               on_click=lambda e: self.ctx.spawn(self.run_translation()))
+        header = ft.Row([self.folder_chip, self.mode, self.run_button], spacing=8, wrap=True)
         if self.image_folder:
             return self._build_image_folder(header)
         self.root = ft.Column([
@@ -1416,6 +1419,11 @@ class ChaptersTab:
         job is queued, so the pipeline translates it instead of skipping a chapter it considers
         done (``SINGLE_CHAPTER_FILTER`` only narrows the extraction)."""
         service = self.page.service
+        source_path = str(self.page.book.get("raw_source_path") or self.page.book.get("path") or "")
+        if source_path and not source_path.lower().endswith(".epub"):
+            # single-chapter jobs extract one EPUB chapter; a TXT book's section is reset to pending instead
+            # (desktop Retranslate), then Run translation translates it
+            return await self.retranslate([row])
         if not service.has_job_kind("single_chapter"):
             self.ctx.say("Single-chapter jobs are not available in this build")
             return None
@@ -1451,6 +1459,14 @@ class ChaptersTab:
         job_id = await service.submit(spec)
         self.ctx.say(f"Translating {row.filename}…", "Jobs", lambda: self.ctx.go("jobs"))
         return job_id
+
+    async def run_translation(self) -> Any:
+        """U13 item 1, the desktop "Run Translation": the book's translation run (the Library Translate sheet),
+        which translates what is pending, failed or reset by Retranslate."""
+        if self._jobs_busy():
+            self.ctx.say(ALREADY_RUNNING, "Jobs", lambda: self.ctx.go("jobs"))
+            return None
+        return await self.page.open_translate()
 
     async def retranslate(self, rows: Sequence[pm.RowVM]) -> Any:
         """Retranslate Selected (desktop ``retranslate_selected``): plan -> refusal or confirmation
@@ -1587,6 +1603,8 @@ class ChaptersTab:
         message = str(result.get("retranslate_message") or "")
         if message:
             self.show_message(str(result.get("retranslate_title") or "Retranslate"), message)
+        self.ctx.say("Chapters reset to pending · Run translation to translate them", "Run translation",
+                     lambda: self.ctx.spawn(self.run_translation()))
         return message or None
 
     async def _on_resolve_qa_end(self, snap: Any) -> Optional[str]:

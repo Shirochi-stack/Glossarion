@@ -153,6 +153,11 @@ __all__ = ["ChatView", "TOOL_ROUTES"]
 
 log = logging.getLogger("glossarion.chat")
 
+#: QA card multipass choices (desktop ``multipass_refinement_mode``) and the card's default (U13 item 3)
+QA_MULTIPASS_MODES = (("full", "Full"), ("full_with_raw", "Full + raw"), ("failed", "Failed"),
+                      ("partial", "Partial"), ("partial.b", "Partial.b"), ("partial.b2", "Partial.b2"))
+QA_MULTIPASS_DEFAULT_MODE = "partial.b"
+
 # ＋ sheet tool -> route name of its surface (None: the tool runs from the chat later)
 TOOL_ROUTES: dict[str, Optional[str]] = {
     "extract_glossary": None,
@@ -2149,18 +2154,66 @@ class ChatView:
         name = os.path.basename(os.path.normpath(folder)) if folder else "workspace"
         record = {"name": f"QA scan · {name}", "path": folder}
         summary = str(storage.get("summary") or "") or self._qa_summary_line()  # what the scan ran with
+        if state == "DONE":  # U13 item 3: the scan's own short summary once it finished
+            summary = self._qa_result_line(folder) or summary
+        meta = self.env.chats.meta(self.cid) if self.bound else {}
+        multipass = bool(meta.get("qa_multipass", False))
+        mode = str(meta.get("qa_multipass_mode") or QA_MULTIPASS_DEFAULT_MODE)
 
         def build() -> JobCard:
-            return self._tool_job_card(record, status, [
-                ("Job", "WORK_HISTORY", "qajob-job",
-                 lambda: self.navigate("jobs.detail", {"jid": job_id}) if job_id else self.navigate("jobs"), True),
+            card = self._tool_job_card(record, status, [
+                ("Run translation", "PLAY_ARROW", "qajob-run",
+                 lambda: self._spawn(self._qa_run_translation(folder, source)), True),
                 ("Report", "ASSESSMENT", "qajob-report", lambda: self._spawn(self.open_qa_report(folder, job_id)), False),
                 ("Chapters", "CHECKLIST", "qajob-chapters",
                  lambda: self._spawn(self._open_qa_chapters(folder, source)), False),
+                ("Job", "WORK_HISTORY", "qajob-job",
+                 lambda: self.navigate("jobs.detail", {"jid": job_id}) if job_id else self.navigate("jobs"), False),
             ], icon="FACT_CHECK", meta=summary)
+            # the run's multipass (a refinement pass after it): off by default, Partial.b preselected
+            card.buttons.controls.extend([
+                ft.Switch(label="Multipass", value=multipass, key="qajob-multipass",
+                          on_change=lambda e: self._set_qa_option("qa_multipass", bool(e.control.value))),
+                ft.Dropdown(value=mode, dense=True, width=150, key="qajob-multipass-mode", disabled=not multipass,
+                            options=[ft.DropdownOption(key=k, text=t) for k, t in QA_MULTIPASS_MODES],
+                            on_select=lambda e: self._set_qa_option("qa_multipass_mode", e.control.value)),
+            ])
+            return card
 
         return self._card(self._mid(item.index) or f"m-{item.index}",  # the Jump-to / search scroll key
-                          ("qa", self.cid, item.index, job_id, folder, status, summary), build)
+                          ("qa", self.cid, item.index, job_id, folder, status, summary, multipass, mode), build)
+
+    def _qa_result_line(self, folder: str) -> str:
+        """"33 files · 23 with issues · Korean 20, Chinese 2, …" from the scan's validation_results.json."""
+        try:
+            from glossarion_mobile.ui.tools import qa_model
+
+            report = qa_model.load_report_summary(qa_model.report_path_for(folder)) if folder else None
+        except Exception:
+            report = None
+        if report is None:
+            return ""
+        kinds = ", ".join(f"{kind} {count}" for kind, count in list(report.issue_counts.items())[:4])
+        line = f"{report.total} files · {report.with_issues} with issues"
+        return f"{line} · {kinds}" if kinds else f"{line} · all clean"
+
+    def _set_qa_option(self, key: str, value: Any) -> None:
+        if self.bound:
+            self.env.chats.set_meta(self.cid, key, value)
+            self.render_transcript()
+
+    async def _qa_run_translation(self, folder: str, source: str) -> Optional[str]:
+        """QA card › Run translation (desktop Run Translation): the scanned book again, with the card's
+        multipass choice for this run only."""
+        runner = getattr(self.env, "run_translation", None) if self.env is not None else None
+        if runner is None:
+            self.notify("Translation runs are not available in this session")
+            return None
+        meta = self.env.chats.meta(self.cid) if self.bound else {}
+        overrides: dict = {"multipass_mode": bool(meta.get("qa_multipass", False))}
+        if overrides["multipass_mode"]:
+            overrides["multipass_refinement_mode"] = str(meta.get("qa_multipass_mode") or QA_MULTIPASS_DEFAULT_MODE)
+        return await self._await(runner(folder, source, overrides))
 
     async def open_qa_report(self, folder: str, job_id: str = "") -> Optional[str]:
         """QA card › Report: the scan's ``validation_results.html`` in the QA report viewer."""

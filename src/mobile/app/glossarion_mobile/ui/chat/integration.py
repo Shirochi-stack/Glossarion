@@ -303,6 +303,7 @@ class ChatFeature:
             push_overlay=self.push_overlay,
             pop_overlay=self.pop_overlay,
             open_progress=self.open_progress,
+            run_translation=self.run_translation_for,
             open_external=self.open_external,
             after_migrate=self.after_migrate,
             library_service=self.library_service,
@@ -861,6 +862,44 @@ class ChatFeature:
         if "book" in found:
             return reader.open_book(found["book"])
         return reader.open_book(path=found["path"])
+
+    async def run_translation_for(self, folder: str, source: str = "",
+                                  config_overrides: Optional[dict] = None) -> Optional[str]:
+        """U13 item 3, a QA card's "Run translation": the desktop Run Translation over the scanned workspace
+        (its pending / failed / QA-failed chapters), with the card's options as this run's overrides."""
+        app = self.app
+        library = getattr(app, "library", None)
+        notify = getattr(app, "notify", None) or (lambda *a, **k: None)
+        if library is None or not hasattr(library, "translate_spec"):
+            notify("Translation runs are not available in this session")
+            return None
+
+        def target() -> Optional[tuple]:
+            workspace = _reader_workspace(str(folder or ""), str(source or ""))
+            raw = str(source or "")
+            if not workspace or not raw or not os.path.isfile(raw):
+                return None
+            name = os.path.basename(os.path.normpath(workspace))
+            progress = os.path.join(workspace, "translation_progress.json")
+            book = {"name": name, "folder_name": name, "path": workspace, "output_folder": workspace,
+                    "type": "in_progress", "is_in_progress": True, "in_library": False, "raw_source_path": raw,
+                    "progress_file": progress if os.path.isfile(progress) else ""}
+            return book, raw
+
+        found = await self._run_io(target)
+        if found is None:
+            notify("The book's source file can't be found for a new run")
+            return None
+        book, raw = found
+        try:
+            spec = library.translate_spec([book], sources=[raw], config_overrides=dict(config_overrides or {}))
+            job_id = await library.submit(spec)
+        except Exception as exc:
+            notify(f"Could not start: {exc}")
+            return None
+        navigate = getattr(app, "navigate_to", None)
+        notify(f"Translating · {book['name']}", "Jobs", (lambda: navigate("jobs")) if navigate else None)
+        return job_id
 
     async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None) -> Optional[str]:
         """A chat workspace in the Progress manager (``/tools/progress?out=<bid>``, Chapters tab): the
