@@ -189,6 +189,10 @@ except ImportError:
         class RateLimitCache:
             def __init__(self): pass
 import threading
+from temperature_compatibility import (
+    is_temperature_rejection, model_rejects_temperature,
+    remember_temperature_rejection, strip_temperature,
+)
 import uuid
 import wave
 from threading import RLock
@@ -7501,7 +7505,8 @@ class UnifiedClient:
         }
 
     def _effective_temperature(self, temperature: Optional[float]) -> Optional[float]:
-        return None if self._temperature_parameter_disabled() else temperature
+        return None if (self._temperature_parameter_disabled()
+                        or model_rejects_temperature(self._get_active_request_model())) else temperature
 
     @route_key_context
     def _send_core(self,
@@ -17379,6 +17384,10 @@ class UnifiedClient:
         if reasoning_endpoint and isinstance(json, dict):
             normalize_none_effort(json, print)
         
+        payload_model = (json.get('model') if isinstance(json, dict) else None) or self._get_active_request_model()
+        if self._temperature_parameter_disabled() or model_rejects_temperature(payload_model):
+            strip_temperature(json)
+
         # Debug: track max_tokens across retries (wired to GUI debug toggle)
         debug_max_tokens = os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1"
         
@@ -17478,6 +17487,17 @@ class UnifiedClient:
             status = resp.status_code
             if status in expected_status:
                 return resp
+            if is_temperature_rejection(status, resp.text) and strip_temperature(json):
+                remember_temperature_rejection(payload_model)
+                print(f"🌡️ {provider}: {payload_model} returned HTTP 400 mentioning temperature; retrying without it (cached for this session)")
+                resp.close()
+                # A compatibility repair is allowed even with one configured attempt.
+                return self._http_request_with_retries(
+                    method, url, headers=headers, json=json,
+                    expected_status=expected_status, max_retries=max_retries - attempt,
+                    provider_name=provider_name, use_session=use_session,
+                    _reasoning_retried=_reasoning_retried,
+                )
             supported = supported_reasoning_efforts(status, resp.text) if reasoning_endpoint else None
             if supported is not None:
                 resp.close()
@@ -18804,7 +18824,8 @@ class UnifiedClient:
                     data["output_config"] = {"effort": effort}
                     orig_temp = data.get("temperature")
                     data["temperature"] = 1
-                    print(f"🧠 Anthropic adaptive thinking: effort={effort} (temperature overridden to 1 for compatibility)")
+                    temperature_note = "temperature omitted" if (self._temperature_parameter_disabled() or model_rejects_temperature(data["model"])) else "temperature overridden to 1 for compatibility"
+                    print(f"🧠 Anthropic adaptive thinking: effort={effort} ({temperature_note})")
                 else:
                     budget_str = os.getenv('ANTHROPIC_THINKING_BUDGET', '10000')
                     try:
@@ -18815,10 +18836,13 @@ class UnifiedClient:
                         data["thinking"] = {"type": "enabled", "budget_tokens": budget}
                         orig_temp = data.get("temperature")
                         data["temperature"] = 1
-                        print(f"🧠 Anthropic extended thinking: budget={budget:,} tokens (temperature overridden to 1 for compatibility)")
+                        temperature_note = "temperature omitted" if (self._temperature_parameter_disabled() or model_rejects_temperature(data["model"])) else "temperature overridden to 1 for compatibility"
+                        print(f"🧠 Anthropic extended thinking: budget={budget:,} tokens ({temperature_note})")
         except Exception:
             pass
         
+        if self._temperature_parameter_disabled() or model_rejects_temperature(data['model']):
+            strip_temperature(data)
         return data
 
     def _parse_anthropic_json(self, json_resp: dict):
@@ -18976,6 +19000,25 @@ class UnifiedClient:
         return client
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name, request_id: Optional[str] = None) -> UnifiedResponse:
+        """Retry one temperature-related HTTP 400, then keep it off for this model."""
+        try:
+            return self._get_response_once(messages, temperature, max_tokens, max_completion_tokens, response_name, request_id)
+        except Exception as exc:
+            status = self._extract_http_status_from_exception(exc)
+            response = getattr(exc, 'response', None)
+            if status is None and response is not None:
+                status = getattr(response, 'status_code', None)
+            detail = f"{exc} {getattr(response, 'text', '')}"
+            model = self._get_active_request_model()
+            if (not is_temperature_rejection(status, detail)
+                    or self._temperature_parameter_disabled()
+                    or model_rejects_temperature(model)):
+                raise
+            remember_temperature_rejection(model)
+            print(f"🌡️ {model} returned HTTP 400 mentioning temperature; retrying without it (cached for this session)")
+            return self._get_response_once(messages, None, max_tokens, max_completion_tokens, response_name, request_id)
+
+    def _get_response_once(self, messages, temperature, max_tokens, max_completion_tokens, response_name, request_id: Optional[str] = None) -> UnifiedResponse:
         """Route to appropriate AI provider and get response.
 
         Args:
@@ -19104,6 +19147,8 @@ class UnifiedClient:
                 temperature = per_key_temp
         except Exception:
             pass
+
+        temperature = self._effective_temperature(temperature)
 
         # Determine actual provider (e.g., Gemini using OpenAI endpoint still reports 'gemini')
         actual_provider = self._get_actual_provider()
@@ -24392,8 +24437,9 @@ class UnifiedClient:
                         elif norm_max_tokens is not None:
                             params["max_tokens"] = norm_max_tokens
 
-                    if req_temperature is None:
-                        params.pop("temperature", None)
+                    if (req_temperature is None or self._temperature_parameter_disabled()
+                            or model_rejects_temperature(effective_model)):
+                        strip_temperature(params)
                     
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
@@ -24687,6 +24733,8 @@ class UnifiedClient:
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
                     self._add_request_parameters_to_sdk_kwargs(call_kwargs, key_request_parameters)
+                    if self._temperature_parameter_disabled() or model_rejects_temperature(effective_model):
+                        strip_temperature(call_kwargs)
                     if provider == 'nanogpt':
                         self._log_nanogpt_chat_options(effective_model, call_kwargs)
                     elif provider == 'openrouter':
@@ -25976,6 +26024,16 @@ class UnifiedClient:
                             stream_cleanup_done = True  # Prevent double-close in finally
                     except Exception:
                         pass
+                    status = self._extract_http_status_from_exception(e)
+                    if status is None:
+                        status = getattr(getattr(e, 'response', None), 'status_code', None)
+                    if is_temperature_rejection(status, f"{e} {getattr(getattr(e, 'response', None), 'text', '')}") and strip_temperature(call_kwargs):
+                        remember_temperature_rejection(effective_model)
+                        print(f"🌡️ {effective_model} returned HTTP 400 mentioning temperature; retrying without it (cached for this session)")
+                        return self._send_openai_compatible(
+                            messages, None, max_tokens, base_url, response_name,
+                            provider=provider, headers=headers, model_override=effective_model,
+                        )
                     if isinstance(e, ReasoningEffortRejected):
                         raise UnifiedClientError(str(e), error_type="validation", http_status=400) from e
                     # Check for stop request after API call returns

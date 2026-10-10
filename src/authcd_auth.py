@@ -1867,15 +1867,15 @@ def _required_client_version(status: int, detail: str) -> Optional[str]:
 
 def _is_temperature_rejection(status: int, detail: str) -> bool:
     text = str(detail or "").lower()
-    return status == 400 and "temperature" in text and any(
-        marker in text for marker in ("deprecated", "not supported", "unsupported", "not allowed")
-    )
+    return status == 400 and "temperature" in text
 
 
 def model_rejects_temperature(model: str) -> bool:
     """Whether this session already learned that ``model`` refuses temperature."""
+    from temperature_compatibility import model_rejects_temperature as temperature_disabled_for_model
     with _TEMPERATURE_REJECTED_LOCK:
-        return str(model or "") in _TEMPERATURE_REJECTED_MODELS
+        return (str(model or "") in _TEMPERATURE_REJECTED_MODELS
+                or temperature_disabled_for_model(model))
 
 
 def send_chat_completion(
@@ -1911,6 +1911,8 @@ def send_chat_completion(
                 raise
             with _TEMPERATURE_REJECTED_LOCK:
                 _TEMPERATURE_REJECTED_MODELS.add(str(model or ""))
+            from temperature_compatibility import remember_temperature_rejection
+            remember_temperature_rejection(model)
             _log(
                 f"🌡️ AuthCD: {model} does not accept temperature; retrying without it "
                 "(kept off for this model for the rest of the session)"
@@ -1966,11 +1968,11 @@ def _send_chat_completion_once(
     if user_id:
         body["metadata"] = {"user_id": user_id}
     # Some models have deprecated the temperature parameter.
-    _no_temp_models = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable-5")
+    from temperature_compatibility import model_rejects_temperature as temperature_disabled_for_model
     if (
         include_temperature
         and temperature is not None
-        and not any(m in model for m in _no_temp_models)
+        and not temperature_disabled_for_model(model)
     ):
         body["temperature"] = temperature
 

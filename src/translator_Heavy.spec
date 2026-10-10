@@ -414,6 +414,7 @@ app_files = [
     # AuthGPT - ChatGPT subscription OAuth
     ('authgpt_auth.py', '.'),
     ('reasoning_compatibility.py', '.'),
+    ('temperature_compatibility.py', '.'),
     ('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
     ('authgem_auth.py', '.'),
     ('authcd_auth.py', '.'),  # Claude subscription OAuth
@@ -653,6 +654,7 @@ app_modules = [
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
 	'reasoning_compatibility',
+	'temperature_compatibility',
 	'authgrok_auth',  # xAI Grok subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
 	'authcd_auth',  # Claude subscription OAuth
