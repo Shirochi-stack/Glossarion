@@ -215,10 +215,93 @@ def test_login_browser_does_not_modify_workers_or_reload(monkeypatch, tmp_path):
     monkeypatch.setattr(ds.subprocess,'Popen',launch)
     monkeypatch.setattr(ds.urllib.request,'build_opener',lambda *a:Opener())
     monkeypatch.setattr(ds,'_Page',lambda *a:BrowserPage())
-    with ds._open_browser(visible=True): pass
+    with ds._launch_browser(visible=True): pass
     assert '--headless=new' not in args
     assert commands == ['Browser.close']
     assert scripts and all('Worker' not in s and 'reload' not in s for s in scripts)
+
+
+@pytest.fixture
+def shared_browser(monkeypatch):
+    from types import SimpleNamespace
+    opened, closed, launches, shutdowns = [], [], [], []
+    class Control:
+        debugger_url = 'ws://127.0.0.1:12345/devtools/page/root'
+        def call(self, method, params):
+            if method == 'Target.createTarget':
+                target = str(len(opened))
+                opened.append(target)
+                return {'targetId': target}
+            assert method == 'Target.closeTarget'
+            closed.append(params['targetId'])
+            return {}
+    @contextmanager
+    def launch(**kwargs):
+        launches.append(kwargs)
+        try:
+            yield Control()
+        finally:
+            shutdowns.append(True)
+    class Tab:
+        def __init__(self, url, cancel_check):
+            self.target = url.rsplit('/', 1)[-1]
+            self.ws = SimpleNamespace(close=lambda: None)
+        def evaluate(self, script):
+            return True
+    monkeypatch.setattr(ds.browser_driver, 'use_driver', lambda _: False)
+    monkeypatch.setattr(ds.mobile_runtime, 'subprocesses_available', lambda: True)
+    monkeypatch.setattr(ds, '_launch_browser', launch)
+    monkeypatch.setattr(ds, '_Page', Tab)
+    monkeypatch.setattr(ds, 'has_session', lambda: True)
+    yield SimpleNamespace(opened=opened, closed=closed, launches=launches, shutdowns=shutdowns)
+    assert ds._browser_session is None
+
+
+def test_batch_completions_overlap_in_independent_tabs(monkeypatch, shared_browser):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    barrier = threading.Barrier(4)
+    def complete(page, model, messages, *args):
+        # All four calls must be inside the completion transport at once.
+        barrier.wait(timeout=5)
+        return {'content': messages[0]['content'], 'tab': page.target}
+    monkeypatch.setattr(ds, '_complete', complete)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(ds.send_chat_completion, messages=[{'content': str(i)}])
+                   for i in range(4)]
+        results = [future.result(timeout=10) for future in futures]
+    assert [result['content'] for result in results] == ['0', '1', '2', '3']
+    assert len({result['tab'] for result in results}) == 4
+    assert len(shared_browser.launches) == len(shared_browser.shutdowns) == 1
+    assert sorted(shared_browser.closed) == sorted(shared_browser.opened)
+
+
+def test_closing_one_request_keeps_other_request_alive(shared_browser):
+    with ds._open_browser() as first:
+        with ds._open_browser() as second:
+            assert first.target != second.target
+        assert shared_browser.closed == [second.target]
+        assert not shared_browser.shutdowns
+    assert len(shared_browser.shutdowns) == 1
+
+
+def test_cancel_closes_all_tabs_and_releases_profile(shared_browser):
+    with ds._open_browser():
+        with ds._open_browser():
+            ds.cancel_stream()
+    assert len(shared_browser.closed) == len(shared_browser.opened) == 2
+    assert len(shared_browser.shutdowns) == 1
+
+
+def test_tab_connection_failure_releases_profile(monkeypatch, shared_browser):
+    def fail(*args):
+        raise ds.AuthDSError('connection failed', 'browser_error')
+    monkeypatch.setattr(ds, '_Page', fail)
+    with pytest.raises(ds.AuthDSError, match='connection failed'):
+        with ds._open_browser():
+            pytest.fail('failed tab must not be used')
+    assert shared_browser.closed == shared_browser.opened
+    assert len(shared_browser.shutdowns) == 1
 
 
 def test_worker_discovery_reads_targets_without_page_mutation():

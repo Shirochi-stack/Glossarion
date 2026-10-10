@@ -25,6 +25,9 @@ BASE_URL = "https://chat.deepseek.com"
 POW_WORKER_URL = "https://fe-static.deepseek.com/chat/static/76608.8f2a9fa413.js"
 _cancel = threading.Event()
 _gate = threading.Lock()
+_browser_session = None
+_login_gate = threading.Lock()
+_login_generation = 0
 
 
 class AuthDSError(RuntimeError):
@@ -88,6 +91,7 @@ class _Page:
                                               http_no_proxy=["127.0.0.1", "localhost"])
         self.sequence = 0
         self.cancel_check = cancel_check
+        self.debugger_url = url
 
     def call(self, method, params=None, timeout=20):
         import websocket
@@ -189,7 +193,7 @@ def driver_session_present(cancel_check=None):
 
 
 @contextmanager
-def _open_browser(*, visible=False, cancel_check=None):
+def _launch_browser(*, visible=False, cancel_check=None):
     if browser_driver.use_driver("AUTHDS_MODE"):
         # Glossarion Mobile: the in-app WebView driver (no Chrome/Edge process); its sign-in is the app's.
         with _driver_page(cancel_check) as page:
@@ -261,15 +265,83 @@ def _open_browser(*, visible=False, cancel_check=None):
 
 
 @contextmanager
-def _serialized(cancel_check=None):
-    # Only this dedicated profile is serialized; other providers remain independent.
-    while not _gate.acquire(timeout=.2):
+def _open_browser(*, visible=False, cancel_check=None):
+    """Lease an independent tab; only browser/profile management is serialized."""
+    global _browser_session
+    if browser_driver.use_driver("AUTHDS_MODE") or not mobile_runtime.subprocesses_available():
+        with _launch_browser(visible=visible, cancel_check=cancel_check) as page:
+            yield page
+        return
+
+    # A visible login needs the profile released by an existing headless browser.
+    # Background requests may also share an already visible browser after login.
+    while True:
+        with _serialized(cancel_check):
+            if _browser_session is None:
+                manager = _launch_browser(visible=visible, cancel_check=cancel_check)
+                control = manager.__enter__()
+                control.cancel_check = None  # this connection belongs to all leases
+                _browser_session = {"manager": manager, "control": control,
+                                    "visible": visible, "users": 0}
+            session = _browser_session
+            if not visible or session["visible"]:
+                session["users"] += 1
+                break
+        _check(cancel_check)
+        time.sleep(.2)
+
+    page = None
+    target_id = None
+    try:
+        with _serialized(cancel_check):
+            control = session["control"]
+            target_id = control.call("Target.createTarget", {"url": BASE_URL})["targetId"]
+            page = _Page(control.debugger_url.rsplit("/", 1)[0] + "/" + target_id, cancel_check)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            _check(cancel_check)
+            try:
+                if page.evaluate("document.readyState !== 'loading' && location.origin === 'https://chat.deepseek.com'"):
+                    break
+            except AuthDSError as exc:
+                if exc.error_type != "browser_error":
+                    raise
+            time.sleep(.2)
+        else:
+            raise AuthDSError("DeepSeek page did not finish loading. Check your connection and try again.", "browser_error")
+        yield page
+    finally:
+        # Cleanup must run even after cancellation; closing one tab must never
+        # terminate the browser used by another active completion.
+        if page:
+            try:
+                page.ws.close()
+            except Exception:
+                pass
+        with _gate:
+            try:
+                if target_id:
+                    session["control"].call("Target.closeTarget", {"targetId": target_id})
+            except Exception:
+                pass
+            finally:
+                session["users"] -= 1
+                if session["users"] == 0:
+                    _browser_session = None
+                    session["manager"].__exit__(None, None, None)
+
+
+@contextmanager
+def _serialized(cancel_check=None, gate=None):
+    # Serialize profile startup and control commands, never completion streams.
+    gate = _gate if gate is None else gate
+    while not gate.acquire(timeout=.2):
         _check(cancel_check)
     try:
         _check(cancel_check)
         yield
     finally:
-        _gate.release()
+        gate.release()
 
 
 _TOKEN_PRESENT = """(() => {
@@ -310,8 +382,11 @@ def _wait_login(page, log_fn, cancel_check=None, timeout=300):
 
 
 def login(log_fn=print, cancel_check=None):
-    with _serialized(cancel_check), _open_browser(visible=True, cancel_check=cancel_check) as page:
-        _wait_login(page, log_fn, cancel_check)
+    global _login_generation
+    with _open_browser(visible=True, cancel_check=cancel_check) as page:
+        with _serialized(cancel_check, _login_gate):
+            _wait_login(page, log_fn, cancel_check)
+            _login_generation += 1
     log_fn("AuthDS: Browser session saved.")
 
 
@@ -559,30 +634,36 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
 
 def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
                          cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None):
+    global _login_generation
     resolve_model(model)
     build_prompt(messages)
-    with _serialized(cancel_check):
-        # Try the saved session once, then permit an interactive re-login once.
-        for attempt in range(2):
-            visible = not has_session() or attempt == 1
-            with _open_browser(visible=visible, cancel_check=cancel_check) as page:
-                if visible:
-                    if attempt and not getattr(page, "driver", False):
+    login_generation = _login_generation
+    # Try the saved session once, then permit an interactive re-login once.
+    for attempt in range(2):
+        visible = not has_session() or attempt == 1
+        with _open_browser(visible=visible, cancel_check=cancel_check) as page:
+            if visible:
+                with _serialized(cancel_check, _login_gate):
+                    if attempt and _login_generation == login_generation and not getattr(page, "driver", False):
                         _clear_page_token(page)
                     _wait_login(page, log_fn, cancel_check)
-                else:
-                    # Wait for the initial document load without opening a login window.
-                    deadline = time.monotonic() + 20
-                    while not page.evaluate(_TOKEN_PRESENT) and time.monotonic() < deadline:
-                        _check(cancel_check)
-                        time.sleep(.2)
-                try:
-                    return _complete(page, model, messages, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
-                except AuthDSError as exc:
-                    if exc.error_type != "auth_error" or attempt:
-                        raise
-                    (profile_dir() / ".signed_in").unlink(missing_ok=True)
-                    log_fn("AuthDS: Session expired. Opening DeepSeek login again.")
+                    _login_generation += 1
+                    login_generation = _login_generation
+            else:
+                # Wait for the initial document load without opening a login window.
+                deadline = time.monotonic() + 20
+                while not page.evaluate(_TOKEN_PRESENT) and time.monotonic() < deadline:
+                    _check(cancel_check)
+                    time.sleep(.2)
+            try:
+                return _complete(page, model, messages, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
+            except AuthDSError as exc:
+                if exc.error_type != "auth_error" or attempt:
+                    raise
+                with _serialized(cancel_check, _login_gate):
+                    if _login_generation == login_generation:
+                        (profile_dir() / ".signed_in").unlink(missing_ok=True)
+                log_fn("AuthDS: Session expired. Opening DeepSeek login again.")
     raise AuthDSError("AuthDS login failed.", "auth_error")
 
 

@@ -15,8 +15,10 @@ Chrome or Edge must be installed. Glossarion uses a separate profile under
 `~/.glossarion/authds_browser`; it does not read your everyday browser profile,
 store your Google password, or export the session token. Keep this profile private.
 Once signed in, translation uses that profile in a background browser. Expired
-sessions trigger one interactive re-login. Each chunk gets a new chat, and requests
-sharing this profile run sequentially. Stop cancels queued work and active requests.
+sessions trigger one interactive re-login. Each chunk gets a new chat in its own
+tab. Batch Translation runs concurrent requests using the configured batch size,
+sharing one signed-in browser. Browser startup and login are coordinated; completion
+streams run in parallel. Stop cancels queued work and active requests.
 Login preserves existing sessions and leaves the site's Worker API unchanged,
 without forced page reloads. Only a confirmed expired-session response clears
 the rejected token for re-login; HTTP 403 keeps the saved session intact.
