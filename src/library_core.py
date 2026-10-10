@@ -906,6 +906,7 @@ def _is_gallery_filename(name: str) -> bool:
 _PROGRESS_SIDECAR_FILENAMES = frozenset({
     "source_epub.txt",
     "image_rename_map.json",
+    "image_reference_map.json",
 })
 
 

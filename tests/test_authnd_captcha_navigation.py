@@ -961,6 +961,74 @@ def test_authnd_schema_limit_retry_is_bounded(reasoning_transport):
     assert [call['max_tokens'] for call in calls] == [1234, 1000]
 
 
+def test_authnd_empty_missing_finish_checks_schema_and_caches_limit(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([Response(200, {'choices': []}), _ok_response(Response), _ok_response(Response)])
+    assert send()['content'] == 'OK'
+    assert calls[1] == {**calls[0], 'max_tokens': 1000}
+    assert responses[0].closed
+    assert send()['content'] == 'OK'
+    assert [call['max_tokens'] for call in calls] == [1234, 1000, 1000]
+    assert len(state['spec_calls']) == 1
+    assert len(set(state['tokens'])) == 3
+    assert any('empty response without finish_reason' in line and 'maximum of 1,000' in line for line in logs)
+
+
+@pytest.mark.parametrize('limit', [None, 1234, 9999])
+def test_authnd_empty_missing_finish_does_not_guess_limit(reasoning_transport, limit):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = limit
+    responses.append(Response(200, {'choices': []}))
+    result = send()
+    assert result['finish_reason_inference'] == 'empty_content_without_finish_reason'
+    assert not result['finish_reason_explicit']
+    assert len(calls) == 1
+    assert len(state['spec_calls']) == 1
+
+
+def test_authnd_empty_schema_limit_retry_is_bounded(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([Response(200, {'choices': []}), Response(200, {'choices': []})])
+    result = send()
+    assert result['finish_reason_inference'] == 'empty_content_without_finish_reason'
+    assert [call['max_tokens'] for call in calls] == [1234, 1000]
+    assert len(state['spec_calls']) == 1
+
+
+@pytest.mark.parametrize('body', [
+    {'choices': [{'message': {'content': 'valid content'}, 'delta': {'content': 'valid content'}}]},
+    {'choices': [{'message': {'content': ''}, 'finish_reason': 'content_filter'}]},
+    {'choices': [], 'usage': {'completion_tokens': 1234}},
+])
+def test_authnd_other_missing_finish_paths_do_not_trigger_clamp(reasoning_transport, body):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.append(Response(200, body))
+    send()
+    assert len(calls) == 1
+    assert state['spec_calls'] == []
+
+
+def test_authnd_cancelled_empty_response_does_not_start_limit_retry(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    original = authnd._endpoint_output_token_limit
+
+    def cancel_during_lookup(metadata, **kwargs):
+        limit = original(metadata, **kwargs)
+        if kwargs.get('fetch'):
+            state['cancelled'] = True
+        return limit
+
+    monkeypatch.setattr(authnd, '_endpoint_output_token_limit', cancel_during_lookup)
+    responses.append(Response(200, {'choices': []}))
+    with pytest.raises(RuntimeError, match='stream cancelled'):
+        send()
+    assert len(calls) == 1
+
+
 def test_authnd_cancellation_prevents_schema_lookup(reasoning_transport):
     send, calls, responses, logs, state, Response = reasoning_transport
     state['cancel_after_failure'] = True

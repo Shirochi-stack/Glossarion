@@ -217,6 +217,7 @@ tests/**
 !tests/test_retranslate_plan_apply.py
 !tests/test_sdlxliff_review_core.py
 !tests/test_image_job.py
+!tests/test_image_reference_map.py
 !tests/test_rpgmaker_job.py
 !tests/test_async_batch_core.py
 !tests/test_review_run_core.py

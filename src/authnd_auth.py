@@ -2630,25 +2630,46 @@ def _post_prediction(
             log_stream=log_stream, progress_label=progress_label, max_tokens=request.get('max_tokens'),
         )
 
-    def send_with_endpoint_limit(request):
+    def reduce_to_endpoint_limit(request, failure):
         nonlocal limit_retried
+        if limit_retried or not request.get('max_tokens'):
+            return False
         try:
-            return send(request)
+            requested_limit = int(request['max_tokens'])
+        except (TypeError, ValueError):
+            return False
+        check_retry_cancel()
+        limit = _endpoint_output_token_limit(metadata, fetch=True, log_fn=log_fn)
+        check_retry_cancel()
+        if limit is None or requested_limit <= limit:
+            return False
+        limit_retried = True
+        _log(log_fn, f'📝 AuthND: {failure} with max_tokens={requested_limit:,}; '
+             f'retrying with the endpoint-declared maximum of {limit:,}.')
+        request['max_tokens'] = limit
+        return True
+
+    def send_with_endpoint_limit(request):
+        try:
+            result = send(request)
         except _AuthNDHTTPError as error:
             message = str(error).lower()
             if (error.status_code != 400 or limit_retried or not request.get('max_tokens')
                     or any(marker in message for marker in ('captcha', 'token is invalid', 'reasoning', 'chat_template'))):
                 raise
-            check_retry_cancel()
-            limit = _endpoint_output_token_limit(metadata, fetch=True, log_fn=log_fn)
-            check_retry_cancel()
-            if limit is None or request['max_tokens'] <= limit:
+            if not reduce_to_endpoint_limit(request, 'HTTP 400'):
                 raise
-            limit_retried = True
-            _log(log_fn, f'📝 AuthND: HTTP 400 with max_tokens={request["max_tokens"]:,}; '
-                 f'retrying with the endpoint-declared maximum of {limit:,}.')
-            request['max_tokens'] = limit
             return send(request)
+        # NVIDIA can return HTTP 200 and an empty completed stream when the
+        # requested limit exceeds its endpoint constraint. Check the same
+        # authoritative schema before handing this response to global retry.
+        # Missing finish_reason alone does not establish a token-limit error.
+        if (not result.get('finish_reason_explicit')
+                and result.get('finish_reason_inference') == 'empty_content_without_finish_reason'
+                and not str(result.get('content') or '').strip()
+                and reduce_to_endpoint_limit(request, 'empty response without finish_reason')):
+            return send(request)
+        return result
 
     return call_with_reasoning_retry(
         send_with_endpoint_limit,

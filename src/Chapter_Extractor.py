@@ -1150,60 +1150,8 @@ def _update_image_refs_in_soup(soup, rename_map):
     Supports: <img src>, SVG <image href>, <object data>, <video poster>,
     and CSS background-image: url(...) in inline styles.
     """
-    modified = False
-    
-    def _update_attr(tag, attr):
-        nonlocal modified
-        val = tag.get(attr, '')
-        if not val or val.startswith('data:'):
-            return
-        clean = val.split('?')[0]
-        basename = os.path.basename(clean)
-        if basename in rename_map:
-            new_name = rename_map[basename]
-            dir_part = os.path.dirname(clean)
-            tag[attr] = f"{dir_part}/{new_name}" if dir_part else new_name
-            modified = True
-    
-    # <img src>
-    for tag in soup.find_all('img'):
-        _update_attr(tag, 'src')
-    
-    # SVG <image> (all href variants)
-    for tag in soup.find_all('image'):
-        for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
-            _update_attr(tag, attr)
-    
-    # <object data>
-    for tag in soup.find_all('object'):
-        _update_attr(tag, 'data')
-    
-    # <video poster>
-    for tag in soup.find_all('video'):
-        _update_attr(tag, 'poster')
-    
-    # CSS background-image: url(...) in inline styles
-    for tag in soup.find_all(style=True):
-        style = tag.get('style', '')
-        if 'url(' not in style:
-            continue
-        new_style = style
-        for m in re.finditer(r'url\(["\']?([^"\')\s]+)["\']?\)', style):
-            url = m.group(1)
-            if not url or url.startswith('data:'):
-                continue
-            clean = url.split('?')[0]
-            basename = os.path.basename(clean)
-            if basename in rename_map:
-                new_name = rename_map[basename]
-                dir_part = os.path.dirname(clean)
-                new_url = f"{dir_part}/{new_name}" if dir_part else new_name
-                new_style = new_style.replace(url, new_url)
-                modified = True
-        if new_style != style:
-            tag['style'] = new_style
-    
-    return modified
+    from image_reference_map import apply_filename_map
+    return apply_filename_map(soup, rename_map)
 
 
 def _prepare_single_chapter_image_renames(
@@ -1315,7 +1263,7 @@ def _prepare_single_chapter_image_renames(
         for src in image_srcs:
             if not src or src.startswith('data:'):
                 continue
-            basename = os.path.basename(src.split('?', 1)[0])
+            basename = os.path.basename(src.split('?', 1)[0].split('#', 1)[0])
             if not basename or basename in rename_map:
                 continue
             if basename not in existing_images:
@@ -1748,7 +1696,7 @@ def _rename_images_to_chapter_format(
             
             # Extract basename from various path formats
             # Handle: ../images/foo.jpg, images/foo.jpg, foo.jpg, etc.
-            clean_src = src.split('?')[0]  # Remove query params
+            clean_src = src.split('?', 1)[0].split('#', 1)[0]  # Preserve suffixes when rewriting
             basename = os.path.basename(clean_src)
             
             if not basename or basename in claimed_images:
@@ -1767,12 +1715,15 @@ def _rename_images_to_chapter_format(
                 else:
                     continue
             
+            if basename in claimed_images:
+                continue
+
             # Generate new name using actual chapter filename
             ext = os.path.splitext(basename)[1]  # Preserve original extension
             new_name = f"{chapter_stem}_img_{img_counter}{ext}"
             
             # Handle collision
-            while new_name in rename_map.values():
+            while new_name in rename_map.values() or new_name in protected_images:
                 img_counter += 1
                 new_name = f"{chapter_stem}_img_{img_counter}{ext}"
             
@@ -1883,7 +1834,12 @@ def _rename_images_to_chapter_format(
     print(f"   📄 Updating on-disk HTML files in output directory...")
     disk_updated = 0
     try:
+        from image_reference_map import historical_pages
+        saved_pages = historical_pages(output_dir)
         for fname in os.listdir(output_dir):
+            # Translated refs require historical image identity after refresh.
+            if fname in saved_pages or fname.lower().startswith("response_"):
+                continue
             fpath = os.path.join(output_dir, fname)
             if not os.path.isfile(fpath):
                 continue
@@ -2219,6 +2175,8 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         return []
         
     print("🚀 Starting EPUB extraction with ThreadPoolExecutor...")
+    from image_reference_map import snapshot_before_refresh, publish_extracted_images
+    snapshot_before_refresh(output_dir)
     print(f"📄 Using parser: {parser} {'(optimized for CJK)' if parser == 'lxml' else '(standard)'}")
     
     # Initial progress
@@ -2338,6 +2296,7 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
                 progress_callback(f"📚 {message}")
             else:
                 print(f"📚 {message}")
+            publish_extracted_images(output_dir, zf, _categorize_resource)
             return cached_chapters
         if cache_reason != 'chapter cache marker is missing':
             print(f"♻️ Chapter cache invalid ({cache_reason}); rebuilding")
@@ -2592,6 +2551,7 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     
     print(f"🔍 VERIFICATION: {extraction_mode.capitalize()} chapter extraction completed successfully")
     print(f"⚡ Used {max_workers} workers for parallel processing")
+    publish_extracted_images(output_dir, zf, _categorize_resource)
     
     return chapters
 
@@ -3068,6 +3028,8 @@ def _extract_all_resources(
 ):
     """Extract all resources with parallel processing"""
     import time
+    from image_reference_map import snapshot_before_refresh
+    snapshot_before_refresh(output_dir)
     
     extracted_resources = {
         'css': [],

@@ -93,6 +93,7 @@ app_files = [
     ('Retranslation_GUI.py', '.'),
     ('QA_Scanner_GUI.py', '.'),
     ('Chapter_Extractor.py', '.'),
+    ('image_reference_map.py', '.'),
     ('PatternManager.py', '.'),
     
     # Translation modules
@@ -376,6 +377,7 @@ app_modules = [
     'Retranslation_GUI',
     'QA_Scanner_GUI',
     'Chapter_Extractor',
+    'image_reference_map',
     'PatternManager',
     'epub_converter',
     'image_archive_epub',
