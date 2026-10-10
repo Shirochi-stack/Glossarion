@@ -115,6 +115,8 @@ tests/**
 !tests/test_google_free_translate.py
 !tests/test_progress_model_metadata.py
 !tests/test_translation_artifacts.py
+!tests/test_emergency_compliance_stop.py
+!tests/test_glossary_filter_stop.py
 !tests/test_gemini_free_budget.py
 !tests/test_gemini_openai_thinking.py
 !tests/test_service_tier.py

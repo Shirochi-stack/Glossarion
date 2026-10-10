@@ -14292,6 +14292,19 @@ def apply_emergency_glossary_compliance(
     Supports CSV, token-efficient (parsed), and JSON glossary formats.
     Returns the modified content (unchanged if feature is disabled or no glossary found).
     """
+    original_content = content
+
+    def stopped():
+        # This is pre-send work: graceful stop must not start another scan.
+        return _translation_prequeue_stop_mode() is not None
+
+    def log(message):
+        if not stopped():
+            print(message)
+
+    if stopped():
+        return original_content
+
     if str(_request_glossary_setting(
         settings, "EMERGENCY_GLOSSARY_COMPLIANCE", "0"
     )) != "1":
@@ -14304,7 +14317,7 @@ def apply_emergency_glossary_compliance(
         try:
             if not getattr(apply_emergency_glossary_compliance, "_logged_no_glossary_skip", False):
                 apply_emergency_glossary_compliance._logged_no_glossary_skip = True
-                print("🔄 Emergency Glossary Compliance: skipped because Glossary Mode is No Glossary")
+                log("🔄 Emergency Glossary Compliance: skipped because Glossary Mode is No Glossary")
         except Exception:
             pass
         return content
@@ -14340,7 +14353,7 @@ def apply_emergency_glossary_compliance(
         settings=settings,
     )
     if not glossary_path or not os.path.exists(glossary_path):
-        print("⚠️ Emergency Glossary Compliance: No glossary file found — skipping")
+        log("⚠️ Emergency Glossary Compliance: No glossary file found — skipping")
         return content
     try:
         glossary_path_abs = os.path.abspath(glossary_path)
@@ -14348,7 +14361,7 @@ def apply_emergency_glossary_compliance(
             apply_emergency_glossary_compliance._logged_paths = set()
         if glossary_path_abs not in apply_emergency_glossary_compliance._logged_paths:
             apply_emergency_glossary_compliance._logged_paths.add(glossary_path_abs)
-            print(f"🔄 Emergency Glossary Compliance using: {glossary_path_abs}")
+            log(f"🔄 Emergency Glossary Compliance using: {glossary_path_abs}")
     except Exception:
         pass
     
@@ -14356,9 +14369,12 @@ def apply_emergency_glossary_compliance(
         with open(glossary_path, "r", encoding="utf-8") as gf:
             raw = gf.read()
     except Exception as e:
-        print(f"⚠️ Emergency Glossary Compliance: Failed to read glossary: {e}")
+        log(f"⚠️ Emergency Glossary Compliance: Failed to read glossary: {e}")
         return content
     
+    if stopped():
+        return original_content
+
     # Parse glossary entries as list of (type, raw_name, translated_name)
     entries = []
     
@@ -14372,6 +14388,8 @@ def apply_emergency_glossary_compliance(
             data = json.loads(raw)
             if isinstance(data, dict):
                 for key, value in data.items():
+                    if stopped():
+                        return original_content
                     if isinstance(value, dict):
                         entry_type = value.get("type", "term").lower()
                         raw_name = value.get("raw_name", value.get("raw", key))
@@ -14382,6 +14400,8 @@ def apply_emergency_glossary_compliance(
                         entries.append(("term", key, value))
             elif isinstance(data, list):
                 for entry in data:
+                    if stopped():
+                        return original_content
                     if isinstance(entry, dict):
                         entry_type = entry.get("type", "term").lower()
                         raw_name = entry.get("raw_name", entry.get("raw", ""))
@@ -14389,7 +14409,7 @@ def apply_emergency_glossary_compliance(
                         if raw_name and translated:
                             entries.append((entry_type, raw_name, translated))
         except Exception as e:
-            print(f"⚠️ Emergency Glossary Compliance: JSON parse error: {e}")
+            log(f"⚠️ Emergency Glossary Compliance: JSON parse error: {e}")
     elif is_token_efficient:
         # Token-efficient / parsed CSV format
         # === CHARACTERS ===
@@ -14426,6 +14446,8 @@ def apply_emergency_glossary_compliance(
             return _strip_custom_tails(head)
 
         for line in raw.split("\n"):
+            if stopped():
+                return original_content
             stripped = line.strip()
             if stripped.startswith("=== ") and stripped.endswith(" ==="):
                 # Extract type from section header, e.g. "=== CHARACTERS ===" -> "character"
@@ -14458,6 +14480,8 @@ def apply_emergency_glossary_compliance(
             # New Unit Separator format - simple split
             header_skipped = False
             for line in raw.strip().split('\n'):
+                if stopped():
+                    return original_content
                 if not line.strip():
                     continue
                 row = [p.strip() for p in line.split(_GLOSSARY_SEP)]
@@ -14478,6 +14502,8 @@ def apply_emergency_glossary_compliance(
             reader = _csv.reader(_io.StringIO(raw))
             header_skipped = False
             for row in reader:
+                if stopped():
+                    return original_content
                 if not row or len(row) < 3:
                     continue
                 if not header_skipped and row[0].strip().lower() == "type":
@@ -14490,7 +14516,7 @@ def apply_emergency_glossary_compliance(
                     entries.append((entry_type, raw_name, translated))
     
     if not entries:
-        print("⚠️ Emergency Glossary Compliance: No entries parsed from glossary")
+        log("⚠️ Emergency Glossary Compliance: No entries parsed from glossary")
         return content
     
     # Filter by mode and source-entry length before applying literal replacements.
@@ -14513,7 +14539,7 @@ def apply_emergency_glossary_compliance(
         entries = [(t, r, tr) for t, r, tr in entries if len(r) >= min_chars]
     
     if not entries:
-        print(f"⚠️ Emergency Glossary Compliance: No entries match mode '{mode}' and minimum length {min_chars}")
+        log(f"⚠️ Emergency Glossary Compliance: No entries match mode '{mode}' and minimum length {min_chars}")
         return content
     
     # Build replacement map sorted longest-first to avoid partial matches
@@ -14521,6 +14547,8 @@ def apply_emergency_glossary_compliance(
     seen = set()
     replacements = []
     for entry_type, raw_name, translated in entries:
+        if stopped():
+            return original_content
         if raw_name not in seen:
             seen.add(raw_name)
             replacements.append((raw_name, translated))
@@ -14529,14 +14557,18 @@ def apply_emergency_glossary_compliance(
     # Apply replacements
     count = 0
     for raw_name, translated in replacements:
+        if stopped():
+            return original_content
         if raw_name in content:
             content = content.replace(raw_name, translated)
             count += 1
     
+    if stopped():
+        return original_content
     if count > 0:
-        print(f"🔄 Emergency Glossary Compliance: replaced {count} entries (mode: {mode}, total candidates: {len(replacements)})")
+        log(f"🔄 Emergency Glossary Compliance: replaced {count} entries (mode: {mode}, total candidates: {len(replacements)})")
     else:
-        print(f"🔄 Emergency Glossary Compliance: 0 matches found in content (mode: {mode}, {len(replacements)} candidates)")
+        log(f"🔄 Emergency Glossary Compliance: 0 matches found in content (mode: {mode}, {len(replacements)} candidates)")
     
     return content
 

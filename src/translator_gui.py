@@ -25383,11 +25383,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 bool(getattr(self, 'stop_requested', False))
                 or os.environ.get('TRANSLATION_CANCELLED') == '1'
                 or os.environ.get('GRACEFUL_STOP') == '1'
+                or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
             )
             if not stopping_now:
                 return False
             msg_low = str(message).lower()
             noisy_stop_keys = (
+                'emergency glossary compliance',
                 'stopped before api call',
                 'translation returned empty result',
                 'image chunk size',
@@ -25614,10 +25616,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                        bool(getattr(self, 'stop_requested', False))
                        or os.environ.get('TRANSLATION_CANCELLED') == '1'
                        or os.environ.get('GRACEFUL_STOP') == '1'
+                       or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
                    )
                    if stopping_now:
                        msg_low_for_stop = msg_low_global or str(message).lower()
                        noisy_stop_keys = (
+                           'emergency glossary compliance',
                            'stopped before api call',
                            'translation returned empty result',
                            'image chunk size',

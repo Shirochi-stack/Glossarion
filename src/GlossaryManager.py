@@ -973,6 +973,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print(f"📁 Smart filtering enabled - checking effective text size after filtering...")
         # Perform filtering ONCE and reuse for chunking
         filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
+        if not filtered_sample:
+            return {}
         filtered_text_cache = filtered_sample
         effective_text_size = len(filtered_sample)
         # Calculate token count using tiktoken
@@ -1077,6 +1079,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             if use_smart_filter and custom_prompt:
                 # Split the filtered text into chunks (reuse cached filtered text)
                 filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences)[0]
+                if not filtered_text:
+                    return {}
                 chunks_to_process = []
                 
                 # Split filtered text into chunks of appropriate size
@@ -2950,6 +2954,70 @@ def _strip_honorific(term, language_hint='unknown'):
     
     return term
 
+class _GlossaryFilteringStopped(Exception):
+    """Internal cancellation signal; never treat it as a recoverable filter error."""
+
+
+def _check_filter_stop():
+    # Filtering prepares new requests, so graceful stop also ends this work.
+    # Keep is_stop_requested's in-flight API semantics unchanged.
+    if (os.environ.get("GRACEFUL_STOP") == "1"
+            or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+            or is_stop_requested()):
+        raise _GlossaryFilteringStopped()
+
+
+def _cancelled_filter_returns_empty(function):
+    from functools import wraps
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            _check_filter_stop()
+            result = function(*args, **kwargs)
+            _check_filter_stop()
+            return result
+        except _GlossaryFilteringStopped:
+            return "", []
+    return wrapped
+
+
+def _filter_completed(futures):
+    from concurrent.futures import wait, FIRST_COMPLETED
+    pending = set(futures)
+    while pending:
+        _check_filter_stop()
+        done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+        for future in done:
+            _check_filter_stop()
+            yield future
+
+
+from contextlib import contextmanager as _filter_contextmanager
+
+
+@_filter_contextmanager
+def _filter_executor(factory, **kwargs):
+    executor = factory(**kwargs)
+    try:
+        yield executor
+    except _GlossaryFilteringStopped:
+        # Process workers have their own environment snapshot. Terminate this
+        # owned CPU-only pool rather than waiting for its unfinished batches.
+        processes = list((getattr(executor, "_processes", None) or {}).values())
+        executor.shutdown(wait=False, cancel_futures=True)
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        raise
+    except BaseException:
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+
+@_cancelled_filter_returns_empty
 def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     """Filter text to extract only meaningful content for glossary extraction
     
@@ -2960,11 +3028,13 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     """
     import re
     from collections import Counter
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
     import time
     
     filter_start_time = time.time()
+    _check_filter_stop()
     print(f"📑 Starting smart text filtering...")
+    _check_filter_stop()
     print(f"📑 Input text size: {len(text):,} characters")
 
     # Dynamic character coverage flag (must be defined before any early checks)
@@ -2974,12 +3044,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     force_skip_smart_selection = False
     honorific_first_indices = {}
     # Clean HTML if present
+    _check_filter_stop()
     print(f"📑 Step 1/7: Cleaning HTML tags...")
     soup = _html_soup(text)
     clean_text = soup.get_text()
+    _check_filter_stop()
     print(f"📑 Clean text size: {len(clean_text):,} characters")
     
     # Detect primary language for better filtering
+    _check_filter_stop()
     print(f"📑 Step 2/7: Detecting primary language...")
     def detect_primary_language(text_sample):
         sample = text_sample[:1000]
@@ -2995,6 +3068,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 chinese_pronouns = PM.GENDER_PRONOUNS.get('chinese', {}).get('male', []) + \
                                  PM.GENDER_PRONOUNS.get('chinese', {}).get('female', [])
                 for p in chinese_pronouns:
+                    _check_filter_stop()
                     if p in sample:
                         return 'chinese'
                         
@@ -3002,6 +3076,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 japanese_pronouns = PM.GENDER_PRONOUNS.get('japanese', {}).get('male', []) + \
                                   PM.GENDER_PRONOUNS.get('japanese', {}).get('female', [])
                 for p in japanese_pronouns:
+                    _check_filter_stop()
                     if p in sample:
                         return 'japanese'
 
@@ -3015,10 +3090,13 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             return 'english'
     
     primary_lang = detect_primary_language(clean_text)
+    _check_filter_stop()
     print(f"📑 Detected primary language: {primary_lang}")
     # Safety guard: ensure flag exists even if subprocess reload missed earlier assignment
     try:
         include_gender_context_flag
+    except _GlossaryFilteringStopped:
+        raise
     except NameError:
         include_gender_context_flag = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
 
@@ -3036,6 +3114,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         gender_pronouns = gp.get("male", []) + gp.get("female", [])
     
     # Split into sentences for better context
+    _check_filter_stop()
     print(f"📁 Step 3/7: Splitting text into sentences...")
     # Use language-specific sentence splitting for better accuracy
     if primary_lang == 'chinese':
@@ -3044,9 +3123,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         sentences = re.split(r'[。！？；：]+', clean_text)
     else:
         sentences = re.split(r'[.!?。！？]+', clean_text)
+    _check_filter_stop()
     print(f"📁 Found {len(sentences):,} sentences")
     
     # Extract potential terms (words/phrases that appear multiple times)
+    _check_filter_stop()
     print(f"📑 Step 4/7: Setting up extraction patterns and exclusion rules...")
     word_freq = Counter()
     
@@ -3063,6 +3144,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     # Combine patterns
     combined_pattern = f'({korean_pattern}|{japanese_pattern}|{chinese_pattern}|{english_pattern})'
+    _check_filter_stop()
     print(f"📑 Using combined regex pattern for {primary_lang} text")
     
     # Get honorifics and title patterns for the detected language
@@ -3076,6 +3158,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     title_patterns = []
     if primary_lang in PM.TITLE_PATTERNS:
         for pattern in PM.TITLE_PATTERNS[primary_lang]:
+            _check_filter_stop()
             title_patterns.append(re.compile(pattern))
     
     # Function to check if a term should be excluded
@@ -3088,11 +3171,13 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Check if it contains honorifics
         for honorific in honorifics_to_exclude:
+            _check_filter_stop()
             if honorific in term or (honorific.startswith('-') and term.endswith(honorific[1:])):
                 return True
         
         # Check if it matches title patterns
         for pattern in title_patterns:
+            _check_filter_stop()
             if pattern.search(term):
                 return True
         
@@ -3108,63 +3193,75 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         if primary_lang == 'chinese' and len(term) >= 2:
             # Check if it's a cultivation term - these should NOT be excluded
             for category in PM.CHINESE_CULTIVATION_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep cultivation terms!
             
             # Check if it's a wuxia term - these should NOT be excluded
             for category in PM.CHINESE_WUXIA_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep wuxia terms!
             
             # Check relationship terms (important character relationships)
             for category in PM.CHINESE_RELATIONSHIP_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep relationship terms!
             
             # Check mythological terms (creatures, artifacts, legendary beings)
             for category in PM.CHINESE_MYTHOLOGICAL_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep mythological terms!
             
             # Check elemental/natural force terms
             for category in PM.CHINESE_ELEMENTAL_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep elemental terms!
             
             # Check physique/spiritual root terms
             for category in PM.CHINESE_PHYSIQUE_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep physique terms!
             
             # Check treasure grades
             for category in PM.CHINESE_TREASURE_GRADES.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep treasure grade terms!
             
             # Check power system terms (levels, stars, etc.)
             for category in PM.CHINESE_POWER_SYSTEMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep power system terms!
             
             # Check location types
             for category in PM.CHINESE_LOCATION_TYPES.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep location terms!
             
             # Check battle terms
             for category in PM.CHINESE_BATTLE_TERMS.values():
+                _check_filter_stop()
                 if term in category:
                     return False  # Keep battle terms!
 
             # Check novel terms (common raw Chinese terms)
             if hasattr(PM, 'CHINESE_NOVEL_TERMS'):
                 for category in PM.CHINESE_NOVEL_TERMS.values():
+                    _check_filter_stop()
                     if term in category:
                         return False
         
         return False
     
     # Extract potential terms from each sentence
+    _check_filter_stop()
     print(f"📑 Step 5/7: Extracting and filtering terms from sentences...")
     
     # Check if we should use parallel processing
@@ -3174,12 +3271,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # Use more cores for better parallelization
         cpu_count = os.cpu_count() or 4
         extraction_workers = min(cpu_count, 12)  # Use up to 12 cores
+        _check_filter_stop()
         print(f"📑 Auto-detected {cpu_count} CPU cores, using {extraction_workers} workers")
     
     use_parallel = extraction_workers > 1 and len(sentences) > 100
     
     if use_parallel:
+        _check_filter_stop()
         print(f"📑 Using parallel processing with {extraction_workers} workers")
+        _check_filter_stop()
         print(f"📑 Estimated speedup: {extraction_workers}x faster")
     
     important_sentences = []
@@ -3202,6 +3302,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         gender_pronouns.extend(PM.GENDER_PRONOUNS.get(lang_key, {}).get('male', []))
         gender_pronouns.extend(PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', []))
         if gender_pronouns:
+            _check_filter_stop()
             print(f"📑 Gender context enabled: scanning for pronouns in {lang_key}")
 
     def process_sentence_batch(batch_sentences, batch_idx):
@@ -3211,6 +3312,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         local_seen = set()
         
         for sentence in batch_sentences:
+            _check_filter_stop()
             sentence = sentence.strip()
             if len(sentence) < 10 or len(sentence) > 500:
                 continue
@@ -3219,6 +3321,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             has_pronoun = False
             if gender_nuance_enabled and gender_pronouns:
                 for pronoun in gender_pronouns:
+                    _check_filter_stop()
                     if pronoun in sentence:
                         has_pronoun = True
                         break
@@ -3230,6 +3333,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if matches:
                 # Filter out excluded terms
                 for match in matches:
+                    _check_filter_stop()
                     if not should_exclude_term(match):
                         local_word_freq[match] += 1
                         valid_term_found = True
@@ -3285,16 +3389,22 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         max_batch_size = max(50, total_sentences // min_batches)
         optimal_batch_size = min(optimal_batch_size, max_batch_size)
         
+        _check_filter_stop()
         print(f"📑 Total sentences: {total_sentences:,}")
+        _check_filter_stop()
         print(f"📑 Target batch size: {optimal_batch_size} sentences")
         
         # Calculate expected number of batches
         expected_batches = (total_sentences + optimal_batch_size - 1) // optimal_batch_size
+        _check_filter_stop()
         print(f"📑 Expected batches: {expected_batches} (for {extraction_workers} workers)")
+        _check_filter_stop()
         print(f"📑 Batches per worker: ~{expected_batches // extraction_workers} batches")
         
         batches = [sentences[i:i + optimal_batch_size] for i in range(0, len(sentences), optimal_batch_size)]
+        _check_filter_stop()
         print(f"📑 Processing {len(batches)} batches of ~{optimal_batch_size} sentences each")
+        _check_filter_stop()
         print(f"📑 Expected speedup: {min(extraction_workers, len(batches))}x (using {extraction_workers} workers)")
         
         # Decide between ThreadPoolExecutor and ProcessPoolExecutor
@@ -3313,7 +3423,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             
             if in_subprocess and is_daemon:
                 # Daemonic processes can't spawn children - fall back to ThreadPoolExecutor
+                _check_filter_stop()
                 print(f"⚠️  Running in daemonic subprocess - cannot use ProcessPoolExecutor")
+                _check_filter_stop()
                 print(f"📁 Falling back to ThreadPoolExecutor (limited parallelism due to GIL)")
                 use_process_pool = False
                 executor_class = ThreadPoolExecutor
@@ -3322,9 +3434,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             else:
                 # We can use ProcessPoolExecutor
                 if in_subprocess:
+                    _check_filter_stop()
                     print(f"📁 Using ProcessPoolExecutor in non-daemonic subprocess")
+                    _check_filter_stop()
                     print(f"📁 This enables TRUE parallelism even from within a subprocess!")
                 else:
+                    _check_filter_stop()
                     print(f"📁 Using ProcessPoolExecutor for maximum performance (true parallelism)")
                 
                 mp_context = multiprocessing.get_context('spawn')
@@ -3340,6 +3455,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     'GLOSSARY_STRIP_HONORIFICS': os.getenv('GLOSSARY_STRIP_HONORIFICS', '1'),
                     'GLOSSARY_FUZZY_THRESHOLD': os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90'),
                 }
+                _check_filter_stop()
                 print(f"📁 Passing env vars to child processes: GLOSSARY_MAX_SENTENCES={current_env_vars['GLOSSARY_MAX_SENTENCES']}")
                 
                 # For multiprocessing.Pool, we use different kwargs
@@ -3351,6 +3467,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 }
                 use_mp_pool = True  # Flag to use different API
         else:
+            _check_filter_stop()
             print(f"📁 Using ThreadPoolExecutor for sentence processing (dataset < 5000 sentences)")
             executor_class = ThreadPoolExecutor
             executor_kwargs = {'max_workers': extraction_workers}
@@ -3372,6 +3489,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 all_args = [(batch, idx, combined_pattern, exclude_check_data) 
                            for idx, batch in enumerate(batches)]
                 
+                _check_filter_stop()
                 print(f"📁 Submitting {len(all_args)} batches to process pool...")
                 
                 # Use map_async with chunksize for better distribution
@@ -3383,15 +3501,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 batch_start_time = time.time()
                 next_report_ts = batch_start_time + 5.0
                 
+                _check_filter_stop()
                 print(f"📁 Processing batches with {extraction_workers} parallel workers...")
                 
                 while not result_async.ready():
-                    time.sleep(2)  # Check every 2 seconds
+                    _check_filter_stop()
+                    time.sleep(0.1)  # Check every 2 seconds
                     now = time.time()
                     elapsed = now - batch_start_time
                     
                     # Emit logs on a fixed 5s cadence (5, 10, 15...) even if our poll loop wakes late.
                     while now >= next_report_ts:
+                        _check_filter_stop()
                         elapsed_for_log = int(next_report_ts - batch_start_time)
                         
                         # Estimate progress based on time and worker count
@@ -3401,22 +3522,27 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         estimated_sentences = min(estimated_completed * optimal_batch_size, total_sentences)
                         
                         if estimated_progress < 95:
+                            _check_filter_stop()
                             print(f"📁 Processing... ~{estimated_progress:.0f}% estimated (~{estimated_sentences:,} sentences) | {elapsed_for_log}s elapsed")
                         else:
+                            _check_filter_stop()
                             print(f"📁 Processing... finalizing last batches | {elapsed_for_log}s elapsed")
                         
                         next_report_ts += 5.0
                 
                 # Get all results
                 total_elapsed = time.time() - batch_start_time
+                _check_filter_stop()
                 print(f"📁 All batches completed in {total_elapsed:.1f}s! Collecting results...")
                 all_results = result_async.get()
                 
                 # Process all results
                 for local_word_freq, local_important, local_seen, batch_idx in all_results:
                     # Merge results
+                    _check_filter_stop()
                     word_freq.update(local_word_freq)
                     for sentence in local_important:
+                        _check_filter_stop()
                         sentence_key = ' '.join(sorted(re.findall(combined_pattern, sentence)))
                         if sentence_key not in seen_contexts:
                             important_sentences.append(sentence)
@@ -3431,10 +3557,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         progress = (processed_count / total_sentences) * 100
                         elapsed = time.time() - batch_start_time
                         rate = (processed_count / elapsed) if elapsed > 0 else 0
+                        _check_filter_stop()
                         print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
         else:
             # Use concurrent.futures API (ThreadPoolExecutor or ProcessPoolExecutor)
-            with executor_class(**executor_kwargs) as executor:
+            with _filter_executor(executor_class, **executor_kwargs) as executor:
                 futures = []
                 
                 # Prepare data for ProcessPoolExecutor if needed
@@ -3448,6 +3575,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     )
                 
                 for idx, batch in enumerate(batches):
+                    _check_filter_stop()
                     if use_process_pool:
                         # Use module-level function for ProcessPoolExecutor
                         future = executor.submit(_process_sentence_batch_for_extraction, 
@@ -3464,13 +3592,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Collect results with progress
                 completed_batches = 0
                 batch_start_time = time.time()
-                for future in as_completed(futures):
+                for future in _filter_completed(futures):
                     # Get result without timeout - as_completed already handles waiting
+                    _check_filter_stop()
                     local_word_freq, local_important, local_seen, batch_idx = future.result()
                     
                     # Merge results
                     word_freq.update(local_word_freq)
                     for sentence in local_important:
+                        _check_filter_stop()
                         sentence_key = ' '.join(sorted(re.findall(combined_pattern, sentence)))
                         if sentence_key not in seen_contexts:
                             important_sentences.append(sentence)
@@ -3486,6 +3616,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         progress = (processed_count / total_sentences) * 100
                         elapsed = time.time() - batch_start_time
                         rate = (processed_count / elapsed) if elapsed > 0 else 0
+                        _check_filter_stop()
                         print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
                     
                     # Yield to GUI after each batch completes
@@ -3493,6 +3624,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     else:
         # Sequential processing with progress
         for idx, sentence in enumerate(sentences):
+            _check_filter_stop()
             sentence = sentence.strip()
             if len(sentence) < 10 or len(sentence) > 500:
                 continue
@@ -3504,6 +3636,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Filter out excluded terms
                 filtered_matches = []
                 for match in matches:
+                    _check_filter_stop()
                     if not should_exclude_term(match):
                         word_freq[match] += 1
                         filtered_matches.append(match)
@@ -3518,6 +3651,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             # Show progress every 1000 sentences or 2 seconds
             if idx % 1000 == 0 or (time.time() - last_progress_time > 2):
                 progress = ((idx + 1) / total_sentences) * 100
+                _check_filter_stop()
                 print(f"📑 Processing sentences: {idx + 1:,}/{total_sentences:,} ({progress:.1f}%)")
                 last_progress_time = time.time()
                 # Yield to GUI thread every 1000 sentences
@@ -3525,13 +3659,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Yield to GUI thread every 1000 sentences
                 time.sleep(0.001)  # Tiny sleep to let GUI update
     
+    _check_filter_stop()
     print(f"📑 Found {len(important_sentences):,} sentences with potential glossary terms")
     
     # Step 6/7: Deduplicate and normalize terms
     # Skip this heavy deduplication if "Dynamic Limit Expansion" (include_all_characters) is disabled
     # When disabled, we only care about exact matches of high-frequency terms, which combined_freq already handles
     if not include_all_characters:
+        _check_filter_stop()
         print(f"📑 Step 6/7: Skipping advanced term deduplication (Dynamic Limit Expansion disabled)...")
+        _check_filter_stop()
         print(f"📑 Using simple normalized frequency counts for {len(word_freq):,} terms")
         
         combined_freq = Counter()
@@ -3539,6 +3676,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Simple deduplication by normalized form only
         for term, count in word_freq.items():
+            _check_filter_stop()
             normalized = term.lower().strip()
             if normalized in combined_freq:
                 if count > combined_freq[normalized]:
@@ -3550,6 +3688,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if term_count % 5000 == 0:
                 time.sleep(0.001)
     else:
+        _check_filter_stop()
         print(f"📑 Step 6/7: Normalizing and deduplicating {len(word_freq):,} unique terms...")
         
         combined_freq = Counter()
@@ -3557,6 +3696,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Original logic with potential for future advanced features if enabled
         for term, count in word_freq.items():
+            _check_filter_stop()
             normalized = term.lower().strip()
             if normalized in combined_freq:
                 if count > combined_freq[normalized]:
@@ -3568,12 +3708,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if term_count % 1000 == 0:
                 time.sleep(0.001)
     
+    _check_filter_stop()
     print(f"📑 Deduplicated to {len(combined_freq):,} unique terms")
     
     # Filter to keep only terms that appear at least min_frequency times
     frequent_terms = {term: count for term, count in combined_freq.items() if count >= min_frequency}
     
     # Build filtered text focusing on sentences containing frequent terms
+    _check_filter_stop()
     print(f"📑 Step 7/7: Building filtered text from relevant sentences...")
     
     # OPTIMIZATION: Skip sentences that already passed filtering in step 5
@@ -3581,6 +3723,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # We just need to limit the sample size
     
     filtered_sentences = important_sentences  # Already filtered!
+    _check_filter_stop()
     print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
 
     # EARLY DYNAMIC EXPANSION: collect one sentence index per unique honorific-attached name (first appearance), before scoring/nuance
@@ -3626,7 +3769,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     honor_pat = re.compile(hon_regex)
                     ordered_names = []
                     for idx, sent in enumerate(filtered_sentences):
+                        _check_filter_stop()
                         for m in combined_pat.finditer(sent):
+                            _check_filter_stop()
                             name = m.group("name").strip()
                             if not name or any(ch.isdigit() for ch in name):
                                 continue
@@ -3647,6 +3792,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             # Skip if name looks like a title term (PatternManager title patterns)
                             skip_title = False
                             for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
+                                _check_filter_stop()
                                 if re.search(pat, name):
                                     skip_title = True
                                     break
@@ -3661,6 +3807,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         # Strict filtering applied to 'before' token to reduce noise.
                         for m in honor_pat.finditer(sent):
                             # 1. Check BEFORE the honorific
+                            _check_filter_stop()
                             if primary_lang == 'chinese':
                                 # Chinese logic: Get previous 2-4 characters without relying on space
                                 start_idx = m.start()
@@ -3676,6 +3823,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 # Scan backwards for valid Chinese chars
                                 current_token = ""
                                 for i in range(1, 5): # Look back up to 4 chars
+                                    _check_filter_stop()
                                     if start_idx - i < 0: break
                                     char = sent[start_idx - i]
                                     # Check if char is valid Chinese character
@@ -3693,6 +3841,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 token = ""
                                 current_token = ""
                                 for i in range(1, 7): # Look back up to 6 chars
+                                    _check_filter_stop()
                                     if start_idx - i < 0: break
                                     char = sent[start_idx - i]
                                     # Check if char is valid Japanese character
@@ -3750,6 +3899,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                                         # Skip if token looks like a title term
                                                         skip_title = False
                                                         for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
+                                                            _check_filter_stop()
                                                             if re.search(pat, token):
                                                                 skip_title = True
                                                                 break
@@ -3761,6 +3911,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
                     # DEDUPLICATE THE REPRESENTATIVE UNIQUE CHARACTERS HERE
                     if ordered_names:
+                        _check_filter_stop()
                         print(f"📑 Deduplicating {len(ordered_names)} potential character names (honorific-first)...")
                         try:
                             import duplicate_detection_config as DDC
@@ -3774,7 +3925,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             effective_threshold = dd_config.get('threshold', fallback_threshold)
                             
                             selected_algo = os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto').upper()
+                            _check_filter_stop()
                             print(f"📑 Duplicate Detection Algorithm: {selected_algo} ({algo_desc})")
+                            _check_filter_stop()
                             print(f"📑 Deduplicating names with threshold: {effective_threshold:.2f}")
                             
                             deduped_names = []
@@ -3797,6 +3950,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             # This allows the user to control the strictness via the GUI/Config
                             min_hon_freq = min_frequency
                             
+                            _check_filter_stop()
                             print(f"📑 Filtering by honorific attachment frequency (min {min_hon_freq} occurrences)...")
                             
                             # Get unique candidates that meet frequency threshold
@@ -3805,10 +3959,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             seen_candidates = set()
                             
                             for name in ordered_names:
+                                _check_filter_stop()
                                 if name not in seen_candidates and name_freq_with_honorific[name] >= min_hon_freq:
                                     filtered_unique.append(name)
                                     seen_candidates.add(name)
                                     
+                            _check_filter_stop()
                             print(f"📑 Reduced candidates from {len(ordered_names)} (total) to {len(filtered_unique)} (unique freq-filtered)")
                             
                             ordered_names = filtered_unique
@@ -3819,11 +3975,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             # Key: first_char, Value: list of existing names starting with that char
                             lookup_buckets = {} 
                             
+                            _check_filter_stop()
                             print(f"📑 Processing {len(ordered_names)} names with bucketed optimization...")
                             
                             for i, name in enumerate(ordered_names):
                                 # Progress logging for large sets
+                                _check_filter_stop()
                                 if i > 0 and i % 1000 == 0:
+                                    _check_filter_stop()
                                     print(f"📑 Dedupe progress: {i}/{len(ordered_names)}...")
                                     
                                 norm = name.lower().strip()
@@ -3850,6 +4009,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                     search_candidates = candidates
                                 
                                 for existing in search_candidates:
+                                    _check_filter_stop()
                                     score = DDC.calculate_similarity_with_config(name, existing, dd_config)
                                     if score >= effective_threshold:
                                         is_dup = True
@@ -3869,17 +4029,23 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                     if name in honorific_first_indices:
                                         kept_indices[name] = honorific_first_indices[name]
                             
+                            _check_filter_stop()
                             print(f"📑 Advanced deduplication removed {skipped_dupes} duplicate names")
                             
                             # Update the lists
                             ordered_names = deduped_names
                             honorific_first_indices = kept_indices
                             
+                        except _GlossaryFilteringStopped:
+                            raise
                         except ImportError:
+                            _check_filter_stop()
                             print("⚠️ duplicate_detection_config module not found, skipping name deduplication")
                         except Exception as e:
+                            _check_filter_stop()
                             print(f"⚠️ Name deduplication failed: {e}")
                 else:
+                    _check_filter_stop()
                     print("📑 Dynamic expansion (honorific-first): no honorifics found in PatternManager for this language")
                 base_count = len(honorific_first_indices)
                 if include_gender_context_flag and base_count > 0:
@@ -3888,10 +4054,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             1 for idx in honorific_first_indices.values()
                             if 0 <= idx < len(filtered_sentences) and _sentence_has_gender_pronoun(filtered_sentences[idx])
                         )
+                        _check_filter_stop()
                         print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring (gender-context subset: {gender_subset})")
+                    except _GlossaryFilteringStopped:
+                        raise
                     except Exception:
+                        _check_filter_stop()
                         print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring")
                 else:
+                    _check_filter_stop()
                     print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring")
 
                 # Debug: Write filtered terms to file (User request)
@@ -3905,25 +4076,37 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         
                         with open(debug_file_path, 'w', encoding='utf-8') as f:
                             for name in ordered_names:
+                                _check_filter_stop()
                                 f.write(f"{name}\n")
+                        _check_filter_stop()
                         print(f"📑 Wrote {len(ordered_names)} terms to {debug_file_path}")
+                    except _GlossaryFilteringStopped:
+                        raise
                     except Exception as e:
+                        _check_filter_stop()
                         print(f"📑 Failed to write debug file: {e}")
+            except _GlossaryFilteringStopped:
+                raise
             except Exception:
+                _check_filter_stop()
                 print("📑 Dynamic expansion (honorific-first): error parsing honorific names; continuing without early captures")
         else:
+            _check_filter_stop()
             print("📑 Dynamic expansion (honorific-first): no honorific pattern available for this language")
     
     # For extremely large datasets, we can optionally do additional filtering
     # Skip this reduction when include_all_characters is enabled to avoid losing rare characters
     if (not include_all_characters) and len(filtered_sentences) > 10000 and len(frequent_terms) > 1000:
+        _check_filter_stop()
         print(f"📑 Large dataset detected - applying frequency-based filtering...")
+        _check_filter_stop()
         print(f"📑 Filtering {len(filtered_sentences):,} sentences for top frequent terms...")
         
         # Sort terms by frequency to prioritize high-frequency ones
         sorted_terms = sorted(frequent_terms.items(), key=lambda x: x[1], reverse=True)
         top_terms = dict(sorted_terms[:1000])  # Focus on top 1000 most frequent terms
         
+        _check_filter_stop()
         print(f"📑 Using top {len(top_terms):,} most frequent terms for final filtering")
         
         # Use parallel processing only if really needed
@@ -3934,6 +4117,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             # Create a simple set of terms for fast lookup (no variations needed)
             term_set = set(top_terms.keys())
             
+            _check_filter_stop()
             print(f"📑 Using parallel filtering with {extraction_workers} workers...")
             
             # Optimize batch size for ProcessPoolExecutor (reduce overhead)
@@ -3942,6 +4126,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             check_batches = [filtered_sentences[i:i + check_batch_size] 
                            for i in range(0, len(filtered_sentences), check_batch_size)]
             
+            _check_filter_stop()
             print(f"📑 Processing {len(check_batches)} batches of ~{check_batch_size} sentences")
             
             # Use ProcessPoolExecutor for true parallelism (if not already in subprocess)
@@ -3949,53 +4134,66 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                           and mobile_runtime.processes_available())
             
             if use_process_pool_filtering:
+                _check_filter_stop()
                 print(f"📑 Using ProcessPoolExecutor for true parallel filtering")
                 new_filtered = []
-                with ProcessPoolExecutor(max_workers=extraction_workers) as executor:
+                with _filter_executor(ProcessPoolExecutor, max_workers=extraction_workers) as executor:
                     # Use the module-level function _check_sentence_batch_for_terms
                     futures = [executor.submit(_check_sentence_batch_for_terms, (batch, term_set)) 
                               for batch in check_batches]
                     
-                    for future in as_completed(futures):
+                    for future in _filter_completed(futures):
+                        _check_filter_stop()
                         new_filtered.extend(future.result())
             else:
+                _check_filter_stop()
                 print(f"📑 Using ThreadPoolExecutor for filtering (small dataset or in subprocess)")
                 # Simple function to check if sentence contains any top term
                 def check_batch_simple(batch):
                     result = []
                     for sentence in batch:
                         # Simple substring check - much faster than regex
+                        _check_filter_stop()
                         for term in term_set:
+                            _check_filter_stop()
                             if term in sentence:
                                 result.append(sentence)
                                 break
                     return result
                 
                 new_filtered = []
-                with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
+                with _filter_executor(ThreadPoolExecutor, max_workers=extraction_workers) as executor:
                     futures = [executor.submit(check_batch_simple, batch) for batch in check_batches]
                     
-                    for future in as_completed(futures):
+                    for future in _filter_completed(futures):
+                        _check_filter_stop()
                         new_filtered.extend(future.result())
             
             filtered_sentences = new_filtered
+            _check_filter_stop()
             print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
         else:
             # For smaller datasets, simple sequential filtering
+            _check_filter_stop()
             print(f"📑 Using sequential filtering...")
             new_filtered = []
             for i, sentence in enumerate(filtered_sentences):
+                _check_filter_stop()
                 for term in top_terms:
+                    _check_filter_stop()
                     if term in sentence:
                         new_filtered.append(sentence)
                         break
                 if i % 1000 == 0:
+                    _check_filter_stop()
                     print(f"📑 Progress: {i:,}/{len(filtered_sentences):,} sentences")
                     time.sleep(0.001)
             
             filtered_sentences = new_filtered
+            _check_filter_stop()
             print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
     
+    _check_filter_stop()
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
     
     # Track character-like term count for final summary
@@ -4004,11 +4202,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # Limit the number of sentences to reduce token usage
     if max_sentences is None:
         max_sentences_fallback = os.getenv("GLOSSARY_MAX_SENTENCES", "200")
+        _check_filter_stop()
         print(f"🔍 [DEBUG] max_sentences was None, reading from environment: '{max_sentences_fallback}'")
         max_sentences = int(max_sentences_fallback)
     else:
+        _check_filter_stop()
         print(f"🔍 [DEBUG] max_sentences parameter was provided: {max_sentences}")
     
+    _check_filter_stop()
     print(f"🔍 [DEBUG] Final GLOSSARY_MAX_SENTENCES value being used: {max_sentences}")
 
     # Force smart selection path when dynamic expansion is enabled, even if filtered_sentences <= max_sentences
@@ -4017,8 +4218,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         dynamic_bonus = len(honorific_first_indices) if include_all_characters else 0
         effective_preview = max_sentences + dynamic_bonus
         if dynamic_bonus > 0:
+            _check_filter_stop()
             print(f"📁 Limiting to {max_sentences} + {dynamic_bonus} (dynamic expansion) = {effective_preview} representative sentences (from {len(filtered_sentences):,})")
         else:
+            _check_filter_stop()
             print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
         
         # SMART SELECTION: Prioritize sentences with unique terms and gender context
@@ -4027,8 +4230,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # 1. Identify which terms appear in which sentences
         # We need to re-scan briefly or pass this info along. Re-scanning is safer/easier here.
         if gender_nuance_enabled:
+            _check_filter_stop()
             print("📑 analyzing sentences for term coverage and gender nuance...")
         else:
+            _check_filter_stop()
             print("📑 analyzing sentences for term coverage (gender nuance disabled)...")
         term_to_sentences = {} # term -> list of (score, sentence_index)
         sentence_scores = {}   # index -> score
@@ -4052,14 +4257,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                               PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', [])
         # If gender context is OFF or nuance scoring is disabled, skip expensive scoring and just build simple coverage map
         if not gender_nuance_enabled:
+            _check_filter_stop()
             print("📑 Gender context or nuance toggle disabled: using simple term coverage (no pronoun weighting).")
             for idx, sent in enumerate(filtered_sentences):
+                _check_filter_stop()
                 sentence_scores[idx] = 1.0
                 for term in frequent_terms:
+                    _check_filter_stop()
                     if term in sent:
                         term_to_sentences.setdefault(term, []).append(idx)
         # Parallelize scoring if dataset is large enough and gender context is ON
         elif use_parallel and len(filtered_sentences) > 2000:
+            _check_filter_stop()
             print(f"📑 Parallelizing sentence scoring with {extraction_workers} workers...")
             
             # Prepare batches
@@ -4072,6 +4281,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             
             batches = []
             for i in range(0, len(filtered_sentences), batch_size):
+                _check_filter_stop()
                 end_idx = min(i + batch_size, len(filtered_sentences))
                 # Pass (start_index, list_of_sentences)
                 batches.append((i, filtered_sentences[i:end_idx]))
@@ -4084,7 +4294,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             else:
                 executor_cls = ThreadPoolExecutor
                 
-            with executor_cls(max_workers=extraction_workers) as executor:
+            with _filter_executor(executor_cls, max_workers=extraction_workers) as executor:
                 # Submit all batches
                 futures = [executor.submit(
                     _score_sentence_batch,
@@ -4102,19 +4312,23 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Emit wait logs even before the first batch completes
                 try:
                     from concurrent.futures import wait as _wait, FIRST_COMPLETED as _FIRST_COMPLETED
+                except _GlossaryFilteringStopped:
+                    raise
                 except Exception:
                     _wait = None
                     _FIRST_COMPLETED = None
 
                 pending = set(futures)
                 while pending:
+                    _check_filter_stop()
                     done = set()
                     if _wait is not None and _FIRST_COMPLETED is not None:
-                        done, pending = _wait(pending, timeout=5.0, return_when=_FIRST_COMPLETED)
+                        done, pending = _wait(pending, timeout=0.1, return_when=_FIRST_COMPLETED)
                         done = set(done or [])
                     else:
                         # Fallback: block until first completion (no wait logs)
-                        for future in as_completed(list(pending)):
+                        for future in _filter_completed(list(pending)):
+                            _check_filter_stop()
                             done.add(future)
                             pending.discard(future)
                             break
@@ -4122,15 +4336,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     if not done:
                         # No batch completed within timeout
                         elapsed = time.time() - scoring_start_time
+                        _check_filter_stop()
                         print(f"📑 Scoring... {elapsed:.0f}s elapsed")
                         continue
 
                     for future in done:
+                        _check_filter_stop()
                         try:
                             batch_scores, batch_term_map = future.result()
                             sentence_scores.update(batch_scores)
                             # Merge term mappings
                             for term, indices in batch_term_map.items():
+                                _check_filter_stop()
                                 if term not in term_to_sentences:
                                     term_to_sentences[term] = []
                                 term_to_sentences[term].extend(indices)
@@ -4149,25 +4366,34 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 rate = display_count / elapsed if elapsed > 0 else 0
 
                                 if completed_batches < total_batches:
+                                    _check_filter_stop()
                                     print(f"📑 Scoring... {display_count:,}/{total_to_score:,} sentences ({progress_pct:.1f}%) | Batch {completed_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
                                 else:
+                                    _check_filter_stop()
                                     print(f"📑 Scoring... {total_to_score:,}/{total_to_score:,} sentences (100.0%) | Batch {total_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
+                                    _check_filter_stop()
                                     print(f"📑 Scoring... finalizing last batches | {elapsed:.0f}s elapsed")
 
                                 last_log_time = current_time
 
+                        except _GlossaryFilteringStopped:
+                            raise
                         except Exception as e:
+                            _check_filter_stop()
                             print(f"⚠️ Scoring batch failed: {e}")
 
                 total_elapsed = time.time() - scoring_start_time
+                _check_filter_stop()
                 print(f"📁 All scoring batches completed in {total_elapsed:.1f}s!")
         else:
             # Sequential fallback
             honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
             for idx, sent in enumerate(filtered_sentences):
+                _check_filter_stop()
                 score = 1.0
                 if gender_nuance_enabled and gender_pronouns:
                     for p in gender_pronouns:
+                        _check_filter_stop()
                         if p in sent:
                             score += 5.0
                             break
@@ -4176,6 +4402,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 sentence_scores[idx] = score
                 
                 for term in frequent_terms:
+                    _check_filter_stop()
                     if term in sent:
                         if term not in term_to_sentences:
                             term_to_sentences[term] = []
@@ -4187,6 +4414,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Sort each term's sentences by score descending (higher score first)
         for term in term_to_sentences:
+            _check_filter_stop()
             term_to_sentences[term].sort(key=lambda idx: sentence_scores[idx], reverse=True)
         # If dynamic expansion is on, prefer character terms derived from honorific-attached names
         honorific_char_terms = []
@@ -4196,7 +4424,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 char_term_map = {}
                 name_regex = re.compile(r'([\w\-\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+)$')
                 for idx, sent in enumerate(filtered_sentences):
+                    _check_filter_stop()
                     for m in honor_pat.finditer(sent):
+                        _check_filter_stop()
                         prefix = sent[:m.start()].strip()
                         nm = name_regex.search(prefix)
                         if nm:
@@ -4206,6 +4436,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     term_to_sentences = {k: sorted(v, key=lambda i: sentence_scores.get(i, 0), reverse=True)
                                          for k, v in char_term_map.items()}
                     honorific_char_terms = list(term_to_sentences.keys())
+            except _GlossaryFilteringStopped:
+                raise
             except Exception:
                 pass
         
@@ -4224,6 +4456,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 parts = term.split()
                 if 1 <= len(parts) <= 3 and all(p[:1].isupper() for p in parts if p):
                     return True
+            except _GlossaryFilteringStopped:
+                raise
             except Exception:
                 pass
             return False
@@ -4232,6 +4466,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         non_character_terms = []
         source_terms = honorific_char_terms if (include_all_characters and honorific_char_terms) else sorted(term_to_sentences.keys())
         for term in source_terms:
+            _check_filter_stop()
             if _is_character_like(term):
                 character_terms.append(term)
             else:
@@ -4246,6 +4481,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 try:
                     honor_pat = re.compile(honorific_pattern_str)
                     honorific_chars = [t for t in character_terms if honor_pat.search(t)]
+                except _GlossaryFilteringStopped:
+                    raise
                 except Exception:
                     honorific_chars = []
             if honorific_chars:
@@ -4260,22 +4497,29 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             # If min_per_term is set, ensure we get at least that many for each term first
             if min_per_term:
                 for term in term_list:
+                    _check_filter_stop()
                     sentences = term_to_sentences[term]
                     for i in range(min(min_per_term, len(sentences))):
+                        _check_filter_stop()
                         selected_indices.add(sentences[i])
             
             while len(selected_indices) < target_limit and term_iterators:
+                _check_filter_stop()
                 active_iterators = []
                 for it in term_iterators:
+                    _check_filter_stop()
                     if len(selected_indices) >= target_limit:
                         break
                     try:
                         while True:
+                            _check_filter_stop()
                             idx = next(it)
                             if idx not in selected_indices:
                                 selected_indices.add(idx)
                                 active_iterators.append(it)
                                 break
+                    except _GlossaryFilteringStopped:
+                        raise
                     except StopIteration:
                         pass
                 term_iterators = active_iterators
@@ -4286,6 +4530,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # If we collected honorific-first sentences, seed the selection with them
         if include_all_characters and honorific_first_indices:
             for idx in honorific_first_indices.values():
+                _check_filter_stop()
                 if 0 <= idx < len(filtered_sentences):
                     selected_indices.add(idx)
             requested_bonus = len(honorific_first_indices)
@@ -4293,6 +4538,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         honorific_bonus = len(selected_indices) if include_all_characters else 0
         effective_limit = base_limit + honorific_bonus
         requested_total = base_limit + requested_bonus
+        _check_filter_stop()
         print(f"📁 Requested sentence budget: base {base_limit} + bonus {requested_bonus} = {requested_total}")
         # Standard Fixed Limit Logic
         # First, prioritize character-like terms (honorific-based)
@@ -4318,8 +4564,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         unique_count = len(selected_indices)
         dropped = max(0, requested_total - unique_count)
         if include_all_characters:
+            _check_filter_stop()
             print(f"📁 Deduped sentence budget: requested {base_limit}+{requested_bonus} -> {unique_count} unique (dropped {dropped})")
         else:
+            _check_filter_stop()
             print(f"📁 Deduped sentence budget: requested {base_limit} -> {unique_count} unique (dropped {dropped})")
             
         # Sort indices to maintain narrative flow
@@ -4341,7 +4589,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             sentence_terms = {}
             if 'term_to_sentences' in locals():
                 for term, idx_list in term_to_sentences.items():
+                    _check_filter_stop()
                     for idx in idx_list:
+                        _check_filter_stop()
                         if idx in final_indices:
                             sentence_terms.setdefault(idx, set()).add(term)
             character_term_set = set(character_terms) if 'character_terms' in locals() else set()
@@ -4355,6 +4605,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             dup_threshold = dup_config.get('threshold', fuzzy_threshold_env)
             algo_list = dup_config.get('algorithms', [])
             algo_mode = os.getenv("GLOSSARY_DUPLICATE_ALGORITHM", "auto")
+            _check_filter_stop()
             print(f"📋 Sentence dedup config: mode={algo_mode}, algos={algo_list}, slider={fuzzy_threshold_env:.2f}, threshold_used={dup_threshold:.2f}, available={ddc.get_algorithm_display_info()}")
 
             dedup_seen_exact = set()
@@ -4364,6 +4615,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             base_dropped = bonus_dropped = 0
 
             for idx, sent in zip(final_indices, pre_dedup_sentences):
+                _check_filter_stop()
                 key = sent.strip()
                 if not key:
                     if idx in base_idx_set:
@@ -4392,6 +4644,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         min_len = int(klen * 0.7)
                         max_len = int(klen * 1.3)
                         for other in kept_sentences:
+                            _check_filter_stop()
                             if not (min_len <= len(other) <= max_len):
                                 continue
                             if len(set(key) & set(other)) < klen * 0.5:
@@ -4406,6 +4659,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     keep_for_character = False
                     if sentence_terms:
                         for t in sentence_terms.get(idx, set()):
+                            _check_filter_stop()
                             if t in character_term_set and t not in covered_char_terms:
                                 keep_for_character = True
                                 break
@@ -4423,6 +4677,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Mark covered character terms
                 if sentence_terms:
                     for t in terms_here:
+                        _check_filter_stop()
                         if t in character_term_set:
                             covered_char_terms.add(t)
                         covered_terms_global.add(t)
@@ -4439,20 +4694,24 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             total_dropped = base_dropped + bonus_dropped
             dropped_windows = total_dropped
 
+            _check_filter_stop()
             print(
                 f"📁 Deduped sentence budget: base {pre_base}->{base_kept} (dropped {base_dropped}), "
                 f"bonus {pre_bonus}->{bonus_kept} (dropped {bonus_dropped}), total {total_kept}"
             )
             # Re-log with dedup-applied cap shrink
+            _check_filter_stop()
             print(
                 f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering "
                 f"{len(term_to_sentences)} unique terms (cap shrink by {total_dropped})"
             )
         else:
+            _check_filter_stop()
             print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms")
             dropped_windows = 0
 
     elif max_sentences == 0:
+        _check_filter_stop()
         print(f"📁 Including ALL {len(filtered_sentences):,} sentences (max_sentences=0)")
     
     # Check if gender context expansion is enabled
@@ -4460,8 +4719,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     if include_gender_context:
         context_window = int(os.getenv("GLOSSARY_CONTEXT_WINDOW", "2"))
+        _check_filter_stop()
         print(f"📑 Gender context enabled: Expanding snippets with {context_window}-sentence windows...")
         if 'dropped_windows' in locals() and dropped_windows:
+            _check_filter_stop()
             print(f"📑 Context windows skipped due to dedup: {dropped_windows}")
         
         # Split full text into sentences for context extraction
@@ -4473,9 +4734,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         sentence_to_index = {}
         all_sentences_normalized = {s.strip(): idx for idx, s in enumerate(all_sentences_list)}
         
+        _check_filter_stop()
         print(f"📑 Mapping {len(filtered_sentences):,} filtered sentences to context positions...")
         kept_windows = 0
         for filtered_sent in filtered_sentences:
+            _check_filter_stop()
             filtered_normalized = filtered_sent.strip()
             
             # Try exact match first (fastest)
@@ -4485,6 +4748,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Try substring match (slower fallback)
                 found = False
                 for sentence, idx in all_sentences_normalized.items():
+                    _check_filter_stop()
                     if filtered_normalized in sentence or sentence in filtered_normalized:
                         sentence_to_index[filtered_sent] = idx
                         found = True
@@ -4493,6 +4757,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 if not found:
                     # Last resort: try finding in original list
                     for idx, sentence in enumerate(all_sentences_list):
+                        _check_filter_stop()
                         if filtered_normalized in sentence or sentence in filtered_normalized:
                             sentence_to_index[filtered_sent] = idx
                             break
@@ -4504,6 +4769,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         for filtered_sent in filtered_sentences:
             # If we can't locate the sentence in the master list, wrap it individually
+            _check_filter_stop()
             if filtered_sent not in sentence_to_index:
                 if 'dropped_sentence_indices' in locals() and filtered_sent in dropped_sentence_indices:
                     continue  # skip entire window if its seed sentence was deduped
@@ -4529,6 +4795,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             
             # Mark all sentences in this window as included
             for i in range(start_idx, end_idx):
+                _check_filter_stop()
                 included_indices.add(i)
             
             # Extract the window and wrap with start/end markers for splitter safety
@@ -4542,14 +4809,17 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             kept_windows += 1
         
         skipped_windows = (len(filtered_sentences) - kept_windows) if 'kept_windows' in locals() else 0
+        _check_filter_stop()
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
         if skipped_windows:
+            _check_filter_stop()
             print(f"📑 Context windows removed after dedup: {skipped_windows}")
 
         # Window-level dedup: drop windows whose term set is already covered, while keeping one per character
         window_terms = []
         if 'sentence_terms' in locals():
             for seed_idx in window_seeds:
+                _check_filter_stop()
                 if seed_idx == -1:
                     window_terms.append(set())
                 else:
@@ -4562,6 +4832,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         kept_context_groups = []
         kept_window_seeds = []
         for cg, seed_idx, terms in zip(context_groups, window_seeds, window_terms):
+            _check_filter_stop()
             if not terms:
                 # keep empty-term windows to preserve structure
                 kept_context_groups.append(cg)
@@ -4585,28 +4856,34 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             kept_context_groups.append(cg)
             kept_window_seeds.append(seed_idx)
             for t in terms:
+                _check_filter_stop()
                 covered_terms_global.add(t)
                 if 'character_term_set' in locals() and t in character_term_set:
                     covered_char_terms.add(t)
 
         dropped_windows_after_terms = len(context_groups) - len(kept_context_groups)
         if dropped_windows_after_terms:
+            _check_filter_stop()
             print(f"📑 Context windows removed after term-aware dedup: {dropped_windows_after_terms}")
 
         # Compute true total sentences emitted in kept windows
         total_window_sentences = 0
         for ctx in kept_context_groups:
             # split on end marker to avoid counting it
+            _check_filter_stop()
             body = ctx.split('=== CONTEXT ')[0]
             # crude split by sentence separators
             total_window_sentences += len([s for s in re.split(r'[.!?。！？]+', body) if s.strip()])
+        _check_filter_stop()
         print(f"📑 Final kept windows: {len(kept_context_groups)}, final kept sentences (within windows): {total_window_sentences}")
         filtered_text = '\n\n'.join(kept_context_groups)  # Separate windows with double newline
+        _check_filter_stop()
         print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
     else:
         # Even without gender context, add footer markers to preserve boundaries for chapter splitting
         context_groups = []
         for idx, sent in enumerate(filtered_sentences, 1):
+            _check_filter_stop()
             context_groups.append(f"{sent}\n=== CONTEXT {idx} END ===")
         filtered_text = '\n\n'.join(context_groups)
     
@@ -4626,17 +4903,27 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     filtered_text = _normalize_filtered_text(filtered_text)
     filtered_length = len(filtered_text)
     size_change_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
+    _check_filter_stop()
     print("📑 Applied post-filter text normalization to remove orphaned quotes and extra blank lines")
+    _check_filter_stop()
     print(f"\n📑 === FILTERING COMPLETE ===")
+    _check_filter_stop()
     print(f"📑 Duration: {filter_duration:.1f} seconds")
     if size_change_percent >= 0:
+        _check_filter_stop()
         print(f"📑 Text reduction: {original_length:,} → {filtered_length:,} chars ({size_change_percent:.1f}% reduction)")
     else:
+        _check_filter_stop()
         print(f"📑 Text expansion: {original_length:,} → {filtered_length:,} chars ({abs(size_change_percent):.1f}% expansion)")
+    _check_filter_stop()
     print(f"📑 Terms found: {len(frequent_terms):,} unique terms (min frequency: {min_frequency})")
+    _check_filter_stop()
     print(f"📑 Characters found (character-like terms): {character_term_count:,}")
+    _check_filter_stop()
     print(f"📑 Final output: {len(filtered_sentences)} sentences, {filtered_length:,} characters")
+    _check_filter_stop()
     print(f"📑 Performance: {(original_length / filter_duration / 1000):.1f}K chars/second")
+    _check_filter_stop()
     print(f"📑 ========================\n")
     
     return filtered_text, frequent_terms
@@ -4655,12 +4942,14 @@ def _normalize_filtered_text(text: str) -> str:
     i = 0
 
     while i < len(lines):
+        _check_filter_stop()
         line = lines[i]
         stripped = line.strip()
 
         if stripped in quote_close:
             # Remove trailing blank lines before attaching closing quote
             while normalized_lines and not normalized_lines[-1].strip():
+                _check_filter_stop()
                 normalized_lines.pop()
             if normalized_lines:
                 normalized_lines[-1] = normalized_lines[-1].rstrip() + stripped
@@ -4669,6 +4958,7 @@ def _normalize_filtered_text(text: str) -> str:
         elif stripped in quote_open:
             j = i + 1
             while j < len(lines) and not lines[j].strip():
+                _check_filter_stop()
                 j += 1
             if j < len(lines):
                 match = re.match(r"^(\s*)(.*)$", lines[j])
@@ -6566,6 +6856,7 @@ def _check_sentence_batch_for_terms(args):
     # Use pre-compiled term list for fast checking
     for sentence in batch_sentences:
         # Quick check using any() - stops at first match
+        _check_filter_stop()
         if any(term in sentence for term in terms):
             filtered.append(sentence)
     
@@ -6594,6 +6885,7 @@ def _score_sentence_batch(args):
     multi_token_terms = []
     
     for t in term_list:
+        _check_filter_stop()
         if len(t) < 2: continue
         # Check if term splits into multiple tokens
         tokens = tokenizer_pattern.findall(t)
@@ -6611,17 +6903,21 @@ def _score_sentence_batch(args):
         pattern = '|'.join(map(re.escape, multi_token_terms))
         try:
             multi_term_regex = re.compile(pattern)
+        except _GlossaryFilteringStopped:
+            raise
         except:
             # Fallback if pattern is too huge (unlikely for just multi-word subset)
             pass
     
     for idx, sentence in enumerate(sentences):
+        _check_filter_stop()
         global_idx = start_idx + idx
         score = 1.0
         
         # Gender pronoun check (fast)
         if include_gender_context and gender_pronouns:
             for p in gender_pronouns:
+                _check_filter_stop()
                 if p in sentence:
                     score += 5.0
                     break
@@ -6637,6 +6933,7 @@ def _score_sentence_batch(args):
         found_terms = tokens.intersection(single_token_terms)
         
         for term in found_terms:
+            _check_filter_stop()
             if term not in local_term_map:
                 local_term_map[term] = []
             local_term_map[term].append(global_idx)
@@ -6647,6 +6944,7 @@ def _score_sentence_batch(args):
             if multi_term_regex:
                 # Fast regex batch match
                 for match in multi_term_regex.findall(sentence):
+                    _check_filter_stop()
                     if match not in local_term_map:
                         local_term_map[match] = []
                     # Avoid duplicates if regex matches same term multiple times
@@ -6655,6 +6953,7 @@ def _score_sentence_batch(args):
             else:
                 # Fallback iteration
                 for term in multi_token_terms:
+                    _check_filter_stop()
                     if term in sentence:
                         if term not in local_term_map:
                             local_term_map[term] = []
@@ -6685,11 +6984,13 @@ def _process_sentence_batch_for_extraction(args):
         
         # Check if it contains honorifics
         for honorific in honorifics_to_exclude:
+            _check_filter_stop()
             if honorific in term or (honorific.startswith('-') and term.endswith(honorific[1:])):
                 return True
         
         # Check if it matches title patterns
         for pattern in title_patterns:
+            _check_filter_stop()
             if pattern.search(term):
                 return True
         
@@ -6700,6 +7001,7 @@ def _process_sentence_batch_for_extraction(args):
         return False
     
     for sentence in batch_sentences:
+        _check_filter_stop()
         sentence = sentence.strip()
         if len(sentence) < 10 or len(sentence) > 500:
             continue
@@ -6711,6 +7013,7 @@ def _process_sentence_batch_for_extraction(args):
             # Filter out excluded terms
             filtered_matches = []
             for match in matches:
+                _check_filter_stop()
                 if not should_exclude_term(match):
                     local_word_freq[match] += 1
                     filtered_matches.append(match)
