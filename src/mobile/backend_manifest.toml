@@ -257,7 +257,7 @@ files = []
 "translate_headers_standalone->PySide6" = { count = 2, reason = "run_translate_headers_gui desktop entry (QMessageBox + its processEvents hook since U7; mobile runs translate_headers_now / run_translate_headers_now)" }
 
 [baseline.lazy_excluded_edges]
-"antigravity_proxy->proxy_token_storage" = { count = 2, reason = "patches / migrates the proxy runtime during the desktop install and launch (_patch_runtime_package_json, ensure_proxy_running after its mobile gate); a phone never installs it (U13: it uses a PC proxy)" }
+"antigravity_proxy->proxy_token_storage" = { count = 1, reason = "patches / migrates the proxy runtime during the desktop install and launch (_patch_runtime_package_json, ensure_proxy_running after its mobile gate); a phone never installs it (U13: it uses a PC proxy)" }
 "model_options->autharena_proxy" = { count = 1, reason = "AuthArena catalog fetch (_fetch_provider_catalog); only reached after the guarded list_accounts() import (U4), route excluded on mobile" }
 "model_options->ocagy_cli" = { count = 3, reason = "OpenCode Zen catalog; ocagy/ocz routes excluded on mobile" }
 "unified_api_client->autharena_proxy" = { count = 2, reason = "autharena/ route setup/send; route rejected on mobile (U1)" }

@@ -305,7 +305,7 @@ def test_model_sheet_offers_the_typed_model_id():
     assert getattr(rows[0], "key", "") == "model-free-text"
     sheet.query = "gpt-6"
     assert getattr(sheet.model_rows()[0], "key", "") != "model-free-text"
-    sheet.query = "ollamapull/qwen3:8b"
+    sheet.query = "ocz/qwen3-8b"  # U13: ollamapull/ runs via a PC
     assert sheet.model_rows()[0].disabled  # an excluded route is shown with its reason
     sheet.query = "chutes/some/model"
     sheet.submit_query()

@@ -653,7 +653,7 @@ def test_real_repo_passes_policy(real_result):
                  "extract_glossary_from_epub", "GlossaryManager", "chapter_extraction_worker", "shutdown_utils"):
         assert must in closure
     for never in ("translator_gui", "other_settings", "epub_library", "Retranslation_GUI", "QA_Scanner_GUI",
-                  "antigravity_proxy", "dpi_setup", "splash_utils"):
+                  "ocagy_cli", "dpi_setup", "splash_utils"):  # U13: antigravity_proxy runs via a PC
         assert never not in closure
 
 
