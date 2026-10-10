@@ -183,6 +183,9 @@ def test_a_switch_that_cannot_load_the_original_keeps_the_translation(phone, mon
         engine = D1._engine(phone)
         client = D1._attach_webview(phone, engine)
         try:
+            # broken before the book opens: the Reader warms both versions in the background once it is open
+            # (U12), and a version it already holds keeps working
+            broken["raw"] = True
             screen = await D1._open(phone, chapter=0)
             session = screen.session
             notes: list = []
@@ -190,7 +193,6 @@ def test_a_switch_that_cannot_load_the_original_keeps_the_translation(phone, mon
             screen.deps.notify = lambda message, *rest: (notes.append(message), notify(message, *rest))
             turns = D1.Turns(phone, client, screen)
             await turns.page_ready(set(), 0)
-            broken["raw"] = True
             for mode in (ORIGINAL, BILINGUAL):
                 loads, doc, before = len(client.loads), screen.current_doc, len(notes)
                 await _press(phone, screen, mode)

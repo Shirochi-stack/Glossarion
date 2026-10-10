@@ -882,10 +882,11 @@ def test_sdlxliff_tablet_side_list_and_size_class_switch():
 def test_manga_reason_chips_name_the_reason():
     from glossarion_mobile.services import manga as svc
 
+    # U12 item 1: PyTorch-only rows are not listed on mobile; their reason still names it (value_reason)
     chips = {row.value: row.chip for row in svc.detector_rows(mobile=True)}
-    assert chips["rtdetr"] == chips["yolo"] == "Needs PyTorch"
-    hybrid = {row.value: row.chip for row in svc.inpaint_method_rows(mobile=True)}["hybrid"]
-    assert hybrid == "Needs PyTorch"
+    assert "rtdetr" not in chips and "yolo" not in chips
+    assert "hybrid" not in {row.value for row in svc.inpaint_method_rows(mobile=True)}
+    assert svc.chip_text(svc.value_reason("manga_inpaint_method", "hybrid", mobile=True)) == "Needs PyTorch"
     assert svc.chip_text("Some long reason without any separator words at all here").endswith("…")
     assert svc.chip_text("RT-DETR (something)", "RT-DETR (PyTorch)") == "Not available on mobile"
 

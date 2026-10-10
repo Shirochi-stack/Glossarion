@@ -336,7 +336,7 @@ def test_login_panel_and_accounts_screen(oauth_env):
     body = screen.get_body()
     keys = [getattr(c, "key", None) for c in body.controls]
     assert keys[:4] == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem"]  # U4: all sign in
-    assert body.controls[-1].title == f"Unavailable on mobile ({len(UNAVAILABLE_ACCOUNTS)})"
+    assert not any(getattr(c, "key", None) == "accounts-unavailable" for c in body.controls)  # U12: not listed
     asyncio.run(screen.refresh("authgpt"))
     assert screen.status["signed_in"] and screen.slots["authgpt"] == [0]
     row = screen.slot_rows[("authgpt", 0)]

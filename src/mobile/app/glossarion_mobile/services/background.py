@@ -346,8 +346,8 @@ class BackgroundExecution:
         if not (self.is_android or self.is_ios) or self._pref(PREF_NOTIFICATION_ASKED, False):
             return None
         await asyncio.sleep(delay)  # let the first screen settle (the dialog covers it)
-        if self._pref(PREF_NOTIFICATION_ASKED, False):
-            return None
+        if self._pref(PREF_NOTIFICATION_ASKED, False) or getattr(self, "_notification_asked_now", False):
+            return None  # answered, or asked in this session already (a Run tap, Welcome): never twice
         try:
             return await self.request_notification_permission()
         except Exception as exc:
@@ -355,6 +355,15 @@ class BackgroundExecution:
             return None
 
     async def request_notification_permission(self) -> str:
+        """One system dialog at a time: a caller while a request is pending (the first-launch ask, then a Run
+        tap) gets that request's answer instead of a second dialog."""
+        pending = getattr(self, "_notification_request", None)
+        if pending is not None and not pending.done():
+            return await asyncio.shield(pending)
+        self._notification_request = asyncio.ensure_future(self._request_notification_permission())
+        return await asyncio.shield(self._notification_request)
+
+    async def _request_notification_permission(self) -> str:
         """Ask for the notification permission; the permission status.
 
         Android 13+: ``POST_NOTIFICATIONS`` through ``flet_permission_handler``. ``PREF_NOTIFICATION_ASKED``
@@ -362,6 +371,7 @@ class BackgroundExecution:
         out, was unavailable or returned nothing is asked again by the next Run. iOS: the notification set-up
         asks (``init_notifications``); the status then comes from the system settings.
         """
+        self._notification_asked_now = True
         if self.is_ios:
             if self.notifications is not None:
                 await self.notifications.ensure_init()

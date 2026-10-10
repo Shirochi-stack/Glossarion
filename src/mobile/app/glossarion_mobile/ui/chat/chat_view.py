@@ -1186,6 +1186,11 @@ class ChatView:
             self.live_job_card = None
             self.approval_card = None
             self.render_transcript(follow=True)
+            if self.transcript.hidden_after or not self.transcript.follow_tail:
+                # the run ended while the user reads earlier cards: ↓ points at the result (the stream loop
+                # shows it only on a repaint, and a run can end between two ticks)
+                self.new_fab.visible = True
+                self._push(self.new_fab)
         else:
             self.render_transcript(follow=self.transcript.follow_tail)
         self.refresh_send()

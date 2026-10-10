@@ -543,7 +543,8 @@ def test_owner_report_6_notifications_on_a_phone(app_env, tmp_path, monkeypatch)
         files[flows.CONFIG_NAME] = picks / flows.CONFIG_NAME
         files[flows.CONFIG_NAME].write_text(json.dumps(_config(server.url, FAKE_MODEL)), encoding="utf-8")
         device = AndroidDevice()
-        device.prompt_answers = [RuntimeError("the permission prompt was dismissed without an answer"), "granted"]
+        device.prompt_answers = [RuntimeError("the first-launch dialog was dismissed without an answer"),  # U12
+                                  RuntimeError("the permission prompt was dismissed without an answer"), "granted"]
         main_module = tf._load_main_module()
         conn, session = _TB._fake_session("android")
         _install_device(conn, session, device)
@@ -636,8 +637,11 @@ async def _scenario(h: Harness) -> None:
     assert app.chat_view.settings().auto_accept_glossary is False
 
     # ---- run 1: the first Start asks for the permission; the prompt never answers -------------------------------
+    # U12: the first launch already showed the dialog once (no answer from this fake prompt); runs count from here
+    assert await _until(lambda: len(device.requests()) >= 1, 30), "no notification dialog on the first launch"
+    launch = len(device.requests())
     run1 = await (await Run(h, "devfix6-run1.epub").send()).start()
-    assert len(device.requests()) == 1, device.requests()
+    assert len(device.requests()) == launch + 1, device.requests()
     assert await _until(lambda: device.fgs is not None, 30), "no foreground service for the job"
     assert [b["id"] for b in device.fgs["buttons"]] == ["stop", "open"], device.fgs
     assert not prefs.get(PREF_NOTIFICATION_ASKED, False), "an unanswered prompt must be asked again"
@@ -660,7 +664,7 @@ async def _scenario(h: Harness) -> None:
     # ---- run 2: Start asks again -> granted; the gate arrives while the Library is on screen ---------------------
     server.hold()
     run2 = await (await Run(h, "devfix6-run2.epub").send()).start()
-    assert len(device.requests()) == 2 and device.post_notifications
+    assert len(device.requests()) == launch + 2 and device.post_notifications
     assert prefs.get(PREF_NOTIFICATION_ASKED) is True
     assert await _until(lambda: server.parked >= 1, 60), "the run never reached the model"
     await flows.open_drawer(d)
@@ -697,7 +701,7 @@ async def _scenario(h: Harness) -> None:
     # ---- run 3: the gate arrives while the app is hidden ----------------------------------------------------------
     server.hold()
     run3 = await (await Run(h, "devfix6-run3.epub").send()).start()
-    assert len(device.requests()) == 2, "the permission is granted: no prompt"
+    assert len(device.requests()) == launch + 2, "the permission is granted: no prompt"
     assert await _until(lambda: server.parked >= 1 and device.fgs is not None, 60)
     await h.leave_app()
     assert h.page.app_visible is False and app.jobs.background.app_visible is False
