@@ -212,6 +212,8 @@ def snapshot_before_refresh(folder):
 
     A pending snapshot is never rebuilt from partially extracted new resources.
     """
+    if not os.path.isdir(folder):
+        return  # a first extraction: no output folder yet, nothing translated to bind
     data = _load(folder)
     _recover_pages(folder, data)
     if data['pending']:

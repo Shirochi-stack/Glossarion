@@ -563,12 +563,22 @@ def test_library_core_is_moved_verbatim_and_reexported():
     # objects, mixins); every name that epub_library defined at BASE_SHA is a move and
     # must stay verbatim, except the documented U5 seams (tests/parity/DISCREPANCIES.md).
     adapted = {"_default_output_root"}  # LibraryEnv output-root seam (desktop never installs one)
+    # owner edits made after the move (in library_core, which desktop now uses): (old, new) fragments
+    later_edits = {
+        # 3646b1a3 "image reference": the image-reference sidecar is a progress sidecar too
+        "_PROGRESS_SIDECAR_FILENAMES": ("'image_rename_map.json'})", "'image_rename_map.json', 'image_reference_map.json'})"),
+    }
     moved = {name: text for name, text in defined.items() if name in legacy_defs}
     assert set(moved) <= set(library_core.__all__)
     for name, text in moved.items():
         if name in adapted:
             continue
-        assert text == legacy_defs[name], f"library_core.{name} differs from epub_library @ {BASE_SHA[:12]}"
+        expected = legacy_defs[name]
+        if name in later_edits:
+            old, new = later_edits[name]
+            assert old in expected, name
+            expected = expected.replace(old, new)
+        assert text == expected, f"library_core.{name} differs from epub_library @ {BASE_SHA[:12]}"
     # epub_library no longer defines them; it imports the same objects
     current = {n.name for n in _tree("epub_library").body if isinstance(n, ast.FunctionDef)}
     assert not current & set(moved)

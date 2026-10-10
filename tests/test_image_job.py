@@ -174,19 +174,34 @@ TG_U7_SPANS = (
 )
 
 
+#: The last mobile milestone that edited translator_gui.py (U9). The mobile spans are pinned against it; the
+#: owner's later desktop edits (after it) are allowed anywhere except inside those spans.
+TG_MOBILE_SHA = "cddd73a4f5d057a03810d00b5787f37c14017130"
+
+
 def test_translator_gui_changed_only_in_the_u7_spans():
     import difflib
 
     try:
         legacy = rp.legacy_translator_gui().split("\n")
+        pinned = rp.git_show(TG_MOBILE_SHA, "src/translator_gui.py").split("\n")
     except rp.Unavailable as exc:  # pragma: no cover - shallow clone
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
             pytest.fail(str(exc))
         pytest.skip(str(exc))
-    current = rp.module_text("translator_gui").split("\n")
-    spans = tuple((i1 + 1, i2, j2 - j1) for tag, i1, i2, j1, j2 in
-                  difflib.SequenceMatcher(None, legacy, current, autojunk=False).get_opcodes() if tag != "equal")
+    mobile = [op for op in difflib.SequenceMatcher(None, legacy, pinned, autojunk=False).get_opcodes()
+              if op[0] != "equal"]
+    spans = tuple((i1 + 1, i2, j2 - j1) for _tag, i1, i2, j1, j2 in mobile)
     assert spans == TG_U7_SPANS
+    # the owner's desktop edits since then leave every mobile span (pinned line ranges) as it was
+    current = rp.module_text("translator_gui").split("\n")
+    mobile_ranges = [(j1, j2) for _tag, _i1, _i2, j1, j2 in mobile if j2 > j1]
+    for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(None, pinned, current, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        for m1, m2 in mobile_ranges:
+            overlaps = (i1 < m2 and m1 < i2) if i2 > i1 else (m1 < i1 < m2)
+            assert not overlaps, f"a later edit at pinned lines {i1 + 1}-{i2} changes the mobile span {m1 + 1}-{m2}"
 
 
 def test_pipeline_mixin_inherits_the_runners_in_place_of_the_placeholders():

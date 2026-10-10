@@ -204,13 +204,19 @@ def test_route_controls_pools_and_slots():
     assert rc.needs_google_creds and rc.vertex_location and rc.google_creds_level == "warning"
 
 
-@pytest.mark.parametrize("model", ["antigravity/claude", "ocagy/x", "ocz/free", "authza/glm", "authza2/glm",
-                                   "autharena/x", "search/opera", "ollamapull/llama3"])
+@pytest.mark.parametrize("model", ["ocagy/x", "ocz/free", "autharena/x", "search/opera"])
 def test_excluded_routes_carry_a_reason_on_mobile_only(model):
     assert sr.excluded_route_reason(model)
     assert sr.excluded_route_reason(model.upper())
     assert sr.excluded_route_reason(model, platform="desktop") is None
     assert sr.route_controls(model, {}, api_key_check=False).excluded
+
+
+@pytest.mark.parametrize("model", ["antigravity/claude", "authza/glm", "authza2/glm", "ollamapull/llama3",
+                                   "authnan/z-ai/glm-5.3"])
+def test_remote_and_signin_routes_run_on_mobile(model):
+    # U13/U14: antigravity/, authza/ and ollamapull/ through a server on the user's PC, authnan/ via sign-in
+    assert sr.excluded_route_reason(model) is None
 
 
 @pytest.mark.parametrize("model", ["ollama/llama3", "lmstudio/x", "search/gemini", "authgpt/x", "gpt-4o"])

@@ -172,7 +172,13 @@ def test_provider_info_is_the_frozen_text():
     node = method_node(frozen("src/translator_gui.py"), "TranslatorGUI", "_show_model_info_dialog")
     assign = next(n for n in node.body if isinstance(n, ast.Assign)
                   and any(isinstance(t, ast.Name) and t.id == "info_text" for t in n.targets))
-    assert model_options.PROVIDER_INFO_HTML == ast.literal_eval(assign.value)
+    # sections the owner added after the move (19ff9fe8 authds, bf89c022 authnan); the rest stays frozen
+    current_html = model_options.PROVIDER_INFO_HTML
+    for title in ("<h4>DeepSeek web chat (authds/)</h4>", "<h4>NanoGPT Subscription (authnan/)</h4>"):
+        start = current_html.index(title)
+        end = current_html.find("<h4>", start + len(title))
+        current_html = current_html[:start] + current_html[end:]
+    assert current_html == ast.literal_eval(assign.value)
     assert model_options.provider_info_html() == model_options.PROVIDER_INFO_HTML
     rewired = methods(current("translator_gui.py"), "TranslatorGUI")["_show_model_info_dialog"]
     assert "info_text = provider_info_html()" in rewired and "<h3>" not in rewired
