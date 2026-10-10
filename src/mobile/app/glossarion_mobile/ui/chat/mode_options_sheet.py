@@ -32,7 +32,7 @@ from glossarion_mobile.ui.chat.media_model import GENERATIVE_MODES
 from glossarion_mobile.ui.chat.output_modes import mode_label, normalize_mode, output_mode
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
-from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
+from glossarion_mobile.ui.components.sheet import fits_compact, scroll_column, sheet_frame
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = [
@@ -287,9 +287,9 @@ class ModeOptionsSheet:
         self.generate_button = self.content.generate_button
         # Scrolls at the sheet level (Vision's eight tiles are taller than a phone); the ＋ sheet
         # inlines the same column inside its own scroll, so the column itself does not scroll.
+        self.scroll_body = scroll_column([self.content.column])
         self.dialog = ft.BottomSheet(
-            content=sheet_frame(scroll_column([self.content.column]),
-                                padding=ft.Padding.only(left=16, right=16, bottom=24)),
+            content=sheet_frame(self.scroll_body, padding=ft.Padding.only(left=16, right=16, bottom=24)),
             show_drag_handle=True,
             scrollable=True,
             on_dismiss=on_dismiss,
@@ -303,8 +303,17 @@ class ModeOptionsSheet:
     def generate(self) -> Any:
         return self.content._generate()
 
+    def estimated_height(self) -> float:
+        """Upper estimate (dp): title + "This chat only" + description, ~96 dp per settings tile, the Generate
+        button."""
+        generate = 56.0 if getattr(self.generate_button, "visible", False) else 0.0
+        return 150.0 + 96.0 * len(self.tiles or ()) + generate
+
     def show(self, page: Any) -> None:
         self._page = page
+        # Owner (U14): a scrolling sheet body takes the whole screen; a short mode (Text) does not scroll,
+        # so the sheet is only as tall as its content.
+        self.scroll_body.scroll = None if fits_compact(page, self.estimated_height()) else ft.ScrollMode.AUTO
         page.show_dialog(self.dialog)
 
     def close(self) -> None:

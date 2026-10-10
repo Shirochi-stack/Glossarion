@@ -51,6 +51,7 @@ from glossarion_mobile.services.model_catalog import (
     EXCLUDED_ROUTE_PREFIXES,
     PROVIDER_CHIPS,
     THINKING_FIELDS,
+    GENERAL_THINKING_FIELDS,
     FAMILY_TITLES,
     CatalogSnapshot,
     RouteInfo,
@@ -353,6 +354,10 @@ class ModelSheet:
         self.route_row = ft.Column([], spacing=6, tight=True, visible=False)
         self.thinking = ft.ExpansionTile(title=ft.Text("Thinking & effort"), controls=[], expanded=False,
                                          visible=False, controls_padding=ft.Padding.only(left=4, right=4, bottom=8))
+        # Owner (U14): the other families' thinking sections and the shared ones, like desktop's Other Settings
+        # (the model's own family stays first, in ``self.thinking``)
+        self.thinking_others = ft.Column([], spacing=0, tight=True, visible=False)
+        self.other_thinking_tiles: dict = {}
         self.footer = ft.Row(
             [
                 ft.TextButton(content="Manage models", on_click=lambda e: self._nav("settings.models")),
@@ -380,6 +385,7 @@ class ModelSheet:
                         self.list_view,
                         self.route_row,
                         self.thinking,
+                        self.thinking_others,
                         self.footer,
                     ],
                     spacing=8,
@@ -1064,6 +1070,7 @@ class ModelSheet:
 
     def _refresh_thinking(self, info: Optional[RouteInfo]) -> None:
         family = info.family if info is not None and not info.excluded else None
+        self._refresh_other_thinking(family)
         keys = THINKING_FIELDS.get(family or "", ())
         if not keys:
             self.thinking.visible = False
@@ -1085,6 +1092,28 @@ class ModelSheet:
                                 "them off for one chat).", theme_style=ft.TextThemeStyle.BODY_SMALL,
                                 color=ft.Colors.ON_SURFACE_VARIANT))
         self.thinking.controls = controls
+
+    def _refresh_other_thinking(self, family: Optional[str]) -> None:
+        """One collapsed section per other thinking family (Gemini, Anthropic, DeepSeek, GPT…) plus the shared
+        thinking settings, so every desktop thinking section is reachable from the model sheet."""
+        sections = [(name, f"Thinking · {FAMILY_TITLES.get(name, name)}", keys)
+                    for name, keys in THINKING_FIELDS.items() if name != family]
+        sections.append(("general", "Thinking · All models", GENERAL_THINKING_FIELDS))
+        tiles_out: list = []
+        self.other_thinking_tiles = {}
+        for name, title, keys in sections:
+            controls = []
+            for key in keys:
+                tile = self._schema_tile(key)
+                if tile is not None:
+                    self.other_thinking_tiles[key] = tile
+                    controls.append(tile.control)
+            if controls:
+                tiles_out.append(ft.ExpansionTile(title=ft.Text(title), controls=controls, expanded=False,
+                                                  key=f"thinking-{name}",
+                                                  controls_padding=ft.Padding.only(left=4, right=4, bottom=8)))
+        self.thinking_others.controls = tiles_out
+        self.thinking_others.visible = bool(tiles_out)
 
     # ---- actions --------------------------------------------------------------------------------------
 
