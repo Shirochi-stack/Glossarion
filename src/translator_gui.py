@@ -12165,7 +12165,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self.gcloud_status_label.setText("")
         
         if hasattr(self, 'authds_login_btn'):
-            self.authds_login_btn.setVisible(str(model).lower().startswith('authds/'))
+            needs_authds = str(model).lower().startswith('authds/')
+            self.authds_login_btn.setVisible(needs_authds)
+            if needs_authds:
+                self._update_authds_login_status()
 
         # Show/hide browser account login controls.
         if hasattr(self, 'authnan_login_btn'):
@@ -13178,8 +13181,35 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     @Slot()
     def _authds_login_finished(self):
         self.authds_login_btn.setEnabled(True)
-        self.authds_login_btn.setText("🔐 DeepSeek Login")
+        self._update_authds_login_status()
         self.append_log(self._authds_login_result or "DeepSeek login finished.")
+
+    def _update_authds_login_status(self):
+        """Show the saved DeepSeek browser session on the login button, like ChatGPT's."""
+        from authds_auth import has_session
+        if has_session():
+            self.authds_login_btn.setText("✅ DeepSeek")
+            self.authds_login_btn.setToolTip(
+                "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                "Signed in to DeepSeek in the dedicated Chrome/Edge profile. "
+                "Click to open DeepSeek and check or redo the sign-in.</p></qt>"
+            )
+            self.authds_login_btn.setStyleSheet(
+                "background-color: #28a745; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            )
+        else:
+            self.authds_login_btn.setText("🔐 DeepSeek Login")
+            self.authds_login_btn.setToolTip(
+                "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                "Sign in on DeepSeek's website in a dedicated Chrome/Edge profile. "
+                "Google login is available through the website. No API key needed. "
+                "Web-chat sampling and output limits use DeepSeek's defaults. Desktop only.</p></qt>"
+            )
+            self.authds_login_btn.setStyleSheet(
+                "background-color: #4d6bfe; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            )
 
     def _authgpt_login_clicked(self):
         """Handle ChatGPT Login button click – run OAuth flow in background thread."""

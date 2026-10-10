@@ -29420,9 +29420,14 @@ class UnifiedClient:
             tls.pre_api_call_callback = None
             started = True
 
+        from glm_proxy import _log_text_stream
+        log_stream = self._stream_logging_enabled(self._streaming_enabled())
+        log_buf = []
+
         def stream_delta(delta):
-            if self._streaming_enabled():
-                print(delta, end='', flush=True)
+            # Each print() is its own GUI log row, so buffer tokens into whole lines.
+            if log_stream and not self._is_stop_requested():
+                _log_text_stream(delta, log_buf, print)
 
         try:
             result = send_chat_completion(
@@ -29434,6 +29439,9 @@ class UnifiedClient:
                                    usage=result.get('usage'), raw_response=result)
         except AuthDSError as exc:
             raise UnifiedClientError(str(exc), error_type=exc.error_type) from exc
+        finally:
+            if log_buf and log_buf[0]:
+                print(log_buf[0])
 
     def _send_authnd(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request through NVIDIA Build's browser-backed public route.
