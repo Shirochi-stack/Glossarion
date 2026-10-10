@@ -183,8 +183,8 @@ class WelcomeScreen(Screen):
         )
 
     def _sign_in_row(self, provider: str, label: str) -> ft.Control:
-        done = self.provider_status.get(provider)
-        if done:
+        done = self.provider_status.get(provider) if provider in self.provider_status else None
+        if provider in self.provider_status:
             who = done.get("email") or done.get("name") or ""
             name = label.replace("Sign in with ", "")
             row: list[ft.Control] = [ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
@@ -547,7 +547,22 @@ class WelcomeScreen(Screen):
                 page = None
         if page is None:
             return None
-        return show_deepseek_sign_in(page, on_signed_in=lambda: self._provider_signed_in("authds", {}))
+        call_handler(self._deepseek_sign_in, page)
+        return None
+
+    async def _deepseek_sign_in(self, page: Any) -> None:
+        """Already signed in to DeepSeek (Accounts, an earlier visit): use it at once; else the sign-in sheet,
+        which reports the sign-in when it closes by itself, or when it is closed after signing in."""
+        from glossarion_mobile.ui.screens.accounts import deepseek_session_present, show_deepseek_sign_in
+
+        self.model_notes["authds"] = "Checking your DeepSeek sign-in…"
+        self.render()
+        if await deepseek_session_present():
+            self._provider_signed_in("authds", {})
+            return
+        self.model_notes.pop("authds", None)
+        self.render()
+        show_deepseek_sign_in(page, on_signed_in=lambda: self._provider_signed_in("authds", {}))
 
     def _provider_signed_in(self, provider: str, status: dict) -> None:
         self.provider_status[provider] = dict(status or {})

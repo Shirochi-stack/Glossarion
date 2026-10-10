@@ -684,22 +684,35 @@ def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = N
     height = max(360.0, float(getattr(page, "height", 0) or 720) * 0.85)
     sheet_ref: dict = {}
 
+    async def signed_in() -> None:
+        if sheet_ref.get("reported") or on_signed_in is None:
+            return
+        sheet_ref["reported"] = True  # once, however the sheet ended
+        result = on_signed_in()
+        if asyncio.iscoroutine(result):
+            await result
+
     async def watch() -> None:
         await asyncio.sleep(DEEPSEEK_POLL_SECONDS)
         while sheet_ref.get("open"):
             if await deepseek_session_present(run_io):
                 sheet_ref["open"] = False
                 close_dialog(page, sheet_ref.get("sheet"))
-                if on_signed_in is not None:
-                    result = on_signed_in()
-                    if asyncio.iscoroutine(result):
-                        await result
+                await signed_in()
                 return
             await asyncio.sleep(DEEPSEEK_POLL_SECONDS)
 
+    async def check_after_close() -> None:
+        # closed with ✕ or swiped away right after signing in (before the next check): still a sign-in
+        if await deepseek_session_present(run_io):
+            await signed_in()
+
     def close(e: Any = None) -> None:
+        was_open = sheet_ref.get("open")
         sheet_ref["open"] = False
         close_dialog(page, sheet_ref.get("sheet"))
+        if was_open:
+            call_handler(check_after_close)
 
     content = ft.Container(height=height, content=ft.Column([
         # Owner (U14): an ✕ in the top-left corner instead of a Close button by the page (mis-tapped)
@@ -717,9 +730,12 @@ def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = N
     previous = getattr(sheet, "on_dismiss", None)
 
     def dismissed(e: Any = None) -> None:
+        was_open = sheet_ref.get("open")
         sheet_ref["open"] = False
         if callable(previous):
             previous(e)
+        if was_open:
+            call_handler(check_after_close)
     sheet.on_dismiss = dismissed
     page.show_dialog(sheet)
     call_handler(watch)
