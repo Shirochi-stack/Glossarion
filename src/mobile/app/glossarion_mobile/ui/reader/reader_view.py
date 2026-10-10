@@ -719,6 +719,14 @@ class ReaderScreen(Screen):
                 await self._switch_flavor(session, flavor, session.flavor)  # a failure keeps the loaded one
                 if self.disposed:  # left while the flavour loaded (dispose closed the session)
                     return
+
+        async def prefetch() -> None:  # Original / Translated / Bilingual then switch without re-reading files
+            try:
+                await self._io(session.prefetch)
+            except Exception:
+                log.debug("reader prefetch failed", exc_info=True)
+
+        self._spawn(prefetch())
         self.renderer = self._choose_renderer()
         self.layout = self._effective_layout()
         start = self._start_chapter(session)

@@ -97,6 +97,16 @@ WINDOW_ROWS = 1500
 WINDOW_STEP = 150
 
 
+#: chapter files the mobile Reader opens besides HTML (a TXT book's sections, U8 item 2)
+TEXT_CHAPTER_EXTENSIONS = (".txt", ".md", ".text")
+
+
+def _text_chapter(row: Any) -> bool:
+    """A TXT book's row: its source or output is a text file (the Reader opens it; the desktop does not)."""
+    names = (str(getattr(row, "filename", "") or ""), str(getattr(row, "output_file", "") or ""))
+    return any(name.lower().endswith(TEXT_CHAPTER_EXTENSIONS) for name in names if name)
+
+
 def row_palette_status(status: str) -> str:
     """Display status -> shared palette key (file_missing / unknown read as pending)."""
     return status if status in ("completed", "merged", "in_progress", "pending", "not_translated", "not_refined",
@@ -1310,6 +1320,8 @@ class ChaptersTab:
         def gate(action_id: str, reason: str) -> Optional[str]:
             if allowed is None:
                 return self._reason(action_id, rows) if action_id in pm.ACTION_LABELS else None
+            if action_id == "open_reader" and _text_chapter(row):
+                return None  # the desktop opens only HTML chapters; the mobile Reader also reads TXT (U8 item 2)
             return None if action_id in allowed else reason
 
         completed = row.status in ("completed", "merged")

@@ -571,13 +571,9 @@ class ReaderSession:
 
     def _load_epub(self, path: str) -> None:
         cached = self.dual_cache.get(_norm(path))
-        if cached is None and self.plan.source_kind == SOURCE_TXT:
-            cached = self.engine.load_text(path)
-        elif cached is None:
-            chapters, images, filenames = self.engine.load_epub(path, show_special=self.show_special,
-                                                                 cache_dir=self.cache_dir)
-            cached = (chapters, images, filenames)
-            if self.plan.mode == MODE_DUAL:
+        if cached is None:
+            cached = self._read_source(path)
+            if self.plan.mode == MODE_DUAL:  # TXT too: a 3 MB book was re-read and re-split on every switch
                 self.dual_cache[_norm(path)] = cached
         chapters, images, filenames = cached
         with self.lock:
@@ -712,11 +708,28 @@ class ReaderSession:
             self.generation += 1
         return True
 
+    def _read_source(self, path: str) -> tuple:
+        """(chapters, images, filenames) of one version of the book (TXT sections or EPUB chapters)."""
+        if self.plan.source_kind == SOURCE_TXT:
+            return tuple(self.engine.load_text(path))
+        return tuple(self.engine.load_epub(path, show_special=self.show_special, cache_dir=self.cache_dir))
+
+    def prefetch(self) -> None:
+        """Load every version of a dual book into ``dual_cache`` (blocking; the Reader runs it on the io pool
+        after the first page), so Original / Translated / Bilingual switch without reading the files again."""
+        if self.plan.mode != MODE_DUAL:
+            return
+        for path in (self.plan.raw_path, self.plan.translated_path):
+            if path and _norm(path) not in self.dual_cache:
+                try:
+                    self.dual_cache[_norm(path)] = self._read_source(path)
+                except Exception:
+                    log.debug("prefetching %s failed", path, exc_info=True)
+
     def _ensure_dual_both(self) -> None:
         for path in (self.plan.raw_path, self.plan.translated_path):
             if path and _norm(path) not in self.dual_cache:
-                self.dual_cache[_norm(path)] = self.engine.load_epub(path, show_special=self.show_special,
-                                                                      cache_dir=self.cache_dir)
+                self.dual_cache[_norm(path)] = self._read_source(path)
         translated = self.dual_cache.get(_norm(self.plan.translated_path))
         if translated is not None and _norm(self.active_path) != _norm(self.plan.translated_path):
             self._load_epub(self.plan.translated_path)
