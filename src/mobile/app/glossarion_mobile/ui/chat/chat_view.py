@@ -686,6 +686,25 @@ class ChatView:
             except Exception:
                 pass
 
+    def _hold_keyboard(self, dialog: Any = None) -> None:
+        """Owner (U14): Chat settings and the output mode never bring the keyboard up. The focus moves off the
+        message field before a sheet opens and again once it closes (Flutter gives focus back to the field
+        that had it when a sheet or menu closes)."""
+        self._spawn(self._keep_keyboard_down(0.0))
+        if dialog is None:
+            self._spawn(self._keep_keyboard_down(0.35))
+            return
+        previous = getattr(dialog, "on_dismiss", None)
+
+        def dismissed(e: Any = None) -> None:
+            if callable(previous):
+                previous(e)
+            self._spawn(self._keep_keyboard_down(0.35))
+        try:
+            dialog.on_dismiss = dismissed
+        except Exception:
+            pass
+
     def _on_store_changed(self) -> None:
         if not self.bound:
             return
@@ -2596,6 +2615,7 @@ class ChatView:
         if self._applying_mode or getattr(mode_state, "automatic", False) or not self.bound:
             return
         mode = normalize_mode(getattr(mode_state, "mode", "text"))
+        self._hold_keyboard()  # the mode menu closing gives focus back to the message field
         if self.env.chats.overrides(self.cid).get("output_mode") is not None:
             self.env.chats.set_override(self.cid, "output_mode", mode)
         elif self.env.config_get("direct_text_output_mode", None) != mode:
@@ -3654,6 +3674,7 @@ class ChatView:
 
         self.mode_sheet = ModeOptionsSheet(mode_id, ctx=sheet_env().ctx,  # ctx: the settings tiles (U4)
                                            **self._mode_options_kwargs())
+        self._hold_keyboard(getattr(self.mode_sheet, "dialog", None))
         self.mode_sheet.show(self.page)
         return self.mode_sheet
 
@@ -3700,6 +3721,7 @@ class ChatView:
             profile_service=getattr(self.env, "profile_service", None),
             on_manage_profiles=lambda: (self.settings_sheet.close(), self.navigate("settings.profiles")),
         )
+        self._hold_keyboard(getattr(self.settings_sheet, "dialog", None))
         self.settings_sheet.show(self.page)
         return self.settings_sheet
 

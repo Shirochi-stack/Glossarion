@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 #: Step 1 sign-ins, all equal (U11 item 1): (provider, button label).
 SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
             ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"),
-            ("authnan", "Sign in with NanoGPT"))
+            ("authnan", "Sign in with NanoGPT"), ("authds", "Sign in with DeepSeek"))
 OTHER_SIGN_INS = SIGN_INS[1:]
 #: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
 #: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
@@ -66,7 +66,7 @@ TOKEN_SLIDER = (1024, 131072)
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
 PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
-                        "authnan": "authnan/"}
+                        "authnan": "authnan/", "authds": "authds/"}
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
@@ -198,6 +198,15 @@ class WelcomeScreen(Screen):
                 lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                      key=f"welcome-model-{provider}"))
             return ft.Column(lines, spacing=2, tight=True, key=f"welcome-signed-{provider}")
+        if provider == "authds":  # DeepSeek's own site in the in-app browser (not an OAuth sign-in)
+            from glossarion_mobile.services import webview_bridge
+
+            available, reason = webview_bridge.availability()
+            if not available:
+                return ft.Row([ft.Text(label), ReasonChip(reason="Needs the in-app browser", detail=reason)],
+                              wrap=True, key="welcome-signin-authds")
+            return ft.OutlinedButton(content=label, on_click=lambda e: self.open_deepseek_sign_in(),
+                                     key="welcome-signin-authds")
         if self.oauth is None:
             return ft.Row([ft.Text(label), ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
         return ft.OutlinedButton(content=label, on_click=lambda e, p=provider: self.open_sign_in(p),
@@ -525,6 +534,20 @@ class WelcomeScreen(Screen):
         if page is not None:
             sheet.show(page)
         return sheet
+
+    def open_deepseek_sign_in(self) -> Any:
+        """DeepSeek: the same in-app browser sheet as Accounts; it closes by itself once signed in."""
+        from glossarion_mobile.ui.screens.accounts import show_deepseek_sign_in
+
+        page = self.page
+        if page is None and self.body is not None:
+            try:
+                page = self.body.page
+            except Exception:
+                page = None
+        if page is None:
+            return None
+        return show_deepseek_sign_in(page, on_signed_in=lambda: self._provider_signed_in("authds", {}))
 
     def _provider_signed_in(self, provider: str, status: dict) -> None:
         self.provider_status[provider] = dict(status or {})

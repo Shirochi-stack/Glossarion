@@ -660,6 +660,70 @@ class GcpProjectPicker:
         return project_id
 
 
+async def deepseek_session_present(run_io: Optional[Callable[..., Any]] = None) -> bool:
+    """Whether the in-app browser holds a DeepSeek session (``authds_auth.driver_session_present``)."""
+    try:
+        import authds_auth
+
+        return bool(await run_io(authds_auth.driver_session_present) if run_io is not None
+                    else await asyncio.to_thread(authds_auth.driver_session_present))
+    except Exception as exc:
+        log.info("DeepSeek sign-in check failed: %s", exc)
+        return False
+
+
+def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = None,
+                          on_signed_in: Optional[Callable[[], Any]] = None) -> Any:
+    """chat.deepseek.com in a visible in-app browser (Accounts and the Welcome). The session is checked every
+    few seconds while it is open and the sheet closes by itself once DeepSeek is signed in, then calls
+    ``on_signed_in`` (no "I'm signed in" button to mis-tap)."""
+    import flet_webview as fwv
+
+    from glossarion_mobile.ui.components.sheet import bottom_sheet
+
+    height = max(360.0, float(getattr(page, "height", 0) or 720) * 0.85)
+    sheet_ref: dict = {}
+
+    async def watch() -> None:
+        await asyncio.sleep(DEEPSEEK_POLL_SECONDS)
+        while sheet_ref.get("open"):
+            if await deepseek_session_present(run_io):
+                sheet_ref["open"] = False
+                close_dialog(page, sheet_ref.get("sheet"))
+                if on_signed_in is not None:
+                    result = on_signed_in()
+                    if asyncio.iscoroutine(result):
+                        await result
+                return
+            await asyncio.sleep(DEEPSEEK_POLL_SECONDS)
+
+    def close(e: Any = None) -> None:
+        sheet_ref["open"] = False
+        close_dialog(page, sheet_ref.get("sheet"))
+
+    content = ft.Container(height=height, content=ft.Column([
+        ft.Text("Sign in on DeepSeek (email or phone; Google sign-in does not work inside apps)",
+                theme_style=ft.TextThemeStyle.BODY_SMALL),
+        ft.Container(content=fwv.WebView(url=DEEPSEEK_URL, expand=True), expand=True),
+        ft.Row([ft.Text("Closes by itself once you are signed in", theme_style=ft.TextThemeStyle.BODY_SMALL,
+                        color=ft.Colors.ON_SURFACE_VARIANT, expand=True),
+                ft.TextButton(content="Close", on_click=close)], alignment=ft.MainAxisAlignment.END),
+    ], spacing=6), padding=ft.Padding.only(left=8, right=8, bottom=8))
+    sheet = bottom_sheet(content, key="authds-signin-sheet")
+    sheet_ref["sheet"] = sheet
+    sheet_ref["open"] = True
+    previous = getattr(sheet, "on_dismiss", None)
+
+    def dismissed(e: Any = None) -> None:
+        sheet_ref["open"] = False
+        if callable(previous):
+            previous(e)
+    sheet.on_dismiss = dismissed
+    page.show_dialog(sheet)
+    call_handler(watch)
+    return sheet
+
+
 class AccountsScreen(Screen):
     title = "Accounts"
 
@@ -894,64 +958,14 @@ class AccountsScreen(Screen):
             key="account-authds")
 
     def open_deepseek_sign_in(self) -> Any:
-        """chat.deepseek.com in a visible in-app browser; the session is checked every few seconds while it is
-        open and the sheet closes by itself once DeepSeek is signed in (no "I'm signed in" button to mis-tap)."""
-        import flet_webview as fwv
-
-        from glossarion_mobile.ui.components.sheet import bottom_sheet
-
+        """chat.deepseek.com in a visible in-app browser (``show_deepseek_sign_in``)."""
         page = self._page()
         if page is None:
             return None
-        height = max(360.0, float(getattr(page, "height", 0) or 720) * 0.85)
-        sheet_ref: dict = {}
-
-        async def watch() -> None:
-            await asyncio.sleep(DEEPSEEK_POLL_SECONDS)
-            while sheet_ref.get("open"):
-                if await self._deepseek_session_present():
-                    sheet_ref["open"] = False
-                    close_dialog(page, sheet_ref.get("sheet"))
-                    await self.check_deepseek()
-                    return
-                await asyncio.sleep(DEEPSEEK_POLL_SECONDS)
-
-        def close(e: Any = None) -> None:
-            sheet_ref["open"] = False
-            close_dialog(page, sheet_ref.get("sheet"))
-
-        content = ft.Container(height=height, content=ft.Column([
-            ft.Text("Sign in on DeepSeek (email or phone; Google sign-in does not work inside apps)",
-                    theme_style=ft.TextThemeStyle.BODY_SMALL),
-            ft.Container(content=fwv.WebView(url=DEEPSEEK_URL, expand=True), expand=True),
-            ft.Row([ft.Text("Closes by itself once you are signed in", theme_style=ft.TextThemeStyle.BODY_SMALL,
-                            color=ft.Colors.ON_SURFACE_VARIANT, expand=True),
-                    ft.TextButton(content="Close", on_click=close)], alignment=ft.MainAxisAlignment.END),
-        ], spacing=6), padding=ft.Padding.only(left=8, right=8, bottom=8))
-        sheet = bottom_sheet(content, key="authds-signin-sheet")
-        sheet_ref["sheet"] = sheet
-        sheet_ref["open"] = True
-        previous = getattr(sheet, "on_dismiss", None)
-
-        def dismissed(e: Any = None) -> None:
-            sheet_ref["open"] = False
-            if callable(previous):
-                previous(e)
-        sheet.on_dismiss = dismissed
-        page.show_dialog(sheet)
-        call_handler(watch)
-        return sheet
+        return show_deepseek_sign_in(page, run_io=self.run_io, on_signed_in=self.check_deepseek)
 
     async def _deepseek_session_present(self) -> bool:
-        try:
-            import authds_auth
-
-            run = self.run_io
-            return bool(await run(authds_auth.driver_session_present) if run is not None
-                        else await asyncio.to_thread(authds_auth.driver_session_present))
-        except Exception as exc:
-            log.info("DeepSeek sign-in check failed: %s", exc)
-            return False
+        return await deepseek_session_present(self.run_io)
 
     async def check_deepseek(self) -> bool:
         """Whether the in-app browser holds a DeepSeek session (``authds_auth.driver_session_present``)."""

@@ -407,7 +407,7 @@ def rank_models(models: Sequence[str], query: str, *, current: str = "", limit: 
 
 _LOGIN_ROUTE = re.compile(r"^(authgpt|authgem-vertex|authgem-key|authgem|authcd|authgrok)(\d{0,4})/", re.IGNORECASE)
 LOGIN_TITLES = {"authgpt": "ChatGPT", "authgem": "Gemini", "authcd": "Claude", "authgrok": "Grok",
-                "authnan": "NanoGPT"}
+                "authnan": "NanoGPT", "authds": "DeepSeek"}
 
 #: The sign-in routes the mobile app offers, in the order it lists them (Welcome, ModelSheet, Model Manager).
 AUTH_ROUTES = ("authgpt", "authgem", "authcd", "authgrok", "authnan")
@@ -417,6 +417,8 @@ _SKIP_WORDS = ("image", "tts", "audio", "live", "embed", "vision", "multi-agent"
                "non-reasoning", "pro", "lite", "nano")
 
 
+#: The Welcome's DeepSeek pick when its models cannot be listed (authds/flash: the fixed light tier).
+DEEPSEEK_DEFAULT_MODEL = "authds/flash"
 #: authnd/ Nemotron variants that are not chat models.
 _ND_SKIP_WORDS = ("safety", "guard", "reward", "parse", "retriever", "rerank", "ocr")
 
@@ -464,6 +466,8 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
         return pick(names, "grok")
     if route == "authnan":
         return pick(names, "glm")
+    if route == "authds":  # DeepSeek web: Flash is its light tier; the route's model names are fixed
+        return next((n for n in names if n.lower().split("/", 1)[-1] == "flash"), DEEPSEEK_DEFAULT_MODEL)
     if route == "authnd":
         best = None
         for name in names:
