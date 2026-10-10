@@ -354,6 +354,7 @@ class StreamParser:
         self.reasoning = ""
         self.tokens = None
         self.finished = False
+        self.on_thinking = None  # optional callback for live thinking text
 
     def feed(self, text):
         self.buffer = (self.buffer + text).replace("\r\n", "\n")
@@ -397,6 +398,8 @@ class StreamParser:
             return [text] if text else []
         if self.channel == "THINK":
             self.reasoning += text
+            if text and self.on_thinking:
+                self.on_thinking(text)
         return []
 
     def _patch(self, payload):
@@ -509,7 +512,7 @@ def _discover_worker(page):
     return None
 
 
-def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback):
+def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None):
     model_type, thinking = resolve_model(model)
     cfg = {"model": model_type, "thinking": thinking, "prompt": build_prompt(messages),
            "worker": os.environ.get("AUTHDS_POW_WORKER_URL") or _discover_worker(page),
@@ -518,6 +521,7 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
         before_send_callback()
     page.evaluate(_START_SCRIPT.replace("__CONFIG__", json.dumps(cfg)))
     parser = StreamParser()
+    parser.on_thinking = on_thinking
     deadline = time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
@@ -554,7 +558,7 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
 
 
 def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
-                         cancel_check=None, on_delta=None, before_send_callback=None):
+                         cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None):
     resolve_model(model)
     build_prompt(messages)
     with _serialized(cancel_check):
@@ -573,7 +577,7 @@ def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
                         _check(cancel_check)
                         time.sleep(.2)
                 try:
-                    return _complete(page, model, messages, float(timeout), cancel_check, on_delta, before_send_callback)
+                    return _complete(page, model, messages, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
                 except AuthDSError as exc:
                     if exc.error_type != "auth_error" or attempt:
                         raise

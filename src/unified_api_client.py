@@ -29422,24 +29422,52 @@ class UnifiedClient:
 
         from glm_proxy import _log_text_stream
         log_stream = self._stream_logging_enabled(self._streaming_enabled())
+        log_thinking = log_stream and self._stream_thinking_logging_enabled()
         log_buf = []
+        think_buf = []
+        phase = None
+
+        def think_line(line):
+            if line.strip():
+                print(f"    {line}")
+
+        def flush_thinking():
+            if think_buf and think_buf[0]:
+                think_line(think_buf[0])
+            think_buf.clear()
+
+        def stream_thinking(delta):
+            nonlocal phase
+            if not log_stream or self._is_stop_requested():
+                return
+            if phase != 'thinking':
+                phase = 'thinking'
+                print("🧠 [authds] Thinking...")
+            if log_thinking:
+                _log_text_stream(delta, think_buf, think_line)
 
         def stream_delta(delta):
+            nonlocal phase
             # Each print() is its own GUI log row, so buffer tokens into whole lines.
             if log_stream and not self._is_stop_requested():
+                if phase == 'thinking':
+                    flush_thinking()
+                    print("🧠 [authds] Thinking complete")
+                phase = 'text'
                 _log_text_stream(delta, log_buf, print)
 
         try:
             result = send_chat_completion(
                 messages=messages, model=model, timeout=self.request_timeout,
                 cancel_check=cancelled, before_send_callback=before_send,
-                on_delta=stream_delta, log_fn=print,
+                on_delta=stream_delta, on_thinking=stream_thinking, log_fn=print,
             )
             return UnifiedResponse(content=result['content'], finish_reason=result['finish_reason'],
                                    usage=result.get('usage'), raw_response=result)
         except AuthDSError as exc:
             raise UnifiedClientError(str(exc), error_type=exc.error_type) from exc
         finally:
+            flush_thinking()
             if log_buf and log_buf[0]:
                 print(log_buf[0])
 
