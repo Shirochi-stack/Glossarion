@@ -263,6 +263,7 @@ app_files = [
     # Added: src scripts that were missing from this spec
     ('app_version.py', '.'),
     ('authnd_auth.py', '.'),
+    ('authds_auth.py', '.'),
     ('config_backup.py', '.'),
     ('epub_metadata_utils.py', '.'),
     ('glossary_compressor.py', '.'),
@@ -461,6 +462,7 @@ app_modules = [
     # Added: src modules that were missing from this spec
     'app_version',
     'authnd_auth',
+    'authds_auth',
     'config_backup',
     'enhanced_text_extractor',
     'epub_metadata_utils',

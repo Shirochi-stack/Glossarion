@@ -446,6 +446,10 @@ def _get_static_model_options() -> List[str]:
         "search/opera-think",  # same route with Opera's think-harder reasoning enabled
 
         # NVIDIA Build browser-backed route (no API key needed) - chat-tagged catalog models
+        "authds/flash",
+        "authds/pro",
+        "authds/flash-thinking",
+        "authds/pro-thinking",
         "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",
         "authnd/deepseek-ai/deepseek-v4-flash",
@@ -2030,6 +2034,12 @@ PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
             <li><b>sam/Llama-4-Maverick-17B-128E-Instruct</b> - Llama 4 Maverick</li>
             <li><b>sam/gpt-oss-120b</b> - GPT OSS 120B via SambaNova</li>
         </ul>
+
+        <h4>DeepSeek web chat (authds/)</h4>
+        <p>Select <code>authds/flash</code> or <code>authds/pro</code>, then click DeepSeek Login.
+        Sign in on DeepSeek's website, using Google if preferred. No API key is needed.
+        The DeepSeek thinking toggle in Other Settings controls DeepThink for all <code>authds/</code> models.
+        Requires desktop Chrome or Edge; web-chat account limits apply.</p>
 
         <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
         <p>Use models running on your computer without an API key or custom endpoint toggle.</p>

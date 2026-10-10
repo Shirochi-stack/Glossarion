@@ -227,7 +227,7 @@ _CHIP_BY_PROVIDER = {
     "gemini": "google", "authgem": "google", "authgem-vertex": "google", "authgem-key": "google",
     "vertex": "google", "google-translate": "google", "google-translate-free": "google", "search": "google",
     "anthropic": "anthropic", "authcd": "anthropic",
-    "deepseek": "deepseek", "chutes": "deepseek",
+    "deepseek": "deepseek", "authds": "deepseek", "chutes": "deepseek",
     "xai": "xai", "authgrok": "xai",
     "mistral": "mistral",
     "openrouter": "openrouter",
@@ -237,7 +237,7 @@ _CHIP_BY_PROVIDER = {
 _PROVIDER_LABELS = {
     "openai": "OpenAI", "authgpt": "ChatGPT (sign-in)", "gemini": "Google Gemini", "authgem": "Gemini (sign-in)",
     "authgem-vertex": "Gemini Vertex (sign-in)", "authgem-key": "Gemini key route", "vertex": "Vertex AI",
-    "anthropic": "Anthropic", "authcd": "Claude (sign-in)", "deepseek": "DeepSeek", "chutes": "Chutes",
+    "anthropic": "Anthropic", "authcd": "Claude (sign-in)", "deepseek": "DeepSeek", "authds": "DeepSeek web (desktop)", "chutes": "Chutes",
     "xai": "xAI", "authgrok": "Grok (sign-in)", "mistral": "Mistral", "openrouter": "OpenRouter",
     "nvidia": "NVIDIA NIM", "authnd": "NVIDIA Build (browser)", "ollama": "Ollama", "lmstudio": "LM Studio",
     "ollamapull": "Managed Ollama", "groq": "Groq", "literouter": "LiteRouter", "opencode": "OpenCode Go",

@@ -1606,6 +1606,14 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authza_get_upstream_chat_endpoint = None
     AUTHZA_AVAILABLE = False
 
+# AuthDS - DeepSeek browser session (optional, no API key)
+try:
+    from authds_auth import cancel_stream as _authds_cancel_stream
+    from authds_auth import reset_cancel as _authds_reset_cancel
+except (ImportError, _MOBILE_IMPORT_FAILURE):
+    _authds_cancel_stream = None
+    _authds_reset_cancel = None
+
 # AuthND - NVIDIA Build browser-backed route (optional, no API key)
 try:
     from authnd_auth import send_chat_completion as _authnd_send
@@ -3000,6 +3008,7 @@ class UnifiedClient:
         'nd/': 'nvidia',
         'search/': 'search',
         'search': 'search',
+        'authds/': 'authds',
         'authnd/': 'authnd',
         'authnd': 'authnd',
         'eh/': 'electronhub',
@@ -3065,7 +3074,7 @@ class UnifiedClient:
         'authgem', 'authgem-vertex',
         'vertex/', 'ocagy/', 'ocagy', 'ocz/',
         'antigravity/', 'antigravity',
-        'authza/', 'authza', 'authnd/', 'authnd',
+        'authza/', 'authza', 'authnd/', 'authnd', 'authds/',
         'search/', 'search', 'authcd/', 'authcd',
     )
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
@@ -4302,6 +4311,12 @@ class UnifiedClient:
         try:
             if _authza_cancel_stream is not None:
                 _authza_cancel_stream()
+        except Exception:
+            pass
+
+        try:
+            if _authds_cancel_stream is not None:
+                _authds_cancel_stream()
         except Exception:
             pass
 
@@ -9151,6 +9166,11 @@ class UnifiedClient:
             account_id = getattr(self, '_authza_account_id', None)
             if account_id:
                 print(f"🔐 GLM proxy: Using Z.AI account slot #{account_id}")
+
+        elif self.client_type == 'authds':
+            # Session/browser is initialized on demand, without an API key.
+            from authds_auth import resolve_model
+            resolve_model(model_snapshot)
 
         elif self.client_type == 'authnd':
             # AuthND uses NVIDIA Build in a browser for captcha, then direct HTTP.
@@ -15069,6 +15089,12 @@ class UnifiedClient:
                     _authcd_reset_cancel()
             except Exception:
                 pass
+            # Only the explicit, stop-guarded operation reset may clear AuthDS.
+            try:
+                if _authds_reset_cancel is not None:
+                    _authds_reset_cancel()
+            except Exception:
+                pass
             # Reset AuthND cancel event
             try:
                 if _authnd_reset_cancel is not None:
@@ -19070,7 +19096,7 @@ class UnifiedClient:
         try:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
-            deferred_provider_boundary = {'authnd', 'authza', 'autharena'}
+            deferred_provider_boundary = {'authnd', 'authza', 'autharena', 'authds'}
             active_model_lower = str(
                 self._get_active_request_model() or ''
             ).strip().lower()
@@ -19081,7 +19107,7 @@ class UnifiedClient:
             except Exception:
                 actual_provider_lower = ''
             defer_progress_callback = (
-                active_model_lower.startswith(('authnd', 'authza', 'autharena'))
+                active_model_lower.startswith(('authnd', 'authza', 'autharena', 'authds/'))
                 or str(getattr(self, 'client_type', '') or '').lower()
                 in deferred_provider_boundary
                 or actual_provider_lower in deferred_provider_boundary
@@ -19254,6 +19280,7 @@ class UnifiedClient:
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI login-plan/general API via local proxy
+            'authds': self._send_authds,  # DeepSeek web session
             'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
             'search': self._send_search_gemini,  # Google Search/Gemini browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
@@ -29309,6 +29336,53 @@ class UnifiedClient:
             error_type="api_error"
         )
 
+    def _send_authds(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        from authds_auth import send_chat_completion, AuthDSError
+        tls = self._get_thread_local_client()
+        model = self._get_active_request_model()
+        started = False
+
+        def cancelled():
+            return self._is_stop_requested() or (
+                not started and not getattr(self, '_ignore_graceful_stop', False)
+                and os.environ.get('GRACEFUL_STOP') == '1'
+            )
+
+        def before_send():
+            nonlocal started
+            if cancelled():
+                raise UnifiedClientError("AuthDS: stopped before sending", error_type="cancelled")
+            request_id = getattr(tls, 'current_request_id', None)
+            if request_id:
+                claimed = _api_watchdog_mark_in_flight(
+                    request_id, model,
+                    allow_during_graceful=bool(getattr(self, '_ignore_graceful_stop', False)),
+                )
+                if not claimed:
+                    raise UnifiedClientError("AuthDS: request cancelled before sending", error_type="cancelled")
+            callback = getattr(tls, 'pre_api_call_callback', None)
+            if callable(callback):
+                tls.last_pre_api_call_callback = callback
+                tls.last_pre_api_call_callback_request_id = request_id
+                callback()
+            tls.pre_api_call_callback = None
+            started = True
+
+        def stream_delta(delta):
+            if self._streaming_enabled():
+                print(delta, end='', flush=True)
+
+        try:
+            result = send_chat_completion(
+                messages=messages, model=model, timeout=self.request_timeout,
+                cancel_check=cancelled, before_send_callback=before_send,
+                on_delta=stream_delta, log_fn=print,
+            )
+            return UnifiedResponse(content=result['content'], finish_reason=result['finish_reason'],
+                                   usage=result.get('usage'), raw_response=result)
+        except AuthDSError as exc:
+            raise UnifiedClientError(str(exc), error_type=exc.error_type) from exc
+
     def _send_authnd(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request through NVIDIA Build's browser-backed public route.
 
@@ -32822,6 +32896,11 @@ def set_stop_flag(value: bool = True):
     global global_stop_flag
     global_stop_flag = bool(value)
     try:
+        from authds_auth import cancel_stream as ds_cancel, reset_cancel as ds_reset
+        ds_cancel() if value else ds_reset()
+    except Exception:
+        pass
+    try:
         UnifiedClient.set_global_cancellation(global_stop_flag)
     except Exception:
         pass
@@ -32921,6 +33000,11 @@ def hard_cancel_all():
     if _authza_cancel_stream is not None:
         try:
             _authza_cancel_stream()
+        except Exception:
+            pass
+    if _authds_cancel_stream is not None:
+        try:
+            _authds_cancel_stream()
         except Exception:
             pass
     if _authnd_cancel_stream is not None:

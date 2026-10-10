@@ -12163,6 +12163,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self.vertex_location_entry.hide()
             self.gcloud_status_label.setText("")
         
+        if hasattr(self, 'authds_login_btn'):
+            self.authds_login_btn.setVisible(str(model).lower().startswith('authds/'))
+
         # Show/hide AuthGPT login button
         if hasattr(self, 'authgpt_login_btn'):
             # authgpt/ routes, an authgpt0/ pool request, or enabled pool entries
@@ -13013,6 +13016,30 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         except ImportError:
             self.authgpt_login_btn.setText("🔐 ChatGPT Login (unavailable)")
             self.authgpt_login_btn.setEnabled(False)
+
+    def _authds_login_clicked(self):
+        self.authds_login_btn.setEnabled(False)
+        self.authds_login_btn.setText("⏳ Signing in…")
+        self._authds_login_result = None
+
+        def worker():
+            try:
+                from authds_auth import login, reset_cancel
+                reset_cancel()
+                login(log_fn=lambda message: None)
+                self._authds_login_result = "DeepSeek browser session saved."
+            except Exception as exc:
+                self._authds_login_result = str(exc)
+            QMetaObject.invokeMethod(self, "_authds_login_finished", Qt.QueuedConnection)
+
+        self.append_log("AuthDS: Opening DeepSeek. Sign in there, using Google if preferred.")
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot()
+    def _authds_login_finished(self):
+        self.authds_login_btn.setEnabled(True)
+        self.authds_login_btn.setText("🔐 DeepSeek Login")
+        self.append_log(self._authds_login_result or "DeepSeek login finished.")
 
     def _authgpt_login_clicked(self):
         """Handle ChatGPT Login button click – run OAuth flow in background thread."""
@@ -15995,6 +16022,16 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         model_info_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Show API provider information and shortcuts.</p></qt>")
         model_btn_layout.addWidget(model_info_btn)
         
+        self.authds_login_btn = QPushButton("🔐 DeepSeek Login")
+        self.authds_login_btn.setToolTip(
+            "Sign in on DeepSeek's website in a dedicated Chrome/Edge profile. "
+            "Google login is available through the website. No API key needed. "
+            "Web-chat sampling and output limits use DeepSeek's defaults. Desktop only."
+        )
+        self.authds_login_btn.clicked.connect(self._authds_login_clicked)
+        self.authds_login_btn.hide()
+        model_btn_layout.addWidget(self.authds_login_btn)
+
         # AuthGPT Login button (visible only for authgpt/ models)
         self.authgpt_login_btn = QPushButton("🔐 ChatGPT Login")
         self.authgpt_login_btn.setStyleSheet(

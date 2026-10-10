@@ -203,6 +203,7 @@ app_files = [
     ('authcd_auth.py', '.'),  # Claude subscription OAuth
     ('glm_proxy.py', '.'),
     ('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
+    ('authds_auth.py', '.'),  # DeepSeek web session
     ('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
     ('opera_aria.py', '.'),  # Opera Ask AI (Aria) backend route
     ('token_encryption.py', '.'),
@@ -410,6 +411,7 @@ app_modules = [
     'authcd_auth',  # Claude subscription OAuth
     'glm_proxy',  # Z.AI Coding Plan login proxy
     'authnd_auth',  # NVIDIA Build browser-backed auth
+    'authds_auth',  # DeepSeek web session
     'gemini_free',  # Google Search/Gemini browser-backed route
     'opera_aria',  # Opera Ask AI (Aria) backend route
     'token_encryption',  # Encrypted token storage

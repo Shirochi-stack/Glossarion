@@ -55,6 +55,7 @@ log = logging.getLogger("glossarion.accounts")
 
 #: UI_SPEC §4.13 "Unavailable on mobile" (label, reason).
 UNAVAILABLE_ACCOUNTS = (
+    ("DeepSeek web login (authds/)", "Needs desktop Chrome or Edge; use deepseek/ with an API key on mobile"),
     ("Antigravity", "Needs the desktop npm/bun proxy"),
     ("OCAGY", "Needs the desktop npm/bun proxy"),
     ("OpenCode Zen (ocz/)", "Needs the desktop npm/bun proxy"),
