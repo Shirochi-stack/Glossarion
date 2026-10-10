@@ -158,6 +158,14 @@ control concurrency; they do not disable or change the timeout field.
 
 ## Debugging
 
+AuthND checks the selected endpoint's declared output-token maximum after an
+HTTP 400 or an empty response without a finish reason. If the requested
+`max_tokens` exceeds that maximum, it retries once at the declared limit with
+a fresh captcha token and caches the limit for subsequent requests. It does
+not guess a lower limit when the endpoint schema is unavailable or provides
+no applicable maximum. Responses that remain empty continue through the
+normal response-handling policy.
+
 Use `--debug` for one run:
 
 ```powershell

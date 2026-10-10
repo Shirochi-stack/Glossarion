@@ -997,6 +997,30 @@ def test_authnd_empty_schema_limit_retry_is_bounded(reasoning_transport):
     assert len(state['spec_calls']) == 1
 
 
+def test_authnd_done_only_response_checks_actual_payload_limit(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    empty = Response(200, {})
+    empty.iter_raw = lambda: iter([b'data: [DONE]\n\n'])
+    responses.extend([empty, _ok_response(Response)])
+    assert send(request_parameters={'max_tokens': 8765})['content'] == 'OK'
+    assert [call['max_tokens'] for call in calls] == [8765, 1000]
+
+
+def test_authnd_empty_response_keeps_original_error_if_spec_unavailable(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+
+    def unavailable(*args, **kwargs):
+        raise authnd.requests.Timeout('endpoint spec unavailable')
+
+    monkeypatch.setattr(authnd.requests, 'get', unavailable)
+    responses.append(Response(200, {'choices': []}))
+    result = send()
+    assert result['finish_reason_inference'] == 'empty_content_without_finish_reason'
+    assert len(calls) == 1
+    assert any('could not read the endpoint output limit' in line for line in logs)
+
+
 @pytest.mark.parametrize('body', [
     {'choices': [{'message': {'content': 'valid content'}, 'delta': {'content': 'valid content'}}]},
     {'choices': [{'message': {'content': ''}, 'finish_reason': 'content_filter'}]},
