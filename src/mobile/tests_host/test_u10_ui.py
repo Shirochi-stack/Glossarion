@@ -1399,7 +1399,7 @@ def test_chat_feature_binds_result_cards_to_the_turn_workspace(tmp_path):
         cloud.changed()
         await asyncio.sleep(1.2)
         await settle()
-        assert card.u10_state["cloud_reason"] == u10.NO_DESTINATION_REASON and card.u10_state["status"] is None
+        assert card.u10_state["cloud_reason"] is None and card.u10_state["status"] is None  # the tap picks one
         feature._u10_unsubs and [u() for u in feature._u10_unsubs]
 
     run(scenario())

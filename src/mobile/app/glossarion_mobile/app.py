@@ -267,6 +267,7 @@ class GlossarionApp:
         await self._install_series()  # optional chat Series (U9; after the chat and the Library)
         await self._install_cloud()  # U10 cloud sync (after the jobs, the chat and the Library)
         await self._install_share_links()  # U10 share links (after files, the Library and the chat)
+        self._u10_ready()  # Result cards rendered before these two services re-read their actions
         self._install_keyboard()  # Ctrl+= / Ctrl+- / Ctrl+0 text size on hardware keyboards (U9)
         self._install_diagnostics()  # HTTP log / payload / memory switches, cache cap, freeze watchdog (U9)
         self.dispatcher.spawn(self._after_ready())
@@ -451,6 +452,15 @@ class GlossarionApp:
             await CloudSyncService.install(self)  # sets self.cloud_sync (and library.cloud_sync)
         except Exception:
             log.exception("cloud sync unavailable; Settings › Cloud sync & sharing shows it as unavailable")
+
+    def _u10_ready(self) -> None:
+        feature = getattr(self, "chat_feature", None)
+        ready = getattr(feature, "u10_services_ready", None)
+        if callable(ready):
+            try:
+                ready()
+            except Exception:
+                log.exception("re-binding the chat's cloud / share actions failed")
 
     async def _install_share_links(self) -> None:
         """U10 "Share file via link" (``services/share_links.py``): the transfer.it browser handoff, Gofile,

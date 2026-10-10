@@ -1584,7 +1584,7 @@ class ChatFeature:
     def _u10_card_state(self, resolve: Callable[[], Any]) -> dict:
         """Blocking: what a Result card shows and allows for U10 (``JobCard.set_u10``)."""
         from glossarion_mobile.ui.chat.chat_ops import workspace_outputs
-        from glossarion_mobile.ui.screens.cloud_sync import book_status_line, compiled_kinds
+        from glossarion_mobile.ui.screens.cloud_sync import NO_DESTINATION_REASON, book_status_line, compiled_kinds
 
         value = resolve()
         folder, in_attachments = value if isinstance(value, tuple) else (value, None)
@@ -1606,7 +1606,10 @@ class ChatFeature:
             "workspace": folder,
             "in_library": in_library,
             "outputs": outputs,
-            "cloud_reason": actions.cloud_reason(cloud_state, has_outputs=bool(outputs), in_library=in_library),
+            # no destination yet is not a dead end: the tap offers the destinations, then sends
+            "cloud_reason": (None if (reason := actions.cloud_reason(cloud_state, has_outputs=bool(outputs),
+                                                                    in_library=in_library)) == NO_DESTINATION_REASON
+                             else reason),
             "share_reason": actions.share_reason(providers, has_outputs=bool(actions.shareable(outputs))),
             "status": line[:3] if line else None,
             "status_action": line[3] if line else None,
@@ -1676,6 +1679,13 @@ class ChatFeature:
                 result = await actions.share_link(state.get("outputs") or [], folder)
         self.bind_u10_card(card, resolve, force=True)
         return result
+
+    def u10_services_ready(self) -> None:
+        """The app installed the cloud sync / share links (they install after the chat): follow them and
+        re-read every Result card, which was bound before and said "Not available in this session"."""
+        self._u10_subscribe()
+        self._u10_full = True
+        self._u10_schedule()
 
     def _u10_subscribe(self) -> None:
         """Follow each service's change events once it is installed (they install after the chat)."""

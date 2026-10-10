@@ -1333,6 +1333,11 @@ class U10Actions:
         if state is None:
             state = await self.io(self.cloud.snapshot)
         reason = self.cloud_reason(state)
+        if reason == NO_DESTINATION_REASON:  # owner: pick it right here, then send (no trip to Settings)
+            if not await self.ask_destination():
+                return {"ok": False, "message": reason, "cancelled": True}
+            state = await self.io(self.cloud.snapshot)
+            reason = self.cloud_reason(state)
         if reason:
             self.explain(reason)
             return {"ok": False, "message": reason}
@@ -1343,6 +1348,32 @@ class U10Actions:
         else:
             self.say(str(result.get("message") or f"Could not copy to {dest}"))
         return result
+
+    async def ask_destination(self) -> bool:
+        """"Send to cloud" with no destination yet: the same three choices as Settings › Cloud sync & sharing,
+        as a sheet; True once one was set."""
+        loop = asyncio.get_running_loop()
+        picked: asyncio.Future = loop.create_future()
+        items = [ActionItem(label, (lambda o=op: picked.done() or picked.set_result(o)), icon=icon,
+                            key=f"cloud-dest-{mode}")
+                 for mode, op, label, _detail, icon in DESTINATIONS
+                 if self.native or mode == "folder"]
+        sheet = ActionSheet(items, title="Where should books go?",
+                            subtitle="Pick once; Settings › Cloud sync & sharing can change it later",
+                            tablet=self.tablet,
+                            on_cancel=lambda: picked.done() or picked.set_result(None))
+        self._show_sheet(sheet)
+        op = await picked
+        if not op:
+            return False
+        result = await self.cloud.call(op)
+        if result.get("cancelled"):
+            return False
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "The destination was not changed"))
+            return False
+        self.say(f"Destination: {destination_text(result.get('destination'))}")
+        return True
 
     def override_sheet(self, identity: str, current: str = "default",
                        on_done: Optional[Callable[[str], Any]] = None) -> ActionSheet:
