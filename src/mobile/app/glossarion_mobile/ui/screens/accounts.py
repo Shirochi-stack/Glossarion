@@ -703,7 +703,8 @@ def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = N
 
     content = ft.Container(height=height, content=ft.Column([
         # Owner (U14): an ✕ in the top-left corner instead of a Close button by the page (mis-tapped)
-        ft.Row([ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", on_click=close, key="authds-signin-close"),
+        ft.Row([ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", on_click=close, size_constraints=HIT_TARGET,
+                              key="authds-signin-close"),
                 ft.Text("Sign in on DeepSeek (email or phone; Google sign-in does not work inside apps). "
                         "Closes by itself once you are signed in.",
                         theme_style=ft.TextThemeStyle.BODY_SMALL, expand=True)],

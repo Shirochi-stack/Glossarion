@@ -219,13 +219,13 @@ class Composer(ft.Container):
             multiline=True,
             min_lines=3,
             max_lines=8,
-            shift_enter=True,
+            # Owner (U14): Enter is a new line, like other AI chat apps; only the Send button sends
+            shift_enter=False,
             border=ft.NoInputBorder(),
             dense=True,
             content_padding=ft.Padding.all(4),
             hint_text=HINT_EMPTY,
             on_change=self._on_text_change,
-            on_submit=self._on_submit,
             expand=True,
             text_style=ft.TextStyle(size=tokens.TYPE_SCALE["body_large"].size),
         )
@@ -536,11 +536,6 @@ class Composer(ft.Container):
         if not has_arg:
             self.set_text(f"/{command.name}")
         self.run_slash_text()
-
-    def _on_submit(self, e: Any = None) -> None:
-        # Hardware Enter (shift_enter=True): same as tapping the button.
-        if self.send_button.state in (SendState.IDLE_READY, SendState.QUEUE, SendState.BLOCKED):
-            self.send_button.tap()
 
     def _on_plus(self, e: Any = None) -> None:
         if self.on_plus is not None:
