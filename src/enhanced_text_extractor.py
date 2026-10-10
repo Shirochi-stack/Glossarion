@@ -247,11 +247,24 @@ class EnhancedTextExtractor:
         )
 
         blocks = []
-        for match in block_re.finditer(text or ''):
+        cursor = 0
+        source = text or ''
+
+        def append_unmarked(fragment):
+            # Bare body/div text and <br>-separated prose are valid content too.
+            fragment = marker_re.sub('', fragment).strip()
+            for block in re.split(r'\n\s*\n', fragment):
+                if block.strip():
+                    blocks.append(block.strip())
+
+        for match in block_re.finditer(source):
+            append_unmarked(source[cursor:match.start()])
             block = marker_re.sub('', match.group('body')).strip()
             block = re.sub(r'\n{3,}', '\n\n', block)
             if block:
                 blocks.append(block)
+            cursor = match.end()
+        append_unmarked(source[cursor:])
 
         cleaned = marker_re.sub('', text or '')
         cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)

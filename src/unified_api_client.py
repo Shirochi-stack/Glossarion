@@ -172,9 +172,9 @@ import hashlib
 import html
 import builtins as _builtins
 try:
-    from gemini_policy import is_google_prohibited_use_policy_refusal
+    from gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
 except ImportError:
-    from .gemini_policy import is_google_prohibited_use_policy_refusal
+    from .gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
 try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
@@ -191,7 +191,7 @@ except ImportError:
 import threading
 from temperature_compatibility import (
     is_temperature_rejection, model_rejects_temperature,
-    remember_temperature_rejection, strip_temperature,
+    remember_temperature_rejection, strip_temperature, omit_claude_sampling_parameters,
 )
 import uuid
 import wave
@@ -7506,7 +7506,8 @@ class UnifiedClient:
 
     def _effective_temperature(self, temperature: Optional[float]) -> Optional[float]:
         return None if (self._temperature_parameter_disabled()
-                        or model_rejects_temperature(self._get_active_request_model())) else temperature
+                        or model_rejects_temperature(self._get_active_request_model())
+                        or uses_gemini_thinking_level(self._get_active_request_model())) else temperature
 
     @route_key_context
     def _send_core(self,
@@ -15676,6 +15677,8 @@ class UnifiedClient:
                         except Exception as _tc_err2:
                             print(f"⚠️ Could not build Vertex ThinkingConfig: {_tc_err2}")
 
+                if uses_gemini_thinking_level(model_name):
+                    omit_gemini_legacy_parameters(config_params)
                 generation_config = types.GenerateContentConfig(**config_params)
                 
                 # Configure safety settings using google-genai SDK
@@ -16829,12 +16832,12 @@ class UnifiedClient:
             if _is_gemini_wrapper and '/' in _model_for_detect:
                 _model_for_detect = _model_for_detect.split('/', 1)[1]
             if _is_gemini_wrapper:
-                is_gemini_3 = 'gemini-3' in _model_for_detect
+                is_gemini_3 = uses_gemini_thinking_level(_model_for_detect)
             else:
                 try:
                     is_gemini_3 = self._is_gemini_3_model()
                 except Exception:
-                    is_gemini_3 = 'gemini-3' in model_lower
+                    is_gemini_3 = uses_gemini_thinking_level(model_lower)
             if is_gemini_3:
                 level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
                 if level not in ('minimal', 'low', 'medium', 'high'):
@@ -17392,6 +17395,9 @@ class UnifiedClient:
         debug_max_tokens = os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1"
         
         for attempt in range(max_retries):
+            omit_claude_sampling_parameters(json, payload_model)
+            if uses_gemini_thinking_level(payload_model):
+                omit_gemini_legacy_parameters(json)
             # Always log attempt number so backoff is visible
             try:
                 print(f"{provider} HTTP attempt {attempt + 1}/{max_retries}")
@@ -18843,6 +18849,7 @@ class UnifiedClient:
         
         if self._temperature_parameter_disabled() or model_rejects_temperature(data['model']):
             strip_temperature(data)
+        omit_claude_sampling_parameters(data, data['model'])
         return data
 
     def _parse_anthropic_json(self, json_resp: dict):
@@ -19782,6 +19789,9 @@ class UnifiedClient:
             if top_k > 0:
                 params["top_k"] = top_k
         
+        omit_claude_sampling_parameters(params, self._get_active_request_model())
+        if uses_gemini_thinking_level(self._get_active_request_model()):
+            omit_gemini_legacy_parameters(params)
         # Log applied parameters with exact values (once per request if log_key provided)
         if log:
             self._log_anti_duplicate_applied(params, log_key)
@@ -20620,13 +20630,13 @@ class UnifiedClient:
         return params
     
     def _is_gemini_3_model(self) -> bool:
-        """Check if the current model is a Gemini 3.0 series model"""
-        return self._is_gemini_3_model_name(self.model)
+        """Check whether the active Gemini model uses level-based thinking (3+)."""
+        return self._is_gemini_3_model_name(self._get_active_request_model())
 
     @staticmethod
     def _is_gemini_3_model_name(model: str = "") -> bool:
         """Check a request model name without relying on shared client state."""
-        return "gemini-3" in str(model or "").lower()
+        return uses_gemini_thinking_level(model)
 
     @classmethod
     def _build_gemini_openai_thinking_config(cls, effective_model: str) -> Optional[dict]:
@@ -21410,6 +21420,7 @@ class UnifiedClient:
         Supports 'thought signatures' for Gemini 3.0 by checking for '_raw_content_object' in messages.
         """
         request_model = (self._get_active_request_model() or '').strip()
+        temperature = self._effective_temperature(temperature)
         request_api_key = self._get_active_request_api_key()
         expected_provider = self._provider_from_model_name(request_model)
         if expected_provider and expected_provider != 'gemini':
@@ -24733,6 +24744,9 @@ class UnifiedClient:
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
                     self._add_request_parameters_to_sdk_kwargs(call_kwargs, key_request_parameters)
+                    omit_claude_sampling_parameters(call_kwargs, effective_model)
+                    if uses_gemini_thinking_level(effective_model):
+                        omit_gemini_legacy_parameters(call_kwargs)
                     if self._temperature_parameter_disabled() or model_rejects_temperature(effective_model):
                         strip_temperature(call_kwargs)
                     if provider == 'nanogpt':

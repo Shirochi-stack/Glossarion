@@ -1975,6 +1975,8 @@ def _send_chat_completion_once(
         and not temperature_disabled_for_model(model)
     ):
         body["temperature"] = temperature
+    from temperature_compatibility import omit_claude_sampling_parameters
+    omit_claude_sampling_parameters(body, model)
 
     headers = {
         "Authorization": f"Bearer {access_token}",

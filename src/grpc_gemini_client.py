@@ -25,9 +25,9 @@ import threading
 from typing import Optional, List, Dict, Any, Tuple
 
 try:
-    from gemini_policy import is_google_prohibited_use_policy_refusal
+    from gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
 except ImportError:
-    from .gemini_policy import is_google_prohibited_use_policy_refusal
+    from .gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +360,7 @@ class GrpcGeminiClient:
         gen_config = self._build_generation_config(
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            model=model,
             thinking_budget=thinking_budget if supports_thinking and not is_gemini_3 else None,
             thinking_level=thinking_level if supports_thinking and is_gemini_3 else None,
             anti_dupe_params=anti_dupe_params,
@@ -449,6 +450,7 @@ class GrpcGeminiClient:
         gen_config = self._build_generation_config(
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            model=model,
             thinking_budget=thinking_budget if supports_thinking and not is_gemini_3 else None,
             thinking_level=thinking_level if supports_thinking and is_gemini_3 else None,
             anti_dupe_params=anti_dupe_params,
@@ -718,6 +720,7 @@ class GrpcGeminiClient:
         thinking_budget: Optional[int] = None,
         thinking_level: Optional[str] = None,
         anti_dupe_params: Optional[Dict] = None,
+        model: Optional[str] = None,
     ) -> GenerationConfig:
         """Build GenerationConfig protobuf message"""
         config_kwargs = {}
@@ -743,6 +746,10 @@ class GrpcGeminiClient:
             if "frequency_penalty" in anti_dupe_params:
                 config_kwargs["frequency_penalty"] = anti_dupe_params["frequency_penalty"]
         
+        level_model = uses_gemini_thinking_level(model) or thinking_level is not None
+        if level_model:
+            omit_gemini_legacy_parameters(config_kwargs)
+            thinking_budget = None
         # Apply thinking configuration
         if _ThinkingConfig is not None and (thinking_budget is not None or thinking_level is not None):
             include_thoughts = os.getenv("ENABLE_THOUGHTS", "false").strip().lower() in ("1", "true", "yes", "on")
@@ -750,12 +757,12 @@ class GrpcGeminiClient:
             if thinking_budget is not None and thinking_budget != -1:
                 thinking_kwargs['thinking_budget'] = thinking_budget
             elif thinking_level is not None:
-                # Proto only supports thinking_budget (int), not thinking_level
-                level_budget_map = {'minimal': 0, 'low': 4096, 'medium': 12288, 'high': 32768 }
-                level_str = str(thinking_level).lower()
-                budget_val = level_budget_map.get(level_str)
-                if budget_val is not None:
-                    thinking_kwargs['thinking_budget'] = budget_val
+                if 'thinking_level' in _ThinkingConfig._meta.fields:
+                    thinking_kwargs['thinking_level'] = str(thinking_level).upper()
+                else:
+                    # Older protobuf libraries cannot encode levels. Use the model
+                    # default rather than converting back to a deprecated budget.
+                    logger.debug("Gemini gRPC thinking levels unavailable; using model default")
             try:
                 config_kwargs['thinking_config'] = _ThinkingConfig(**thinking_kwargs)
             except Exception as e:

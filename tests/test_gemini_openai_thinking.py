@@ -7,6 +7,8 @@ from unified_api_client import UnifiedClient
     "gemini-3-flash-preview",
     "models/gemini-3.1-pro-preview",
     "gemini-3.5-flash",
+    "gemini-4-pro-preview",
+    "or/google/gemini-10-flash",
 ])
 def test_gemini_openai_uses_thinking_level_for_gemini_3(monkeypatch, model):
     monkeypatch.setenv("ENABLE_GEMINI_THINKING", "1")

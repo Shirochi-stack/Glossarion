@@ -1287,7 +1287,11 @@ def _build_gemini_request_body(
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
 
     model_lower = model.lower() if model else ""
-    is_gemini_3 = "gemini-3" in model_lower
+    from gemini_policy import uses_gemini_thinking_level, omit_gemini_legacy_parameters
+    is_gemini_3 = uses_gemini_thinking_level(model_lower)
+
+    if is_gemini_3:
+        omit_gemini_legacy_parameters(gen_config)
 
     if thinking_level not in ("minimal", "low", "medium", "high"):
         thinking_level = "high"

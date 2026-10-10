@@ -439,7 +439,12 @@ def _split_chapter_for_translation(chapter_splitter, chapter, available_tokens, 
         except Exception:
             current_hash = None
 
-        if isinstance(blocks, list) and blocks and source_hash and current_hash == source_hash:
+        complete_blocks = (
+            isinstance(blocks, list) and blocks
+            and all(isinstance(block, str) for block in blocks)
+            and re.sub(r'\s+', '', ''.join(blocks)) == re.sub(r'\s+', '', body)
+        )
+        if complete_blocks and source_hash and current_hash == source_hash:
             chunks = chapter_splitter.split_blocks(blocks, available_tokens)
             if chunks:
                 return chunks
