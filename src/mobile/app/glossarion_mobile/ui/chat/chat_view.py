@@ -913,7 +913,7 @@ class ChatView:
             slot = self._card(slot_key, ("live", self.cid, item.index, record),
                               lambda: JobCard(attachment=record, phase=CardPhase("running"), on_action=self._on_job_action,
                                               on_open_request=self._open_request, row_page=row_page,
-                                              requests_expanded=True))
+                                              requests_expanded=False))  # U12 item 3: a summary until opened
             slot.card.saved_requests = self._saved_request_segments(item, messages)
             self.live_job_card = slot.card
             self._update_live_job_card(run)
@@ -1134,9 +1134,30 @@ class ChatView:
         self.approval_card = GlossaryApprovalCard(
             path=path, info=info, on_answer=self._answer_glossary, on_edit=self.open_glossary_editor,
             on_always=self._always_accept_glossary if prefs is not None else None,
+            on_refine=(lambda: self._spawn(self._refine_at_gate(run, path))) if path else None,
         )
         self._approval_key = key
         return self.approval_card
+
+    async def _refine_at_gate(self, run: Any, path: str) -> None:
+        """U12 item 5: the approval card's "✨ Refine" (``JobService.refine_at_gate``, off the loop)."""
+        card = self.approval_card
+        jobs = getattr(self.env, "jobs", None)
+        job_id = getattr(run, "job_id", None)
+        ok = False
+        info = None
+        try:
+            if jobs is None or job_id is None or not hasattr(jobs, "refine_at_gate"):
+                raise RuntimeError("Glossary refinement is not available here")
+            await self.env.run_io(lambda: jobs.refine_at_gate(job_id, path))
+            info = await self.env.run_io(lambda: glossary_preview(path))
+            ok = True
+            self.notify("✨ Glossary refined: review it, then choose Edit, Yes or No")
+        except Exception as exc:
+            log.info("glossary refinement at the gate failed: %s", exc)
+            self.notify(f"Could not refine the glossary: {exc}")
+        if card is not None:
+            card.refined(ok, info)
 
     def _always_accept_glossary(self) -> None:
         """The approval card's "Always accept": the All-chats switch of Chat settings ("Always accept
@@ -1254,10 +1275,18 @@ class ChatView:
             if not run.live or str(run.cid) != self.cid:
                 break  # finished meanwhile: _on_run_changed renders the committed cards
             if run.stream.drain():
-                self.transcript.set_tail(self._tail_controls(run))
+                # U12 item 4: re-send only what changed. The whole transcript (every card of the window) went
+                # to the client on each tick (280-900 ms) for the whole run, which made every other screen lag.
+                old_tail = list(self.transcript.tail)
+                new_tail = [c for c in self._tail_controls(run) if c is not None]
+                same_tail = [id(c) for c in new_tail] == [id(c) for c in old_tail]
                 if self.live_job_card is not None:
                     self._update_live_job_card(run)
-                self._push(self.transcript)
+                if same_tail:
+                    self._push(*new_tail, self.live_job_card)
+                else:
+                    self.transcript.set_tail(new_tail)
+                    self._push(self.transcript)
                 # follow only while the window shows the newest cards and the user is at the bottom: after
                 # "↑ earlier" or a jump the view stays where the user is reading, ↓ brings it back
                 at_tail = self.transcript.follow_tail and not self.transcript.hidden_after

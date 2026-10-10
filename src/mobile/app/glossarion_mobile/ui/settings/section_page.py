@@ -181,7 +181,9 @@ class SectionPage(Screen):
                               body=f"There is no section “{self.section_id}” in this build.", key="settings-unknown")
         # Sub-headings (U9): the desktop group boxes (QA Scanner › Foreign Character Detection,
         # Word Count Analysis, ...) or the nested path (AI Hunter › Thresholds / Weights).
-        specs = self.ctx.schema.specs_for(self.section)
+        # U12 item 1: settings that cannot work on mobile (Tor, desktop-only, PyTorch) are not listed at all
+        specs = [spec for spec in self.ctx.schema.specs_for(self.section)
+                 if self.ctx.schema.availability(str(getattr(spec, "key", "")))[0]]
         curated = dict(getattr(self.section, "headings", ()) or ())
         if curated:  # UI_SPEC §4.15 curated section: its own sub-headings, in its order
             self.specs = list(specs)

@@ -364,10 +364,7 @@ class LocalAiScreen(Screen):  # type: ignore[misc,valid-type]
             options_children = [ft.Text(f"Ollama options need the shared ollama_settings module ({exc}).")]
         controls.append(SectionCard(title="🦙 Ollama options", collapsible=True, expanded=False,
                                     children=options_children, key="lan-ollama-options"))
-        controls.append(SectionCard(title="Unavailable on mobile", children=[
-            unavailable_tile("🦙 Load Ollama (ollamapull/)", subtitle="Install, pull and update models",
-                             reason=NOT_ON_MOBILE, detail=OLLAMAPULL_REASON, key="lan-ollamapull"),
-        ]))
+        # U12 item 1: "Load Ollama (ollamapull/)" cannot work on mobile and is not listed
         self.list_view = ft.ListView(controls=controls, expand=True, spacing=tokens.SPACING["sm"],
                                      padding=ft.Padding.symmetric(horizontal=tokens.SPACING["md"],
                                                                   vertical=tokens.SPACING["sm"]))

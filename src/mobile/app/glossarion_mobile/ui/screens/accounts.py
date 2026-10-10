@@ -722,15 +722,7 @@ class AccountsScreen(Screen):
     def build_body(self) -> ft.Control:
         controls: list[ft.Control] = [self._provider_card(provider) for provider in self.providers]
         controls.append(self._experimental_tile())
-        controls.append(ft.ExpansionTile(
-            title=f"Unavailable on mobile ({len(UNAVAILABLE_ACCOUNTS)})",
-            expanded=True,
-            key="accounts-unavailable",
-            controls=[  # enabled rows: a disabled ListTile would disable (and silence) its ReasonChip
-                unavailable_tile(label, reason=NOT_ON_MOBILE, detail=reason, dense=False, key=f"unavailable-{label}")
-                for label, reason in UNAVAILABLE_ACCOUNTS
-            ],
-        ))
+        # U12 item 1: routes that cannot work on mobile (Tor, desktop helpers) are not listed at all
         return ft.ListView(controls=controls, expand=True, padding=12, spacing=8)
 
     def _experimental_tile(self) -> ft.Control:

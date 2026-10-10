@@ -516,10 +516,8 @@ def ocr_provider_rows(config: Mapping[str, Any], *, mobile: Optional[bool] = Non
     cfg = config or {}
     rows: list = []
     for value, label in OCR_PROVIDERS:
-        reason = value_reason(K_PROVIDER, value, mobile=mobile)
-        if reason:
-            rows.append(OptionRow(value, label, "unavailable", chip_text(reason), reason, _kept_note(reason)))
-            continue
+        if value_reason(K_PROVIDER, value, mobile=mobile):
+            continue  # U12 item 1: never listed on mobile (PyTorch-only / not functional here)
         if value == "custom-api":
             detection = effective_setting(cfg, P_BUBBLE_DETECTION, True)
             detail = "Uses the translation model, its API key and the Vision key pool"
@@ -531,9 +529,7 @@ def ocr_provider_rows(config: Mapping[str, Any], *, mobile: Optional[bool] = Non
         elif value == "google":
             backend = google_backend()
             if backend is None:
-                rows.append(OptionRow(value, label, "unavailable", NOT_IN_BUILD,
-                                      "Neither google-cloud-vision nor its REST fallback is in this build"))
-                continue
+                continue  # not in this build: not listed (U12 item 1)
             problem = _google_credentials_problem(str(cfg.get(K_GOOGLE_CREDS) or cfg.get(K_GOOGLE_CLOUD_CREDS) or ""))
             detail = f"Google Vision {backend}"
             rows.append(OptionRow(value, label, "needs_key" if problem else "ready",
@@ -541,18 +537,14 @@ def ocr_provider_rows(config: Mapping[str, Any], *, mobile: Optional[bool] = Non
                                   f"{detail} · {problem}" if problem else detail))
         elif value == "azure":
             if not importable("azure.ai.vision.imageanalysis"):
-                rows.append(OptionRow(value, label, "unavailable", NOT_IN_BUILD,
-                                      "azure-ai-vision-imageanalysis is not in this build"))
-                continue
+                continue  # not in this build: not listed (U12 item 1)
             ok = bool(str(cfg.get(K_AZURE_KEY) or "").strip())
             rows.append(OptionRow(value, label, "ready" if ok else "needs_key", "Ready" if ok else "Needs key", None,
                                   "Azure AI Vision SDK" if ok else "Key needed"))
         elif value == "azure-document-intelligence":
             backend = azure_docintel_backend()
             if backend is None:
-                rows.append(OptionRow(value, label, "unavailable", NOT_IN_BUILD,
-                                      "Neither the Document Intelligence SDK nor its REST client is in this build"))
-                continue
+                continue  # not in this build: not listed (U12 item 1)
             key = str(cfg.get(K_AZURE_KEY) or cfg.get(K_DOCINTEL_KEY) or "").strip()
             endpoint = str(cfg.get(K_AZURE_ENDPOINT) or cfg.get(K_DOCINTEL_ENDPOINT) or "").strip()
             if key and endpoint:
@@ -563,8 +555,7 @@ def ocr_provider_rows(config: Mapping[str, Any], *, mobile: Optional[bool] = Non
         elif value == "rapidocr":
             missing = rapidocr_reason()
             if missing:
-                rows.append(OptionRow(value, label, "unavailable", NOT_IN_BUILD, missing))
-                continue
+                continue  # not in this build: not listed (U12 item 1)
             status = model_status("rapidocr") if model_status is not None else None
             rows.append(_model_backed_row(value, label, status, "RapidOCR ONNX models"))
         else:
@@ -592,27 +583,27 @@ def detector_rows(*, mobile: Optional[bool] = None) -> list:
     key = ".".join(P_DETECTOR)
     rows = []
     for value, label in DETECTORS:
-        reason = value_reason(key, value, mobile=mobile)
-        rows.append(OptionRow(value, label, "unavailable" if reason else "ready",
-                              chip_text(reason, label), reason))
+        if value_reason(key, value, mobile=mobile):
+            continue  # U12 item 1: never listed on mobile
+        rows.append(OptionRow(value, label, "ready", chip_text(None, label), None))
     return rows
 
 
 def inpaint_method_rows(*, mobile: Optional[bool] = None) -> list:
     rows = []
     for value, label in INPAINT_METHODS:
-        reason = value_reason(K_INPAINT_METHOD, value, mobile=mobile) if value != "skip" else None
-        rows.append(OptionRow(value, label, "unavailable" if reason else "ready",
-                              chip_text(reason, label), reason))
+        if value != "skip" and value_reason(K_INPAINT_METHOD, value, mobile=mobile):
+            continue  # U12 item 1: never listed on mobile
+        rows.append(OptionRow(value, label, "ready", chip_text(None, label), None))
     return rows
 
 
 def local_model_rows(*, mobile: Optional[bool] = None) -> list:
     rows = []
     for value, label in LOCAL_INPAINT_MODELS:
-        reason = value_reason(K_LOCAL_MODEL, value, mobile=mobile)
-        rows.append(OptionRow(value, label, "unavailable" if reason else "ready", chip_text(reason), reason,
-                              _kept_note(reason) if reason else ""))
+        if value_reason(K_LOCAL_MODEL, value, mobile=mobile):
+            continue  # U12 item 1: never listed on mobile
+        rows.append(OptionRow(value, label, "ready", chip_text(None), None, ""))
     return rows
 
 

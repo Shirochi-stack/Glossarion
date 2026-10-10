@@ -726,13 +726,10 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
                             on_signed_in_changed=signed.append)
     body = screen.get_body()
     keys = [getattr(c, "key", None) for c in body.controls]
+    # U12 item 1: the routes that cannot work on mobile are not listed
     assert keys == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem",
-                    "accounts-experimental", "accounts-unavailable"]
-    assert body.controls[-2].title == f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})"
-    # U9: enabled rows without a tap action (a disabled ListTile would disable its ReasonChip too)
-    assert all(not tile.disabled and tile.on_click is None and tile.trailing.detail
-               for tile in body.controls[-1].controls)
-    assert len(body.controls[-1].controls) == len(UNAVAILABLE_ACCOUNTS)
+                    "accounts-experimental"]
+    assert body.controls[-1].title == f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})"
     fake_auth.modules["authgem"].get_store(2).save_tokens({"access_token": "g", "email": "gem@example.com",
                                                           "expires_at": time.time() + 3 * 3600 + 60})
     out = _run(screen.refresh())

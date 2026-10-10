@@ -1776,6 +1776,42 @@ class JobService:
             event.set()
         return True
 
+    def refine_at_gate(self, job_id: str, glossary_path: str, selected_types: Optional[Sequence[str]] = None) -> dict:
+        """U12 item 5, "✨ Refine" on the glossary approval card: refine the generated glossary while the job
+        waits at the gate (blocking; call it off the UI loop). A refinement *job* would queue behind the
+        paused translation forever (one job at a time), so this runs the shared manual refinement
+        (``glossary_progress_core.plan_manual_glossary_refinement`` / ``run_manual_glossary_refinement``)
+        with the paused job's own owner and environment; its log lines go to the job's log. The question
+        stays open: the user then accepts (Yes), edits or rejects the refined file."""
+        job = self._find_live(job_id)
+        if job is None or not job.question or job.owner is None:
+            raise RuntimeError("The job is not waiting for a glossary decision")
+        if not glossary_path or not os.path.isfile(glossary_path):
+            raise RuntimeError("The generated glossary file was not found")
+        import glossary_progress_core as gpc
+
+        from glossarion_mobile.services.library import bind_call
+
+        owner = job.owner
+        types = [str(t) for t in (selected_types or ()) if str(t or "").strip()]
+        if not types:
+            types = [str(t) for t, cfg in dict(getattr(owner, "custom_entry_types", None) or {}).items()
+                     if not isinstance(cfg, Mapping) or cfg.get("enabled", True)] or ["character", "terms"]
+
+        def log(text: Any = "", *args: Any, **kwargs: Any) -> None:
+            self._job_log(job, text, kwargs)
+
+        planned = bind_call(gpc.plan_manual_glossary_refinement, owner, glossary_path=glossary_path,
+                            progress_path=None, source_path=None, selected_types=types,
+                            target_chunk_count=None, log=log)
+        if not planned:
+            raise RuntimeError("The selected entry type(s) contain no glossary entries")
+        options, plan = planned[0], planned[1]
+        log(f"\n✨ Refining the generated glossary before translation: {', '.join(types)}")
+        gpc.run_manual_glossary_refinement(owner, glossary_path, None, options, plan)
+        log("✨ Glossary refinement finished: review it, then choose Edit, Yes or No")
+        return {"ok": True, "glossary_path": glossary_path}
+
     def pending_question(self, job_id: Optional[str] = None) -> Optional[dict]:
         with self._lock:
             job = self._active if job_id is None else self._find_live(job_id)

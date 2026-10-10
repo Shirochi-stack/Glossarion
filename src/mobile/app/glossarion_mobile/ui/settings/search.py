@@ -26,8 +26,7 @@ FILTERS = (
     ("modified", "Modified"),
     ("locked", "Locked"),
     ("advanced", "Advanced"),
-    ("unavailable", "Unavailable on mobile"),
-)
+)  # U12 item 1: no "Unavailable on mobile" filter; such settings are not listed at all
 
 #: The Settings home group the "Advanced" chip keeps (UI_SPEC §4.15: Other Stored Settings, Internal
 #: State and what the curated map left of the desktop Context Management & Memory section).
@@ -72,7 +71,7 @@ def find_settings(ctx: Any, query: str, filters: Iterable[str] = (), limit: int 
     out: list[SearchHit] = []
     seen: set[str] = set()
     for hit in candidates:
-        if hit.key in seen or not matches_filters(ctx, hit, filters, config):
+        if hit.key in seen or not ctx.schema.availability(hit.key)[0] or not matches_filters(ctx, hit, filters, config):
             continue
         seen.add(hit.key)
         out.append(hit)

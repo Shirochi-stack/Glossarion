@@ -271,8 +271,6 @@ class ModelManagerScreen(Screen):
     def actions(self) -> list:
         return [ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", items=[
             ft.PopupMenuItem(content="Reset to defaults", icon=ft.Icons.RESTART_ALT, on_click=lambda e: self.confirm_reset()),
-            ft.PopupMenuItem(content="Lock mouse wheel (desktop only)", icon=ft.Icons.MOUSE, disabled=True,
-                             on_click=lambda e: self.say(WHEEL_REASON)),
         ])]
 
     def did_show(self) -> None:

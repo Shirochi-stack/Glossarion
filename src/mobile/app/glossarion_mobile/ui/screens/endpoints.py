@@ -392,9 +392,7 @@ class EndpointsScreen(Screen):  # type: ignore[misc,valid-type]
                 if chips is not None:
                     children.append(chips)
             if title == "Unavailable on mobile":
-                for label, reason in DESKTOP_ONLY_ROWS:  # enabled rows: the chip opens the reason
-                    children.append(unavailable_tile(label, reason="Not available on mobile", detail=reason,
-                                                     key=f"unavailable-{label}"))
+                continue  # U12 item 1: nothing that cannot work on mobile is listed
             if children:
                 focused = bool(self.focus_target) and self.focus_target in keys
                 controls.append(SectionCard(title=title, children=children, collapsible=title != "Custom OpenAI endpoint",

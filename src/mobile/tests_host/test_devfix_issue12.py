@@ -660,7 +660,7 @@ def _check_gate(probe: Probe, *, glossary_requests: int) -> dict:
     labels = _labels(card)
     assert labels == committed, (labels, committed)
     assert state["tile"] == f"Requests ({glossary_requests})" and state["rows"] == glossary_requests, state
-    assert card.requests_tile.expanded
+    assert not card.requests_tile.expanded and card.requests_tile.subtitle  # U12 item 3: a summary until opened
     texts = probe.visible_texts()
     assert WAITING in texts and EPUB_NAME in texts, sorted(t for t in texts if len(t) < 60)[:80]
     assert "Done" not in texts and "Attachment" not in texts, sorted(t for t in texts if len(t) < 60)[:80]

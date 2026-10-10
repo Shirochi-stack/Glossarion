@@ -218,12 +218,13 @@ def test_value_rules_come_from_the_schema_and_never_apply_on_desktop():
     assert svc.value_reason("manga_inpaint_method", "hybrid", mobile=True)
     assert svc.value_reason("manga_settings.ocr.detector_type", "yolo", mobile=True)
     assert svc.value_reason("manga_settings.ocr.detector_type", "rtdetr_onnx", mobile=True) is None
+    # U12 item 1: what can never run on mobile is not listed at all (the stored value still round-trips)
     rows = {r.value: r for r in svc.local_model_rows(mobile=True)}
-    assert [v for v, r in rows.items() if not r.disabled] == ["aot_onnx", "lama_onnx", "anime_onnx",
-                                                              "custom-image-edit"]
-    assert "kept for the desktop app" in rows["mat"].detail
-    assert {r.value for r in svc.detector_rows(mobile=True) if r.disabled} == {"rtdetr", "yolo", "custom"}
-    assert [r.value for r in svc.inpaint_method_rows(mobile=True) if r.disabled] == ["hybrid"]
+    assert list(rows) == ["aot_onnx", "lama_onnx", "anime_onnx", "custom-image-edit"]
+    assert not any(r.disabled for r in rows.values())
+    detectors = {r.value for r in svc.detector_rows(mobile=True)}
+    assert "rtdetr_onnx" in detectors and not detectors & {"rtdetr", "yolo", "custom"}
+    assert "hybrid" not in [r.value for r in svc.inpaint_method_rows(mobile=True)]
     assert svc.chip_text("x" * 40).endswith("…") and len(svc.chip_text("x" * 40)) <= 32
 
 
@@ -235,13 +236,12 @@ def test_ocr_provider_rows_follow_the_desktop_status_rules(tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules, "azure.ai.vision.imageanalysis", _module("azure.ai.vision.imageanalysis"))
     monkeypatch.setitem(sys.modules, "pyclipper", None)  # RapidOCR without its geometry wheels
     rows = {r.value: r for r in svc.ocr_provider_rows({}, mobile=True)}
-    assert [v for v, _label in svc.OCR_PROVIDERS] == list(rows)
+    # U12 item 1: PyTorch-only providers and those not in this build are not listed on mobile
+    assert list(rows) == ["custom-api", "google", "azure", "azure-document-intelligence"]
     assert rows["custom-api"].status == "ready"
     assert rows["google"].status == "needs_key" and "REST" in rows["google"].detail
     assert rows["azure"].status == "needs_key"
     assert rows["azure-document-intelligence"].detail == "Key & Endpoint needed"
-    assert rows["rapidocr"].status == "unavailable" and "pyclipper" in rows["rapidocr"].reason
-    assert all(rows[v].disabled for v in ("manga-ocr", "Qwen2-VL", "easyocr", "paddleocr", "doctr"))
     creds = tmp_path / "sa.json"
     creds.write_text(json.dumps({"type": "service_account", "project_id": "p", "private_key": "k",
                                  "client_email": "e@x"}), encoding="utf-8")
@@ -255,7 +255,7 @@ def test_ocr_provider_rows_follow_the_desktop_status_rules(tmp_path, monkeypatch
     creds.write_text(json.dumps({"type": "authorized_user"}), encoding="utf-8")
     assert {r.value: r for r in svc.ocr_provider_rows(config, mobile=True)}["google"].status == "needs_key"
     monkeypatch.setitem(sys.modules, "google_vision_rest", None)
-    assert {r.value: r for r in svc.ocr_provider_rows({}, mobile=True)}["google"].status == "unavailable"
+    assert "google" not in {r.value for r in svc.ocr_provider_rows({}, mobile=True)}  # not in this build
 
 
 def test_inpaint_status_and_choice_writes(monkeypatch):
@@ -1350,10 +1350,8 @@ def test_settings_tab_providers_inpainting_rendering_and_schema_groups(iso, tmp_
         tab = screen.settings_tab
         tab.did_show()
         tiles = tab.provider_tiles
-        assert list(tiles) == [v for v, _l in svc.OCR_PROVIDERS]
-        # U9: the row stays enabled with no tap action, so its ReasonChip opens the reason (UI_SPEC §5.2)
-        assert not tiles["manga-ocr"].disabled and tiles["manga-ocr"].on_click is None
-        assert isinstance(tiles["manga-ocr"].trailing, ReasonChip)
+        # U12 item 1: providers that can never run on mobile (PyTorch-only) are not listed
+        assert "manga-ocr" not in tiles and "custom-api" in tiles
         assert not tiles["custom-api"].disabled
         assert not tab.select_provider("easyocr") and store.get("manga_ocr_provider") is None
         assert tab.select_provider("azure") and store.get("manga_ocr_provider") == "azure"

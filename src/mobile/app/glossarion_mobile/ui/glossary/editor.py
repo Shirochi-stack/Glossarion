@@ -110,6 +110,10 @@ def new_entry_form(doc: Any, fields: Sequence[str], raw_term: str = "") -> tuple
     return shown, values
 
 
+#: desktop ``_apply_editor_gender_presentation``: the tint of a row whose tracked gender is unresolved
+UNRESOLVED_GENDER_PINK = "#ec4899"
+
+
 class EditorPane:
     def __init__(self, screen: Any) -> None:
         self.screen = screen
@@ -430,9 +434,12 @@ class EditorPane:
         if entry_type:
             badges.append(chip(entry_type, key="type"))
         gender = str(entry.get("gender") or "")
-        if gender:
-            badges.append(chip(gender, bgcolor=ft.Colors.TERTIARY_CONTAINER, key="gender"))
         status = self.service.gender_status(doc, entry) if doc is not None else None
+        # U12 item 6, desktop ``_apply_editor_gender_presentation``: the gender column shows the tracker's
+        # label (the tracked decision, e.g. with its share) when the tracker knows the name
+        tracked = str(status.get("label") or "") if isinstance(status, dict) and not status.get("conflict") else ""
+        if gender or tracked:
+            badges.append(chip(tracked or gender, bgcolor=ft.Colors.TERTIARY_CONTAINER, key="gender"))
         if isinstance(status, dict) and status.get("conflict"):
             badges.append(chip(f"⚠ {status.get('label') or 'Gender conflict'}", bgcolor=ft.Colors.ERROR_CONTAINER,
                                key="conflict", tooltip="Tap the row › Resolve gender…"))
@@ -455,6 +462,8 @@ class EditorPane:
                             color=ft.Colors.PRIMARY if selected else ft.Colors.OUTLINE, size=22)
             leading.append(check)
         base_bgcolor = ft.Colors.with_opacity(0.10, ft.Colors.ORANGE) if updated else ft.Colors.SURFACE_CONTAINER_LOW
+        if isinstance(status, dict) and status.get("unresolved"):  # desktop: unresolved rows are tinted pink
+            base_bgcolor = ft.Colors.with_opacity(0.28, UNRESOLVED_GENDER_PINK)
         row = ft.Container(
             content=ft.Row(leading + [
                 ft.Column(lines, spacing=1, expand=True, tight=True),

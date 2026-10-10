@@ -1276,8 +1276,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
                 ft.TextButton(content="Refusal patterns", icon=ft.Icons.BLOCK, on_click=lambda e: self._open_refusal()),
             ], wrap=True, spacing=6, run_spacing=6),
         ]
-        for label, reason in DESKTOP_ONLY_ROWS:  # an enabled row: a disabled one would disable its chip
-            rows.append(unavailable_tile(label, reason="Desktop only", detail=reason, key=f"desktop-{label}"))
+        # U12 item 1: desktop-only rows are not listed on mobile
         return ft.Container(content=ft.Column(rows, spacing=4, tight=True),
                             padding=ft.Padding.only(top=8, bottom=24))
 

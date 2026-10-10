@@ -103,7 +103,9 @@ class ChatHeader:
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
         )
-        self.title_gesture = ft.GestureDetector(content=self.title_text, on_long_press_start=on_rename)
+        # a handler is always set: a GestureDetector without one is a Flutter error box (U12 item 7)
+        self.title_gesture = ft.GestureDetector(content=self.title_text,
+                                                on_long_press_start=on_rename or (lambda e: None))
         muted = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
         self.model_span = ft.TextSpan("", on_click=lambda e: self._open("model"))
         self.profile_sep = ft.TextSpan(" · ")

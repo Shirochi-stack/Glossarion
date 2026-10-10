@@ -290,6 +290,12 @@ def stat_chip(text: str, status: str, *, selected: bool = False, on_select: Any 
         border_side=ft.BorderSide(1, color),
         selected_color=tinted(color, 0.18),
     )
+    if on_long_press is None:
+        # A GestureDetector without any handler is a Flutter error box on device ("GestureDetector should have
+        # at least one event handler defined", Book page › At a glance, U12 item 7).
+        chip.key = key
+        chip.visible = visible
+        return chip
     return ft.GestureDetector(content=chip, on_long_press_start=on_long_press, key=key, visible=visible)
 
 

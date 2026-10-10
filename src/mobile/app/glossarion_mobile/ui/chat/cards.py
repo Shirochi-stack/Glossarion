@@ -169,6 +169,7 @@ class GlossaryApprovalCard(ft.Container):
         on_answer: Optional[Callable[[bool], Any]] = None,
         on_edit: Optional[Callable[[str], Any]] = None,
         on_always: Optional[Callable[[], Any]] = None,
+        on_refine: Optional[Callable[[], Any]] = None,
         dark: bool = False,
         key: Any = "approval-card",
     ) -> None:
@@ -181,6 +182,9 @@ class GlossaryApprovalCard(ft.Container):
         # "Always accept" (chat cards only): remember the choice (the chat's Prefs key), then answer Yes;
         # the owner of ``on_always`` does both. The Library review gate's sheet has no such button.
         self.on_always = on_always
+        # U12 item 5: "✨ Refine" runs the glossary refinement on this file while the job waits (the chat's
+        # ``on_refine`` calls ``JobService.refine_at_gate`` off the loop, then ``refined``)
+        self.on_refine = on_refine
         self.answered: Optional[bool] = None
         self.always_accepted = False
         success = semantic("success", dark)
@@ -218,7 +222,11 @@ class GlossaryApprovalCard(ft.Container):
             content="■ No", on_click=lambda e: self.answer(False),
             style=ft.ButtonStyle(color=ft.Colors.ERROR, side=ft.BorderSide(width=1, color=ft.Colors.ERROR)),
         )
-        body.append(ft.Row([self.edit_button, self.yes_button, self.no_button], wrap=True, spacing=8, run_spacing=8))
+        self.refine_button = ft.FilledTonalButton(content="✨ Refine", disabled=not exists, key="approval-refine",
+                                                  visible=on_refine is not None, on_click=lambda e: self.refine(),
+                                                  tooltip="Refine this glossary (the refinement settings) before translating")
+        body.append(ft.Row([self.edit_button, self.refine_button, self.yes_button, self.no_button], wrap=True,
+                           spacing=8, run_spacing=8))
         self.always_button = ft.TextButton(
             content="Always accept", icon=ft.Icons.DONE_ALL, on_click=lambda e: self.always(),
             tooltip="Accept this glossary and every generated glossary from now on (Chat settings to change)",
@@ -231,7 +239,7 @@ class GlossaryApprovalCard(ft.Container):
         self.padding = ft.Padding.all(14)
 
     def _disable(self) -> None:
-        for button in (self.edit_button, self.yes_button, self.no_button, self.always_button):
+        for button in (self.edit_button, self.refine_button, self.yes_button, self.no_button, self.always_button):
             button.disabled = True
         try:
             self.update()
@@ -246,6 +254,43 @@ class GlossaryApprovalCard(ft.Container):
         if self.on_answer is not None:
             self.on_answer(bool(accepted))
         return True
+
+    def refine(self) -> bool:
+        if self.answered is not None or self.on_refine is None or self.refine_button.disabled:
+            return False
+        self.refine_button.disabled = True
+        self.refine_button.content = "✨ Refining…"
+        self._push()
+        self.on_refine()
+        return True
+
+    def refined(self, ok: bool, info: Optional[dict] = None) -> None:
+        """The refinement ended: show the refined file's entries again and let the user answer."""
+        if info:
+            self.info = info
+            preview = [ft.Text(f"{raw} → {translated}" if translated else raw, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                               max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+                       for raw, translated in list(info.get("preview") or [])[:5]]
+            controls = list(self.content.controls)
+            first = next((i for i, c in enumerate(controls) if isinstance(c, ft.Row)), None)
+            if first is not None:  # the "name · N entries" row, then the old preview lines
+                row = controls[first]
+                texts = [c for c in row.controls if isinstance(c, ft.Text)]
+                if texts:
+                    texts[0].value = f"{info.get('name')} · {int(info.get('entries') or 0):,} entries"
+                end = first + 1
+                while end < len(controls) and isinstance(controls[end], ft.Text):
+                    end += 1
+                self.content.controls = controls[:first + 1] + preview + controls[end:]
+        self.refine_button.content = "✨ Refined" if ok else "✨ Refine"
+        self.refine_button.disabled = bool(ok) or self.answered is not None
+        self._push()
+
+    def _push(self) -> None:
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def always(self) -> bool:
         """"Always accept": ``on_always`` stores the choice and answers Yes (one answer, never two)."""
@@ -458,6 +503,26 @@ def _row_signature(segment: dict) -> tuple:
             segment.get("index"), str(segment.get("status_label") or ""))
 
 
+#: U12 item 3: one request row (label line + one preview line) and the Requests box it scrolls in
+REQUEST_ROW_HEIGHT = 50
+REQUESTS_BOX_HEIGHT = 260
+
+
+def request_summary(segments: Sequence[dict]) -> str:
+    """The collapsed Requests line: "12/33 done · 3 in flight · Chapter 21 · Thinking"."""
+    if not segments:
+        return ""
+    done = sum(1 for s in segments if s.get("complete"))
+    active = [s for s in segments if not s.get("complete")]
+    parts = [f"{done}/{len(segments)} done"]
+    if active:
+        parts.append(f"{len(active)} in flight")
+        latest = active[-1]
+        phase = {"thinking": "Thinking", "text": "Generating"}.get(str(latest.get("phase") or ""), "Processing")
+        parts.append(f"{latest.get('label') or 'Request'} · {phase}")
+    return " · ".join(parts)
+
+
 def _request_row(segment: dict, on_open: Optional[Callable[[dict], Any]]) -> ft.Control:
     phase = str(segment.get("phase") or "processing")
     phase_label = {"thinking": "Thinking", "text": "Generating"}.get(phase, "Processing")
@@ -479,7 +544,7 @@ def _request_row(segment: dict, on_open: Optional[Callable[[dict], Any]]) -> ft.
                     ],
                     spacing=6,
                 ),
-                ft.Text(preview[:400], theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=3,
+                ft.Text(preview[:160], theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1,
                         overflow=ft.TextOverflow.ELLIPSIS, visible=bool(preview)),
             ],
             spacing=2,
@@ -561,12 +626,15 @@ class JobCard(ft.Container):
         self.failed_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
                                    visible=False, key="job-qa-failed",
                                    on_click=lambda e: self.on_action("progress") if self.on_action else None)
-        self.requests_column = ft.Column([], spacing=2, tight=True)
+        # U12 item 3: the rows sit in a box of at most REQUESTS_BOX_HEIGHT that scrolls itself to the newest
+        # row, so a running card never grows with its requests (and never drags the chat down with it)
+        self.requests_column = ft.ListView([], spacing=2, auto_scroll=True, key="job-requests-list")
+        self.requests_box = ft.Container(content=self.requests_column, height=0)
         self.earlier_requests_button = ft.TextButton(content="", visible=False,
                                                      on_click=lambda e: self.show_earlier_requests())
         # the running card opens its list (like Jobs › job while the job is active), a Result's stays shut
         self.requests_tile = ft.ExpansionTile(title="Requests (0)",
-                                              controls=[self.earlier_requests_button, self.requests_column],
+                                              controls=[self.earlier_requests_button, self.requests_box],
                                               visible=False, maintain_state=True, dense=True,
                                               expanded=bool(requests_expanded), on_change=self._on_requests_toggle)
         self.report_md = ft.Markdown("", selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)
@@ -783,12 +851,16 @@ class JobCard(ft.Container):
         self.current_text.value = current
         self.current_text.visible = bool(current)
 
-    def set_requests(self, segments: Sequence[dict]) -> None:
+    def set_requests(self, segments: Sequence[dict], *, force: bool = False) -> None:
         """Every request of the turn; the newest ``shown_rows`` are rows ("Requests (N)" counts them all,
         "↑ Show … earlier requests" pages back). A row whose segment did not change stays the same
         control, so a live repaint re-sends only the requests that moved."""
         self.request_segments = list(segments)
         total = len(self.request_segments)
+        self.requests_tile.title = f"Requests ({total})"
+        self.requests_tile.subtitle = request_summary(self.request_segments) or None
+        self.requests_tile.visible = bool(total)
+        self._rows_stale = False
         shown = self.request_segments[-self.shown_rows:] if total > self.shown_rows else self.request_segments
         cache: dict = {}
         rows: list = []
@@ -806,12 +878,14 @@ class JobCard(ft.Container):
                                                                                 hidden=hidden)
         self.earlier_requests_button.visible = hidden > 0
         self.requests_tile.title = f"Requests ({total})"
+        self.requests_tile.subtitle = request_summary(self.request_segments) or None
         self.requests_tile.visible = bool(total)
+        self.requests_box.height = min(len(rows) * REQUEST_ROW_HEIGHT, REQUESTS_BOX_HEIGHT)
 
     def show_earlier_requests(self) -> None:
         """"↑ Show … earlier requests": one page more of the older rows."""
         self.shown_rows += self.row_page
-        self.set_requests(self.request_segments)
+        self.set_requests(self.request_segments, force=True)
         self.push()
 
     def reveal_request(self, index: int) -> bool:
@@ -820,10 +894,11 @@ class JobCard(ft.Container):
         for position, segment in enumerate(self.request_segments):
             if segment.get("index") == index:
                 needed = len(self.request_segments) - position
+                self.requests_tile.expanded = True  # first: a collapsed list does not rebuild its rows
                 if needed > self.shown_rows:
                     self.shown_rows = -(-needed // self.row_page) * self.row_page
-                    self.set_requests(self.request_segments)
-                self.requests_tile.expanded = True
+                if needed > len(self.requests_column.controls) or getattr(self, "_rows_stale", False):
+                    self.set_requests(self.request_segments, force=True)
                 return True
         return False
 
@@ -833,6 +908,9 @@ class JobCard(ft.Container):
             value = value.strip().lower() == "true"
         if isinstance(value, bool):
             self.requests_tile.expanded = value  # the next reveal / repaint starts from what the user sees
+            if value and getattr(self, "_rows_stale", False):
+                self.set_requests(self.request_segments)
+                self.push()
 
     def set_ocr(self, entries: Sequence[tuple]) -> None:
         """Vision: the run's cached OCR text per image (UI_SPEC §2.6 "a collapsible OCR section")."""

@@ -421,6 +421,14 @@ class JobsAdapter:
             log.exception("resuming job %s failed", job_id)
             return None
 
+    def refine_at_gate(self, job_id: Any, glossary_path: str) -> dict:
+        """The approval card's "✨ Refine" (U12 item 5): ``JobService.refine_at_gate`` (blocking)."""
+        target = self.jobs
+        fn = getattr(target, "refine_at_gate", None) or getattr(getattr(target, "service", None), "refine_at_gate", None)
+        if not callable(fn):
+            raise RuntimeError("Glossary refinement is not available here")
+        return fn(str(job_id), glossary_path)
+
     def answer(self, question_id: Any, value: Any) -> bool:
         for name in ("answer", "answer_question", "respond"):
             fn = getattr(self.jobs, name, None)

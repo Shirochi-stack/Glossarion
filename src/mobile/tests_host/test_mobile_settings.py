@@ -814,7 +814,8 @@ def test_renderer_builds_every_section_and_tile_kind(tmp_path):
             page.views[0].controls.append(body)
             kinds.update(t.kind for t in screen.tiles.values())
             assert screen.title == section.title
-            assert screen.visible_keys == list(section.keys)
+            # U12 item 1: keys that cannot work on mobile are not listed at all
+            assert screen.visible_keys == [k for k in section.keys if ctx.schema.availability(k)[0]]
             for key, tile in screen.tiles.items():
                 assert tile.control.key == __import__("flet").ScrollKey(key)
         page.update()
@@ -896,11 +897,8 @@ def test_tiles_edit_validate_reset_and_show_reasons(tmp_path):
         assert fuzzy.lock_reason is None and not fuzzy.switch.disabled
 
         # unavailable rows stay visible, disabled, with a ReasonChip; their values are untouched
-        tor = t["use_tor"]
-        assert not tor.editable and tor.switch.disabled
-        assert isinstance(tor.badges.controls[0], ReasonChip) and tor.badges.controls[0].reason == "Tor is not available on mobile"
-        assert not tor.apply(True) and not store.has("use_tor")
-        assert isinstance(t["dpi_scaling"].badges.controls[0], ReasonChip)
+        # U12 item 1: Tor and desktop-only settings are not listed on mobile (and nothing writes them)
+        assert "use_tor" not in t and "dpi_scaling" not in t and not store.has("use_tor")
         assert t["summary_role"].hidden_reason is None  # rolling history is on now
 
         # long-press reset removes the key (default applies again) and offers Undo
@@ -1055,7 +1053,8 @@ def test_settings_search_filters_and_opens_fragment_routes(tmp_path):
         assert [h.key for h in find_settings(ctx, "temperature")] == ["temperature"]
         assert [h.key for h in find_settings(ctx, "", ["modified"])] == ["batch_size", "glossary_mode"]
         assert [h.key for h in find_settings(ctx, "", ["locked"])] == ["glossary_fuzzy"]
-        assert [h.key for h in find_settings(ctx, "", ["unavailable"])] == ["use_tor", "dpi_scaling"]
+        assert find_settings(ctx, "", ["unavailable"]) == []  # U12 item 1: no such filter any more
+        assert not {h.key for h in find_settings(ctx, "tor")} & {"use_tor"}
         assert find_settings(ctx, "") == []
         opened = []
         search = SettingsSearch(ctx, on_open=lambda hit: opened.append(ctx.open_setting(hit.section_id, hit.key)))
@@ -1064,9 +1063,9 @@ def test_settings_search_filters_and_opens_fragment_routes(tmp_path):
         search.set_query("batch")
         assert list(search.result_rows) == ["batch_size"]
         assert search.results.controls[0].content.value == "Translation › Context & memory"
-        search.toggle_filter("unavailable")
+        search.toggle_filter("locked")  # U12 item 1: there is no "Unavailable on mobile" filter any more
         assert search.result_rows == {} and "No settings match" in search.results.controls[0].content.value
-        search.toggle_filter("unavailable")
+        search.toggle_filter("locked")
         search.result_rows["batch_size"].on_click(None)
         assert navigated == ["/settings/s/context#batch_size"] == opened
         assert parse_route(navigated[0]).fragment == "batch_size"
@@ -1156,7 +1155,8 @@ def test_real_schema_renders_every_section(tmp_path):
             page.views[0].controls[:] = [screen.get_body()]
             page.update()
             for key in section.keys:
-                if schema.spec(key) is not None and schema.display_key(key) == key:  # devfix4: folded keys
+                if (schema.spec(key) is not None and schema.display_key(key) == key  # devfix4: folded keys
+                        and ctx.schema.availability(key)[0]):  # U12 item 1: unavailable keys are not listed
                     tile = screen.tiles[key]
                     assert tile.kind in TILE_CLASSES
                     available, reason = schema.availability(key)

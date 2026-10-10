@@ -464,7 +464,12 @@ def test_owner_issue12_book_card_stays_live_through_the_glossary_gate(desktop_st
             assert card is view.live_job_card is live, "the running card stays the live card at the gate"
             assert card.phase.name == "running" and card.state_text.value == "Waiting for your glossary decision"
             assert card.title_text.value == "novel.epub" and card.requests_tile.title == f"Requests ({cards})"
-            assert len(card.requests_column.controls) == min(cards, limit) and card.requests_tile.expanded
+            # U12 item 3: the running card shows a summary line until the user opens the list
+            assert len(card.requests_column.controls) == min(cards, limit) and not card.requests_tile.expanded
+            assert card.requests_tile.subtitle  # the summary line ("N/M done · …")
+            # the user opens the list: from now on its rows follow the run (a closed list keeps its rows)
+            card._on_requests_toggle(types.SimpleNamespace(data="true"))
+            assert card.requests_tile.expanded
             assert not any(c.state_text.value == "Done" for c in job_cards)
             assert view.approval_card is not None and view.approval_card in view.transcript.tail
 

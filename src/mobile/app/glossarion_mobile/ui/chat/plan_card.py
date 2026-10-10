@@ -215,6 +215,11 @@ class RunOptionsPanel:
                 pass
 
 
+#: Choose chapters preview: the height of one preview line and of the whole list (it scrolls beyond)
+PREVIEW_ROW_HEIGHT = 20
+PREVIEW_MAX_HEIGHT = 320
+
+
 class ChooseChaptersSheet:
     """"Choose chapters": range + Spine order + the live preview list (see the module docstring).
 
@@ -239,12 +244,15 @@ class ChooseChaptersSheet:
         self.header = ft.Text("", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY, key="chapters-header")
         self.note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True, visible=False)
         self.legend = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True, visible=False)
-        self.rows = ft.Column([], spacing=0, tight=True, key="chapters-rows")
+        # U12 item 2: the sheet stays compact (no scrolling body: Flet 1.0.3 makes such a sheet full height);
+        # only the preview list scrolls, in a box sized to its rows and hidden while there are none
+        self.rows = ft.ListView([], spacing=0, key="chapters-rows")
+        self.rows_box = ft.Container(content=self.rows, height=0, visible=False, key="chapters-rows-box")
         self.result: Optional[dict] = None
         self._task: Any = None
         self.dialog = scroll_sheet("Choose chapters", [
-            self.range_field, self.spine_switch, self.header, self.note, self.rows, self.legend,
-        ], actions=[
+            self.range_field, self.spine_switch, self.header, self.note, self.rows_box, self.legend,
+        ], scroll=False, actions=[
             ft.TextButton(content="All chapters", on_click=lambda e: self.apply(""), key="chapters-all"),
             ft.FilledButton(content="Apply", on_click=lambda e: self.apply(), key="chapters-apply"),
         ], key="chapters-sheet")
@@ -302,7 +310,10 @@ class ChooseChaptersSheet:
                 controls.append(ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL,
                                         color=ft.Colors.ON_SURFACE_VARIANT if skipped else None))
             self.rows.controls = controls
-        for control in (self.header, self.note, self.legend, self.rows):
+        count = len(self.rows.controls)
+        self.rows_box.visible = count > 0
+        self.rows_box.height = min(count * PREVIEW_ROW_HEIGHT, PREVIEW_MAX_HEIGHT)
+        for control in (self.header, self.note, self.legend, self.rows_box):
             try:
                 control.update()
             except Exception:

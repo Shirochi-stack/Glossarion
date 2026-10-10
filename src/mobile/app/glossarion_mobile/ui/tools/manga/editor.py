@@ -57,8 +57,6 @@ TOOLS = (
     ("box", "Box", "CROP_SQUARE", None),
     ("circle", "Circle", "CIRCLE_OUTLINED", None),
     ("lasso", "Lasso", "GESTURE", None),
-    ("brush", "Brush", "BRUSH", MASK_REASON),
-    ("eraser", "Eraser", "AUTO_FIX_OFF", MASK_REASON),
 )
 STEP_BUTTONS = (("detect", "Detect", "CENTER_FOCUS_STRONG"), ("clean", "Clean", "CLEANING_SERVICES"),
                 ("recognize", "Recognize", "DOCUMENT_SCANNER"), ("translate", "Translate", "TRANSLATE"),

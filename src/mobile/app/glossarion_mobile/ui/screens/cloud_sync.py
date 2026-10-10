@@ -2241,7 +2241,8 @@ class CloudSyncScreen(PageScreen):
             label="Downloads", value=str(downloads), dense=True, expand=True, key=f"share-send-downloads-{n}",
             options=[ft.DropdownOption(key=str(count), text=str(count)) for count in SEND_DOWNLOAD_CHOICES],
             on_select=lambda e: self.spawn(self.set_send_options(downloads=int(e.control.value or downloads))))
-        return ft.Container(content=ft.Row([self.send_expire, self.send_downloads], wrap=True, spacing=8),
+        # no wrap: an expanding child inside a wrapping Row is a Flutter layout error (a grey box on release builds)
+        return ft.Container(content=ft.Row([self.send_expire, self.send_downloads], spacing=8),
                             padding=ft.Padding.only(left=56, right=8, bottom=8), key=f"share-send-row-{n}")
 
     # ---- handlers ----
