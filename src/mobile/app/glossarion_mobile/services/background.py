@@ -88,6 +88,8 @@ log = logging.getLogger("glossarion.background")
 CONTINUED_ID_PREFIX = "com.glossarion.app.job."
 PREF_BATTERY_PROMPT = "jobs_battery_prompt_done"
 PREF_NOTIFICATION_ASKED = "jobs_notification_permission_asked"
+#: seconds after launch before the first-run notification dialog (U11 item 8)
+LAUNCH_ASK_DELAY = 2.0
 PREF_NOTIFICATIONS_OFF_HINT = "jobs_notifications_off_hint_shown"
 PREF_KEEP_SCREEN_ON = "keep_screen_on_during_jobs"
 UPDATE_INTERVAL = 1.0  # seconds between foreground-service / Live Activity updates
@@ -146,6 +148,17 @@ class _PermissionRequester:
     def __init__(self) -> None:
         self._handler: Any = None
 
+    def prime(self) -> bool:
+        """Build the handler now, inside the page context (app start), so Flet registers the service with
+        the page before the first request: built lazily from a later task it was not registered and the
+        request returned None without the system dialog (U11 item 8). True when it exists."""
+        try:
+            self._get()
+        except Exception as exc:  # no flet_permission_handler / no page (host tests)
+            log.debug("permission handler not primed: %s", exc)
+            return False
+        return True
+
     def _get(self) -> tuple:
         from flet_permission_handler import Permission, PermissionHandler
 
@@ -201,6 +214,8 @@ class BackgroundExecution:
         self.notifications = notifications
         self.prefs = prefs
         self.permissions = permissions if permissions is not None else _PermissionRequester()
+        if platform in ("android", "ios") and hasattr(self.permissions, "prime"):
+            self.permissions.prime()
         self.wakelock = wakelock
         self.confirm = confirm
         self.navigate_route = navigate_route
@@ -323,7 +338,21 @@ class BackgroundExecution:
         except Exception as exc:
             return f"error {type(exc).__name__}: {exc}"
 
-    # ---- notification permission (Run tap, Welcome step 4, Settings › Notifications) --------------------
+    # ---- notification permission (launch, Run tap, Welcome step 4, Settings › Notifications) ------------
+
+    async def ask_notifications_on_launch(self, delay: float = LAUNCH_ASK_DELAY) -> Optional[str]:
+        """First launch (U11 item 8): show the system notification dialog by itself instead of waiting for
+        the user to find "Allow notifications". Asked until it gets a definite answer, like the Run tap."""
+        if not (self.is_android or self.is_ios) or self._pref(PREF_NOTIFICATION_ASKED, False):
+            return None
+        await asyncio.sleep(delay)  # let the first screen settle (the dialog covers it)
+        if self._pref(PREF_NOTIFICATION_ASKED, False):
+            return None
+        try:
+            return await self.request_notification_permission()
+        except Exception as exc:
+            log.info("launch notification request failed: %s", exc)
+            return None
 
     async def request_notification_permission(self) -> str:
         """Ask for the notification permission; the permission status.

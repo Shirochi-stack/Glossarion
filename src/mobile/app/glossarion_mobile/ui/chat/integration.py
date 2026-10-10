@@ -108,6 +108,15 @@ def _inside(path: Any, root: Any) -> bool:
         return False
 
 
+def _catalog_service() -> Any:
+    try:
+        from glossarion_mobile.services.model_catalog import default_service
+
+        return default_service()
+    except Exception:
+        return None
+
+
 def _target_languages() -> tuple:
     try:
         from language_options import TARGET_LANGUAGES
@@ -635,6 +644,16 @@ class ChatFeature:
             elif try_id == "import" and chat_view is not None:
                 chat_view._spawn(chat_view.pick_and_attach())
 
+        def set_model(model: str) -> None:  # Welcome's post-sign-in model check (U11 item 1)
+            if env is None:
+                return
+            from glossarion_mobile.state.setting_writes import write_setting
+
+            write_setting(env.store, "model", model)
+            chat_view = getattr(self.app, "chat_view", None)
+            if chat_view is not None:
+                chat_view.apply_settings_changed()
+
         def save_key(key: str) -> None:
             if env is not None:
                 env.config_set_many({"api_key": key})
@@ -653,6 +672,9 @@ class ChatFeature:
             on_try=try_action,
             is_android=self.is_android,
             is_ios=self.is_ios,
+            catalog=_catalog_service(),
+            current_model=lambda: str(env.config_get("model", "") or "") if env else "",
+            on_set_model=set_model,
         )
 
     def needs_welcome(self) -> bool:

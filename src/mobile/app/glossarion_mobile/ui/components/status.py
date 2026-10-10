@@ -15,8 +15,14 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import icon_data, status_color
 
-__all__ = ["StatusChip", "status_label"]
+__all__ = ["StatusChip", "count_badge", "status_label"]
 
+
+def count_badge(label: str) -> ft.Badge:
+    """A small count badge drawn inside its control's top-right corner (U11 item 6): the default
+    Material badge hangs over the edge, and a scrolling chip row or a short strip cropped its red dot."""
+    return ft.Badge(label=str(label), large_size=14, text_style=ft.TextStyle(size=9),
+                    padding=ft.Padding.symmetric(horizontal=3), offset=ft.Offset(-4, 3))
 
 def status_label(status: str, label: Optional[str] = None, count: Optional[int] = None) -> str:
     text = label or tokens.status_style(status).label

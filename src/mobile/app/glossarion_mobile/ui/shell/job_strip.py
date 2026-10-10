@@ -29,6 +29,7 @@ import flet as ft
 from glossarion_mobile.state.app_state import JobStripModel
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
+from glossarion_mobile.ui.components.status import count_badge
 
 __all__ = ["JobStrip"]
 
@@ -125,7 +126,7 @@ class JobStrip(ft.Container):
         self.title_text.value = model.title
         self.subtitle_text.value = model.subtitle
         self.subtitle_text.color = semantic("warning", self.dark) if model.warning else None
-        self.stop_button.badge = ft.Badge(label=f"+{model.queued}") if model.queued else None
+        self.stop_button.badge = count_badge(f"+{model.queued}") if model.queued else None
         running = model.state in ("running", "finishing")
         self.stop_button.visible = running or model.state == "stopping"
         self.stop_button.disabled = model.state == "stopping"

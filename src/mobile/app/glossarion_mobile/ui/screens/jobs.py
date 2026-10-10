@@ -469,6 +469,7 @@ class JobsFeature:
         feature = cls(app)
         feature.attach(app)
         feature.spawn(feature.recover())
+        feature.spawn(feature.background.ask_notifications_on_launch())  # U11 item 8: the system dialog
         return feature
 
     def attach(self, app: Any) -> None:

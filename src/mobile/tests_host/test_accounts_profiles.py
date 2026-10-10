@@ -915,36 +915,58 @@ def test_grok_device_login_resumes_after_the_app_was_killed(fake_auth):
 
 @needs_flet
 def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
+    """U11 item 1: step 1 offers every sign-in side by side; after one the provider's models are polled and
+    the model becomes its most cost-efficient one (or stays the default while it is still listed)."""
+    import asyncio
+    import types
+
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.screens.accounts import LoginPanel, LoginSheet
-    from glossarion_mobile.ui.screens.welcome import OTHER_SIGN_INS, WelcomeScreen
+    from glossarion_mobile.ui.screens.welcome import SIGN_INS, WelcomeScreen
 
     routes: list = []
     queries: list = []
+    chosen: list = []
+    polled: list = []
+
+    class Catalog:
+        snapshot = types.SimpleNamespace(models=("authgem/gemini-3.5-flash", "authgem/gemini-3.5-pro",
+                                                 "authgem/gemini-3-flash-preview", "authgpt/gpt-5.6-luna"))
+
+        async def refresh(self, provider, explicit=True):
+            polled.append(provider)
+
     screen = WelcomeScreen(parse_route("/welcome"),
                            login_panel_factory=lambda on_done: LoginPanel(fake_auth.bridge, on_done=on_done),
-                           navigate=routes.append, on_use_provider=queries.append)
+                           navigate=routes.append, on_use_provider=queries.append, catalog=Catalog(),
+                           current_model=lambda: "authgpt/gpt-6-luna", on_set_model=chosen.append)
     screen.get_body()
-    assert screen.oauth is fake_auth.bridge  # taken from the step-1 LoginPanel
+    assert screen.oauth is fake_auth.bridge  # taken from the LoginPanel factory
+    keys = [getattr(c, "key", None) for c in screen.page_area.content.controls]
+    assert [f"welcome-signin-{p}" for p, _label in SIGN_INS] == [k for k in keys if str(k).startswith("welcome-signin")]
     screen.go("providers")
-    page = screen.page_area.content
-    keys = [getattr(c, "key", None) for c in page.controls]
-    assert [f"welcome-signin-{p}" for p, _label in OTHER_SIGN_INS] == [k for k in keys if str(k).startswith("welcome-signin")]
-    assert "welcome-local" in keys
+    keys = [getattr(c, "key", None) for c in screen.page_area.content.controls]
+    assert "welcome-local" in keys and not any(str(k).startswith("welcome-signin") for k in keys)
     sheet = screen.open_sign_in("authgem")
     assert isinstance(sheet, LoginSheet) and sheet.panel.provider == "authgem" and sheet.panel.account_id == 0
     screen._go("settings.endpoints")
     assert routes == ["settings.endpoints"]
-    screen._provider_signed_in("authgem", {"email": "gem@example.com"})
-    assert screen.flow.signed_in
-    # the model is still GPT-6 Luna (ChatGPT): the sign-in opens the ModelSheet on Gemini's models
-    assert queries == ["authgem"]
+    screen.go("sign_in")
+    screen.provider_status["authgem"] = {"email": "gem@example.com"}
+    screen.flow.signed_in = True
+    assert asyncio.run(screen.check_model("authgem")) == "authgem/gemini-3.5-flash"
+    assert polled == ["authgem"] and chosen == ["authgem/gemini-3.5-flash"] and queries == []
     rows = {getattr(c, "key", None): c for c in screen.page_area.content.controls}
-    assert "welcome-signed-authgem" in rows
-    use = next(c for c in rows["welcome-signed-authgem"].controls if getattr(c, "key", None) == "welcome-use-authgem")
+    signed = rows["welcome-signed-authgem"]
+    texts = [getattr(c, "value", "") for c in signed.controls]
+    assert any("gemini-3.5-flash" in str(v) for v in texts), texts
+    use = next(c for c in signed.controls[0].controls if getattr(c, "key", None) == "welcome-use-authgem")
     use.on_click(None)
-    assert queries == ["authgem", "authgem"] and use.content == "Use a Gemini model"
-    # without a bridge the rows stay visible, disabled with a reason
+    assert queries == ["authgem"] and use.content == "Change model"
+    # ChatGPT: the default GPT-6 Luna is gone from the catalog -> the newest Luna, said so
+    assert asyncio.run(screen.check_model("authgpt")) == "authgpt/gpt-5.6-luna"
+    assert "no longer offered" in screen.model_notes["authgpt"]
+    # without a bridge no sign-in buttons are offered
     bare = WelcomeScreen(parse_route("/welcome"))
     bare.get_body()
     bare.go("providers")

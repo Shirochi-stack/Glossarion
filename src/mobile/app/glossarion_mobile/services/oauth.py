@@ -674,7 +674,42 @@ class OAuthBridge:
             self._set(step="error", message=str(exc))
             await self._stop_fgs()
             raise
+        self._open_device_return_page(provider, info.label)
         return await self._finished(account_id, provider)
+
+    def _open_device_return_page(self, provider: str, label: str) -> None:
+        """U11 item 4: a device-code sign-in (Grok) ends on the provider's own page, so it never showed the
+        "Return to Glossarion" page the loopback sign-ins serve. Serve that same shared page
+        (``oauth_session.oauth_success_html``) once from a short-lived loopback server and open it."""
+        try:
+            import oauth_session
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+            if not oauth_session.oauth_return_url():
+                return  # desktop / no return link: nothing to go back to
+            html = oauth_session.oauth_success_html(
+                provider, "<html><body><h1>Signed in.</h1>You can close this tab.</body></html>",
+                f"&#10004; {label} authorized").encode("utf-8")
+
+            class _Page(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(html)
+
+                def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                    pass
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _Page)
+            threading.Thread(target=server.serve_forever, name="oauth-return-page", daemon=True).start()
+            closer = threading.Timer(300.0, server.shutdown)  # long enough to tap the button
+            closer.daemon = True
+            closer.start()
+            self._open(f"http://127.0.0.1:{server.server_address[1]}/success")
+        except Exception as exc:  # the sign-in itself succeeded; the page is a convenience
+            log.info("device sign-in return page not shown: %s", exc)
 
     def _begin_or_resume_device(self, provider: str, account_id: int) -> tuple:
         """Worker thread: the device login saved for this slot (app killed mid-poll), else a new one."""

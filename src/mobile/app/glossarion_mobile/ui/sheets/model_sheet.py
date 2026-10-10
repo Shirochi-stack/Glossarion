@@ -41,8 +41,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
+import re
+
 import flet as ft
 
+from glossarion_mobile.state.languages import remember_language, target_languages
 from glossarion_mobile.services import model_catalog as mc
 from glossarion_mobile.services.model_catalog import (
     EXCLUDED_ROUTE_PREFIXES,
@@ -866,7 +869,9 @@ class ModelSheet:
 
     def language_rows(self) -> list:
         needle = self.query.strip()
-        names = list(self.languages) or ([self.current["language"]] if self.current["language"] else [])
+        names = list(target_languages(self.env.prefs, self.languages))
+        if self.current["language"] and self.current["language"] not in names:
+            names.append(self.current["language"])
         rows: list = []
         recent = [v for v in self._pref_list(LANG_RECENTS_PREF) if v in names][:5]
         if recent and not needle:
@@ -879,7 +884,22 @@ class ModelSheet:
             rows.insert(0, ft.ListTile(title=ft.Text(f"Use “{needle}”"), leading=ft.Icon(ft.Icons.EDIT),
                                        on_click=lambda e, v=needle: self.select("language", v), dense=True,
                                        key="language-free-text"))
+        if not needle:  # U11 item 9: any language a model can write, not only the built-in list
+            rows.append(ft.ListTile(title=ft.Text("＋ Add a language"),
+                                    subtitle=ft.Text("Type its name in the search field above"),
+                                    leading=ft.Icon(ft.Icons.ADD), dense=True, key="language-add",
+                                    on_click=lambda e: self._focus_language_search()))
         return rows
+
+    def _focus_language_search(self) -> None:
+        self.search.hint_text = "Type a language, then pick “Use …”"
+        try:
+            self.search.update()
+            run = getattr(self._page, "run_task", None)
+            if callable(run):
+                run(self.search.focus)
+        except Exception:
+            pass
 
     # ---- route row + thinking -----------------------------------------------------------------------
 
@@ -947,7 +967,7 @@ class ModelSheet:
                 label = f"{title}{slot} ✓" if signed else (
                     "Sign in with ChatGPT" if login == "authgpt" else f"Sign in with {title}")
                 chips.append(ft.Chip(label=ft.Text(label), leading=ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED, size=18),
-                                     on_click=lambda e, r=login, a=account: self._sign_in_route(r, a),
+                                     on_click=lambda e, r=login, a=account: self.open_auth_menu(r, a),
                                      key=f"route-login-{login}"))
                 chips.append(self._slot_menu(login, account))
                 if login == "authgem" and signed and self.env.gemini_status is not None:
@@ -1084,6 +1104,7 @@ class ModelSheet:
             self._remember(RECENTS_PREF, value)
         elif field_name == "language":
             self._remember(LANG_RECENTS_PREF, value)
+            remember_language(self.env.prefs, value, self.languages)
         chat_scope = bool(self.chat_switch.value) and not self.one_shot
         # Close first: on_select may open the next sheet or a snackbar (a one-shot send opens the
         # Manual glossary sheet), which a later close must not take down instead of this one.
@@ -1122,6 +1143,44 @@ class ModelSheet:
     def _sign_in(self, model: str) -> None:
         route, account = mc.login_route(model)
         self._sign_in_route(route or "authgpt", account)
+
+    def open_auth_menu(self, current: str, account: int = 0) -> ActionSheet:
+        """The route row's sign-in chip (U11 item 7): switch between sign-ins without the login page. Each
+        sign-in that is signed in switches the model to its most cost-efficient one
+        (``recommended_model``); one that is not opens its sign-in. Signing in again (a refresh) and the
+        Accounts page are rows of the same menu."""
+        try:
+            signed_keys = set(self.env.signed_in_keys() or ()) if self.env.signed_in_keys is not None else set()
+        except Exception:
+            signed_keys = set()
+        models = getattr(self.snapshot, "models", ()) or ()
+        items: list = []
+        for route in mc.AUTH_ROUTES:
+            title = mc.LOGIN_TITLES.get(route, route)
+            signed = any(re.fullmatch(route + r"\d*", str(k)) for k in signed_keys) or (
+                route == current and self.signed_in(self.current.get("model", ""), route, account))
+            best = mc.recommended_model(route, models)
+            mark = " (current)" if route == current else ""
+            if signed and best:
+                items.append(ActionItem(f"{title} ✓ · {best}{mark}", lambda m=best: self.select("model", m),
+                                        icon="ACCOUNT_CIRCLE", key=f"auth-menu-{route}"))
+            elif signed:
+                items.append(ActionItem(f"{title} ✓{mark}", None, icon="ACCOUNT_CIRCLE", key=f"auth-menu-{route}",
+                                        disabled_reason="Poll providers to list its models"))
+            else:
+                items.append(ActionItem(f"{title} · Sign in{mark}", lambda r=route: self._sign_in_route(r, 0),
+                                        icon="LOGIN", key=f"auth-menu-{route}"))
+        title = mc.LOGIN_TITLES.get(current, current)
+        slot = f" #{account}" if account else ""
+        items.append(ActionItem(f"Sign in to {title}{slot} again", lambda: self._sign_in_route(current, account),
+                                icon="REFRESH", key="auth-menu-refresh"))
+        items.append(ActionItem("Accounts…", self._accounts, icon="MANAGE_ACCOUNTS", key="auth-menu-accounts"))
+        sheet = ActionSheet(items, title="Switch sign-in", subtitle="Uses each sign-in's most cost-efficient model",
+                            tablet=bool(self.env.tablet()))
+        if self._page is not None:
+            sheet.show(self._page)
+        self.action_sheet = sheet
+        return sheet
 
     def _sign_in_route(self, route: str, account: int = 0) -> None:
         self.close()

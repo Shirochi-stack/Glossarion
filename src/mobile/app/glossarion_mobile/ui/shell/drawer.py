@@ -56,6 +56,7 @@ from glossarion_mobile.state.app_state import AppState
 from glossarion_mobile.state.chat_index import ChatSummary
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_AVATAR
+from glossarion_mobile.ui.components.status import count_badge
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = ["DESTINATIONS", "ChatDrawer", "KEYS_ROUTE", "SEARCH_DEBOUNCE", "SEARCH_GROUPS", "SEARCH_LIMIT",
@@ -545,7 +546,7 @@ class ChatDrawer:
     def _refresh_badge(self) -> None:
         badge = self.state.jobs_badge.value
         chip = self.destination_chips["jobs"]
-        chip.badge = ft.Badge(label=str(badge.count)) if badge.count else None
+        chip.badge = count_badge(str(badge.count)) if badge.count else None
 
     def _refresh_status(self) -> None:
         text, warning = drawer_status(self.state)

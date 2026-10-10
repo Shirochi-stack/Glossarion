@@ -61,6 +61,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     merge_meta_overrides,
     normalize_rendered_card_limit,
 )
+from glossarion_mobile.state.languages import remember_language, target_languages
 from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.dialogs import close_dialog
@@ -171,6 +172,24 @@ def inherited_value(get: Callable[[str, Any], Any], field_name: str, listing: An
                          "target_language": "English"}[field_name])
 
 
+#: vertical gap between the rows of a chat settings section (U11 item 5)
+ROW_GAP = 12
+ROW_GAP_DATA = "chat-settings-row-gap"
+#: Target language option that opens the "add a language" field (U11 item 9)
+ADD_LANGUAGE_OPTION = "__add_language__"
+
+
+def _spaced(controls: list) -> list:
+    """``controls`` with a ``ROW_GAP`` spacer between neighbours (ExpansionTile has no ``spacing``); the
+    first and last controls stay first and last."""
+    out: list = []
+    for index, control in enumerate(controls):
+        if index:
+            out.append(ft.Container(height=ROW_GAP, data=ROW_GAP_DATA))
+        out.append(control)
+    return out
+
+
 class ChatSettingsSheet:
     def __init__(
         self,
@@ -215,9 +234,10 @@ class ChatSettingsSheet:
         self.subject = "series" if subject == "series" else "chat"
         self.title = title or ("Series defaults" if self.subject == "series" else "Direct Text settings")
         self._page: Any = None
-        self.body = ft.Column([], tight=True, spacing=4)
+        self.body = ft.Column([], tight=True, spacing=8)
         #: section id -> ExpansionTile of the last rebuild; its ``expanded`` follows the user's taps.
         self.sections: dict = {}
+        self.adding_language = False  # the "Add a language" field is open (U11 item 9)
         self.expanded = {"model": True, "glossary": True, "run": False, "conversation": False, "series": True}
         self.scope_button = ft.SegmentedButton(
             segments=[ft.Segment(value="chat", label="This series" if self.subject == "series" else "This chat"),
@@ -395,11 +415,42 @@ class ChatSettingsSheet:
         return ft.Row([dropdown, *self._badge(field_name)], spacing=4, key=f"setting-{field_name}")
 
     def _on_select(self, field_name: str, value: Any) -> None:
+        if field_name == "target_language" and value == ADD_LANGUAGE_OPTION:
+            self.adding_language = True
+            self.rebuild()
+            self._changed()
+            return
         if str(value or "").startswith(GROUP_OPTION_PREFIX):  # a group heading: put the shown value back
             self.rebuild()
             self._changed()
             return
         self.set_value(field_name, value)
+
+    # ---- target language (U11 item 9: any language a model can write, not only the built-in list) ----
+
+    def _language_row(self) -> ft.Control:
+        options = [(lang, lang) for lang in target_languages(self.prefs, self.languages)]
+        options.append((ADD_LANGUAGE_OPTION, "＋ Add a language…"))
+        row = self._dropdown("target_language", "Target language", options)
+        if not self.adding_language:
+            return row
+        field = ft.TextField(label="Language name", hint_text="e.g. Tagalog, Esperanto, Old Norse", dense=True,
+                             autofocus=True, expand=True, key="setting-add-language-field",
+                             on_submit=lambda e: self._add_language(e.control.value))
+        return ft.Column([row, ft.Row([field, ft.TextButton(content="Add", key="setting-add-language",
+                                                           on_click=lambda e: self._add_language(field.value)),
+                                       ft.TextButton(content="Cancel", on_click=lambda e: self._add_language(None))],
+                                      spacing=4)], spacing=6, tight=True, key="setting-target_language-box")
+
+    def _add_language(self, name: Any) -> None:
+        """Keep the typed name in the user's language list (Prefs) and make it the target language."""
+        self.adding_language = False
+        name = " ".join(str(name or "").split())
+        if name:
+            remember_language(self.prefs, name, self.languages)
+            self.set_value("target_language", name)
+        self.rebuild()
+        self._changed()
 
     # ---- prompt profiles (owner #15/#16) -----------------------------------------------------------
 
@@ -637,7 +688,7 @@ class ChatSettingsSheet:
                     self._dropdown("profile", "Prompt profile", self.profile_options(),
                                    missing="{value} (missing)" if self.listing is not None else "{value}"),
                     self._prompt_card(),
-                    self._dropdown("target_language", "Target language", [(lang, lang) for lang in self.languages]),
+                    self._language_row(),
                     self._dropdown("output_mode", "Default output mode", [(m.id, f"{m.emoji} {m.label}") for m in OUTPUT_MODES]),
                 ],
             ),
@@ -710,6 +761,9 @@ class ChatSettingsSheet:
             self._add_series_section()
         reset_label = "Reset series defaults" if self.subject == "series" else "Reset chat overrides"
         footer = [ft.TextButton(content=reset_label, on_click=lambda e: self.reset())] if self.scope == "chat" else []
+        for tile in self.sections.values():  # U11 item 5: rows of a section were packed edge to edge
+            tile.controls_padding = ft.Padding.only(left=16, right=16, bottom=12)
+            tile.controls = _spaced([c for c in tile.controls if getattr(c, "data", None) != ROW_GAP_DATA])
         self.body.controls = [*self.sections.values(), *footer]
 
     def _add_series_section(self) -> None:

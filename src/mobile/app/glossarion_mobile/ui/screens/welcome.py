@@ -1,13 +1,15 @@
 """First-run Welcome (``/welcome``, UI_SPEC §4.17): 5 steps, re-runnable from About.
 
-1. **Welcome · Sign in with ChatGPT** - the default model is ``authgpt/gpt-6-luna``
-   (desktop default), so the primary action signs in (OAuthBridge LoginPanel);
-   "Use an API key or another provider" goes to step 2; "Skip for now" moves on
-   (Send then stays blocked with the "Sign in with ChatGPT" fix action).
-2. **Other providers** - choose another model (ModelSheet), paste an API key (the
-   desktop main key field, ``api_key``), sign in with Claude / Gemini / Grok
-   (LoginSheet through the same OAuthBridge; Grok shows its device code), or set up
-   a local Ollama / LM Studio host (Settings › Endpoints).
+1. **Welcome · Sign in** - ChatGPT, Claude, Gemini and Grok side by side (U11 item 1: no
+   provider is pushed; LoginSheet through the OAuthBridge, Grok shows its device code). After a
+   sign-in the provider's models are polled (``ModelCatalogService.refresh``): ChatGPT keeps the
+   default ``authgpt/gpt-6-luna`` while the provider still lists it, otherwise (and for the other
+   providers) the model becomes that provider's most cost-efficient one
+   (``model_catalog.recommended_model``: Sonnet, the newest Flash, the newest Grok); "Change
+   model" opens the ModelSheet on that provider's models. "Use an API key or a local model" goes
+   to step 2; "Skip for now" moves on.
+2. **Other providers** - choose another model (ModelSheet), paste an API key (the desktop main
+   key field, ``api_key``), or set up a local Ollama / LM Studio host (Settings › Endpoints).
 3. **Target language and glossary mode** - the desktop first-run "Choose Your
    Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected) and
    the target language (``output_language``).
@@ -47,15 +49,18 @@ from glossarion_mobile.ui.screens.welcome_flow import (
     welcome_glossary_updates,
 )
 
-#: Step 2 sign-ins (ChatGPT is step 1): (provider, button label).
-OTHER_SIGN_INS = (("authcd", "Sign in with Claude"), ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"))
+#: Step 1 sign-ins, all equal (U11 item 1): (provider, button label).
+SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
+            ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"))
+OTHER_SIGN_INS = SIGN_INS[1:]
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
-PROVIDER_MODEL_QUERY = {"authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/"}
+PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/"}
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
     "OTHER_SIGN_INS",
+    "SIGN_INS",
     "OFF_GLOSSARY_MODES",
     "PROVIDER_MODEL_QUERY",
     "STEPS",
@@ -89,6 +94,9 @@ class WelcomeScreen(Screen):
         navigate: Optional[Callable[..., Any]] = None,
         copy_text: Optional[Callable[[str], Any]] = None,
         page: Any = None,
+        catalog: Any = None,  # ModelCatalogService: the post-sign-in model check (U11 item 1)
+        current_model: Optional[Callable[[], str]] = None,
+        on_set_model: Optional[Callable[[str], Any]] = None,
     ) -> None:
         super().__init__(match)
         self.flow = flow or WelcomeFlow()
@@ -110,6 +118,10 @@ class WelcomeScreen(Screen):
         self.page = page
         self.login_sheet: Any = None
         self.provider_status: dict = {}
+        self.catalog = catalog
+        self.current_model = current_model
+        self.on_set_model = on_set_model
+        self.model_notes: dict = {}  # provider -> the model check's line
         self.page_area = ft.Container(expand=True)
         self.dots = ft.Row([], alignment=ft.MainAxisAlignment.CENTER, spacing=6)
         self.back_button = ft.TextButton(content="Back", on_click=lambda e: self.back())
@@ -120,24 +132,26 @@ class WelcomeScreen(Screen):
 
     # ---- pages ----------------------------------------------------------------------------
 
+    def _ensure_oauth(self) -> None:
+        if self.oauth is None and self.login_panel_factory is not None:
+            try:
+                self.oauth = getattr(self.login_panel_factory(self._signed_in), "oauth", None)
+            except Exception:
+                self.oauth = None
+
     def _page_sign_in(self) -> ft.Control:
-        login: ft.Control
-        if self.login_panel_factory is not None:
-            login = self.login_panel_factory(self._signed_in)
-            if self.oauth is None:
-                self.oauth = getattr(login, "oauth", None)
-        else:
-            login = ReasonChip(reason="Sign-in is unavailable in this build")
+        self._ensure_oauth()
         return ft.Column(
             [
                 ft.Image(src=HALGAKOS_ASSET, width=96, height=96),
                 ft.Text(STEP_TITLES["sign_in"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
                 ft.Text(TAGLINE, theme_style=ft.TextThemeStyle.BODY_MEDIUM, text_align=ft.TextAlign.CENTER),
-                ft.Text("The default model is GPT-6 Luna (authgpt/gpt-6-luna). Sign in with your ChatGPT account to use it.",
+                ft.Text("Sign in with an AI subscription you already have (no API key needed). Glossarion checks its "
+                        "models and picks its most cost-efficient one; you can change it any time.",
                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                         text_align=ft.TextAlign.CENTER),
-                login,
-                ft.TextButton(content="Use an API key or another provider", on_click=lambda e: self.go("providers")),
+                *[self._sign_in_row(provider, label) for provider, label in SIGN_INS],
+                ft.TextButton(content="Use an API key or a local model", on_click=lambda e: self.go("providers")),
                 ft.TextButton(content="Skip for now", on_click=lambda e: self.next()),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -153,18 +167,20 @@ class WelcomeScreen(Screen):
             row: list[ft.Control] = [ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
                                      ft.Text(f"{name} signed in" + (f" · {who}" if who else ""))]
             if self.on_use_provider is not None or self.on_choose_model is not None:
-                # The model is still GPT-6 Luna (ChatGPT): Send stays blocked until a model is chosen.
-                row.append(ft.FilledTonalButton(content=f"Use a {name} model", key=f"welcome-use-{provider}",
-                                                on_click=lambda e, p=provider: self.use_provider(p)))
-            return ft.Row(row, wrap=True, key=f"welcome-signed-{provider}")
+                row.append(ft.TextButton(content="Change model", key=f"welcome-use-{provider}",
+                                         on_click=lambda e, p=provider: self.use_provider(p)))
+            note = self.model_notes.get(provider)
+            lines: list[ft.Control] = [ft.Row(row, wrap=True)]
+            if note:
+                lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                     key=f"welcome-model-{provider}"))
+            return ft.Column(lines, spacing=2, tight=True, key=f"welcome-signed-{provider}")
         if self.oauth is None:
             return ft.Row([ft.Text(label), ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
         return ft.OutlinedButton(content=label, on_click=lambda e, p=provider: self.open_sign_in(p),
                                  key=f"welcome-signin-{provider}")
 
     def _page_providers(self) -> ft.Control:
-        if self.oauth is None and self.login_panel_factory is not None:
-            self.oauth = getattr(self.login_panel_factory(self._signed_in), "oauth", None)
         local: ft.Control
         if self.navigate is not None:
             local = ft.OutlinedButton(content="Set up Ollama / LM Studio on your network",
@@ -175,13 +191,11 @@ class WelcomeScreen(Screen):
         return ft.Column(
             [
                 ft.Text(STEP_TITLES["providers"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
-                ft.Text("Use another model with your own API key, or sign in with another provider.",
+                ft.Text("Use another model with your own API key, or a model on your own network.",
                         theme_style=ft.TextThemeStyle.BODY_MEDIUM),
                 ft.FilledTonalButton(content="Choose another model", on_click=lambda e: self._choose_model()),
                 self.api_key_field,
                 ft.TextButton(content="Save API key", on_click=lambda e: self._save_key()),
-                ft.Text("Subscriptions (no API key needed)", theme_style=ft.TextThemeStyle.TITLE_SMALL),
-                *[self._sign_in_row(provider, label) for provider, label in OTHER_SIGN_INS],
                 ft.Text("Local", theme_style=ft.TextThemeStyle.TITLE_SMALL),
                 local,
             ],
@@ -364,8 +378,46 @@ class WelcomeScreen(Screen):
     def _provider_signed_in(self, provider: str, status: dict) -> None:
         self.provider_status[provider] = dict(status or {})
         self.flow.signed_in = True
+        self.flow.skipped_sign_in = False
+        self.model_notes[provider] = "Checking the models you can use…"
         self.render()
-        self.use_provider(provider)  # offer that provider's models right away
+        call_handler(self.check_model, provider)
+
+    async def check_model(self, provider: str) -> Optional[str]:
+        """After a sign-in (U11 item 1): poll the provider's models, keep the current model when it is that
+        provider's and still listed (the default GPT-6 Luna for ChatGPT), else switch to the provider's most
+        cost-efficient model; nothing found -> the ModelSheet on its models. The model in use, or None."""
+        from glossarion_mobile.services import model_catalog as mc
+
+        name = mc.LOGIN_TITLES.get(provider, provider)
+        models: tuple = ()
+        if self.catalog is not None:
+            try:
+                await self.catalog.refresh(provider, explicit=True)
+            except Exception:
+                pass  # the cached catalog still decides
+            models = tuple(getattr(getattr(self.catalog, "snapshot", None), "models", ()) or ())
+        current = str(self.current_model() if self.current_model is not None else "") or mc.DEFAULT_AUTH_MODEL
+        listed = {str(m).casefold() for m in models}
+        if mc.login_route(current)[0] == provider and current.casefold() in listed:
+            note = f"✓ Using {current}"
+            chosen: Optional[str] = current
+        else:
+            chosen = mc.recommended_model(provider, models)
+            if chosen and self.on_set_model is not None:
+                call_handler(self.on_set_model, chosen)
+                gone = (provider == "authgpt" and current.casefold() == mc.DEFAULT_AUTH_MODEL
+                        and current.casefold() not in listed)
+                note = (f"{current} is no longer offered · using {chosen}" if gone
+                        else f"✓ Using {chosen} ({name}'s most cost-efficient model)")
+            else:
+                chosen = None
+                note = f"Couldn't list {name}'s models: choose one"
+        self.model_notes[provider] = note
+        self.render()
+        if chosen is None:
+            self.use_provider(provider)
+        return chosen
 
     def _go(self, route_name: str) -> None:
         if self.navigate is not None:

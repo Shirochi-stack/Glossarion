@@ -42,7 +42,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
+    "AUTH_ROUTES",
     "AUTO_POLL_TTL_SECONDS",
+    "recommended_model",
     "CatalogCore",
     "CatalogSnapshot",
     "EXCLUDED_PROVIDERS",
@@ -405,6 +407,57 @@ def rank_models(models: Sequence[str], query: str, *, current: str = "", limit: 
 
 _LOGIN_ROUTE = re.compile(r"^(authgpt|authgem-vertex|authgem-key|authgem|authcd|authgrok)(\d{0,4})/", re.IGNORECASE)
 LOGIN_TITLES = {"authgpt": "ChatGPT", "authgem": "Gemini", "authcd": "Claude", "authgrok": "Grok"}
+
+#: The sign-in routes the mobile app offers, in the order it lists them (Welcome, ModelSheet, Model Manager).
+AUTH_ROUTES = ("authgpt", "authgem", "authcd", "authgrok")
+#: The app's default model (desktop default, ``HeadlessOwner``): kept for ChatGPT while the catalog has it.
+DEFAULT_AUTH_MODEL = "authgpt/gpt-6-luna"
+_SKIP_WORDS = ("image", "tts", "audio", "live", "embed", "vision", "multi-agent", "build", "composer", "codex",
+               "non-reasoning", "pro", "lite", "nano")
+
+
+def _version(text: str) -> float:
+    """``4-6`` / ``4.6`` / ``5`` -> 4.6 / 4.6 / 5.0 (a minor ``20`` reads as .20, i.e. below .3)."""
+    m = re.search(r"(\d+)(?:[.-](\d{1,2}))?(?!\d)", text)
+    if not m:
+        return 0.0
+    return float(f"{m.group(1)}.{m.group(2) or 0}")
+
+
+def recommended_model(route: str, models: Any) -> Optional[str]:
+    """The most cost-efficient model of a sign-in route among ``models`` (U11 item 1), or None.
+
+    ChatGPT: the default ``gpt-6-luna`` while listed, else the newest Luna (the light tier), else the newest
+    plain GPT; Claude: the newest Sonnet; Gemini: the newest Flash (not Lite/image/TTS/live); Grok: the
+    newest plain Grok (no build/composer/multi-agent variants). Preview builds lose ties."""
+    route = str(route or "").lower()
+    names = [str(m) for m in (models or ()) if str(m).lower().startswith(route + "/")
+             or re.match(rf"^{re.escape(route)}\d*/", str(m).lower())]
+    if route == "authgpt" and any(n.lower() == DEFAULT_AUTH_MODEL for n in names):
+        return next(n for n in names if n.lower() == DEFAULT_AUTH_MODEL)
+
+    def pick(pool: list, family: str) -> Optional[str]:
+        best = None
+        for name in pool:
+            stem = name.split("/", 1)[-1].lower()
+            if family not in stem or any(w in stem for w in _SKIP_WORDS):
+                continue
+            after = stem.split(family, 1)[1] if route == "authcd" else stem
+            key = (_version(after), "preview" not in stem and "exp" not in stem, -len(stem))
+            if best is None or key > best[0]:
+                best = (key, name)
+        return best[1] if best else None
+
+    if route == "authgpt":
+        return pick(names, "luna") or pick(names, "gpt")
+    if route == "authcd":
+        return pick(names, "sonnet") or pick(names, "haiku")
+    if route == "authgem":
+        return pick(names, "flash") or pick(names, "gemini")
+    if route == "authgrok":
+        return pick(names, "grok")
+    return None
+
 
 
 @dataclass(frozen=True)

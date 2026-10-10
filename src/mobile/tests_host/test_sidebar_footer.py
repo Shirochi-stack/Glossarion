@@ -73,6 +73,7 @@ PHONE_HEIGHT = 860.0
 STATUS_BAR = 24.0
 THREE_BUTTON_NAV = 48.0
 GESTURE_NAV = 24.0
+_DRAWER_SLACK = 24.0  # app_shell._DRAWER_SLACK: room the drawer box leaves under it (U11 item 2)
 KEYBOARD = 300.0
 
 
@@ -237,7 +238,7 @@ def test_phone_drawer_footer_never_scrolls_with_the_chat_list(app_env, monkeypat
             _assert_pinned_footer(drawer, nav)
 
             # 3-button navigation: the box is the list viewport minus the list's end padding
-            assert shell.drawer_box.height == PHONE_HEIGHT - STATUS_BAR - THREE_BUTTON_NAV
+            assert shell.drawer_box.height == PHONE_HEIGHT - STATUS_BAR - THREE_BUTTON_NAV - _DRAWER_SLACK
             assert _outer_list_overflow(page, shell.drawer_box.height) <= 0
             # (the U1 box, height - status bar, let the whole drawer scroll by the navigation bar)
             assert _outer_list_overflow(page, PHONE_HEIGHT - STATUS_BAR) == THREE_BUTTON_NAV
@@ -251,8 +252,8 @@ def test_phone_drawer_footer_never_scrolls_with_the_chat_list(app_env, monkeypat
 
             # switching to gesture navigation re-fits the box without a resize event
             await _media_change(session, _media(STATUS_BAR, GESTURE_NAV))
-            assert shell.drawer_box.height == PHONE_HEIGHT - STATUS_BAR - GESTURE_NAV
-            assert _outer_list_overflow(page, shell.drawer_box.height) == 0
+            assert shell.drawer_box.height == PHONE_HEIGHT - STATUS_BAR - GESTURE_NAV - _DRAWER_SLACK
+            assert _outer_list_overflow(page, shell.drawer_box.height) <= 0
 
             # rotation: media first, then the size (as the client sends them); landscape keeps the drawer
             landscape = _media(STATUS_BAR, 0.0, orientation="landscape")
@@ -260,7 +261,7 @@ def test_phone_drawer_footer_never_scrolls_with_the_chat_list(app_env, monkeypat
             await session.dispatch_event(page._i, "media_change", landscape)
             await session.dispatch_event(page._i, "resize", {"width": PHONE_HEIGHT, "height": 412})
             assert not shell.tablet and page.views[0].drawer is not None
-            assert shell.drawer_box.height == 412 - STATUS_BAR
+            assert shell.drawer_box.height == 412 - STATUS_BAR - _DRAWER_SLACK
             assert _outer_list_overflow(page, shell.drawer_box.height) <= 0
             _assert_pinned_footer(drawer, page.views[0].drawer)
             assert conn.bytes_sent > 0

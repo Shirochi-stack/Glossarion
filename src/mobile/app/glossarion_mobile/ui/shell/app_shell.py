@@ -63,6 +63,10 @@ log = logging.getLogger("glossarion.shell")
 
 #: The phone drawer box never gets shorter than this (header, search, chips, footer and a few chat rows).
 _DRAWER_MIN_HEIGHT = 300.0
+#: Kept free under the phone drawer's content box: the drawer's own list adds a few dp the insets do not
+#: report on some phones (owner, U11 item 2: the footer still needed a small scroll), so the box would be
+#: taller than its viewport. Only the chat list (``ChatDrawer.body``, expand) gets shorter.
+_DRAWER_SLACK = 24.0
 
 ScreenFactory = Callable[[RouteMatch], Screen]
 
@@ -181,7 +185,7 @@ class AppShell:
         """
         height = getattr(self.page, "height", None) or 640
         top, bottom = self._system_insets()
-        return max(_DRAWER_MIN_HEIGHT, float(height) - top - bottom)
+        return max(_DRAWER_MIN_HEIGHT, float(height) - top - bottom - _DRAWER_SLACK)
 
     def apply_insets(self, e: Any = None) -> bool:
         """``page.on_media_change`` (system bars, navigation mode, rotation): re-fit the phone drawer

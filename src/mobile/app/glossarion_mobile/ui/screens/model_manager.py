@@ -25,6 +25,7 @@ screens for ``settings.models``, ``settings.keys``, ``settings.keys.pool`` and
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 import os
 from collections import OrderedDict
@@ -107,8 +108,14 @@ class ModelManagerScreen(Screen):
     def __init__(self, match: Optional[RouteMatch], *, catalog: ModelCatalogService, page: Any = None,
                  notify: Optional[Callable[..., Any]] = None, spawn: Optional[Callable[[Any], Any]] = None,
                  run_io: Optional[Callable[..., Any]] = None, tablet: bool = False,
-                 is_top: Optional[Callable[[Any], bool]] = None) -> None:
+                 is_top: Optional[Callable[[Any], bool]] = None,
+                 signed_in_keys: Optional[Callable[[], Any]] = None, sign_in: Optional[Callable[..., Any]] = None,
+                 use_model: Optional[Callable[[str], Any]] = None) -> None:
         super().__init__(match)
+        # U11 item 3, the Sign-ins tab: who is signed in, sign in / accounts, use the recommended model
+        self.signed_in_keys = signed_in_keys
+        self.sign_in = sign_in
+        self.use_model = use_model
         self.catalog = catalog
         self.page = page
         self.notify = notify
@@ -202,7 +209,8 @@ class ModelManagerScreen(Screen):
     def build_body(self) -> ft.Control:
         self._capture_loop()
         self.tabs = ft.SegmentedButton(
-            segments=[ft.Segment(value="models", label="Models"), ft.Segment(value="prefixes", label="Custom prefixes")],
+            segments=[ft.Segment(value="models", label="Models"), ft.Segment(value="auths", label="Sign-ins"),
+                      ft.Segment(value="prefixes", label="Custom prefixes")],
             selected=[self.tab], on_change=self._on_tab,
         )
         self.search = ft.TextField(hint_text="Search models", prefix_icon=ft.Icons.SEARCH, dense=True,
@@ -221,7 +229,9 @@ class ModelManagerScreen(Screen):
                                  color=ft.Colors.ON_SURFACE_VARIANT)
         self.status_row = ft.Row([], scroll=ft.ScrollMode.AUTO, spacing=6)
         self.hint = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.auth_panel = ft.Column([], spacing=6, tight=True, visible=False, key="mm-auths")
         self.models_header = ft.Column([
+            self.auth_panel,
             self.search,
             ft.Row([self.polled_chip, self.custom_chip, self.removed_chip], wrap=True, spacing=6),
             ft.Row([self.poll_button], wrap=True),
@@ -448,6 +458,10 @@ class ModelManagerScreen(Screen):
             models = list(snap.removed)
         else:
             models = snap.visible_models()
+            if filter_ == "auths":  # Sign-ins tab: the sign-in routes' models, grouped in AUTH_ROUTES order
+                order = {route: i for i, route in enumerate(mc.AUTH_ROUTES)}
+                models = sorted((m for m in models if mc.login_route(m)[0] in order),
+                                key=lambda m: order[mc.login_route(m)[0]])
             if filter_ == "custom":
                 if known is None:  # the catalog was not read yet: never "everything is custom"
                     return []
@@ -457,7 +471,12 @@ class ModelManagerScreen(Screen):
         return models
 
     def visible_models(self) -> list:
-        return self._visible_for(self.snapshot, self.filter, self.query, self.builtin_keys)
+        return self._visible_for(self.snapshot, self.list_filter, self.query, self.builtin_keys)
+
+    @property
+    def list_filter(self) -> str:
+        """The filter the list applies: the chips' one, or "auths" on the Sign-ins tab (no chip on)."""
+        return "auths" if self.tab == "auths" and self.filter == "all" else self.filter
 
     def _inputs(self, snap: CatalogSnapshot, filter_: str, query: str, known: Optional[frozenset]) -> tuple:
         """Everything the list depends on (compared by identity first: an unchanged list costs nothing)."""
@@ -466,7 +485,8 @@ class ModelManagerScreen(Screen):
 
     @property
     def reorderable(self) -> bool:
-        return self.filter == "all" and not self.query.strip() and not self.snapshot.hide_unpolled
+        return (self.tab == "models" and self.filter == "all" and not self.query.strip()
+                and not self.snapshot.hide_unpolled)
 
     def render(self, push: bool = True, *, whole: bool = False, sync_list: bool = True) -> None:
         """Sync the header, the state card and (only when its inputs changed; never when ``sync_list``
@@ -474,7 +494,10 @@ class ModelManagerScreen(Screen):
         (``whole``: the tab changed, push the body)."""
         self.renders += 1
         snap = self.snapshot
-        models_tab = self.tab == "models"
+        models_tab = self.tab in ("models", "auths")
+        self.auth_panel.visible = self.tab == "auths"
+        if self.tab == "auths":
+            self.auth_panel.controls = self._auth_rows(snap)
         self.models_header.visible = models_tab
         self.rows.control.visible = models_tab
         self.prefix_list.visible = not models_tab
@@ -509,7 +532,7 @@ class ModelManagerScreen(Screen):
 
     def _sync_list(self, snap: CatalogSnapshot) -> bool:
         known = self.builtin_keys
-        inputs = self._inputs(snap, self.filter, self.query, known)
+        inputs = self._inputs(snap, self.list_filter, self.query, known)
         if inputs == self._list_inputs:
             return False
         precomputed = self._precomputed
@@ -517,11 +540,11 @@ class ModelManagerScreen(Screen):
         if precomputed is not None and precomputed[0] == inputs:
             models = precomputed[1]
         else:
-            models = self._visible_for(snap, self.filter, self.query, known)
+            models = self._visible_for(snap, self.list_filter, self.query, known)
         if snap.custom_routes != self._cache_routes:  # provider labels follow the custom prefixes
             self._row_cache.clear()
             self._cache_routes = snap.custom_routes
-        view = (self.filter, self.query.strip(), snap.hide_unpolled)
+        view = (self.list_filter, self.query.strip(), snap.hide_unpolled)
         fresh = view != self._view  # a new search / filter starts at the first rows
         self._view = view
         self._list_inputs = inputs
@@ -709,7 +732,7 @@ class ModelManagerScreen(Screen):
         self.set_tab(selected[0] if selected else "models")
 
     def set_tab(self, tab: str) -> None:
-        self.tab = tab if tab in ("models", "prefixes") else "models"
+        self.tab = tab if tab in ("models", "auths", "prefixes") else "models"
         self.tabs.selected = [self.tab]
         self._render_now(whole=True)
 
@@ -736,7 +759,7 @@ class ModelManagerScreen(Screen):
             query = (field.value or "") if field is not None else ""
         self._search_generation += 1
         generation = self._search_generation
-        snap, filter_, known = self.snapshot, self.filter, self.builtin_keys
+        snap, filter_, known = self.snapshot, self.list_filter, self.builtin_keys
         try:
             models = await self.io(self._visible_for, snap, filter_, query, known)
         except asyncio.CancelledError:
@@ -958,6 +981,59 @@ class ModelManagerScreen(Screen):
             self.snapshot = self.catalog.snapshot
             self._render_if_shown()
         return outcome
+
+    # ---- Sign-ins tab (U11 item 3) --------------------------------------------------------------------------
+
+    def _auth_rows(self, snap: CatalogSnapshot) -> list:
+        """One card per sign-in: status, the recommended (most cost-efficient) model with "Use", and
+        Sign in / Accounts. The list below shows every model of the sign-in routes."""
+        try:
+            signed = set(self.signed_in_keys() or ()) if self.signed_in_keys is not None else set()
+        except Exception:
+            signed = set()
+        rows: list = []
+        for route in mc.AUTH_ROUTES:
+            title = mc.LOGIN_TITLES.get(route, route)
+            accounts = sorted(k for k in signed if re.fullmatch(route + r"\d*", str(k)))
+            plural = "" if len(accounts) == 1 else "s"
+            status = f"✓ Signed in ({len(accounts)} account{plural})" if accounts else "Not signed in"
+            best = mc.recommended_model(route, snap.models)
+            buttons: list = []
+            if best and self.use_model is not None:
+                buttons.append(ft.TextButton(content="Use", key=f"mm-auth-use-{route}",
+                                             on_click=lambda e, m=best: self._use(m)))
+            if self.sign_in is not None:
+                buttons.append(ft.TextButton(content="Accounts" if accounts else "Sign in",
+                                             key=f"mm-auth-signin-{route}",
+                                             on_click=lambda e, r=route: self.sign_in(r, 0)))
+            rows.append(ft.Container(
+                content=ft.Row([
+                    ft.Column([ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                               ft.Text(status, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                       color=ft.Colors.PRIMARY if accounts else ft.Colors.ON_SURFACE_VARIANT),
+                               ft.Text(f"Recommended: {best}" if best else "Poll providers to list its models",
+                                       theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                       max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)],
+                              spacing=0, tight=True, expand=True),
+                    *buttons], spacing=4),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=8), border_radius=12,
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, key=f"mm-auth-{route}"))
+        return rows
+
+    def _use(self, model: str) -> None:
+        try:
+            self.use_model(model)
+        except Exception as exc:
+            self._toast(f"Could not switch the model: {exc}")
+            return
+        self._toast(f"Model: {model}")
+
+    def _toast(self, text: str) -> None:
+        if self.notify is not None:
+            try:
+                self.notify(text)
+            except Exception:
+                pass
 
     # ---- custom prefixes ---------------------------------------------------------------------------------
 
@@ -1280,6 +1356,12 @@ class ModelsKeysFeature:
             pass
         return frozenset(signed)
 
+    def use_model(self, model: str) -> None:
+        """Make ``model`` the global model (Model Manager Sign-ins "Use"; the desktop model field)."""
+        from glossarion_mobile.state.setting_writes import write_setting
+
+        write_setting(self.store, "model", str(model))
+
     def next_slot(self, route: str) -> int:
         """ModelSheet slot menu "+ Add account": OAuthBridge.next_slot (desktop slot allocation)."""
         oauth = self._oauth()
@@ -1325,7 +1407,8 @@ class ModelsKeysFeature:
         if match.name == "settings.models":
             screen: Any = ModelManagerScreen(match, catalog=self.catalog, page=self.page, notify=notify,
                                              spawn=self.spawn, run_io=self.run_io, tablet=self._tablet(),
-                                             is_top=self._is_shown)
+                                             is_top=self._is_shown, signed_in_keys=self.signed_in_keys,
+                                             sign_in=self.sign_in, use_model=self.use_model)
         elif match.name in ("settings.keys", "settings.keys.pool"):
             from glossarion_mobile.ui.screens.keys import KeysScreen
             from glossarion_mobile.ui.sheets.model_sheet import sheet_env
