@@ -203,7 +203,9 @@ def _open_browser(*, visible=False, cancel_check=None):
     port_file = directory / "DevToolsActivePort"
     port_file.unlink(missing_ok=True)
     args = [_browser_binary(), "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={directory}", "--no-first-run", "--no-default-browser-check", BASE_URL]
+            f"--user-data-dir={directory}", "--no-first-run", "--no-default-browser-check",
+            # Remote debugging sets navigator.webdriver, which makes DeepSeek's captcha always fail.
+            "--disable-blink-features=AutomationControlled", BASE_URL]
     if not visible:
         args.insert(1, "--headless=new")
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

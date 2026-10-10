@@ -297,6 +297,8 @@ app_files = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     ('browser_driver.py', '.'),
     ('update_core.py', '.'),
+    ('safe_image.py', '.'),
+    ('tor_proxy.py', '.'),
 ]
 
 # Add application files to datas
@@ -505,6 +507,8 @@ app_modules = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     'browser_driver',
     'update_core',
+    'safe_image',
+    'tor_proxy',
 ]
 
 # GUI Framework

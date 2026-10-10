@@ -323,6 +323,8 @@ app_files = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     ('browser_driver.py', '.'),
     ('update_core.py', '.'),
+    ('safe_image.py', '.'),
+    ('tor_proxy.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -531,6 +533,24 @@ app_modules = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     'browser_driver',
     'update_core',
+    'safe_image',
+    'tor_proxy',
+    'ImageRenderer',
+    'azure_document_intelligence_rest',
+    'bubble_detector',
+    'google_vision_rest',
+    'local_inpainter',
+    'manga_editor_core',
+    'manga_env',
+    'manga_files_core',
+    'manga_image_preview',
+    'manga_integration',
+    'manga_models',
+    'manga_runner',
+    'manga_settings_defaults',
+    'manga_settings_dialog',
+    'manga_translator',
+    'ocr_manager',
 ]
 # GUI Framework
 gui_modules = [
