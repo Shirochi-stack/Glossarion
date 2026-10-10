@@ -9378,12 +9378,12 @@ class TranslationProcessor:
                     print(
                         f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
-                        f"assistant/memory: {assistant_tokens:,}) / {self.get_token_budget_str()} [File: {file_ref}]"
+                        f"assistant/memory: {assistant_tokens:,}) / input limit: {self.get_token_budget_str()} / chunk size: {_translation_chunk_budget_snapshot(self.config)['cached_chunk_size']:,} [File: {file_ref}]"
                     )
                 else:
                     print(
                         f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: "
-                        f"{total_tokens:,} tokens (system + user) / {self.get_token_budget_str()} [File: {file_ref}]"
+                        f"{total_tokens:,} tokens (system + user) / input limit: {self.get_token_budget_str()} / chunk size: {_translation_chunk_budget_snapshot(self.config)['cached_chunk_size']:,} [File: {file_ref}]"
                     )
                 
                 self.client.context = 'translation'
@@ -10710,12 +10710,12 @@ class BatchTranslationProcessor:
                     defer_batch_log(
                         f"💬 {_term} {log_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
-                        f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {file_ref}]"
+                        f"assistant/memory: {assistant_tokens:,}) / input limit: {budget_str} / chunk size: {available_tokens:,} [File: {file_ref}]"
                     )
                 else:
                     defer_batch_log(
                         f"💬 {_term} {log_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
-                        f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]"
+                        f"{total_tokens:,} tokens (system + user) / input limit: {budget_str} / chunk size: {available_tokens:,} [File: {file_ref}]"
                     )
                 
                 # Generate filename before API call
@@ -12652,12 +12652,12 @@ class BatchTranslationProcessor:
                     print(
                         f"💬 Chunk 1/1 combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
-                        f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {parent_file_ref}]"
+                        f"assistant/memory: {assistant_tokens:,}) / input limit: {budget_str} / chunk size: {_translation_chunk_budget_snapshot(self.config)['cached_chunk_size']:,} [File: {parent_file_ref}]"
                     )
                 else:
                     print(
                         f"💬 Chunk 1/1 combined prompt: "
-                        f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {parent_file_ref}]"
+                        f"{total_tokens:,} tokens (system + user) / input limit: {budget_str} / chunk size: {_translation_chunk_budget_snapshot(self.config)['cached_chunk_size']:,} [File: {parent_file_ref}]"
                     )
             except Exception as e:
                 # Never break translation due to logging issues.
