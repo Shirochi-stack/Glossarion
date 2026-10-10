@@ -30,7 +30,9 @@
 # Optional repository variables: IOS_EXPORT_METHOD (default release-testing), IOS_SIGNING_CERTIFICATE
 # (default "Apple Distribution", or "Apple Development" for the debugging/development export method).
 #
-# This workflow never publishes; the APK/IPA are downloadable run artifacts kept 7 days.
+# This workflow never creates a release. On a v* tag push (like build-macos.yml) its update-release job
+# attaches the APK/AAB/IPA to the release that already exists for that tag (gh release upload --clobber);
+# without one it uploads nothing. Every run also keeps the files as run artifacts for 7 days.
 #
 # Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
 # Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
@@ -41,6 +43,9 @@
 name: Build Mobile (Android + iOS)
 
 on:
+  push:
+    tags:
+      - 'v*'  # like build-macos.yml: build, then update that tag's existing release
   workflow_dispatch:
     inputs:
       targets:
@@ -1296,3 +1301,41 @@ jobs:
           path: mobile-smoke-logs/
           if-no-files-found: warn
           retention-days: 14
+
+  # ---------------------------------------------------------------------------------------------
+  # update-release (v* tags only): attach the built files to the EXISTING release of the same tag.
+  # It never creates a release (gh release view first; no release -> a notice, nothing uploaded) and
+  # replaces files of the same name (--clobber), like build-macos.yml updating its tag's release.
+  # ---------------------------------------------------------------------------------------------
+  update-release:
+    name: Update the tag's release (APK / AAB / IPA)
+    needs: [android, ios, ios-signed]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.android.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built files
+        uses: actions/download-artifact@v8
+        with:
+          pattern: Z_Glossarion-*
+          path: release-files
+      - name: Attach them to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::notice title=No release::No release exists for $TAG yet; nothing was uploaded (this job never creates one)."
+            exit 0
+          fi
+          mapfile -t files < <(find release-files -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.ipa' \) \
+            -not -path '*Simulator*' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::warning::No APK/AAB/IPA found in the run artifacts"
+            exit 0
+          fi
+          printf 'Uploading %s\n' "${files[@]}"
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO" --clobber

@@ -315,23 +315,48 @@ def _permission_values(node, found=None) -> list:
     return found
 
 
-def test_workflow_has_no_release_or_publish_job(wf):
+RELEASE_JOB = "update-release"
+
+
+def _job_text(job_id: str) -> str:
+    """The raw YAML block of one job (from its ``  <id>:`` line to the next job)."""
+    text = BUILD_MOBILE.read_text(encoding="utf-8").replace("\r\n", "\n")
+    start = text.index(f"\n  {job_id}:\n")
+    nxt = re.search(r"\n  [A-Za-z0-9_-]+:\n", text[start + 1:])
+    return text[start:start + 1 + nxt.start()] if nxt else text[start:]
+
+
+def test_only_update_release_touches_a_release_and_never_creates_one(wf):
+    """Owner (U13): like build-macos.yml, a v* tag run attaches the APK/AAB/IPA to the release that already
+    exists for that tag. Only the update-release job may do it; nothing creates a release, pushes a tag
+    or distributes to a store."""
     jobs = wf["jobs"]
-    assert set(jobs) == BUILD_JOBS  # a new job is a deliberate change here
+    assert set(jobs) == BUILD_JOBS | {RELEASE_JOB}  # a new job is a deliberate change here
     for job_id, job in jobs.items():
+        assert job.get("environment") is None, job_id
+        if job_id == RELEASE_JOB:
+            continue
         label = f"{job_id} {job.get('name', '')}".lower()
         assert "release" not in label and "publish" not in label and "deploy" not in label, job_id
-        assert job.get("environment") is None, job_id  # no deployment environment either
-    for uses in _uses(wf):
-        lowered = uses.lower()
-        assert "release" not in lowered and "publish" not in lowered, uses
+    release = jobs[RELEASE_JOB]
+    assert release["if"].replace(" ", "").startswith("${{always()&&startsWith(github.ref,'refs/tags/')")
+    block = _job_text(RELEASE_JOB)
+    assert 'gh release view "$TAG"' in block and "--clobber" in block and "gh release upload" in block
     code = _code(BUILD_MOBILE)
-    for pattern in PUBLISH_PATTERNS + RELEASE_JOB_LEFTOVERS:
+    assert not re.search(r"\bgh\s+release\s+(create|edit|delete)\b", code)
+    for pattern in (r"action-gh-release", r"create-release", r"\bgit\s+(?:push|tag)\b", r"\baltool\b",
+                    r"\bfastlane\b", r"testflight", r"upload-google-play", r"androidpublisher", r"appdistribution"):
         assert not re.search(pattern, code, re.I), pattern
-    # the one comment line that states the rule
+    whole = BUILD_MOBILE.read_text(encoding="utf-8").replace("\r\n", "\n")
+    outside = _code_of(whole.replace(block, "\n"))
+    for pattern in PUBLISH_PATTERNS + RELEASE_JOB_LEFTOVERS:
+        assert not re.search(pattern, outside, re.I), pattern  # only the update-release job uses a token / release
     header = BUILD_MOBILE.read_text(encoding="utf-8").split("\nname:", 1)[0]
-    assert "# This workflow never publishes; the APK/IPA are downloadable run artifacts kept 7 days." in header
-    assert "release job" not in header and "publish_release" not in header
+    assert "# This workflow never creates a release." in header and "publish_release" not in header
+
+
+def _code_of(block: str) -> str:
+    return "\n".join(line.split("#", 1)[0].rstrip() for line in block.splitlines() if line.split("#", 1)[0].strip())
 
 
 def test_no_publish_release_input(wf):
@@ -348,15 +373,15 @@ def test_no_publish_release_input(wf):
     assert set(re.findall(r"\bvars\.([A-Za-z0-9_]+)", text)) == {"IOS_EXPORT_METHOD", "IOS_SIGNING_CERTIFICATE"}
 
 
-def test_permissions_are_read_only(wf):
+def test_permissions_are_read_only_except_the_release_update(wf):
     assert wf["permissions"] == {"contents": "read"}
-    values = _permission_values(wf)
-    assert values == ["read"]  # the top-level block only; no job raises it
     for job_id, job in wf["jobs"].items():
-        assert "permissions" not in job, job_id
-    code = _code(BUILD_MOBILE)
-    assert not re.search(r":\s*write\b", code) and "write-all" not in code
-    assert "contents: write" not in BUILD_MOBILE.read_text(encoding="utf-8")
+        if job_id == RELEASE_JOB:
+            assert job["permissions"] == {"contents": "write"}
+        else:
+            assert "permissions" not in job, job_id
+    assert sorted(_permission_values(wf)) == ["read", "write"]
+    assert "write-all" not in _code(BUILD_MOBILE)
 
 
 def test_workflow_call_cannot_publish(wf):
@@ -401,15 +426,14 @@ def test_release_only_tools_are_gone():
 # triggers, other workflows, retention
 # ---------------------------------------------------------------------------
 
-def test_build_mobile_has_only_manual_and_call_triggers(wf):
+def test_build_mobile_triggers_manual_call_and_version_tags(wf):
     triggers = _triggers(wf)
-    assert set(triggers) == {"workflow_dispatch", "workflow_call"}
-    assert "tags" not in json.dumps(triggers) and "branches" not in json.dumps(triggers)
-    # the raw `on:` block too (a second `on` key would be merged away by the YAML loader)
+    assert set(triggers) == {"workflow_dispatch", "workflow_call", "push"}
+    assert triggers["push"] == {"tags": ["v*"]}  # like build-macos.yml; no branch pushes
     text = BUILD_MOBILE.read_text(encoding="utf-8")
     assert len(re.findall(r"^on:\s*$", text, re.M)) == 1
     on_block = text.split("\non:", 1)[1].split("\npermissions:", 1)[0]
-    assert not re.search(r"^  (push|pull_request|pull_request_target|schedule|release|create|repository_dispatch)\b",
+    assert not re.search(r"^  (pull_request|pull_request_target|schedule|release|create|repository_dispatch)\b",
                          on_block, re.M)
 
 

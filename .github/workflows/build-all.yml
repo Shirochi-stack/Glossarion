@@ -840,4 +840,4 @@ jobs:
           compression-level: 0
 
   # Mobile (Android + iOS) is intentionally not built here: desktop release runs must never build
-  # or publish the mobile app. Run build-mobile.yml manually (workflow_dispatch) instead.
+  # the mobile app. Run build-mobile.yml manually, or push a v* tag (it updates that tag's existing release).
