@@ -1167,7 +1167,7 @@ def test_composer_header_transcript_and_plus_sheet():
     changes = []
     composer = Composer(on_content_changed=changes.append)
     field = composer.text_field
-    assert (field.multiline, field.min_lines, field.max_lines, field.shift_enter) == (True, 1, 6, True)
+    assert (field.multiline, field.min_lines, field.max_lines, field.shift_enter) == (True, 3, 8, True)
     assert field.hint_text == HINT_EMPTY == "Message to translate…"
     assert not composer.has_content and not composer.chips_row.visible
     composer.handle_text("hello")

@@ -121,6 +121,7 @@ class ChatHeader:
         self.subtitle = ft.Text(
             spans=[self.model_span, self.profile_sep, self.profile_span, self.target_sep, self.target_span, self.caret_span],
             theme_style=ft.TextThemeStyle.LABEL_SMALL,
+            size=10,  # below LABEL_SMALL's 11 (owner request)
             color=muted,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
@@ -278,7 +279,7 @@ class ChatHeader:
                 self.target_span,
                 self.caret_span,
             ]
-        self.custom_badge.visible = context.custom and not compact
+        self.custom_badge.visible = False  # owner request: no "custom" chip (the model line says it)
 
     @property
     def subtitle_text(self) -> str:

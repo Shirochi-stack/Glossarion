@@ -29,6 +29,8 @@ renders it.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
@@ -48,6 +50,8 @@ from glossarion_mobile.ui.screens.welcome_flow import (
     WelcomeFlow,
     welcome_glossary_updates,
 )
+
+log = logging.getLogger(__name__)
 
 #: Step 1 sign-ins, all equal (U11 item 1): (provider, button label).
 SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
@@ -118,6 +122,11 @@ class WelcomeScreen(Screen):
         self.on_api_key = on_api_key
         self.on_request_notifications = on_request_notifications
         self.on_request_battery = on_request_battery
+        #: async () -> {"notifications": bool, "battery": bool}: the real grants, so step 4 shows ✓ instead of
+        #: a button for a permission that is already given (the launch dialog, or an earlier visit)
+        self.on_permission_status: Optional[Callable[[], Any]] = None
+        self.permission_state: dict = {}
+        self._permission_check: Any = None
         self.on_try = on_try
         self.is_android = is_android
         self.is_ios = is_ios
@@ -350,13 +359,15 @@ class WelcomeScreen(Screen):
             ft.Text(STEP_TITLES["permissions"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
             ft.Text("Notifications show translation progress and let you stop a job from the notification.",
                     theme_style=ft.TextThemeStyle.BODY_MEDIUM),
-            ft.FilledTonalButton(content="Allow notifications", on_click=lambda e: self._call(self.on_request_notifications)),
+            self._permission_control("notifications", "Notifications allowed", "Allow notifications",
+                                     self.on_request_notifications),
         ]
         if self.is_android:
             rows += [
                 ft.Text("Long translations keep running with the screen off when battery optimisation is disabled for "
                         "Glossarion.", theme_style=ft.TextThemeStyle.BODY_MEDIUM),
-                ft.FilledTonalButton(content="Disable battery optimisation", on_click=lambda e: self._call(self.on_request_battery)),
+                self._permission_control("battery", "Battery optimisation is off for Glossarion",
+                                         "Disable battery optimisation", self.on_request_battery),
             ]
         rows.append(
             ft.Text(
@@ -366,21 +377,62 @@ class WelcomeScreen(Screen):
                 color=ft.Colors.ON_SURFACE_VARIANT,
             )
         )
+        if self.on_permission_status is not None and self._permission_check is None:
+            self._permission_check = call_handler(self.refresh_permissions)
         return ft.Column(rows, spacing=10, scroll=ft.ScrollMode.AUTO)
+
+    def _permission_control(self, key: str, granted_label: str, button_label: str,
+                            handler: Optional[Callable[[], Any]]) -> ft.Control:
+        if self.permission_state.get(key):
+            return ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY), ft.Text(granted_label)],
+                          key=f"welcome-granted-{key}")
+        return ft.FilledTonalButton(content=button_label, key=f"welcome-ask-{key}",
+                                    on_click=lambda e: call_handler(self._ask_permission, handler))
+
+    async def _ask_permission(self, handler: Optional[Callable[[], Any]]) -> None:
+        if handler is not None:
+            try:
+                result = handler()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                log.exception("permission request failed")
+        await self.refresh_permissions()
+
+    async def refresh_permissions(self) -> None:
+        """Read the real grants; re-render step 4 only when they changed."""
+        try:
+            state = dict(await self.on_permission_status() or {}) if self.on_permission_status else {}
+        except Exception:
+            log.exception("permission status failed")
+            state = {}
+        finally:
+            self._permission_check = None
+        if state and state != self.permission_state:
+            self.permission_state = state
+            self._permission_check = False  # checked: no re-check on this render
+            self.render()
+            self._permission_check = None
 
     def _page_done(self) -> ft.Control:
         chips = [
             ft.Chip(label=ft.Text(label), on_click=lambda e, t=tid: self._try(t), key=f"try-{tid}")
             for tid, label in (("paste", "Paste text to translate"), ("import", "Import a book"), ("library", "Open Library"))
         ]
-        return ft.Column(
-            [
-                ft.Image(src=HALGAKOS_ASSET, width=72, height=72),
-                ft.Text(STEP_TITLES["done"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
-                ft.Row(chips, wrap=True, spacing=8, alignment=ft.MainAxisAlignment.CENTER),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=12,
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Image(src=HALGAKOS_ASSET, width=72, height=72),
+                    ft.Text(STEP_TITLES["done"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
+                    ft.Row(chips, wrap=True, spacing=8, alignment=ft.MainAxisAlignment.CENTER),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=12,
+                tight=True,
+            ),
+            alignment=ft.Alignment.CENTER,  # the whole width and height of the page area (was left-aligned)
+            expand=True,
         )
 
     def _page(self) -> ft.Control:

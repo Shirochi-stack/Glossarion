@@ -468,14 +468,16 @@ def test_composer_collapses_pills_and_the_header_grows_at_large_text():
     opened = []
     composer = Composer(on_pill=opened.append)
     composer.set_pills([("glossary", "Glossary: Off"), ("thinking", "Thinking off"), ("multipass", "Multipass on")])
-    assert [c.key for c in composer.pills_row.controls] == ["pill-glossary", "pill-thinking", "pill-multipass"]
+    # one settings button (Chat settings) at every text size; its tooltip names the changed options
+    (chip,) = composer.pills_row.controls
+    assert chip.key == "pill-options" and "Thinking off" in chip.tooltip
     composer.set_compact_text(True)
     (chip,) = composer.pills_row.controls
-    assert chip.key == "pill-options" and chip.label.value == "Options (3)" and composer.text_field.max_lines == 4
+    assert chip.key == "pill-options" and composer.text_field.max_lines == 4
     chip.on_click(None)
     assert opened == ["options"]
     composer.set_compact_text(False)
-    assert len(composer.pills_row.controls) == 3
+    assert len(composer.pills_row.controls) == 1
     composer.set_text_scale(1.3 * 1.5)
     assert composer.text_field.text_style.size == pytest.approx(15 * 1.95)
 
@@ -581,7 +583,7 @@ def test_system_font_scale_probe_drives_the_compact_rules(app_env):
             assert shell.layout.text_scale == pytest.approx(2.4) and header.wrapper.toolbar_height > 80
             shell.text_probe._on_size(types.SimpleNamespace(width=40.0, height=ts.PROBE_SP))
             app.state.text_scale.set(1.0)
-            assert not shell.layout.compact_text and composer.text_field.max_lines == 6
+            assert not shell.layout.compact_text and composer.text_field.max_lines == 8
             assert header.wrapper.toolbar_height == 56
         finally:
             await _UF._stop(app)

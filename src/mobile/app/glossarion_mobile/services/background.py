@@ -354,6 +354,24 @@ class BackgroundExecution:
             log.info("launch notification request failed: %s", exc)
             return None
 
+    async def ask_permissions_on_launch(self, delay: float = LAUNCH_ASK_DELAY) -> None:
+        """First launch: the notification dialog, then (Android) the battery-optimisation dialog by itself,
+        one after the other; each is asked once (a Run tap or Welcome step 4 can still ask)."""
+        await self.ask_notifications_on_launch(delay)
+        if not self.is_android or self._pref(PREF_BATTERY_PROMPT, False):
+            return
+        try:
+            if not await self.battery_exempt():
+                result = await self._request_permission("IGNORE_BATTERY_OPTIMIZATIONS")
+                log.info("launch battery optimisation exemption: %s", result)
+            self._set_pref(PREF_BATTERY_PROMPT, True)
+        except Exception as exc:
+            log.info("launch battery request failed: %s", exc)
+
+    async def battery_exempt(self) -> bool:
+        """Android: Glossarion is exempt from battery optimisation (False when unknown)."""
+        return await self._permission_status("IGNORE_BATTERY_OPTIMIZATIONS") == "granted"
+
     async def request_notification_permission(self) -> str:
         """One system dialog at a time: a caller while a request is pending (the first-launch ask, then a Run
         tap) gets that request's answer instead of a second dialog."""

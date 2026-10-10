@@ -357,11 +357,11 @@ def test_chat_header_subtitle_ellipsizes_in_the_app_bar(app_env, width):
 
             # the owner's case: per-chat overrides show the "custom" chip next to the subtitle
             view._on_model_sheet_select("model", LONG_MODEL, True)
-            assert await _until(lambda: header.custom_badge.visible), "the 'custom' chip did not appear"
+            assert await _until(lambda: header.subtitle_text.startswith(LONG_MODEL)), "the chat model did not apply"
             assert header.subtitle_text.startswith(LONG_MODEL + " · ")
             encoded = wire(_phone_bar(page, header))
             layout = header_layout(encoded, width, header)
-            assert_header_fits(layout, width=width, state="chat with 'This chat only' overrides", custom=True)
+            assert_header_fits(layout, width=width, state="chat with 'This chat only' overrides", custom=False)  # no "custom" chip any more
             assert pre_fix_overflow(encoded, width, header) > 0
         finally:
             app.jobs.close()
@@ -390,10 +390,10 @@ def test_scratch_chat_header_with_custom_chip_fits(app_env, width):
             assert_header_fits(layout, width=width, state="scratch chat", custom=False)
 
             view._on_model_sheet_select("model", LONG_MODEL, True)
-            assert await _until(lambda: header.custom_badge.visible), "the 'custom' chip did not appear"
+            assert await _until(lambda: header.subtitle_text.startswith(LONG_MODEL)), "the chat model did not apply"
             assert header.scratch_chip.visible and header.save_scratch_button.visible
             layout = header_layout(wire(_phone_bar(page, header)), width, header)
-            assert_header_fits(layout, width=width, state="scratch chat with 'This chat only' overrides", custom=True)
+            assert_header_fits(layout, width=width, state="scratch chat with 'This chat only' overrides", custom=False)  # no "custom" chip any more
         finally:
             app.jobs.close()
             await tf._stop(app)
@@ -423,7 +423,7 @@ def test_scratch_chat_header_follows_a_resize_within_the_phone_class(app_env, st
             cid = view._on_new_scratch()
             assert cid and await _until(lambda: header.scratch_chip.visible)
             view._on_model_sheet_select("model", LONG_MODEL, True)
-            assert await _until(lambda: header.custom_badge.visible), "the 'custom' chip did not appear"
+            assert await _until(lambda: header.subtitle_text.startswith(LONG_MODEL)), "the chat model did not apply"
             assert header.narrow == (start < NARROW_HEADER_DP), (start, header.narrow)
             page.width = end
             app.on_resize(types.SimpleNamespace(width=end, height=800))
@@ -432,7 +432,7 @@ def test_scratch_chat_header_follows_a_resize_within_the_phone_class(app_env, st
             assert header.narrow == narrow and header.compact_actions == narrow, \
                 (start, end, header.narrow, header.compact_actions)
             layout = header_layout(wire(_phone_bar(page, header)), end, header)
-            assert_header_fits(layout, width=end, state=f"scratch chat resized from {start} dp", custom=True)
+            assert_header_fits(layout, width=end, state=f"scratch chat resized from {start} dp", custom=False)
         finally:
             app.jobs.close()
             await tf._stop(app)

@@ -158,6 +158,20 @@ def _snapshot_time(snapshot: Any) -> float:
     return 0.0
 
 
+def _streamed_text(model: Any, run_state: Mapping) -> bool:
+    """The run streamed reply text (the stream's content or any request segment's)."""
+    if str(run_state.get("streamed_content") or "").strip():
+        return True
+    if model is None:
+        return False
+    if str(getattr(model, "_streamed_content", "") or "").strip():
+        return True
+    segments = getattr(model, "_active_request_segments", None)
+    if segments is None and isinstance(model, list):
+        segments = model
+    return any(str((s or {}).get("content") or "").strip() for s in (segments or ()) if isinstance(s, Mapping))
+
+
 @dataclass
 class ChatRun:
     cid: str
@@ -959,8 +973,13 @@ class ChatRuns:
         model = run.stream.model()
         # Keep the run root of a stopped / failed run so Resume continues from its progress file.
         cleanup = state == "DONE" and not run.stop_requested
-        result = store.finish_run(session, self.finish_run_state(run, snapshot),
-                                  model if model is not None else [], cleanup=cleanup)
+        run_state = self.finish_run_state(run, snapshot)
+        if not cleanup and not _streamed_text(model, run_state):
+            # A failed / stopped run with no reply: its output file still holds the untranslated input
+            # (the text pipeline writes the source for an unfinished chunk), which the card showed as the
+            # answer. Not read: the card says no output was produced; the run root stays for Resume.
+            run_state["expected_output"] = ""
+        result = store.finish_run(session, run_state, model if model is not None else [], cleanup=cleanup)
         status = None
         if isinstance(result, Mapping):
             run.output_folder = str(result.get("output_folder") or "")

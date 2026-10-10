@@ -217,8 +217,8 @@ class Composer(ft.Container):
         self.slash = SlashPopover(on_pick=self._on_slash_pick)
         self.text_field = ft.TextField(
             multiline=True,
-            min_lines=1,
-            max_lines=6,
+            min_lines=3,
+            max_lines=8,
             shift_enter=True,
             border=ft.NoInputBorder(),
             dense=True,
@@ -253,7 +253,7 @@ class Composer(ft.Container):
             rotate=ft.Rotate(angle=0),
             animate_rotation=motion.rotation_animation(tokens.MOTION["sheet_ms"]),
         )
-        self.pills_row = ft.Row([], spacing=6, scroll=ft.ScrollMode.AUTO, visible=False)
+        self.pills_row = ft.Row([], spacing=6, scroll=ft.ScrollMode.AUTO, visible=True)
         self.token_hint = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, visible=False, no_wrap=True)
         self.send_button = SendStopButton(on_action=self._on_send_action)
         # ＋ · output mode · option pills (take the rest, scroll) · token hint · Send; one line, never
@@ -267,7 +267,7 @@ class Composer(ft.Container):
                 self.send_button,
             ],
             spacing=ACTION_ROW_GAP,
-            height=tokens.SIZES["composer_row"] + 8,
+            height=tokens.SIZES["composer_row"],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self.content = ft.Column(
@@ -281,8 +281,8 @@ class Composer(ft.Container):
         )
         self.bgcolor = ft.Colors.SURFACE_CONTAINER_HIGH
         self.border_radius = tokens.RADII["composer"]
-        self.padding = ft.Padding.symmetric(vertical=8, horizontal=12)
-        self.margin = ft.Margin.only(left=8, right=8, bottom=8)
+        self.padding = ft.Padding.only(left=12, right=12, top=8, bottom=2)
+        self.margin = ft.Margin.only(left=8, right=8, bottom=4)
 
     # ---- content -------------------------------------------------------------------
 
@@ -387,30 +387,22 @@ class Composer(ft.Container):
         self._render_pills()
 
     def _render_pills(self) -> None:
+        """One ⚙ button (Chat settings) instead of a pill per option; tinted with the changed options
+        in its tooltip when any differ from the defaults (owner request: model and options live in the header
+        and Chat settings, the action row stays short)."""
         pills = self.pills
-        if self._compact_text and pills:
-            count = len(pills)
-            self.pills_row.controls = [
-                ft.Chip(
-                    label=ft.Text(f"Options ({count})", theme_style=ft.TextThemeStyle.LABEL_MEDIUM),
-                    leading=ft.Icon(ft.Icons.TUNE, size=16),
-                    visual_density=ft.VisualDensity.COMPACT,
-                    tooltip=", ".join(label for _pill_id, label in pills),
-                    on_click=lambda e: self.on_pill("options") if self.on_pill else None,
-                    key="pill-options",
-                )
-            ]
-        else:
-            self.pills_row.controls = [
-                ft.Chip(
-                    label=ft.Text(label),
-                    on_click=lambda e, p=pill_id: self.on_pill(p) if self.on_pill else None,
-                    on_delete=lambda e, p=pill_id: self.on_pill_reset(p) if self.on_pill_reset else None,
-                    key=f"pill-{pill_id}",
-                )
-                for pill_id, label in pills
-            ]
-        self.pills_row.visible = bool(pills)
+        changed = ", ".join(label for _pill_id, label in pills)
+        self.pills_row.controls = [
+            ft.IconButton(
+                icon=ft.Icons.SETTINGS_OUTLINED if not pills else ft.Icons.SETTINGS,
+                icon_color=ft.Colors.PRIMARY if pills else None,
+                tooltip=f"Chat settings · {changed}" if pills else "Chat settings",
+                on_click=lambda e: self.on_pill("options") if self.on_pill else None,
+                size_constraints=HIT_TARGET,
+                key="pill-options",
+            )
+        ]
+        self.pills_row.visible = True
 
     def set_token_hint(self, text: str) -> None:
         """"≈1.2k tok"; hidden at >= 160% text scale (§7.5), where it would crowd the action row."""
@@ -466,7 +458,7 @@ class Composer(ft.Container):
         """>= 160% text scale: max 4 lines, no token hint, the pills as "Options (n)" (§7.5)."""
         changed = bool(compact) != self._compact_text
         self._compact_text = bool(compact)
-        self.text_field.max_lines = 4 if compact else 6
+        self.text_field.max_lines = 4 if compact else 8
         self.set_token_hint(self.token_hint.value or "")
         if changed:
             self._render_pills()

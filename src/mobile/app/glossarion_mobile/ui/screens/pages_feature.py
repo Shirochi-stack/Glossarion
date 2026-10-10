@@ -386,7 +386,20 @@ class AccountsProfilesFeature:
             screen.on_request_notifications = lambda: self.request_notifications(background)
             if getattr(background, "is_android", False):
                 screen.on_request_battery = lambda: self.request_battery(background)
+            screen.on_permission_status = lambda: self.permission_status(background)
         return screen
+
+    @staticmethod
+    async def permission_status(background: Any) -> dict:
+        """Welcome step 4: which permissions are already granted (notifications; Android: battery exemption)."""
+        out: dict = {}
+        try:
+            out["notifications"] = (await background.notification_status()).get("state") == "on"
+        except Exception:
+            pass
+        if getattr(background, "is_android", False):
+            out["battery"] = await background.battery_exempt()
+        return out
 
     @staticmethod
     async def request_notifications(background: Any) -> str:

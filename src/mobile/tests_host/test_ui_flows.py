@@ -943,10 +943,10 @@ def test_header_subtitle_ellipsizes_in_the_app_bar_on_narrow_phones(app_env):
                 assert isinstance(bar, ft.AppBar) and bar is header.wrapper and bar.title is header.title_slot
                 assert header.title_slot.content is header.title_column
                 slot = _app_bar_title_px(bar, width)
-                for custom in (False, True):
+                for custom in (False,):  # the "custom" chip was removed (owner request)
                     header.set_context(ChatContext(custom=custom, **context))
                     assert header.subtitle_text == "authgpt/gpt-6-luna · Universal · → English ▾"
-                    assert header.custom_badge.visible is custom
+                    assert header.custom_badge.visible is False  # no "custom" chip (owner request)
                     overflow, sizes = _row_layout(row, slot)
                     assert overflow == 0, (width, custom, overflow)
                     natural, laid_out = sizes[id(header.subtitle)]
