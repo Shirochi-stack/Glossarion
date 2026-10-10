@@ -1,10 +1,10 @@
 # DeepSeek web login (`authds/`)
 
 Select `authds/flash`, `authds/pro`, `authds/flash-thinking`, or
-`authds/pro-thinking` in the desktop model picker. The **Enable DeepSeek and
-Chutes Thinking** toggle in Other Settings also controls DeepThink for every
-`authds/` model, including the `-thinking` aliases. Effort and Responses API
-format settings apply to API routes; web chat uses the DeepThink on/off setting.
+`authds/pro-thinking` in the desktop model picker. The `-thinking` aliases enable
+DeepThink; plain `flash` and `pro` disable it. The DeepSeek thinking toggle,
+effort, and Responses API format settings in Other Settings apply to API routes
+and do not override `authds/` model names.
 Click **DeepSeek Login** and
 sign in on DeepSeek's own website; choose its Google login option if preferred.
 The first translation also opens login automatically when needed. Leave the API

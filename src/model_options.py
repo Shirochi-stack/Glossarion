@@ -2038,7 +2038,7 @@ PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
         <h4>DeepSeek web chat (authds/)</h4>
         <p>Select <code>authds/flash</code> or <code>authds/pro</code>, then click DeepSeek Login.
         Sign in on DeepSeek's website, using Google if preferred. No API key is needed.
-        The DeepSeek thinking toggle in Other Settings controls DeepThink for all <code>authds/</code> models.
+        Add <code>-thinking</code> to either model name for DeepThink mode.
         Requires desktop Chrome or Edge; web-chat account limits apply.</p>
 
         <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>

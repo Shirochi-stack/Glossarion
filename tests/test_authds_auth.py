@@ -95,21 +95,22 @@ def test_completion_uses_fresh_chat_and_omits_sampling(monkeypatch):
 @pytest.mark.parametrize('model', ['authds/flash', 'authds/pro', 'authds/flash-thinking',
                                   'authds/pro-thinking', 'authds/deepseek-reasoner'])
 @pytest.mark.parametrize('enabled', [False, True])
-def test_shared_deepseek_toggle_controls_web_deepthink(monkeypatch, model, enabled):
+def test_model_alias_controls_deepthink_independent_of_toggle(monkeypatch, model, enabled):
     monkeypatch.setenv('ENABLE_DEEPSEEK_THINKING', '1' if enabled else '0')
     data=frame({'v':{'response':{'fragments':[{'type':'RESPONSE','content':'answer'}]}}}) + frame({},'close')
     page=Page([{'chunks':[data],'done':True}])
     ds._complete(page,model,[{'content':'source'}],5,None,None,None)
-    assert ('"thinking": true' in page.start) is enabled
-    assert ('"thinking": false' in page.start) is (not enabled)
+    expected = model.endswith('-thinking') or model.endswith('/deepseek-reasoner')
+    assert ('"thinking": true' in page.start) is expected
+    assert ('"thinking": false' in page.start) is (not expected)
 
 
-def test_deepthink_default_matches_shared_toggle_default(monkeypatch):
+def test_plain_model_disables_deepthink_when_toggle_unset(monkeypatch):
     monkeypatch.delenv('ENABLE_DEEPSEEK_THINKING',raising=False)
     data=frame({'v':{'response':{'fragments':[{'type':'RESPONSE','content':'answer'}]}}}) + frame({},'close')
     page=Page([{'chunks':[data],'done':True}])
     ds._complete(page,'authds/flash',[{'content':'source'}],5,None,None,None)
-    assert '"thinking": true' in page.start
+    assert '"thinking": false' in page.start
 
 
 @pytest.mark.parametrize("chunks", [[], [frame({"v":{"response":{"fragments":[{"type":"RESPONSE","content":"partial"}]}}})],

@@ -414,10 +414,7 @@ _START_SCRIPT = r"""(() => {
 
 
 def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback):
-    model_type, _ = resolve_model(model)
-    # The shared DeepSeek toggle is authoritative, including for legacy
-    # -thinking aliases. Run-env also disables this for lightweight requests.
-    thinking = os.getenv("ENABLE_DEEPSEEK_THINKING", "1") == "1"
+    model_type, thinking = resolve_model(model)
     cfg = {"model": model_type, "thinking": thinking, "prompt": build_prompt(messages),
            "worker": os.environ.get("AUTHDS_POW_WORKER_URL"), "fallbackWorker": POW_WORKER_URL}
     if before_send_callback:
