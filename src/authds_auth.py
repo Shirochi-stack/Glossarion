@@ -18,6 +18,7 @@ import time
 import urllib.request
 from contextlib import contextmanager
 
+import browser_driver
 import mobile_runtime
 
 BASE_URL = "https://chat.deepseek.com"
@@ -34,6 +35,7 @@ class AuthDSError(RuntimeError):
 
 def cancel_stream():
     _cancel.set()
+    browser_driver.cancel_pages(BROWSER_OWNER)
 
 
 def reset_cancel():
@@ -113,8 +115,86 @@ class _Page:
         return result.get("result", {}).get("value")
 
 
+#: browser_driver page owner (Glossarion Mobile's in-app WebView): cancel_stream() closes only these pages.
+BROWSER_OWNER = "authds"
+#: Where the mobile app's own sign-in page is (its DeepSeek sign-in opens chat.deepseek.com in a
+#: visible in-app WebView; the hidden pages that translate share that WebView storage).
+MOBILE_SIGN_IN_HINT = "Sign in to DeepSeek in Settings › Accounts › DeepSeek first."
+
+
+class _DriverPage:
+    """A ``browser_driver`` page (Glossarion Mobile's hidden WebView) with the CDP page's ``evaluate``.
+    It has no ``call``: worker discovery falls back to the known proof-worker asset."""
+
+    driver = True
+
+    def __init__(self, page):
+        self.page = page
+
+    def evaluate(self, expression):
+        try:
+            return self.page.run_js(expression, 30000)
+        except browser_driver.BrowserCancelled as exc:
+            raise AuthDSError("AuthDS: translation stopped by user", "cancelled") from exc
+        except Exception as exc:
+            raise AuthDSError("AuthDS browser script failed. Reload DeepSeek and sign in again.",
+                              "browser_error") from exc
+
+
+@contextmanager
+def _driver_page(cancel_check=None):
+    """A DeepSeek page of the registered browser driver, loaded and ready (mobile; no subprocess)."""
+    try:
+        driver = browser_driver.require_driver("AuthDS")
+    except browser_driver.BrowserUnavailable as exc:
+        raise AuthDSError("AuthDS needs an in-app browser here (Glossarion Mobile) or the desktop app with "
+                          "Chrome/Edge.", "config_error") from exc
+
+    def cancelled():
+        return _cancel.is_set() or bool(cancel_check and cancel_check())
+
+    page = driver.open_page(owner=BROWSER_OWNER, cancel_check=cancelled)
+    try:
+        page.load(BASE_URL)
+        wrapped = _DriverPage(page)
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            _check(cancel_check)
+            try:
+                if wrapped.evaluate("document.readyState !== 'loading' && location.origin === 'https://chat.deepseek.com'"):
+                    break
+            except AuthDSError as exc:
+                if exc.error_type == "cancelled":
+                    raise
+            time.sleep(.3)
+        else:
+            raise AuthDSError("DeepSeek page did not finish loading. Check your connection and try again.",
+                              "browser_error")
+        yield wrapped
+    finally:
+        page.close()
+
+
+def driver_session_present(cancel_check=None):
+    """Mobile sign-in check: whether the in-app WebView storage holds a DeepSeek session (marks it)."""
+    with _driver_page(cancel_check) as page:
+        present = bool(page.evaluate(_TOKEN_PRESENT))
+    marker = profile_dir() / ".signed_in"
+    if present:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(mode=0o600)
+    else:
+        marker.unlink(missing_ok=True)
+    return present
+
+
 @contextmanager
 def _open_browser(*, visible=False, cancel_check=None):
+    if browser_driver.use_driver("AUTHDS_MODE"):
+        # Glossarion Mobile: the in-app WebView driver (no Chrome/Edge process); its sign-in is the app's.
+        with _driver_page(cancel_check) as page:
+            yield page
+        return
     # Keep the process-spawn gate in the same function for the mobile collector.
     if not mobile_runtime.subprocesses_available():
         raise AuthDSError("AuthDS web login currently needs the desktop app and Chrome/Edge. On mobile, use deepseek/ with an API key.", "config_error")
@@ -199,6 +279,17 @@ _TOKEN_PRESENT = """(() => {
 
 
 def _wait_login(page, log_fn, cancel_check=None, timeout=300):
+    if getattr(page, "driver", False):
+        # a hidden in-app page cannot show DeepSeek's login: only an existing session counts
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            _check(cancel_check)
+            if page.evaluate(_TOKEN_PRESENT):
+                (profile_dir() / ".signed_in").touch(mode=0o600)
+                return
+            time.sleep(.3)
+        (profile_dir() / ".signed_in").unlink(missing_ok=True)
+        raise AuthDSError(f"AuthDS: not signed in. {MOBILE_SIGN_IN_HINT}", "auth_error")
     log_fn("AuthDS: Sign in on the DeepSeek browser window. You can choose Continue with Google; Glossarion does not receive your Google password.")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -470,7 +561,7 @@ def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
             visible = not has_session() or attempt == 1
             with _open_browser(visible=visible, cancel_check=cancel_check) as page:
                 if visible:
-                    if attempt:
+                    if attempt and not getattr(page, "driver", False):
                         _clear_page_token(page)
                     _wait_login(page, log_fn, cancel_check)
                 else:

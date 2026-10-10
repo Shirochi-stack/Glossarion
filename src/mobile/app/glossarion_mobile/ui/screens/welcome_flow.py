@@ -9,6 +9,7 @@ compares them with the desktop source.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 __all__ = [
     "DEFAULT_GLOSSARY_MODE",
@@ -83,6 +84,9 @@ class WelcomeFlow:
     signed_in: bool = False
     skipped_sign_in: bool = False
     api_key_set: bool = False
+    # U13: the run budget the user sets here (None: leave the setting alone)
+    max_output_tokens: Optional[int] = None
+    chunk_size: Optional[str] = None  # "" = auto (manual_chunk_size cleared)
     finished: bool = False
     skipped: bool = False
     history: list = field(default_factory=list)
@@ -129,6 +133,10 @@ class WelcomeFlow:
         updates = welcome_glossary_updates(self.glossary_mode)
         if self.target_language:
             updates["output_language"] = self.target_language
+        if self.max_output_tokens:
+            updates["max_output_tokens"] = int(self.max_output_tokens)
+        if self.chunk_size is not None:
+            updates["manual_chunk_size"] = str(self.chunk_size)
         updates["glossary_mode_dialog_shown"] = True
         self.finished = True
         return updates

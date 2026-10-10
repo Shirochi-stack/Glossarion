@@ -259,7 +259,7 @@ def test_http_403_preserves_session_and_does_not_relogin(monkeypatch, tmp_path):
 def test_mobile_rejected_before_process_spawn(monkeypatch):
     monkeypatch.setattr(ds.mobile_runtime,'subprocesses_available',lambda:False)
     monkeypatch.setattr(ds.subprocess,'Popen',lambda *a,**k:pytest.fail('must not launch'))
-    with pytest.raises(ds.AuthDSError,match='desktop'):
+    with pytest.raises(ds.AuthDSError,match='desktop'):  # no browser driver registered: a clear error, no spawn
         with ds._open_browser(): pass
 
 

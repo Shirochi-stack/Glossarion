@@ -676,6 +676,8 @@ class ChatFeature:
             catalog=_catalog_service(),
             current_model=lambda: str(env.config_get("model", "") or "") if env else "",
             on_set_model=set_model,
+            default_max_tokens=int((env.config_get("max_output_tokens", None) if env else None) or 16384),
+            default_chunk_size=str((env.config_get("manual_chunk_size", "") if env else "") or ""),
         )
 
     def needs_welcome(self) -> bool:

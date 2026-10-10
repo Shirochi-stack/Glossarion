@@ -44,6 +44,7 @@ __all__ = [
     "CONTEXT_MODE_CHOICES",
     "CONTEXT_MODE_KEY",
     "CONTEXT_MODE_WRITES",
+    "MOBILE_MAX_OUTPUT_TOKENS",
     "MOBILE_STREAMING_DEFAULT",
     "PROFILE_KEY",
     "RULE_KEYS",
@@ -98,6 +99,8 @@ STREAMING_WRITES = STREAMING_KEYS + ("enable_thoughts",)
 #: What an absent streaming toggle means on Glossarion Mobile (owner 2026-10-08: ON; the desktop default
 #: stays off). A saved or imported value always wins, and the default itself is never written.
 MOBILE_STREAMING_DEFAULT = True
+#: the mobile output-token budget when none is saved (desktop default 128000; owner, U13)
+MOBILE_MAX_OUTPUT_TOKENS = 16384
 #: Enable thoughts when absent (owner_state / run_env: ``config.get('enable_thoughts', True)``).
 THOUGHTS_DEFAULT = True
 _STREAMING_DEFAULTS = {**{key: MOBILE_STREAMING_DEFAULT for key in STREAMING_KEYS}, "enable_thoughts": THOUGHTS_DEFAULT}
@@ -257,6 +260,8 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
         return config
     for key in STREAMING_KEYS:
         config.setdefault(key, MOBILE_STREAMING_DEFAULT)
+    # owner (U13): a phone run asks for at most 16,384 output tokens unless the user saved another budget
+    config.setdefault("max_output_tokens", MOBILE_MAX_OUTPUT_TOKENS)
     if bool(config.get("stream_thinking_logs")) and not bool(config.get("enable_thoughts", THOUGHTS_DEFAULT)):
         rules = _rules()
         try:

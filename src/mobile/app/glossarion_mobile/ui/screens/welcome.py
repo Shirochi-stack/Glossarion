@@ -53,6 +53,11 @@ from glossarion_mobile.ui.screens.welcome_flow import (
 SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
             ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"))
 OTHER_SIGN_INS = SIGN_INS[1:]
+#: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
+#: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
+KEYLESS = (("authnd", "NVIDIA Build free models (authnd/, no sign-in)"),)
+#: output-token slider range (the mobile default is 16,384; the field takes any value)
+TOKEN_SLIDER = (1024, 131072)
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
 PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/"}
@@ -97,6 +102,8 @@ class WelcomeScreen(Screen):
         catalog: Any = None,  # ModelCatalogService: the post-sign-in model check (U11 item 1)
         current_model: Optional[Callable[[], str]] = None,
         on_set_model: Optional[Callable[[str], Any]] = None,
+        default_max_tokens: Optional[int] = None,
+        default_chunk_size: str = "",
     ) -> None:
         super().__init__(match)
         self.flow = flow or WelcomeFlow()
@@ -121,6 +128,8 @@ class WelcomeScreen(Screen):
         self.catalog = catalog
         self.current_model = current_model
         self.on_set_model = on_set_model
+        self.default_max_tokens = default_max_tokens  # the saved budget, else the mobile default
+        self.default_chunk_size = default_chunk_size
         self.model_notes: dict = {}  # provider -> the model check's line
         self.page_area = ft.Container(expand=True)
         self.dots = ft.Row([], alignment=ft.MainAxisAlignment.CENTER, spacing=6)
@@ -151,6 +160,8 @@ class WelcomeScreen(Screen):
                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                         text_align=ft.TextAlign.CENTER),
                 *[self._sign_in_row(provider, label) for provider, label in SIGN_INS],
+                ft.Text("No account needed", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                *[self._keyless_row(provider, label) for provider, label in KEYLESS],
                 ft.TextButton(content="Use an API key or a local model", on_click=lambda e: self.go("providers")),
                 ft.TextButton(content="Skip for now", on_click=lambda e: self.next()),
             ],
@@ -179,6 +190,77 @@ class WelcomeScreen(Screen):
             return ft.Row([ft.Text(label), ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
         return ft.OutlinedButton(content=label, on_click=lambda e, p=provider: self.open_sign_in(p),
                                  key=f"welcome-signin-{provider}")
+
+    def _keyless_row(self, provider: str, label: str) -> ft.Control:
+        note = self.model_notes.get(provider)
+        lines: list[ft.Control] = [ft.OutlinedButton(content=label, key=f"welcome-keyless-{provider}",
+                                                     on_click=lambda e, p=provider: call_handler(self.use_keyless, p))]
+        if note:
+            lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                 key=f"welcome-model-{provider}"))
+        return ft.Column(lines, spacing=2, tight=True)
+
+    async def use_keyless(self, provider: str) -> None:
+        """A keyless route: poll its models first, then the ModelSheet on them (the user picks a model that
+        exists right now)."""
+        self.model_notes[provider] = "Checking the models you can use…"
+        self.render()
+        count = 0
+        if self.catalog is not None:
+            try:
+                await self.catalog.refresh(provider, explicit=True)
+            except Exception:
+                pass
+            models = tuple(getattr(getattr(self.catalog, "snapshot", None), "models", ()) or ())
+            count = sum(1 for m in models if str(m).lower().startswith(provider + "/"))
+        self.model_notes[provider] = (f"{count} models available · pick one" if count
+                                      else "Couldn't list its models right now; you can still pick one")
+        self.flow.signed_in = True  # a usable route: the next step follows
+        self.render()
+        self.use_provider(provider)
+
+    def _run_budget(self) -> ft.Control:
+        """U13: the output-token budget (slider + field; mobile default 16,384) and the chunk size (blank: auto)."""
+        current = int(self.flow.max_output_tokens or self.default_max_tokens or 16384)
+        low, high = TOKEN_SLIDER
+        field = ft.TextField(label="Output token limit", value=str(current), dense=True, width=170,
+                             keyboard_type=ft.KeyboardType.NUMBER, key="welcome-max-tokens")
+        slider = ft.Slider(min=low, max=high, value=max(low, min(high, current)), expand=True,
+                           key="welcome-max-tokens-slider")
+
+        def from_slider(e: Any) -> None:
+            value = int(round(float(e.control.value) / 1024.0)) * 1024 or low
+            self.flow.max_output_tokens = value
+            field.value = str(value)
+            try:
+                field.update()
+            except Exception:
+                pass
+
+        def from_field(e: Any) -> None:
+            text = str(e.control.value or "").strip()
+            if text.isdigit() and int(text) > 0:
+                self.flow.max_output_tokens = int(text)
+                slider.value = max(low, min(high, int(text)))
+                try:
+                    slider.update()
+                except Exception:
+                    pass
+
+        slider.on_change = from_slider
+        field.on_change = from_field
+        chunk = ft.TextField(label="Chunk size (tokens)", hint_text="Blank = auto", dense=True, width=170,
+                             value=self.flow.chunk_size or self.default_chunk_size or "",
+                             keyboard_type=ft.KeyboardType.NUMBER, key="welcome-chunk-size",
+                             on_change=lambda e: setattr(self.flow, "chunk_size",
+                                                         str(e.control.value or "").strip()))
+        return ft.Column([
+            ft.Text("Request size", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+            ft.Row([slider, field], spacing=8),
+            chunk,
+            ft.Text("Lower limits suit phones and free tiers; leave the chunk size blank to let Glossarion choose.",
+                    theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+        ], spacing=6, tight=True)
 
     def _page_providers(self) -> ft.Control:
         local: ft.Control
@@ -239,6 +321,7 @@ class WelcomeScreen(Screen):
                 ft.Text(STEP_TITLES["language_glossary"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
                 ft.Text("Select how glossary extraction runs when you translate", theme_style=ft.TextThemeStyle.BODY_SMALL),
                 language,
+                self._run_budget(),
                 ft.ResponsiveRow([self._mode_card(card) for card in GLOSSARY_MODE_CARDS], spacing=8, run_spacing=8),
                 ft.Text(NOTE, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
             ],

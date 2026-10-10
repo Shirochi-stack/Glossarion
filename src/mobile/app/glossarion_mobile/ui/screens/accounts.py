@@ -55,7 +55,6 @@ log = logging.getLogger("glossarion.accounts")
 
 #: UI_SPEC §4.13 "Unavailable on mobile" (label, reason).
 UNAVAILABLE_ACCOUNTS = (
-    ("DeepSeek web login (authds/)", "Needs desktop Chrome or Edge; use deepseek/ with an API key on mobile"),
     ("Antigravity", "Needs the desktop npm/bun proxy"),
     ("OCAGY", "Needs the desktop npm/bun proxy"),
     ("OpenCode Zen (ocz/)", "Needs the desktop npm/bun proxy"),
@@ -67,6 +66,12 @@ UNAVAILABLE_ACCOUNTS = (
     ("Claude Code CLI import", "Reads the desktop CLI credential store"),
     ("Grok CLI import", "Reads the desktop CLI credential store"),
 )
+
+DEEPSEEK_URL = "https://chat.deepseek.com"
+DEEPSEEK_ABOUT = ("DeepSeek's web chat with your own DeepSeek account (authds/flash, authds/pro and their -thinking "
+                  "variants), no API key. You sign in on DeepSeek's site in an in-app browser; translations then run "
+                  "in hidden in-app browser pages that share that session. Each chunk is a new chat in your DeepSeek "
+                  "history; the website controls temperature and output limits.")
 
 #: UI_SPEC §4.13 Experimental (best effort): the browser-backed routes, run in hidden in-app
 #: browser pages by services.webview_bridge. (label, route, how it works).
@@ -722,9 +727,99 @@ class AccountsScreen(Screen):
 
     def build_body(self) -> ft.Control:
         controls: list[ft.Control] = [self._provider_card(provider) for provider in self.providers]
+        controls.append(self._deepseek_card())
         controls.append(self._experimental_tile())
         # U12 item 1: routes that cannot work on mobile (Tor, desktop helpers) are not listed at all
         return ft.ListView(controls=controls, expand=True, padding=12, spacing=8)
+
+    # ---- DeepSeek web (authds/, U13 item 4) ----------------------------------------------------------
+
+    def _deepseek_signed(self) -> bool:
+        try:
+            import authds_auth
+
+            return bool(authds_auth.has_session())
+        except Exception:
+            return False
+
+    def _deepseek_card(self) -> ft.Control:
+        """DeepSeek web sign-in (``authds/``): DeepSeek's own site in a visible in-app browser; the hidden
+        pages that translate share its storage (the in-app browser of ``services.webview_bridge``)."""
+        available, reason = webview_bridge.availability()
+        signed = self._deepseek_signed()
+        self.deepseek_status = ft.Text("✓ Signed in" if signed else "Not signed in",
+                                       theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                       color=ft.Colors.PRIMARY if signed else ft.Colors.ON_SURFACE_VARIANT,
+                                       key="account-authds-status")
+        if not available:
+            return unavailable_tile("DeepSeek (authds/)", reason=NEEDS_WEBVIEW_CHIP, detail=reason,
+                                    subtitle="authds/flash · authds/pro", dense=False, key="account-authds")
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED),
+                        ft.Text("DeepSeek (authds/)", theme_style=ft.TextThemeStyle.TITLE_SMALL, expand=True),
+                        ReasonChip(reason=EXPERIMENTAL_CHIP, detail=DEEPSEEK_ABOUT)], spacing=8),
+                self.deepseek_status,
+                ft.Row([ft.FilledTonalButton(content="Sign in again" if signed else "Sign in", icon=ft.Icons.LOGIN,
+                                             on_click=lambda e: self.open_deepseek_sign_in(), key="account-authds-signin"),
+                        ft.TextButton(content="Check sign-in", on_click=lambda e: call_handler(self.check_deepseek),
+                                      key="account-authds-check")], wrap=True, spacing=8),
+            ], spacing=6, tight=True),
+            padding=12, border_radius=tokens.RADII["card"], bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            key="account-authds")
+
+    def open_deepseek_sign_in(self) -> Any:
+        """chat.deepseek.com in a visible in-app browser; "I'm signed in" checks the session."""
+        import flet_webview as fwv
+
+        from glossarion_mobile.ui.components.sheet import bottom_sheet
+
+        page = self._page()
+        if page is None:
+            return None
+        height = max(360.0, float(getattr(page, "height", 0) or 720) * 0.85)
+        sheet_ref: dict = {}
+
+        async def done() -> None:
+            close_dialog(page, sheet_ref.get("sheet"))
+            await self.check_deepseek()
+
+        content = ft.Container(height=height, content=ft.Column([
+            ft.Text("Sign in on DeepSeek (email or phone; Google sign-in does not work inside apps)",
+                    theme_style=ft.TextThemeStyle.BODY_SMALL),
+            ft.Container(content=fwv.WebView(url=DEEPSEEK_URL, expand=True), expand=True),
+            ft.Row([ft.TextButton(content="Close", on_click=lambda e: close_dialog(page, sheet_ref.get("sheet"))),
+                    ft.FilledButton(content="I'm signed in", on_click=lambda e: call_handler(done),
+                                    key="authds-signed-in")], alignment=ft.MainAxisAlignment.END),
+        ], spacing=6), padding=ft.Padding.only(left=8, right=8, bottom=8))
+        sheet = bottom_sheet(content, key="authds-signin-sheet")
+        sheet_ref["sheet"] = sheet
+        page.show_dialog(sheet)
+        return sheet
+
+    async def check_deepseek(self) -> bool:
+        """Whether the in-app browser holds a DeepSeek session (``authds_auth.driver_session_present``)."""
+        try:
+            import authds_auth
+
+            run = self.run_io
+            present = bool(await run(authds_auth.driver_session_present) if run is not None
+                           else await asyncio.to_thread(authds_auth.driver_session_present))
+        except Exception as exc:
+            log.info("DeepSeek sign-in check failed: %s", exc)
+            present = False
+        status = getattr(self, "deepseek_status", None)
+        if status is not None:
+            status.value = "✓ Signed in" if present else "Not signed in"
+            status.color = ft.Colors.PRIMARY if present else ft.Colors.ON_SURFACE_VARIANT
+            try:
+                status.update()
+            except Exception:
+                pass
+        if self.notify is not None:
+            self.notify("DeepSeek: signed in · use authds/flash or authds/pro" if present
+                        else "DeepSeek: no session found. Sign in on the page, then check again")
+        return present
 
     def _experimental_tile(self) -> ft.Control:
         """UI_SPEC §4.13 Experimental: AuthND / Gemini Free. Tappable rows (how it works +
