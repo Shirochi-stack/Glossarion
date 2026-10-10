@@ -257,8 +257,9 @@ THINKING_FIELDS = {
                   "anthropic_effort"),
     "deepseek": ("enable_deepseek_thinking", "deepseek_effort", "deepseek_use_responses_api"),
 }
-#: The shared thinking settings (Other Settings › Thinking on desktop) that apply to every family.
-GENERAL_THINKING_FIELDS = ("pass_thinking_all_openai", "lightweight_thinking_level", "stream_thinking_logs",
+#: The shared thinking settings (Other Settings › Thinking on desktop) that apply to every family. Never
+#: stream_thinking_logs: mobile has one real-time streaming toggle for all streamed output.
+GENERAL_THINKING_FIELDS = ("pass_thinking_all_openai", "lightweight_thinking_level",
                            "skip_book_title_thinking", "skip_metadata_thinking", "skip_toc_thinking")
 FAMILY_TITLES = {
     "gpt": "GPT / OpenRouter / NIM / OpenCode",
