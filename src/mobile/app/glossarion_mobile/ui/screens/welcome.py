@@ -133,6 +133,7 @@ class WelcomeScreen(Screen):
         self.default_max_tokens = default_max_tokens  # the saved budget, else the mobile default
         self.default_chunk_size = default_chunk_size
         self.model_notes: dict = {}  # provider -> the model check's line
+        self.keyless_chosen: set = set()  # keyless routes whose recommended model is in use
         self.page_area = ft.Container(expand=True)
         self.dots = ft.Row([], alignment=ft.MainAxisAlignment.CENTER, spacing=6)
         self.back_button = ft.TextButton(content="Back", on_click=lambda e: self.back())
@@ -197,17 +198,23 @@ class WelcomeScreen(Screen):
         note = self.model_notes.get(provider)
         lines: list[ft.Control] = [ft.OutlinedButton(content=label, key=f"welcome-keyless-{provider}",
                                                      on_click=lambda e, p=provider: call_handler(self.use_keyless, p))]
+        if provider in self.keyless_chosen:
+            lines.append(ft.TextButton(content="Change model", key=f"welcome-use-{provider}",
+                                       on_click=lambda e, p=provider: self.use_provider(p)))
         if note:
             lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                  key=f"welcome-model-{provider}"))
         return ft.Column(lines, spacing=2, tight=True)
 
     async def use_keyless(self, provider: str) -> None:
-        """A keyless route: poll its models first, then the ModelSheet on them (the user picks a model that
-        exists right now)."""
+        """A keyless route: poll its models first, then use its recommended model (authnd/: the highest
+        Nemotron) and say which; without one, the ModelSheet on its models (a model that exists right now)."""
+        from glossarion_mobile.services import model_catalog as mc
+
         self.model_notes[provider] = "Checking the models you can use…"
         self.render()
         count = 0
+        models: tuple = ()
         if self.catalog is not None:
             try:
                 await self.catalog.refresh(provider, explicit=True)
@@ -215,9 +222,16 @@ class WelcomeScreen(Screen):
                 pass
             models = tuple(getattr(getattr(self.catalog, "snapshot", None), "models", ()) or ())
             count = sum(1 for m in models if str(m).lower().startswith(provider + "/"))
+        chosen = mc.recommended_model(provider, models) if count else None
+        self.flow.signed_in = True  # a usable route: the next step follows
+        if chosen and self.on_set_model is not None:
+            call_handler(self.on_set_model, chosen)
+            self.keyless_chosen.add(provider)
+            self.model_notes[provider] = f"✓ Using {chosen}"
+            self.render()
+            return
         self.model_notes[provider] = (f"{count} models available · pick one" if count
                                       else "Couldn't list its models right now; you can still pick one")
-        self.flow.signed_in = True  # a usable route: the next step follows
         self.render()
         self.use_provider(provider)
 

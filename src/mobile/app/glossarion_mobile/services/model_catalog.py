@@ -417,6 +417,10 @@ _SKIP_WORDS = ("image", "tts", "audio", "live", "embed", "vision", "multi-agent"
                "non-reasoning", "pro", "lite", "nano")
 
 
+#: authnd/ Nemotron variants that are not chat models.
+_ND_SKIP_WORDS = ("safety", "guard", "reward", "parse", "retriever", "rerank", "ocr")
+
+
 def _version(text: str) -> float:
     """``4-6`` / ``4.6`` / ``5`` -> 4.6 / 4.6 / 5.0 (a minor ``20`` reads as .20, i.e. below .3)."""
     m = re.search(r"(\d+)(?:[.-](\d{1,2}))?(?!\d)", text)
@@ -430,7 +434,8 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
 
     ChatGPT: the default ``gpt-6-luna`` while listed, else the newest Luna (the light tier), else the newest
     plain GPT; Claude: the newest Sonnet; Gemini: the newest Flash (not Lite/image/TTS/live); Grok: the
-    newest plain Grok (no build/composer/multi-agent variants); NanoGPT: the newest GLM. Preview builds lose ties."""
+    newest plain Grok (no build/composer/multi-agent variants); NanoGPT: the newest GLM; NVIDIA Build (authnd/):
+    the Nemotron with the highest number (version after "nemotron", then size). Preview builds lose ties."""
     route = str(route or "").lower()
     names = [str(m) for m in (models or ()) if str(m).lower().startswith(route + "/")
              or re.match(rf"^{re.escape(route)}\d*/", str(m).lower())]
@@ -459,6 +464,19 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
         return pick(names, "grok")
     if route == "authnan":
         return pick(names, "glm")
+    if route == "authnd":
+        best = None
+        for name in names:
+            stem = name.split("/", 1)[-1].lower()
+            if "nemotron" not in stem or any(w in stem for w in _SKIP_WORDS + _ND_SKIP_WORDS):
+                continue
+            after = stem.split("nemotron", 1)[1]
+            sizes = [int(n) for n in re.findall(r"(\d+)b(?![a-z])", after)]
+            key = (_version(re.sub(r"\d+b(?![a-z])", "", after)), max(sizes or [0]),
+                   "preview" not in stem, -len(stem))
+            if best is None or key > best[0]:
+                best = (key, name)
+        return best[1] if best else None
     return None
 
 
