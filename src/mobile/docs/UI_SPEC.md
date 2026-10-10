@@ -1814,7 +1814,8 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
   - **Models:**
     - search; chips Polled only (`hide_unpolled`), Custom, Removed;
     - "🌐 Poll providers" with a per-provider status chip row;
-    - a `ReorderableListView` windowed by provider group. Rows: name, provider badge, ✓.
+    - a `ReorderableListView` inside a `WindowedList` (§7.3): 100-row steps, at most 500 rows mounted, a "Show 100 more (N left)" footer and the page selector beyond 500. Rows: name, provider badge, ✓; a row is reused while its model, ✓ and view are unchanged. Drag reorders inside the mounted rows. Long-press a row (ActionSheet, §5.2) for Move to top / Move up / Move down / Move to bottom (the desktop ⇈ ↑ ↓ ⇊ buttons), which reach any position of the whole list, and Remove; while a search or filter is on, the moves stay listed but unavailable, with the reason. A window change opens the new window at its first row.
+    - The search runs 250 ms after typing stops. Catalog changes paint once; nothing paints while another screen covers it. While Poll providers runs, its own publishes update only the header and the list updates once at the end; the user's search, chips and edits still update the list at once. Loading shows skeleton rows, a failed load an ErrorCard with Retry, "Still loading…" with Retry after 10 s (Retry shares a load still in flight, and "Still loading…" returns if it stays stuck).
     - Swipe removes (tombstone). In Removed, swipe restores. FAB "Add model".
   - **Custom prefixes:** route list; an add/edit sheet with prefix, endpoint type, base URL, key and model override, validated by the shared normalizer.
 
@@ -2372,6 +2373,8 @@ On tablets, sheets become SidePanel content (persistent tasks) or centered dialo
   - it renders a window of 150 and appends on `on_scroll` near the end;
   - a page selector is shown beyond 1,500;
   - jumps re-centre the window before `scroll_to(scroll_key=…)` (§2.8 procedure).
+  - Wide rows window from the first row: the Model Manager (§4.11; a row is about 1 KB on the wire, and a desktop config brings 3,000+ models) uses 100-row steps, a 500-row window and a "Show 100 more" footer. Its scroll events that append nothing send nothing (Flet 1.0.3 otherwise auto-updates the whole page after every `on_scroll` event), and a window change scrolls back to the window's first row.
+- **What is sent.** In Flet 1.0.3 `build_controls_on_demand` only delays building Flutter widgets: Python still serialises, diffs and sends every control in `controls`. A screen's first patch stays within about 150 KB and 2,000 controls (`tests_host/test_model_manager_perf.py` measures it), and a repaint re-uses the mounted row objects so only changed rows are sent.
 - **Transcript:** windowed by message count and a character budget. Long Markdown is split per paragraph. Bodies load lazily from files.
 - **Covers:** decoded in io_pool (PIL) to 240 px thumbnails in `cache/covers/`. `Image.src` is set when ready; a Halgakos placeholder shows until then.
 - **Logs:** coalesced into 40-line `Text` blocks, with at most 100 blocks mounted.

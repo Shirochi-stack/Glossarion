@@ -608,6 +608,13 @@ class CatalogSnapshot:
     loaded: bool = False
     error: Optional[str] = None
     updated_at: float = 0.0
+    #: casefolded ids of the built-in + cached catalog (``get_model_options``) the last load merged; the
+    #: Model Manager's Custom filter (entries not in it). None until a load has read the catalog.
+    known_keys: Optional[frozenset] = None
+
+    def same_content(self, other: Any) -> bool:
+        """Equal apart from ``updated_at`` (a reload that found nothing new)."""
+        return isinstance(other, CatalogSnapshot) and dataclasses.replace(other, updated_at=self.updated_at) == self
 
     def is_polled(self, model: str) -> bool:
         try:
@@ -674,6 +681,7 @@ class ModelCatalogService:
         self._polling: set = set()
         self._refresh_lock = threading.Lock()  # one catalog poll at a time (shared cache file)
         self._auto_checked: dict = {}  # provider -> clock() of the last auto-poll decision
+        self._load_task: Optional[asyncio.Future] = None  # the load in flight (concurrent callers share it)
         self.last_outcome: Optional[RefreshOutcome] = None
         self.last_result: Any = None  # the last model_options.ModelCatalogRefreshResult
 
@@ -708,11 +716,18 @@ class ModelCatalogService:
         return unsubscribe
 
     def _publish(self, **changes: Any) -> CatalogSnapshot:
+        """Replace the snapshot and notify the listeners, unless nothing but ``updated_at`` would change
+        (a reload after the app's own config write, an empty poll publish): then the current snapshot
+        object stays and nobody is notified, so screens do not repaint an identical list."""
         with self._lock:
             changes.setdefault("polling", frozenset(self._polling))
             changes.setdefault("updated_at", self.clock())
-            self._snapshot = dataclasses.replace(self._snapshot, **changes)
-            snap = self._snapshot
+            current = self._snapshot
+            candidate = dataclasses.replace(current, **changes)
+            if candidate.same_content(current):
+                return current
+            self._snapshot = candidate
+            snap = candidate
         for callback in list(self._listeners):
             try:
                 if self.post is not None:
@@ -795,26 +810,53 @@ class ModelCatalogService:
         except Exception:
             return frozenset(m for ids in by_provider.values() for m in ids)
 
+    def _merge_models(self, online_models: Optional[Sequence[str]] = None) -> tuple:
+        """(picker list, the catalog it merged): one ``get_model_options`` read for both."""
+        discovered = list(online_models) if online_models is not None else list(self.options.get_model_options())
+        merged = list(self.options.merge_saved_model_options(self.saved_models(), discovered, self.removed_models()))
+        return merged, discovered
+
     def build_models(self, online_models: Optional[Sequence[str]] = None) -> list:
         """Blocking: the picker list (desktop ``merge_saved_model_options(custom, catalog, removed)``)."""
-        discovered = list(online_models) if online_models is not None else list(self.options.get_model_options())
-        return list(self.options.merge_saved_model_options(self.saved_models(), discovered, self.removed_models()))
+        return self._merge_models(online_models)[0]
 
     def load_blocking(self) -> CatalogSnapshot:
         try:
-            models = self.build_models()
+            models, discovered = self._merge_models()
+            known: Optional[frozenset] = frozenset(str(m).casefold() for m in discovered)
             by_provider = self.polled_state()
             error = None
         except Exception as exc:
             log.warning("model catalog unavailable: %s", exc)
-            models, by_provider, error = list(self.snapshot.models), dict(self.snapshot.polled_by_provider), str(exc)
+            snap = self.snapshot
+            models, by_provider, error = list(snap.models), dict(snap.polled_by_provider), str(exc)
+            known = snap.known_keys
         polled = self._polled_keys(by_provider)
         return self._publish(models=tuple(models), removed=tuple(self.removed_models()), polled=polled,
                              polled_by_provider=by_provider, hide_unpolled=self.hide_unpolled(),
-                             custom_routes=tuple(self.custom_routes()), loaded=True, error=error)
+                             custom_routes=tuple(self.custom_routes()), loaded=True, error=error, known_keys=known)
 
-    async def load(self) -> CatalogSnapshot:
-        return await self._io(self.load_blocking)
+    async def load(self, *, fresh: bool = False) -> CatalogSnapshot:
+        """Load off the loop. Callers that arrive while a load runs share it (the feature install, a
+        screen opened during a slow start and the ModelSheet would otherwise read the catalog and
+        repaint once each); ``fresh`` (the config changed after that load started) runs one more
+        load after it unless a newer one has started meanwhile."""
+        loop = asyncio.get_running_loop()
+        task = self._load_task
+        if task is not None and not task.done() and task.get_loop() is loop:
+            if not fresh:
+                return await asyncio.shield(task)
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                pass
+            newer = self._load_task
+            if newer is not task and newer is not None and not newer.done():
+                return await asyncio.shield(newer)
+        task = asyncio.ensure_future(self._io(self.load_blocking))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())  # retrieved even if every caller left
+        self._load_task = task
+        return await asyncio.shield(task)
 
     def reload_from_config(self) -> CatalogSnapshot:
         """Cheap re-merge after a config edit (no catalog file read when already loaded)."""
