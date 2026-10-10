@@ -702,12 +702,13 @@ def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = N
         close_dialog(page, sheet_ref.get("sheet"))
 
     content = ft.Container(height=height, content=ft.Column([
-        ft.Text("Sign in on DeepSeek (email or phone; Google sign-in does not work inside apps)",
-                theme_style=ft.TextThemeStyle.BODY_SMALL),
+        # Owner (U14): an ✕ in the top-left corner instead of a Close button by the page (mis-tapped)
+        ft.Row([ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", on_click=close, key="authds-signin-close"),
+                ft.Text("Sign in on DeepSeek (email or phone; Google sign-in does not work inside apps). "
+                        "Closes by itself once you are signed in.",
+                        theme_style=ft.TextThemeStyle.BODY_SMALL, expand=True)],
+               spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ft.Container(content=fwv.WebView(url=DEEPSEEK_URL, expand=True), expand=True),
-        ft.Row([ft.Text("Closes by itself once you are signed in", theme_style=ft.TextThemeStyle.BODY_SMALL,
-                        color=ft.Colors.ON_SURFACE_VARIANT, expand=True),
-                ft.TextButton(content="Close", on_click=close)], alignment=ft.MainAxisAlignment.END),
     ], spacing=6), padding=ft.Padding.only(left=8, right=8, bottom=8))
     sheet = bottom_sheet(content, key="authds-signin-sheet")
     sheet_ref["sheet"] = sheet
