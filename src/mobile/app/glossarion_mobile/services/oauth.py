@@ -138,6 +138,12 @@ PROVIDER_INFO: dict[str, ProviderInfo] = {
         "Log in with your Google account in the browser. No API key is needed.",
         "http://127.0.0.1:<port>/…?code=…&state=…",
     ),
+    "authnan": ProviderInfo(
+        "authnan", "NanoGPT", "authnan_auth", "loopback", "authnan0/",
+        "authnan0/ rotates through every signed-in NanoGPT slot; authnanN/ uses slot #N only.",
+        "Log in to your NanoGPT subscription in the browser and approve access. No API key is needed.",
+        "http://127.0.0.1:<port>/callback?code=…&state=…",
+    ),
 }
 
 #: ``(provider, label, reason)``: every provider signs in from U4 (reason None).
@@ -179,6 +185,7 @@ _MODEL_PATTERNS = (
     ("authgrok", re.compile(r"^authgrok(\d{0,4})$")),
     ("authcd", re.compile(r"^authcd(\d{0,4})$")),
     ("authgem", re.compile(r"^authgem(?:-vertex)?(\d{0,4})$")),
+    ("authnan", re.compile(r"^authnan(\d{0,4})$")),
 )
 
 def provider_for_model(model: Optional[str]) -> Optional[tuple]:

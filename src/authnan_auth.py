@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
+import mobile_runtime
 import oauth_session
 
 logger = logging.getLogger(__name__)
@@ -137,7 +138,12 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             error = "Missing authorization code"
         session._record_callback(code, state, error)
         body = "Approval received. Return to Glossarion to finish signing in." if code else "NanoGPT sign-in failed. Return to Glossarion."
-        oauth_session.send_page_quietly(self, 200 if code else 400, body, "text/plain; charset=utf-8")
+        if code and oauth_session.oauth_return_url():
+            # Glossarion Mobile: the shared "Return to Glossarion" page, like the other sign-ins
+            page = oauth_session.oauth_success_html("authnan", body, "&#10004; NanoGPT approved")
+            oauth_session.send_page_quietly(self, 200, page, "text/html; charset=utf-8")
+        else:
+            oauth_session.send_page_quietly(self, 200 if code else 400, body, "text/plain; charset=utf-8")
         threading.Thread(target=session.close, daemon=True).start()
 
 
@@ -235,6 +241,9 @@ def _fresh_account_browser(auth_url):
     opening that URL alone cannot sign out the normal browser automatically.
     Never silently fall back to a browser that can reuse the previous account.
     """
+    if not mobile_runtime.subprocesses_available():
+        # Glossarion Mobile: a new slot signs in through the in-app sign-in sheet instead
+        raise RuntimeError("A separate fresh browser for a new NanoGPT account needs the desktop app")
     binary = _fresh_browser_binary()
     temporary_root = Path(tempfile.gettempdir()).resolve()
     directory = temporary_root / ("glossarion-authnan-" + secrets.token_hex(16))
@@ -259,6 +268,8 @@ def _fresh_account_browser(auth_url):
 
 
 def _close_fresh_account_browser(process, directory, temporary_root):
+    if not mobile_runtime.subprocesses_available():
+        return  # a phone never started one
     with _fresh_browsers_lock:
         if process is not None and _fresh_browsers.pop(process, None) is None:
             return  # Cancellation already closed and cleaned this window.

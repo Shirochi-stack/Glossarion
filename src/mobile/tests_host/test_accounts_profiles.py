@@ -309,7 +309,7 @@ def fake_auth(tmp_path):
 
 
 def test_provider_table_and_model_routes():
-    assert [p for p, _label, _reason in PROVIDERS] == ["authgpt", "authgrok", "authcd", "authgem"]
+    assert [p for p, _label, _reason in PROVIDERS] == ["authgpt", "authgrok", "authcd", "authgem", "authnan"]
     assert all(reason is None for _p, _l, reason in PROVIDERS)  # every provider signs in from U4
     assert PROVIDER_INFO["authgrok"].flow == "device" and PROVIDER_INFO["authcd"].flow == "loopback"
     assert PROVIDER_INFO["authgpt"].pool_route == "authgpt0/" and PROVIDER_INFO["authgem"].pool_route == "authgem-vertex0/"
@@ -727,13 +727,13 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
     body = screen.get_body()
     keys = [getattr(c, "key", None) for c in body.controls]
     # U12 item 1: the routes that cannot work on mobile are not listed
-    assert keys == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem",
+    assert keys == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem", "account-authnan",
                     "account-authds", "account-antigravity", "account-zai", "accounts-experimental"]  # U13
     assert body.controls[-1].title == f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})"
     fake_auth.modules["authgem"].get_store(2).save_tokens({"access_token": "g", "email": "gem@example.com",
                                                           "expires_at": time.time() + 3 * 3600 + 60})
     out = _run(screen.refresh())
-    assert set(out) == {"authgpt", "authgrok", "authcd", "authgem"} and screen.slots["authgem"] == [0, 2]
+    assert set(out) == {"authgpt", "authgrok", "authcd", "authgem", "authnan"} and screen.slots["authgem"] == [0, 2]
     row = screen.slot_rows[("authgem", 2)]
     assert row.subtitle.value == "✓ Signed in · gem@example.com · token refreshes in 3 h"
     assert isinstance(row.trailing, ft.IconButton)

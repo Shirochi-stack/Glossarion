@@ -51,7 +51,8 @@ from glossarion_mobile.ui.screens.welcome_flow import (
 
 #: Step 1 sign-ins, all equal (U11 item 1): (provider, button label).
 SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
-            ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"))
+            ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"),
+            ("authnan", "Sign in with NanoGPT"))
 OTHER_SIGN_INS = SIGN_INS[1:]
 #: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
 #: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
@@ -60,7 +61,8 @@ KEYLESS = (("authnd", "NVIDIA Build free models (authnd/, no sign-in)"),)
 TOKEN_SLIDER = (1024, 131072)
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
-PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/"}
+PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
+                        "authnan": "authnan/"}
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
@@ -495,7 +497,9 @@ class WelcomeScreen(Screen):
                         else f"✓ Using {chosen} ({name}'s most cost-efficient model)")
             else:
                 chosen = None
-                note = f"Couldn't list {name}'s models: choose one"
+                count = sum(1 for m in models if mc.login_route(str(m))[0] == provider)
+                note = (f"{count} {name} models available: choose one" if count  # no cost rule for it (NanoGPT)
+                        else f"Couldn't list {name}'s models: choose one")
         self.model_notes[provider] = note
         self.render()
         if chosen is None:
