@@ -99,7 +99,7 @@ class FakeOptions:
 
         self.real = real
         self.catalog = list(catalog or ["gpt-6", "gpt-6-mini", "claude-opus-5-5", "gemini-3.5-flash",
-                                        "authgpt/gpt-6-luna", "ollamapull/qwen3:8b"])
+                                        "authgpt/gpt-6-luna", "ocz/qwen3-8b"])
         self.polled = dict(polled or {})
         self.results = list(results or [])
         self.refresh_calls: list = []
@@ -153,7 +153,7 @@ def test_excluded_routes_reasons_come_from_settings_rules():
         assert mc.excluded_route(model), model
         detail = mc.excluded_detail(model)
         assert settings_rules.excluded_route_reason(model) in detail and mc.KEPT_NOTE in detail
-    assert mc.excluded_route("ollamapull/qwen3") == "ollamapull/ isn't available on mobile"
+    assert mc.excluded_route("ocz/qwen3") == "ocz/ isn't available on mobile"  # U13: ollamapull/ runs via a PC
     assert mc.excluded_route("ollama/qwen3") is None and mc.excluded_route("authgpt/gpt-6-luna") is None
     assert mc.provider_excluded("opencode-zen") and mc.provider_excluded("autharena") and not mc.provider_excluded("openai")
     # the U3 module is an alias: same names, same objects
@@ -375,7 +375,7 @@ def test_auto_poll_is_scoped_ttl_gated_and_skips_excluded_routes(tmp_path):
     options.provider_model_catalog_supports_anonymous_poll = lambda m, r=None: True
     service = _service(store, options)
     service.load_blocking()
-    assert service.due_provider("ollamapull/qwen") is None and not options.due_calls
+    assert service.due_provider("ocz/qwen") is None and not options.due_calls
     options.due = None
     assert asyncio.run(service.maybe_auto_poll()) is None  # not due (24 h TTL)
     options.due = "openrouter"
@@ -399,8 +399,8 @@ def test_route_info_binds_the_shared_route_controls():
     pooled = mc.route_info("gpt-6", {"use_multi_api_keys": True,
                                      "multi_api_keys": [{"api_key": "", "model": "authcd/claude-opus-5-5"}]})
     assert "authcd" in pooled.logins  # an enabled pool route needs the Claude login (desktop on_model_change)
-    excluded = mc.route_info("ollamapull/qwen3", {})
-    assert excluded.excluded and "ollama/ or lmstudio/" in excluded.excluded_detail
+    excluded = mc.route_info("ocz/qwen3", {})
+    assert excluded.excluded and "npm/bun" in excluded.excluded_detail
     assert mc.route_info("poe/claude", {}).poe
 
 
@@ -964,7 +964,7 @@ def test_model_sheet_rows_sections_selection_and_route_row(tmp_path):
         page.update()
         rows = sheet.rows
         # excluded route: grey, ReasonChip, not selectable
-        assert isinstance(rows["ollamapull/qwen3:8b"].trailing, ReasonChip) and rows["ollamapull/qwen3:8b"].on_click is None
+        assert isinstance(rows["ocz/qwen3-8b"].trailing, ReasonChip) and rows["ocz/qwen3-8b"].on_click is None
         # ChatGPT route not signed in: amber + "Sign in with ChatGPT"
         assert rows["authgpt/gpt-6-luna"].trailing.content == "Sign in with ChatGPT"
         signed.add("authgpt")
@@ -1009,7 +1009,7 @@ def test_model_sheet_rows_sections_selection_and_route_row(tmp_path):
         # selecting an excluded route is refused
         other = ModelSheet(current_model="gpt-6", env=env, on_select=lambda *a: selected.append(a),
                            profiles=["Universal", "Korean"], languages=["English", "Korean"])
-        other.select("model", "ollamapull/qwen3:8b")
+        other.select("model", "ocz/qwen3-8b")
         assert len(selected) == 1
         # profile / language tabs
         other.tab = "profile"

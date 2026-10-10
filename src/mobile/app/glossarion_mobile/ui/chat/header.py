@@ -57,6 +57,7 @@ def narrow_header(width: Any) -> bool:
 # SeriesFeature sets ``on_move_series`` and never in a scratch chat (scratch chats are not saved).
 MENU_ITEMS = (
     ("new_chat", "New chat"),  # only while the New chat button is folded in (a scratch chat on a narrow phone)
+    ("rename", "Rename chat"),
     ("chat_settings", "Chat settings"),
     ("attachments", "Attachments (0)"),
     ("jump_to", "Jump to…"),

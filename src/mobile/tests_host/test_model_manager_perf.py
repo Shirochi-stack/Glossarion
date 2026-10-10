@@ -49,7 +49,7 @@ LOOP_GAP_S = 1.0
 
 PREFIXES = ("", "openrouter/", "nanogpt/", "or/", "electronhub/", "groq/", "together/", "chutes/", "authgpt/",
             "deepseek/", "mistral/", "xai/", "fireworks/", "nvidia/")
-EXCLUDED = ("autharena/", "antigravity/", "ocagy/", "ollamapull/")  # routes excluded on mobile (a ReasonChip)
+EXCLUDED = ("autharena/", "ocagy/", "ollamapull/")  # routes excluded on mobile (a ReasonChip; antigravity/ runs via a PC proxy since U13)
 CATALOG = ["gpt-6", "gpt-6-mini", "claude-opus-5-5", "gemini-3.5-flash", "authgpt/gpt-6-luna", "deepseek-v4",
            "grok-5", "mistral-large-3", "qwen3-max", "kimi-k3", "glm-5", "o5-mini", "gemini-3.5-pro",
            "claude-sonnet-5", "llama-5-70b", "command-r3"]

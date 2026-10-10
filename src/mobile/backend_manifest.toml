@@ -105,7 +105,6 @@ extra_modules = []
 
 # Never bundled (reason required). Every edge into them must be guarded or baselined.
 [exclude]
-antigravity_proxy = "npm/bun proxy (antigravity/ route, excluded on mobile)"
 ocagy_cli = "npm/bun CLI (ocagy/ and ocz/ routes, excluded on mobile)"
 glm_proxy = "bun proxy (authza/ route, excluded on mobile)"
 installer_utils = "npm/bun installer"
@@ -114,7 +113,6 @@ autharena_proxy = "uv + QtWebEngine + CDP (autharena/ route, excluded on mobile)
 autharena_browser = "QtWebEngine"
 opera_aria = "desktop Opera CDP (search/opera, excluded on mobile)"
 tor_proxy = "Tor binary"
-ollamapull = "local Ollama binary (ollamapull/ route, excluded on mobile)"
 dpi_setup = "Qt DPI side effect (guarded import in metadata_batch_translator)"
 onnx_cpp_backend = "Windows C++ DLL (bubble_detector falls back to Python onnxruntime on mobile, P27)"
 update_manager = "self-installing desktop updater (mobile shows a 'new version' link)"
@@ -260,12 +258,12 @@ files = []
 "translate_headers_standalone->PySide6" = { count = 2, reason = "run_translate_headers_gui desktop entry (QMessageBox + its processEvents hook since U7; mobile runs translate_headers_now / run_translate_headers_now)" }
 
 [baseline.lazy_excluded_edges]
+"antigravity_proxy->proxy_token_storage" = { count = 2, reason = "patches / migrates the proxy runtime during the desktop install and launch (_patch_runtime_package_json, ensure_proxy_running after its mobile gate); a phone never installs it (U13: it uses a PC proxy)" }
 "model_options->autharena_proxy" = { count = 1, reason = "AuthArena catalog fetch (_fetch_provider_catalog); only reached after the guarded list_accounts() import (U4), route excluded on mobile" }
 "model_options->glm_proxy" = { count = 2, reason = "AuthZA catalog/session (incl. dynamic __import__ at 1429); route excluded on mobile" }
 "model_options->ocagy_cli" = { count = 3, reason = "OpenCode Zen catalog; ocagy/ocz routes excluded on mobile" }
 "multi_api_key_manager->glm_proxy" = { count = 1, reason = "AuthZA login button in MultiAPIKeyDialog (desktop dialog)" }
 "unified_api_client->autharena_proxy" = { count = 2, reason = "autharena/ route setup/send; route rejected on mobile (U1)" }
-"unified_api_client->ollamapull" = { count = 1, reason = "ollamapull/ route send; route excluded on mobile" }
 
 # Process-spawn sites (module:function) in bundled modules that the collector cannot see as
 # gated: the gate is in the caller, in an object attribute or in a worker count (U1, plan §3,

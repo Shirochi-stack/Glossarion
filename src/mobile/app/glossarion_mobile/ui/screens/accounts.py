@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 from glossarion_mobile.services import webview_bridge
+from glossarion_mobile.state import remote_routes
 from glossarion_mobile.services.oauth import PROVIDER_INFO, PROVIDERS, OAuthBridge, SignInState, provider_for_model
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
@@ -66,6 +67,14 @@ UNAVAILABLE_ACCOUNTS = (
     ("Claude Code CLI import", "Reads the desktop CLI credential store"),
     ("Grok CLI import", "Reads the desktop CLI credential store"),
 )
+
+ANTIGRAVITY_ABOUT = ("Antigravity models (antigravity/…) run through the Antigravity proxy, which a phone cannot "
+                     "install or start. Glossarion on your PC runs it and keeps its accounts; the phone sends its "
+                     "requests to that proxy over your Wi-Fi.")
+ANTIGRAVITY_STEPS = ("1. On the PC, pick an antigravity/ model once so Glossarion starts its proxy (port 3000).  "
+                     "2. Allow it through the PC's firewall on your private network.  "
+                     "3. Enter http://<PC address>:3000 here (ipconfig shows the address). Keep the PC on while translating.")
+
 
 DEEPSEEK_URL = "https://chat.deepseek.com"
 DEEPSEEK_ABOUT = ("DeepSeek's web chat with your own DeepSeek account (authds/flash, authds/pro and their -thinking "
@@ -657,8 +666,10 @@ class AccountsScreen(Screen):
         run_io: Optional[Callable[..., Any]] = None,
         tablet: bool = False,
         on_refreshed: Optional[Callable[[], Any]] = None,
+        prefs: Any = None,
     ) -> None:
         super().__init__(match)
+        self.prefs = prefs  # U13: the Antigravity PC proxy address (mobile_state.json)
         self.oauth = oauth
         self.on_refreshed = on_refreshed  # the app mirrors oauth.signed_in into AppState.signed_in
         self.notify = notify
@@ -728,9 +739,57 @@ class AccountsScreen(Screen):
     def build_body(self) -> ft.Control:
         controls: list[ft.Control] = [self._provider_card(provider) for provider in self.providers]
         controls.append(self._deepseek_card())
+        controls.append(self._antigravity_card())
         controls.append(self._experimental_tile())
         # U12 item 1: routes that cannot work on mobile (Tor, desktop helpers) are not listed at all
         return ft.ListView(controls=controls, expand=True, padding=12, spacing=8)
+
+    # ---- Antigravity through the proxy on the user's PC (antigravity/, U13) --------------------------
+
+    def _antigravity_card(self) -> ft.Control:
+        current = remote_routes.saved_url(self.prefs, "antigravity")
+        self.antigravity_field = ft.TextField(label="Proxy address on your PC", value=current, dense=True,
+                                              hint_text="http://192.168.1.10:3000", expand=True,
+                                              keyboard_type=ft.KeyboardType.URL, key="account-antigravity-url")
+        self.antigravity_status = ft.Text("Not tested" if current else "Not set up",
+                                          theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                          color=ft.Colors.ON_SURFACE_VARIANT, key="account-antigravity-status")
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([ft.Icon(ft.Icons.COMPUTER),
+                        ft.Text("Antigravity (antigravity/) via your PC", theme_style=ft.TextThemeStyle.TITLE_SMALL,
+                                expand=True),
+                        ReasonChip(reason=EXPERIMENTAL_CHIP, detail=ANTIGRAVITY_ABOUT)], spacing=8),
+                ft.Text(ANTIGRAVITY_STEPS, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Row([self.antigravity_field,
+                        ft.FilledTonalButton(content="Save & test", key="account-antigravity-test",
+                                             on_click=lambda e: call_handler(self.test_antigravity))], spacing=8),
+                self.antigravity_status,
+            ], spacing=6, tight=True),
+            padding=12, border_radius=tokens.RADII["card"], bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            key="account-antigravity")
+
+    async def test_antigravity(self) -> bool:
+        url = remote_routes.apply_url(self.prefs, "antigravity", self.antigravity_field.value, save=True)
+        ok, text = False, "Not set up"
+        if url:
+            try:
+                import antigravity_proxy
+
+                run = self.run_io
+                health = await run(antigravity_proxy.check_proxy_health) if run is not None else \
+                    await asyncio.to_thread(antigravity_proxy.check_proxy_health)
+                ok = bool(health.get("healthy"))
+                text = "✓ Connected to the proxy" if ok else f"No answer: {health.get('error') or 'unreachable'}"
+            except Exception as exc:
+                text = f"No answer: {exc}"
+        self.antigravity_status.value = text
+        self.antigravity_status.color = ft.Colors.PRIMARY if ok else ft.Colors.ERROR
+        try:
+            self.antigravity_status.update()
+        except Exception:
+            pass
+        return ok
 
     # ---- DeepSeek web (authds/, U13 item 4) ----------------------------------------------------------
 

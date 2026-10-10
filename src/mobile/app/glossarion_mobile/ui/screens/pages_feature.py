@@ -291,6 +291,7 @@ class AccountsProfilesFeature:
                 config_set=store.set_many if store is not None else None,
                 copy_text=getattr(app, "_copy_text", None), run_io=getattr(ctx, "run_io", None),
                 tablet=bool(getattr(getattr(app, "shell", None), "tablet", False)),
+                prefs=getattr(app, "prefs", None),
             )
         if name == "settings.profiles":
             from glossarion_mobile.ui.screens.profiles import ProfilesScreen

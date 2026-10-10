@@ -668,6 +668,23 @@ class ChatView:
         self.show_newest()  # the chat opens on its newest cards (window None), following them
         self.refresh_send()
         self._ensure_stream_task()
+        if previous != cid:
+            self._spawn(self._keep_keyboard_down())
+
+    async def _keep_keyboard_down(self, delay: float = 0.35) -> None:
+        """Owner (U13): entering a chat never brings the keyboard up; only a tap on the message field does.
+        Closing the drawer gives focus back to the field that had it (Flutter's route focus restore), so
+        once the drawer has closed the focus moves to the menu button (Flet 1.0.3 has no blur())."""
+        await asyncio.sleep(delay)
+        button = getattr(self.header, "menu_button", None)
+        focus = getattr(button, "focus", None)
+        if callable(focus):
+            try:
+                result = focus()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                pass
 
     def _on_store_changed(self) -> None:
         if not self.bound:
@@ -2985,6 +3002,8 @@ class ChatView:
                 self.navigate("chat.settings", {"cid": cid})
         elif action == "attachments":
             self.navigate("chat.attachments", {"cid": self.cid if self.bound else cid})
+        elif action == "rename":
+            self.open_rename()
         elif action == "delete":
             self.confirm_delete()
         elif action == "text_size":
@@ -3757,7 +3776,8 @@ class ChatView:
     def _on_model_sheet_select(self, field_name: str, value: str, this_chat_only: bool) -> None:
         key = {"model": "model", "profile": "active_profile", "language": "output_language"}[field_name]
         override_key = {"model": "model", "profile": "profile", "language": "target_language"}[field_name]
-        if this_chat_only and self.bound:
+        if field_name == "model" and self.bound:
+            this_chat_only = True  # owner (U13): every chat keeps its own model; Settings sets the default
             self.env.chats.set_override(self.cid, override_key, value)
         else:
             # the desktop combos' side effects: the profile's extraction method

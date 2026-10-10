@@ -23,8 +23,19 @@ from typing import Any, Callable, Optional
 
 import requests
 
+import mobile_runtime
+
 
 BASE_URL = "http://127.0.0.1:11434"
+#: Glossarion Mobile cannot install or start Ollama: it uses an Ollama server on the user's PC
+#: (``OLLAMAPULL_BASE_URL``), where models are pulled through the same API.
+MOBILE_HINT = ("ollamapull/ on mobile uses the Ollama server on your PC: start Ollama there (with OLLAMA_HOST=0.0.0.0 "
+               "so the phone can reach it) and set its address in Settings › Local AI")
+
+
+def base_url() -> str:
+    """The Ollama API this route uses: the loopback server (desktop) or ``OLLAMAPULL_BASE_URL`` (mobile)."""
+    return os.environ.get("OLLAMAPULL_BASE_URL", "").strip().rstrip("/") or BASE_URL
 _LATEST_RELEASE_URL = "https://api.github.com/repos/ollama/ollama/releases/latest"
 _UPDATE_CHECK_SECONDS = 6 * 60 * 60
 _lifecycle_lock = threading.RLock()
@@ -128,7 +139,7 @@ def _http_error(response: requests.Response, action: str) -> OllamaPullError:
 
 
 def _api_get(path: str, timeout: float = 3.0) -> dict[str, Any]:
-    response = requests.get(f"{BASE_URL}{path}", timeout=timeout)
+    response = requests.get(f"{base_url()}{path}", timeout=timeout)
     if not response.ok:
         raise _http_error(response, path)
     data = response.json()
@@ -138,7 +149,7 @@ def _api_get(path: str, timeout: float = 3.0) -> dict[str, Any]:
 
 
 def _api_post(path: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
-    response = requests.post(f"{BASE_URL}{path}", json=payload, timeout=timeout)
+    response = requests.post(f"{base_url()}{path}", json=payload, timeout=timeout)
     if not response.ok:
         raise _http_error(response, path)
     data = response.json()
@@ -179,6 +190,8 @@ def _hidden_subprocess_kwargs() -> dict[str, Any]:
 
 
 def _binary_version() -> Optional[str]:
+    if not mobile_runtime.subprocesses_available():
+        return None
     executable = _ollama_executable()
     if not executable:
         return None
@@ -286,6 +299,8 @@ def get_status(model_name: str = "") -> dict[str, Any]:
 
 
 def _installer_command(script_path: Path) -> list[str]:
+    if not mobile_runtime.subprocesses_available():
+        raise OllamaPullError(MOBILE_HINT)
     if sys.platform == "win32":
         shell = shutil.which("powershell.exe") or "powershell.exe"
         return [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)]
@@ -308,6 +323,8 @@ def _installer_command(script_path: Path) -> list[str]:
 def _install_macos_app(progress: Optional[Callable[[str], None]],
                        should_stop: Optional[Callable[[], bool]]) -> None:
     """Install Ollama's official app archive in the current user's Applications."""
+    if not mobile_runtime.subprocesses_available():
+        raise OllamaPullError(MOBILE_HINT)
     _check_stop(should_stop)
     _progress(progress, "Downloading the official Ollama app for macOS...")
     destination = Path.home() / "Applications" / "Ollama.app"
@@ -362,6 +379,8 @@ def _install_macos_app(progress: Optional[Callable[[str], None]],
 
 
 def _run_installer(progress: Optional[Callable[[str], None]], should_stop: Optional[Callable[[], bool]]) -> None:
+    if not mobile_runtime.subprocesses_available():
+        raise OllamaPullError(f"{MOBILE_HINT} ({base_url()} did not answer)")
     if sys.platform == "win32":
         script_url, suffix = "https://ollama.com/install.ps1", ".ps1"
     elif sys.platform == "darwin":
@@ -443,6 +462,12 @@ def update_ollama(*, progress: Optional[Callable[[str], None]] = None,
 
 def _start_server(progress: Optional[Callable[[str], None]], should_stop: Optional[Callable[[], bool]]) -> None:
     global _managed_server_process
+    if not mobile_runtime.subprocesses_available():
+        try:
+            _api_get("/api/version", timeout=3)
+            return
+        except (requests.RequestException, OllamaPullError, ValueError) as exc:
+            raise OllamaPullError(f"{MOBILE_HINT} ({base_url()}: {exc})") from exc
     try:
         _api_get("/api/version", timeout=1)
         return
@@ -664,7 +689,7 @@ def pull_model(model_name: str, *, progress: Optional[Callable[[str], None]] = N
     _check_stop(should_stop)
     _progress(progress, f"Pulling Ollama model {name}...")
     try:
-        with requests.post(f"{BASE_URL}/api/pull", json={"model": name, "stream": True},
+        with requests.post(f"{base_url()}/api/pull", json={"model": name, "stream": True},
                            stream=True, timeout=(5, 30)) as response:
             finished = _watch_stop(response, should_stop)
             try:
@@ -720,10 +745,10 @@ def ensure_ready(model_name: Optional[str] = None, *, auto_update: Optional[bool
     """Install/update Ollama, start its server, and pull a missing model."""
     with _lifecycle_lock:
         _check_stop(should_stop)
-        installed = bool(_ollama_executable())
+        installed = bool(_ollama_executable()) if mobile_runtime.subprocesses_available() else False
         if not installed:
             try:
-                _api_get("/api/version", timeout=1)
+                _api_get("/api/version", timeout=1 if mobile_runtime.subprocesses_available() else 5)
                 installed = True
             except (requests.RequestException, OllamaPullError, ValueError):
                 pass
@@ -732,6 +757,7 @@ def ensure_ready(model_name: Optional[str] = None, *, auto_update: Optional[bool
             _after_update(progress, should_stop)
         else:
             enabled = load_settings().get("auto_update", True) if auto_update is None else auto_update
+            enabled = enabled and mobile_runtime.subprocesses_available()  # a phone never updates the PC's Ollama
             if enabled:
                 current_version = _installed_version()
                 available_version = latest_version()
@@ -847,7 +873,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                 _chat_status(progress, f"Still waiting for an Ollama response ({elapsed}s); model loading or prompt processing may be underway.")
         threading.Thread(target=report_wait, daemon=True).start()
     try:
-        response = requests.post(f"{BASE_URL}/api/chat", json=payload, stream=stream, timeout=(5, 600))
+        response = requests.post(f"{base_url()}/api/chat", json=payload, stream=stream, timeout=(5, 600))
         finished = _watch_stop(response, should_stop)
         if on_response_open:
             on_response_open(response)

@@ -117,6 +117,9 @@ class SettingsFeature:
         """Create, load and hook the feature into a running ``GlossarionApp``."""
         feature = cls.for_app(app)
         await feature.load()
+        from glossarion_mobile.state import remote_routes
+
+        remote_routes.apply_all(feature.prefs)  # U13: antigravity/ and ollamapull/ use the user's PC
         feature.attach(app)
         return feature
 

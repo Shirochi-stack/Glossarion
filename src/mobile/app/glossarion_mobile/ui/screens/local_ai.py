@@ -48,9 +48,12 @@ LAN_SERVERS = (
     ("lmstudio", "LM Studio", "lmstudio-lan/", 1234,
      "In LM Studio's Developer tab, start the server and enable “Serve on Local Network”."),
 )
+OLLAMAPULL_STEPS = ("ollamapull/ models run on the Ollama of your PC and are pulled there on first use. "
+                    "On the PC: start Ollama with OLLAMA_HOST=0.0.0.0 and allow port 11434 in its firewall on your private "
+                    "network, then enter http://<PC address>:11434 here.")
 OLLAMAPULL_REASON = ("Managed Ollama (ollamapull/) installs Ollama and pulls models with the desktop binary, "
                      "which a phone cannot run. Point Ollama on your network here instead.")
-OPTIONS_NOTE = ("These per-model options are sent by the managed ollamapull/ route on the desktop. Requests "
+OPTIONS_NOTE = ("These per-model options are sent by the ollamapull/ route (your PC's Ollama on mobile). Requests "
                 "through a LAN route use the server's model defaults. Values stay in sync with your desktop config.")
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-\[\]:]+$")
 
@@ -298,9 +301,11 @@ class LocalAiScreen(Screen):  # type: ignore[misc,valid-type]
     title = "Local AI"
 
     def __init__(self, match: Any, *, store: Any, catalog: Any = None, notify: Optional[Callable[..., Any]] = None,
-                 spawn: Optional[Callable[[Any], Any]] = None, navigate: Optional[Callable[..., Any]] = None) -> None:
+                 spawn: Optional[Callable[[Any], Any]] = None, navigate: Optional[Callable[..., Any]] = None,
+                 prefs: Any = None) -> None:
         super().__init__(match)
         self.store = store
+        self.prefs = prefs  # U13: the ollamapull/ server address (mobile_state.json)
         self.catalog = catalog
         self.notify = notify
         self.spawn_fn = spawn
@@ -355,8 +360,7 @@ class LocalAiScreen(Screen):  # type: ignore[misc,valid-type]
         try:
             self.options_form = OllamaOptionsForm(self.store)
             options_children: list = [
-                ft.Row([ft.Text(OPTIONS_NOTE, theme_style=ft.TextThemeStyle.BODY_SMALL, expand=True),
-                        ReasonChip(reason="ollamapull/ is desktop-only", detail=OLLAMAPULL_REASON)]),
+                ft.Text(OPTIONS_NOTE, theme_style=ft.TextThemeStyle.BODY_SMALL),
                 self.options_form.control,
             ]
         except Exception as exc:  # backend helpers missing
@@ -364,7 +368,7 @@ class LocalAiScreen(Screen):  # type: ignore[misc,valid-type]
             options_children = [ft.Text(f"Ollama options need the shared ollama_settings module ({exc}).")]
         controls.append(SectionCard(title="🦙 Ollama options", collapsible=True, expanded=False,
                                     children=options_children, key="lan-ollama-options"))
-        # U12 item 1: "Load Ollama (ollamapull/)" cannot work on mobile and is not listed
+        controls.append(self._ollamapull_card())
         self.list_view = ft.ListView(controls=controls, expand=True, spacing=tokens.SPACING["sm"],
                                      padding=ft.Padding.symmetric(horizontal=tokens.SPACING["md"],
                                                                   vertical=tokens.SPACING["sm"]))
@@ -437,3 +441,50 @@ class LocalAiScreen(Screen):  # type: ignore[misc,valid-type]
         status = str(outcome.statuses.get(f"custom:{prefix}", outcome.message))
         self._set_status(server_id, f"{title}: {status}", bool(outcome.ok))
         return outcome
+
+    # ---- Managed Ollama (ollamapull/) on the user's PC (U13) ------------------------------------------
+
+    def _ollamapull_card(self) -> ft.Control:
+        from glossarion_mobile.state import remote_routes
+
+        current = remote_routes.saved_url(self.prefs, "ollamapull")
+        self.ollamapull_field = ft.TextField(label="Ollama address on your PC", value=current, dense=True, expand=True,
+                                             hint_text="http://192.168.1.10:11434", keyboard_type=ft.KeyboardType.URL,
+                                             key="lan-ollamapull-url")
+        self.ollamapull_status = ft.Text("Not tested" if current else "Not set up", key="lan-ollamapull-status",
+                                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+        return SectionCard(title="🦙 Managed Ollama (ollamapull/) on your PC", key="lan-ollamapull", children=[
+            ft.Text(OLLAMAPULL_STEPS, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Row([self.ollamapull_field,
+                    ft.FilledTonalButton(content="Save & test", key="lan-ollamapull-test",
+                                         on_click=lambda e: self.spawn(self.test_ollamapull()))], spacing=8),
+            self.ollamapull_status,
+        ])
+
+    async def test_ollamapull(self) -> bool:
+        import asyncio
+
+        from glossarion_mobile.state import remote_routes
+
+        url = remote_routes.apply_url(self.prefs, "ollamapull", self.ollamapull_field.value, save=True)
+        ok, text = False, "Not set up"
+        if url:
+            def probe() -> str:
+                import requests
+
+                response = requests.get(f"{url}/api/version", timeout=5)
+                response.raise_for_status()
+                return str((response.json() or {}).get("version") or "")
+
+            try:
+                version = await asyncio.to_thread(probe)
+                ok, text = True, f"✓ Ollama {version} · models you pick are pulled there on first use"
+            except Exception as exc:
+                text = f"No answer: {exc}"
+        self.ollamapull_status.value = text
+        self.ollamapull_status.color = ft.Colors.PRIMARY if ok else ft.Colors.ERROR
+        try:
+            self.ollamapull_status.update()
+        except Exception:
+            pass
+        return ok

@@ -1471,6 +1471,6 @@ class ModelsKeysFeature:
         from glossarion_mobile.ui.screens.local_ai import LocalAiScreen
 
         screen = LocalAiScreen(None, store=self.store, catalog=self.catalog, notify=getattr(self.app, "notify", None),
-                               spawn=self.spawn, navigate=getattr(self.app, "navigate_to", None))
+                               spawn=self.spawn, navigate=getattr(self.app, "navigate_to", None), prefs=self.prefs)
         self._push_screen(screen)
         return screen

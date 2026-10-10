@@ -651,14 +651,11 @@ def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=
 #: routes). Their rows stay visible, disabled with this reason; a value chosen on desktop is
 #: kept in config.json untouched.
 EXCLUDED_ROUTE_PREFIXES = {
-    'antigravity/': "Antigravity runs through a desktop npm/bun proxy, which a phone cannot start.",
     'ocagy': "OCAGY runs through a desktop npm/bun CLI, which a phone cannot start.",
     'ocz/': "OpenCode Zen free models need the desktop npm/bun CLI.",
     'authza': "Z.AI login and the GLM access modes use desktop-only routes.",
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",
     'search/opera': "Opera Aria mints its token by driving a desktop Opera browser.",
-    'ollamapull/': ("Managed Ollama installs and runs a desktop Ollama binary. Use ollama/ or lmstudio/ "
-                    "with a server on your network instead."),
 }
 
 

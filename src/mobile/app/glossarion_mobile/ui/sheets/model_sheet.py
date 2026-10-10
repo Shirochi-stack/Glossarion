@@ -755,7 +755,8 @@ class ModelSheet:
         self.search.visible = model_tab or self.tab == "language"
         self.search.hint_text = "Search models" if model_tab else "Search or type a language"
         self.chip_row.visible = model_tab
-        self.chat_switch.visible = not self.one_shot and not self.field_mode
+        # the model is always this chat's own (U13); profile and language may still apply to every chat
+        self.chat_switch.visible = not self.one_shot and not self.field_mode and self.tab != "model"
         for chip_id, chip in self.chips.items():
             chip.selected = chip_id == self.chip
         self.hide_item.checked = bool(self.snapshot.hide_unpolled)

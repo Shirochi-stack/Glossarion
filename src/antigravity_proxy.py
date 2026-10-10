@@ -47,7 +47,13 @@ except ImportError:  # pragma: no cover - fallback path for stripped builds
     httpx = None
 
 import requests
-from installer_utils import run_logged_subprocess
+
+import mobile_runtime
+
+try:  # not bundled on Glossarion Mobile, which never installs or launches the proxy (it uses one on a PC)
+    from installer_utils import run_logged_subprocess
+except ImportError:  # pragma: no cover - mobile bundle
+    run_logged_subprocess = None
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_PROXY_URL = "http://localhost:3000"
+#: Glossarion Mobile cannot install or launch the proxy: it uses one running on the user's PC.
+MOBILE_PROXY_HINT = ("Antigravity on mobile uses the proxy running on your PC: start it from Glossarion on the PC "
+                     "and set its address (e.g. http://192.168.1.10:3000) in Accounts › Antigravity")
 PROXY_PACKAGE_NAME = "antigravity-proxy"
 PROXY_REPO_URL = "https://github.com/Shirochi-stack/antigravity-proxy"
 PROXY_GITHUB_API_MAIN = (
@@ -1211,6 +1220,8 @@ def _copy_runtime_tree(source_dir: str, target_dir: str) -> None:
 
 def _download_proxy_archive_bytes(url: str) -> bytes:
     """Download a fork archive, preferring curl on systems where requests stalls."""
+    if not mobile_runtime.subprocesses_available():
+        raise RuntimeError(MOBILE_PROXY_HINT)
     errors: List[str] = []
     download_started = time.monotonic()
     curl = _candidate_executable("curl")
@@ -2568,6 +2579,8 @@ def _automatic_bun_install_command() -> Optional[List[str]]:
 def _install_bun_automatically(log_fn=None) -> Dict[str, Any]:
     """Install Bun for the current user and return a structured result."""
     _log = log_fn or _log_noop
+    if not mobile_runtime.subprocesses_available() or run_logged_subprocess is None:
+        return {"ok": False, "installed": False, "error": MOBILE_PROXY_HINT}
     command = _automatic_bun_install_command()
     if not command:
         error = "No supported automatic installer was found for this system."
@@ -2646,6 +2659,13 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
     global _proxy_process
 
     _log = log_fn or _log_noop
+    if not mobile_runtime.subprocesses_available():
+        # Glossarion Mobile: the proxy runs on the user's PC (ANTIGRAVITY_PROXY_URL); only check it answers
+        health = check_proxy_health()
+        if health.get("healthy"):
+            return {"running": True, "auto_launched": False}
+        return {"running": False, "auto_launched": False,
+                "error": f"{MOBILE_PROXY_HINT} ({get_proxy_url()}: {health.get('error') or 'no answer'})"}
     data_dir = _ensure_proxy_config()
     force_update = False
 
@@ -2783,6 +2803,8 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
 
 def _kill_proxy_by_port(port: int = 3000) -> None:
     """Kill any process listening on the proxy port."""
+    if not mobile_runtime.subprocesses_available():
+        return  # a phone never owns the proxy process
     try:
         if sys.platform == "win32":
             try:
@@ -2894,7 +2916,10 @@ def _load_stored_accounts() -> List[Dict[str, Any]]:
     path = _accounts_file_path()
     if not path or not os.path.exists(path):
         return []
-    from proxy_token_storage import load_accounts
+    try:
+        from proxy_token_storage import load_accounts
+    except ImportError:  # Glossarion Mobile: the accounts live on the PC that runs the proxy
+        return []
     data = load_accounts(path)
 
     if isinstance(data, list):
