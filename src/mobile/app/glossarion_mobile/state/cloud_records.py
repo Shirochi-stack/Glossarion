@@ -266,6 +266,8 @@ class CloudRecordStore:
             self._version += 1
             self._saved_version = self._version
         self._saver.cancel()
+        # a save already running (the saver thread) would write the file back after the remove (CI flake)
+        self._saver.wait_idle(5.0)
         try:
             os.remove(self.path)
         except FileNotFoundError:

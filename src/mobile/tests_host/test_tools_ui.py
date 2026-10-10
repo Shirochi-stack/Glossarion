@@ -1369,9 +1369,7 @@ def test_qa_report_webview_falls_back_when_the_page_never_reports_in(tmp_path):
     report = Path(qa_kind.report_path_for(str(folder)))
     report.parent.mkdir(parents=True)
     report.write_text("<html><head></head><body><h1>Translation QA Report</h1></body></html>", encoding="utf-8")
-    (report.parent / "validation_results.json").write_text(json.dumps([
-        {"file_index": 1, "filename": "response_0001_ch1.html", "score": 1, "issues": ["x"], "preview": ""}]),
-        encoding="utf-8")
+    # no validation_results.json: with one the parsed native report is the view (U13 item 3)
 
     async def scenario():
         _conn, session = tb._fake_session("android")
