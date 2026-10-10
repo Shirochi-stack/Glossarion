@@ -653,7 +653,6 @@ def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=
 EXCLUDED_ROUTE_PREFIXES = {
     'ocagy': "OCAGY runs through a desktop npm/bun CLI, which a phone cannot start.",
     'ocz/': "OpenCode Zen free models need the desktop npm/bun CLI.",
-    'authza': "Z.AI login and the GLM access modes use desktop-only routes.",
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",
     'search/opera': "Opera Aria mints its token by driving a desktop Opera browser.",
 }

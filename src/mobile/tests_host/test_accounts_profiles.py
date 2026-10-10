@@ -728,7 +728,7 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
     keys = [getattr(c, "key", None) for c in body.controls]
     # U12 item 1: the routes that cannot work on mobile are not listed
     assert keys == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem",
-                    "account-authds", "account-antigravity", "accounts-experimental"]  # U13
+                    "account-authds", "account-antigravity", "account-zai", "accounts-experimental"]  # U13
     assert body.controls[-1].title == f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})"
     fake_auth.modules["authgem"].get_store(2).save_tokens({"access_token": "g", "email": "gem@example.com",
                                                           "expires_at": time.time() + 3 * 3600 + 60})

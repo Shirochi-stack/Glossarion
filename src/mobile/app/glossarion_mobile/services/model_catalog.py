@@ -95,7 +95,7 @@ def _rules() -> Any:
 
 #: Plan "Excluded on mobile" model routes; the reasons live in ``settings_rules.EXCLUDED_ROUTE_PREFIXES``
 #: (shared). This tuple is the U3 alias and the fallback when the backend is not importable.
-EXCLUDED_ROUTE_PREFIXES = ("ocagy", "ocz/", "authza", "autharena", "search/opera")
+EXCLUDED_ROUTE_PREFIXES = ("ocagy", "ocz/", "autharena", "search/opera")
 KEPT_NOTE = "A model chosen on the desktop stays selected in config.json, but it cannot run here."
 
 
@@ -116,7 +116,7 @@ def excluded_route(model: Optional[str]) -> Optional[str]:
 
 
 #: Catalog providers (``model_options`` names) of the excluded routes.
-EXCLUDED_PROVIDERS = frozenset({"ocagy", "opencode-zen", "authza", "autharena"})
+EXCLUDED_PROVIDERS = frozenset({"ocagy", "opencode-zen", "autharena"})
 
 
 def provider_excluded(provider: Optional[str]) -> bool:
@@ -182,7 +182,7 @@ def job_model_block(kind: Any, params: Optional[Mapping[str, Any]] = None,
 
 #: The route prefix of each excluded catalog provider (for its long reason).
 _EXCLUDED_PROVIDER_ROUTES = {"ocagy": "ocagy/", "opencode-zen": "ocz/",
-                             "authza": "authza/", "autharena": "autharena/"}
+                             "autharena": "autharena/"}
 
 
 def provider_excluded_detail(provider: Optional[str]) -> str:

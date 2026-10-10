@@ -76,6 +76,15 @@ ANTIGRAVITY_STEPS = ("1. On the PC, pick an antigravity/ model once so Glossario
                      "3. Enter http://<PC address>:3000 here (ipconfig shows the address). Keep the PC on while translating.")
 
 
+ZAI_ABOUT = ("Z.AI models (authza/…) run through the GLM proxy, which signs in to Z.AI and, with \"Use "
+             "auto-provisioned API key with Z.AI General API\" on, provisions the General API key. A phone cannot run it: "
+             "Glossarion on your PC does, and the phone sends its requests there. With no address set, the phone never "
+             "tries to sign in or provision a key.")
+ZAI_STEPS = ("1. On the PC, set GLM_PROXY_LISTEN_HOST=0.0.0.0 before starting Glossarion, sign in to Z.AI (and set the "
+             "General API toggle there if you use it), and use an authza/ model once so the proxy starts.  "
+             "2. Allow its port through the PC's firewall on your private network.  "
+             "3. Enter http://<PC address>:18870 (the default port) and the proxy_api_key from the PC's GLM proxy secrets file.")
+
 DEEPSEEK_URL = "https://chat.deepseek.com"
 DEEPSEEK_ABOUT = ("DeepSeek's web chat with your own DeepSeek account (authds/flash, authds/pro and their -thinking "
                   "variants), no API key. You sign in on DeepSeek's site in an in-app browser; translations then run "
@@ -740,6 +749,7 @@ class AccountsScreen(Screen):
         controls: list[ft.Control] = [self._provider_card(provider) for provider in self.providers]
         controls.append(self._deepseek_card())
         controls.append(self._antigravity_card())
+        controls.append(self._zai_card())
         controls.append(self._experimental_tile())
         # U12 item 1: routes that cannot work on mobile (Tor, desktop helpers) are not listed at all
         return ft.ListView(controls=controls, expand=True, padding=12, spacing=8)
@@ -789,6 +799,60 @@ class AccountsScreen(Screen):
             self.antigravity_status.update()
         except Exception:
             pass
+        return ok
+
+    # ---- Z.AI (authza/) through the GLM proxy on the user's PC (U13) ----------------------------------
+
+    def _zai_card(self) -> ft.Control:
+        current = remote_routes.saved_url(self.prefs, "authza")
+        has_key = remote_routes.has_secret(self.prefs, "authza")
+        self.zai_url = ft.TextField(label="GLM proxy address on your PC", value=current, dense=True,
+                                    hint_text="http://192.168.1.10:18870", keyboard_type=ft.KeyboardType.URL,
+                                    key="account-zai-url")
+        self.zai_key = ft.TextField(label="Proxy API key", password=True, can_reveal_password=True, dense=True,
+                                    hint_text="A key is saved" if has_key else "proxy_api_key from the PC",
+                                    key="account-zai-key")
+        self.zai_status = ft.Text("Not tested" if current else "Not set up", key="account-zai-status",
+                                  theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([ft.Icon(ft.Icons.COMPUTER),
+                        ft.Text("Z.AI (authza/) via your PC", theme_style=ft.TextThemeStyle.TITLE_SMALL, expand=True),
+                        ReasonChip(reason=EXPERIMENTAL_CHIP, detail=ZAI_ABOUT)], spacing=8),
+                ft.Text(ZAI_STEPS, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                self.zai_url,
+                self.zai_key,
+                ft.Row([ft.FilledTonalButton(content="Save & test", key="account-zai-test",
+                                             on_click=lambda e: call_handler(self.test_zai))]),
+                self.zai_status,
+            ], spacing=6, tight=True),
+            padding=12, border_radius=tokens.RADII["card"], bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            key="account-zai")
+
+    async def test_zai(self) -> bool:
+        url = remote_routes.apply_url(self.prefs, "authza", self.zai_url.value, save=True)
+        typed = str(self.zai_key.value or "").strip()
+        keyed = (remote_routes.apply_secret(self.prefs, "authza", typed, save=True) if typed
+                 else remote_routes.apply_secret(self.prefs, "authza"))
+        self.zai_key.value = ""
+        ok, text = False, "Not set up"
+        if url:
+            try:
+                import glm_proxy
+
+                run = self.run_io
+                models = await run(glm_proxy.fetch_available_models) if run is not None else \
+                    await asyncio.to_thread(glm_proxy.fetch_available_models)
+                ok, text = True, f"✓ Connected · {len(models)} models"
+            except Exception as exc:
+                text = f"No answer: {exc}" + ("" if keyed else " (no proxy API key saved)")
+        self.zai_status.value = text
+        self.zai_status.color = ft.Colors.PRIMARY if ok else ft.Colors.ERROR
+        for control in (self.zai_status, self.zai_key):
+            try:
+                control.update()
+            except Exception:
+                pass
         return ok
 
     # ---- DeepSeek web (authds/, U13 item 4) ----------------------------------------------------------

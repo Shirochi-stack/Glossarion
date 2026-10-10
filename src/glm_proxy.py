@@ -31,12 +31,17 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+import mobile_runtime
+
 try:
     import httpx
 except ImportError:  # pragma: no cover - requests remains the compatibility fallback
     httpx = None
 
-from installer_utils import run_logged_subprocess
+try:  # not bundled on Glossarion Mobile, which uses the GLM proxy running on the user's PC
+    from installer_utils import run_logged_subprocess
+except ImportError:  # pragma: no cover - mobile bundle
+    run_logged_subprocess = None
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +64,15 @@ RUNTIME_PATCH_VERSION = "2026-09-20-zcode-dual-access-v7"
 ZCODE_APP_VERSION = "3.14.0"
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
+#: Glossarion Mobile cannot install, log in to or start the GLM proxy: it uses the one on the user's PC.
+MOBILE_PROXY_HINT = ("authza/ on mobile uses the GLM proxy running on your PC: on the PC set GLM_PROXY_LISTEN_HOST=0.0.0.0, "
+                     "sign in to Z.AI there, then enter the proxy address and key in Accounts › Z.AI")
+
+
+def _listen_host() -> str:
+    """Where the managed proxy listens: loopback, unless ``GLM_PROXY_LISTEN_HOST`` opens it to the network
+    (Glossarion Mobile on the same Wi-Fi; requests still need the proxy API key)."""
+    return os.environ.get("GLM_PROXY_LISTEN_HOST", "").strip() or DEFAULT_PROXY_HOST
 DEFAULT_PROXY_PORT = 18870
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 MODELS_ENDPOINT = "/v1/models"
@@ -578,6 +592,8 @@ def _automatic_bun_install_command() -> Optional[List[str]]:
 
 
 def _install_bun_automatically(log_fn=None) -> List[str]:
+    if not mobile_runtime.subprocesses_available() or run_logged_subprocess is None:
+        raise RuntimeError(MOBILE_PROXY_HINT)
     command = _automatic_bun_install_command()
     if not command:
         raise RuntimeError(
@@ -601,6 +617,8 @@ def _install_bun_automatically(log_fn=None) -> List[str]:
 
 
 def _download_archive(url: str) -> bytes:
+    if not mobile_runtime.subprocesses_available():
+        raise RuntimeError(MOBILE_PROXY_HINT)
     errors: List[str] = []
     curl = _candidate_executable("curl")
     if curl:
@@ -936,6 +954,8 @@ def _dependency_marker(runtime_dir: str) -> str:
 
 
 def _ensure_dependencies(runtime_dir: str, bun: List[str], log_fn=None) -> None:
+    if not mobile_runtime.subprocesses_available():
+        raise RuntimeError(MOBILE_PROXY_HINT)
     marker = _dependency_marker(runtime_dir)
     if os.path.isdir(os.path.join(runtime_dir, "node_modules")) and os.path.isfile(marker):
         return
@@ -1016,7 +1036,7 @@ def _ensure_account_config(account_id: Optional[int] = None) -> str:
     plan = "coding-plan" if general_api else "start-plan"
     enabled_flag = "false" if general_api else "true"
     config = f'''server:
-  host: "{DEFAULT_PROXY_HOST}"
+  host: "{_listen_host()}"
   port: {_get_proxy_port(account)}
 auth:
   mode: "oauth"
@@ -1080,8 +1100,10 @@ def has_credentials(account_id: Optional[int] = None) -> bool:
 
 
 def can_auto_provision_general_api_key(account_id: Optional[int] = None) -> bool:
-    """Return whether polling may retrieve a General API key via Z.AI login."""
-    return uses_general_api() and _external_proxy_url(account_id) is None
+    """Return whether polling may retrieve a General API key via Z.AI login (never on a phone: the PC
+    proxy provisions it, and with no proxy address there is nothing to provision through)."""
+    return (uses_general_api() and _external_proxy_url(account_id) is None
+            and mobile_runtime.subprocesses_available())
 
 
 def _build_headers(account_id: Optional[int] = None) -> Dict[str, str]:
@@ -1151,6 +1173,8 @@ def _hidden_process_kwargs() -> Dict[str, Any]:
 
 
 def _login(account_id: Optional[int] = None, log_fn=None) -> None:
+    if not mobile_runtime.subprocesses_available():
+        raise RuntimeError(MOBILE_PROXY_HINT)
     with _proxy_launch_lock:
         account = _normalize_account_id(account_id)
         if _external_proxy_url(account):
@@ -1242,6 +1266,8 @@ def ensure_proxy_running(
             "running": False,
             "error": f"Configured GLM proxy is unavailable: {health.get('error', 'unknown error')}",
         }
+    if not mobile_runtime.subprocesses_available():
+        return {"running": False, "needs_login": True, "error": MOBILE_PROXY_HINT}
 
     with _proxy_launch_lock:
         health = check_proxy_health(account)
@@ -1842,6 +1868,16 @@ def fetch_available_models(
 ) -> List[str]:
     """Return model IDs visible after the selected AuthZA proxy is ready."""
     account = _normalize_account_id(account_id)
+    external = _external_proxy_url(account)
+    if external:  # a proxy elsewhere (Glossarion Mobile -> the PC): its OpenAI-style model list
+        response = requests.get(f"{external}/v1/models", headers=_build_headers(account), timeout=timeout)
+        response.raise_for_status()
+        ids = [str(row.get("id")) for row in (response.json() or {}).get("data") or [] if row.get("id")]
+        if not ids:
+            raise RuntimeError("The GLM proxy returned no model IDs")
+        return ids
+    if not mobile_runtime.subprocesses_available():
+        raise RuntimeError(MOBILE_PROXY_HINT)
     general_api = uses_general_api()
     _log = log_fn or _log_console
     account_label = "default account" if account == 0 else f"account #{account}"

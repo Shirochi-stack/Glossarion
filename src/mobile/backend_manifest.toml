@@ -106,7 +106,6 @@ extra_modules = []
 # Never bundled (reason required). Every edge into them must be guarded or baselined.
 [exclude]
 ocagy_cli = "npm/bun CLI (ocagy/ and ocz/ routes, excluded on mobile)"
-glm_proxy = "bun proxy (authza/ route, excluded on mobile)"
 installer_utils = "npm/bun installer"
 proxy_token_storage = "bun + DPAPI token storage"
 autharena_proxy = "uv + QtWebEngine + CDP (autharena/ route, excluded on mobile)"
@@ -260,9 +259,7 @@ files = []
 [baseline.lazy_excluded_edges]
 "antigravity_proxy->proxy_token_storage" = { count = 2, reason = "patches / migrates the proxy runtime during the desktop install and launch (_patch_runtime_package_json, ensure_proxy_running after its mobile gate); a phone never installs it (U13: it uses a PC proxy)" }
 "model_options->autharena_proxy" = { count = 1, reason = "AuthArena catalog fetch (_fetch_provider_catalog); only reached after the guarded list_accounts() import (U4), route excluded on mobile" }
-"model_options->glm_proxy" = { count = 2, reason = "AuthZA catalog/session (incl. dynamic __import__ at 1429); route excluded on mobile" }
 "model_options->ocagy_cli" = { count = 3, reason = "OpenCode Zen catalog; ocagy/ocz routes excluded on mobile" }
-"multi_api_key_manager->glm_proxy" = { count = 1, reason = "AuthZA login button in MultiAPIKeyDialog (desktop dialog)" }
 "unified_api_client->autharena_proxy" = { count = 2, reason = "autharena/ route setup/send; route rejected on mobile (U1)" }
 
 # Process-spawn sites (module:function) in bundled modules that the collector cannot see as

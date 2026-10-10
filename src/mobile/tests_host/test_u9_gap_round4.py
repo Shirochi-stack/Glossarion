@@ -347,13 +347,13 @@ def test_translate_sheet_review_switch_and_excluded_model(tmp_path):
 def test_job_model_block_covers_model_jobs_only():
     from glossarion_mobile.services import model_catalog as mc
 
-    get = {"model": "ollamapull/qwen3:8b"}.get
-    assert mc.job_model_block("translate", {}, get)[0] == "ollamapull/ isn't available on mobile"
+    get = {"model": "ocz/qwen3-8b"}.get  # U13: ollamapull/ runs via a PC
+    assert mc.job_model_block("translate", {}, get)[0] == "ocz/ isn't available on mobile"
     assert mc.job_model_block("extract_glossary", {}, get) is not None
     assert mc.job_model_block("compile_epub", {}, get) is None and mc.job_model_block("qa_scan", {}, get) is None
     # the job's own model wins over the config's
     assert mc.job_model_block("translate", {"config_overrides": {"model": "gpt-6"}}, get) is None
-    assert mc.job_model_block("direct_text", {"model": "antigravity/x"}, {"model": "gpt-6"}.get) is not None
+    assert mc.job_model_block("direct_text", {"model": "ocagy/x"}, {"model": "gpt-6"}.get) is not None
     assert mc.mobile_statuses({"ocagy": "static fallback (ModuleNotFoundError)", "openai": "online (2 models)"}) == {
         "ocagy": mc.EXCLUDED_STATUS, "openai": "online (2 models)"}
     assert "npm/bun" in mc.provider_excluded_detail("opencode-zen")
@@ -376,7 +376,7 @@ def test_jobs_feature_refuses_an_excluded_model_before_queueing():
 def test_keys_cards_mark_excluded_models():
     from glossarion_mobile.ui.screens.keys import excluded_model_reason
 
-    assert excluded_model_reason("authza/glm-5")[0] == "authza/ isn't available on mobile"
+    assert excluded_model_reason("autharena/glm-5")[0] == "autharena/ isn't available on mobile"  # U13: authza/ via a PC
     assert excluded_model_reason("gpt-6") is None and excluded_model_reason("") is None
 
 
