@@ -674,7 +674,6 @@ def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=
 #: routes). Their rows stay visible, disabled with this reason; a value chosen on desktop is
 #: kept in config.json untouched.
 EXCLUDED_ROUTE_PREFIXES = {
-    'authnan': "NanoGPT browser login is currently available in the desktop app.",
     'ocagy': "OCAGY runs through a desktop npm/bun CLI, which a phone cannot start.",
     'ocz/': "OpenCode Zen free models need the desktop npm/bun CLI.",
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",

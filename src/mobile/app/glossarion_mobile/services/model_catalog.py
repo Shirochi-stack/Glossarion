@@ -430,7 +430,7 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
 
     ChatGPT: the default ``gpt-6-luna`` while listed, else the newest Luna (the light tier), else the newest
     plain GPT; Claude: the newest Sonnet; Gemini: the newest Flash (not Lite/image/TTS/live); Grok: the
-    newest plain Grok (no build/composer/multi-agent variants). Preview builds lose ties."""
+    newest plain Grok (no build/composer/multi-agent variants); NanoGPT: the newest GLM. Preview builds lose ties."""
     route = str(route or "").lower()
     names = [str(m) for m in (models or ()) if str(m).lower().startswith(route + "/")
              or re.match(rf"^{re.escape(route)}\d*/", str(m).lower())]
@@ -457,6 +457,8 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
         return pick(names, "flash") or pick(names, "gemini")
     if route == "authgrok":
         return pick(names, "grok")
+    if route == "authnan":
+        return pick(names, "glm")
     return None
 
 
