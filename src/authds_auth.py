@@ -143,27 +143,11 @@ def _open_browser(*, visible=False, cancel_check=None):
                 target = next(t for t in tabs if t.get("type") == "page" and
                               t.get("url", "").startswith(BASE_URL + "/"))
                 page = _Page(target["webSocketDebuggerUrl"], cancel_check)
-                page.call("Page.enable")
-                # Observe the site's current worker URL instead of relying only on
-                # a hashed asset name that can change with a web release.
-                page.call("Page.addScriptToEvaluateOnNewDocument", {"source": """
-                    if (location.origin === 'https://chat.deepseek.com') {
-                      window.__glossarionDSWorkers = [];
-                      const NativeWorker = window.Worker;
-                      window.Worker = class extends NativeWorker {
-                        constructor(url, options) {
-                          super(url, options);
-                          window.__glossarionDSWorkers.push(String(url));
-                        }
-                      };
-                    }
-                """})
-                page.call("Page.reload")
                 ready_deadline = time.monotonic() + 30
                 while time.monotonic() < ready_deadline:
                     _check(cancel_check)
                     try:
-                        ready = page.evaluate("document.readyState !== 'loading' && Array.isArray(window.__glossarionDSWorkers)")
+                        ready = page.evaluate("document.readyState !== 'loading' && location.origin === 'https://chat.deepseek.com'")
                     except AuthDSError:
                         ready = False  # navigation may destroy the old JS context
                     if ready:
@@ -234,7 +218,6 @@ def _wait_login(page, log_fn, cancel_check=None, timeout=300):
 
 def login(log_fn=print, cancel_check=None):
     with _serialized(cancel_check), _open_browser(visible=True, cancel_check=cancel_check) as page:
-        _clear_page_token(page)
         _wait_login(page, log_fn, cancel_check)
     log_fn("AuthDS: Browser session saved.")
 
@@ -375,11 +358,7 @@ _START_SCRIPT = r"""(() => {
   }
   const target='/api/v0/chat/completion';
   const {challenge}=await post('/api/v0/chat/create_pow_challenge',{target_path:target});
-  const observed=(window.__glossarionDSWorkers || []).filter(url => {
-    try {const u=new URL(url,location.href);return u.protocol==='https:' &&
-      ['chat.deepseek.com','fe-static.deepseek.com'].includes(u.hostname);} catch(_){return false;}
-  });
-  const workerResponse=await fetch(cfg.worker || observed.at(-1) || cfg.fallbackWorker, {signal:controller.signal});
+  const workerResponse=await fetch(cfg.worker || cfg.fallbackWorker, {signal:controller.signal});
   if(!workerResponse.ok) throw Error('Proof worker unavailable; update AUTHDS_POW_WORKER_URL');
   const workerURL=URL.createObjectURL(new Blob([await workerResponse.text()],{type:'application/javascript'}));
   const worker=new Worker(workerURL);
@@ -413,10 +392,35 @@ _START_SCRIPT = r"""(() => {
 })()"""
 
 
+def _discover_worker(page):
+    """Read worker targets after login without modifying the page's Worker API."""
+    from urllib.parse import urlparse
+    call = getattr(page, "call", None)
+    if not callable(call):
+        return None
+    try:
+        targets = call("Target.getTargets").get("targetInfos", [])
+    except AuthDSError as exc:
+        if exc.error_type == "cancelled":
+            raise
+        return None
+    for target in targets:
+        if target.get("type") not in ("worker", "shared_worker"):
+            continue
+        url = target.get("url", "")
+        parsed = urlparse(url)
+        if (parsed.scheme == "https" and
+                parsed.hostname in ("chat.deepseek.com", "fe-static.deepseek.com") and
+                parsed.path.startswith("/chat/static/") and parsed.path.endswith(".js")):
+            return url
+    return None
+
+
 def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback):
     model_type, thinking = resolve_model(model)
     cfg = {"model": model_type, "thinking": thinking, "prompt": build_prompt(messages),
-           "worker": os.environ.get("AUTHDS_POW_WORKER_URL"), "fallbackWorker": POW_WORKER_URL}
+           "worker": os.environ.get("AUTHDS_POW_WORKER_URL") or _discover_worker(page),
+           "fallbackWorker": POW_WORKER_URL}
     if before_send_callback:
         before_send_callback()
     page.evaluate(_START_SCRIPT.replace("__CONFIG__", json.dumps(cfg)))
@@ -430,7 +434,7 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
                 raise AuthDSError("AuthDS page was reloaded during translation.", "browser_error")
             if state.get("error"):
                 status = state.get("status", 0)
-                kind = "auth_error" if status in (401, 403) else "rate_limit" if status == 429 else "api_error"
+                kind = "auth_error" if status == 401 else "access_denied" if status == 403 else "rate_limit" if status == 429 else "api_error"
                 # No server bodies, tokens, or browser state are included in logs.
                 raise AuthDSError(f"AuthDS: {state['error']}", kind)
             for chunk in state.get("chunks", []):

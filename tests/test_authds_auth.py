@@ -165,6 +165,97 @@ def test_cancel_queued_work():
     ds._gate.release()
 
 
+def test_manual_login_preserves_existing_session(monkeypatch, tmp_path):
+    scripts=[]
+    class BrowserPage:
+        def evaluate(self, script):
+            scripts.append(script)
+            return True
+    @contextmanager
+    def browser(**kwargs):
+        assert kwargs['visible'] is True
+        yield BrowserPage()
+    monkeypatch.setattr(ds,'profile_dir',lambda:tmp_path)
+    monkeypatch.setattr(ds,'_open_browser',browser)
+    monkeypatch.setattr(ds,'_clear_page_token',lambda *a:pytest.fail('valid session must be preserved'))
+    ds.login(log_fn=lambda _:None)
+    assert scripts == [ds._TOKEN_PRESENT]
+    assert (tmp_path/'.signed_in').exists()
+
+
+def test_login_browser_does_not_modify_workers_or_reload(monkeypatch, tmp_path):
+    import io
+    scripts=[]
+    commands=[]
+    args=[]
+    class Process:
+        def poll(self): return None
+        def wait(self, **kwargs): pass
+    def launch(arguments, **kwargs):
+        args.extend(arguments)
+        (tmp_path/'DevToolsActivePort').write_text('12345\n/devtools/browser/test',encoding='utf-8')
+        return Process()
+    class Opener:
+        def open(self, url, **kwargs):
+            return io.BytesIO(json.dumps([{'type':'page','url':ds.BASE_URL+'/',
+                'webSocketDebuggerUrl':'ws://127.0.0.1:12345/devtools/page/test'}]).encode())
+    class Socket:
+        def send(self, message): commands.append(json.loads(message)['method'])
+        def close(self): pass
+    class BrowserPage:
+        ws=Socket()
+        def evaluate(self, script):
+            scripts.append(script)
+            return True
+        def call(self, method, *args, **kwargs):
+            commands.append(method)
+            return {}
+    monkeypatch.setattr(ds,'profile_dir',lambda:tmp_path)
+    monkeypatch.setattr(ds,'_browser_binary',lambda:'chrome')
+    monkeypatch.setattr(ds.subprocess,'Popen',launch)
+    monkeypatch.setattr(ds.urllib.request,'build_opener',lambda *a:Opener())
+    monkeypatch.setattr(ds,'_Page',lambda *a:BrowserPage())
+    with ds._open_browser(visible=True): pass
+    assert '--headless=new' not in args
+    assert commands == ['Browser.close']
+    assert scripts and all('Worker' not in s and 'reload' not in s for s in scripts)
+
+
+def test_worker_discovery_reads_targets_without_page_mutation():
+    calls=[]
+    class BrowserPage:
+        def call(self, method):
+            calls.append(method)
+            return {'targetInfos':[
+                {'type':'worker','url':'https://captcha.example/worker.js'},
+                {'type':'page','url':'https://fe-static.deepseek.com/chat/static/main.js'},
+                {'type':'worker','url':'https://fe-static.deepseek.com/chat/static/current-worker.js'}]}
+    assert ds._discover_worker(BrowserPage()).endswith('/current-worker.js')
+    assert calls == ['Target.getTargets']
+
+
+def test_http_403_preserves_session_and_does_not_relogin(monkeypatch, tmp_path):
+    visibility=[]
+    (tmp_path/'.signed_in').touch()
+    class BrowserPage(Page):
+        def evaluate(self, script):
+            if script == ds._TOKEN_PRESENT:
+                return True
+            return super().evaluate(script)
+    @contextmanager
+    def browser(**kwargs):
+        visibility.append(kwargs['visible'])
+        yield BrowserPage([{'chunks':[], 'done':True,'error':'HTTP 403','status':403}])
+    monkeypatch.setattr(ds,'profile_dir',lambda:tmp_path)
+    monkeypatch.setattr(ds,'_open_browser',browser)
+    monkeypatch.setattr(ds,'_clear_page_token',lambda *a:pytest.fail('403 must not clear token'))
+    with pytest.raises(ds.AuthDSError) as error:
+        ds.send_chat_completion(messages=[{'content':'source'}],log_fn=lambda _:None)
+    assert error.value.error_type == 'access_denied'
+    assert visibility == [False]
+    assert (tmp_path/'.signed_in').exists()
+
+
 def test_mobile_rejected_before_process_spawn(monkeypatch):
     monkeypatch.setattr(ds.mobile_runtime,'subprocesses_available',lambda:False)
     monkeypatch.setattr(ds.subprocess,'Popen',lambda *a,**k:pytest.fail('must not launch'))
@@ -179,7 +270,8 @@ def test_browser_script_protocol(tmp_path):
     if not node:
         pytest.skip('Node is needed to execute the browser JavaScript test')
     config={'model':'expert','thinking':True,'prompt':'한국어 source',
-            'worker':None,'fallbackWorker':ds.POW_WORKER_URL}
+            'worker':'https://fe-static.deepseek.com/chat/static/current-worker.js',
+            'fallbackWorker':ds.POW_WORKER_URL}
     setup=r'''
 const assert = require('node:assert/strict');
 global.window=global;

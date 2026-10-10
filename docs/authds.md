@@ -17,6 +17,9 @@ store your Google password, or export the session token. Keep this profile priva
 Once signed in, translation uses that profile in a background browser. Expired
 sessions trigger one interactive re-login. Each chunk gets a new chat, and requests
 sharing this profile run sequentially. Stop cancels queued work and active requests.
+Login preserves existing sessions and leaves the site's Worker API unchanged,
+without forced page reloads. Only a confirmed expired-session response clears
+the rejected token for re-login; HTTP 403 keeps the saved session intact.
 
 This route uses DeepSeek's web-chat service and its account limits. Temperature,
 sampling parameters, and requested output-token limits are not sent; the website
@@ -32,8 +35,8 @@ Advanced settings through environment variables:
 - `AUTHDS_BROWSER_BINARY`: full path to Chrome/Edge if automatic detection fails.
 - `AUTHDS_PROFILE_DIR`: dedicated browser profile directory.
 - `AUTHDS_POW_WORKER_URL`: override the site's proof worker URL if a site update
-  changes the asset or worker discovery fails. Normally the route observes the
-  site's worker URL, with a known asset as a fallback.
+  changes the asset or worker discovery fails. After login, the route reads the
+  browser's worker targets without modifying the page, with a known asset as a fallback.
 
 The web protocol is unofficial and can change. Local tests cover routing, stream
 parsing, cancellation, expired-session recovery, and the mobile process guard.
