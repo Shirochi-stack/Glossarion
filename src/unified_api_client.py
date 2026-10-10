@@ -1484,6 +1484,12 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authgpt_reset_cancel = None
     AUTHGPT_AVAILABLE = False
 
+# AuthNan - NanoGPT browser-approved API keys (optional)
+try:
+    import authnan_auth as _authnan_auth
+except (ImportError, _MOBILE_IMPORT_FAILURE):
+    _authnan_auth = None
+
 # AuthGrok - Grok account via xAI OAuth (optional)
 try:
     from authgrok_auth import AuthGrokHTTPError as _AuthGrokHTTPError
@@ -3019,6 +3025,7 @@ class UnifiedClient:
         'google-translate': 'google_translate',
         'authgpt/': 'authgpt',
         'authgpt': 'authgpt',
+        'authnan/': 'authnan',
         'authgrok/': 'authgrok',
         'authgrok': 'authgrok',
         'authgem-key/': 'authgem_key',
@@ -3070,6 +3077,7 @@ class UnifiedClient:
         'ollama/', 'lmstudio/',
         'autharena/', 'autharena',
         'authgpt/', 'authgpt',
+        'authnan/',
         'authgrok/', 'authgrok',
         'authgem', 'authgem-vertex',
         'vertex/', 'ocagy/', 'ocagy', 'ocz/',
@@ -3193,6 +3201,8 @@ class UnifiedClient:
             model_l = (model or '').strip().lower()
             if not model_l:
                 return None
+            if re.match(r'^authnan\d{0,4}/', model_l):
+                return None
             for route in cls._load_custom_prefix_routes():
                 prefix = (route.get('prefix') or '').lower()
                 if prefix and model_l.startswith(prefix):
@@ -3208,6 +3218,8 @@ class UnifiedClient:
             model_l = (model or '').strip().lower()
             if not model_l:
                 return None
+            if re.match(r'^authnan\d{0,4}/', model_l):
+                return 'authnan'
             if model_l.startswith('ollamapull/'):
                 return 'ollamapull'
             local_route = cls._local_openai_route(model_l)
@@ -3221,6 +3233,7 @@ class UnifiedClient:
                 if model_l.startswith(str(prefix).lower()):
                     return provider
             numbered_routes = (
+                (r'^authnan\d{1,4}(?:/|$)', 'authnan'),
                 (r'^authgem-vertex\d{1,4}(?:/|$)', 'authgem_vertex'),
                 (r'^authgem\d{1,4}(?:/|$)', 'authgem'),
                 (r'^authgpt\d{1,4}(?:/|$)', 'authgpt'),
@@ -3327,6 +3340,8 @@ class UnifiedClient:
     @classmethod
     def _model_needs_api_key(cls, model: str) -> bool:
         """Return False for models that authenticate without an API key."""
+        if re.match(r'^authnan\d{0,4}/', str(model or '').strip(), re.I):
+            return False
         if (model or '').lower().startswith('ollamapull/') or cls._local_openai_route(model):
             return False
         # Local custom endpoint (Ollama/LM Studio/etc.) → no API key needed
@@ -4280,6 +4295,8 @@ class UnifiedClient:
             pass
 
         # Cancel any in-flight AuthGPT SSE streams
+        if _authnan_auth is not None:
+            _authnan_auth.cancel_stream()
         try:
             if _authgpt_cancel_stream is not None:
                 _authgpt_cancel_stream()
@@ -4374,6 +4391,8 @@ class UnifiedClient:
         except Exception:
             pass
         # Reset AuthGPT cancel event so it doesn't block new requests
+        if _authnan_auth is not None:
+            _authnan_auth.reset_cancel()
         try:
             if _authgpt_reset_cancel is not None:
                 _authgpt_reset_cancel()
@@ -5682,6 +5701,8 @@ class UnifiedClient:
 
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
+        if re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I):
+            return
         if (str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')
                 or self._local_openai_route(getattr(self, 'model', ''))):
             return
@@ -5727,6 +5748,8 @@ class UnifiedClient:
     
     def _apply_individual_key_endpoint_if_needed(self):
         """Apply individual key endpoint if configured (multi-key mode) - works independently of global toggle"""
+        if re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I):
+            return
         if (str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')
                 or self._local_openai_route(getattr(self, 'model', ''))):
             return
@@ -8591,6 +8614,8 @@ class UnifiedClient:
         self.client_type = None
         self._authgem_account_id = None  # account slot for numbered authgem prefixes
         custom_prefix_route = self._get_custom_prefix_route_for_model(model_snapshot)
+        if re.match(r'^authnan\d{0,4}/', model_lower):
+            custom_prefix_route = None
         self._custom_prefix_route = custom_prefix_route
         if custom_prefix_route:
             self.client_type = 'custom_openai'
@@ -8619,6 +8644,9 @@ class UnifiedClient:
                     self._authgem_account_id = int(_m.group(1))
 
         # Dynamic fallback: match numbered authgpt variants (authgpt1/, authgpt2/, etc.)
+        if self.client_type is None and re.match(r'^authnan\d{1,4}/', model_lower):
+            self.client_type = 'authnan'
+
         if self.client_type is None:
             import re as _re
             _m = _re.match(r'^authgpt(\d{1,4})(?:/|$)', model_lower)
@@ -8659,8 +8687,8 @@ class UnifiedClient:
         
         # Check if we're using a custom OpenAI base URL
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
-        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-        
+        use_custom_endpoint = self.client_type != 'authnan' and os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+
         # CRITICAL: Skip global custom endpoint if this key has an individual endpoint enabled
         has_individual_endpoint = (hasattr(self, 'current_key_use_individual_endpoint') and 
                                   self.current_key_use_individual_endpoint and
@@ -8792,7 +8820,7 @@ class UnifiedClient:
             else:
                 logger.info("ElectronHub will use HTTP API for API calls")
 
-        elif self.client_type == 'nanogpt':
+        elif self.client_type in ('nanogpt', 'authnan'):
             # NanoGPT uses OpenAI-compatible chat endpoint or native image/video endpoints
             # NanoGPT routes internally within its send method
             pass
@@ -17406,6 +17434,7 @@ class UnifiedClient:
         - Handles cancellation, rate limits (429 with Retry-After), 5xx with backoff, and generic errors.
         - Returns the requests.Response object when a successful status is received.
         """
+        import re
         self._bind_thread_run_id_for_request()
         api_delay = self._get_send_interval()
         provider = provider_name or "HTTP"
@@ -17519,6 +17548,16 @@ class UnifiedClient:
             status = resp.status_code
             if status in expected_status:
                 return resp
+            if (status in (401, 429)
+                    and re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I)
+                    and url.startswith('https://nano-gpt.com/')):
+                details = {'retry_after_seconds': self._parse_retry_after(resp.headers.get('Retry-After', ''))}
+                resp.close()
+                raise UnifiedClientError(
+                    f"AuthNan request rejected (HTTP {status})",
+                    error_type='auth_error' if status == 401 else 'rate_limit',
+                    http_status=status, details=details,
+                )
             if is_temperature_rejection(status, resp.text) and strip_temperature(json):
                 remember_temperature_rejection(payload_model)
                 print(f"🌡️ {provider}: {payload_model} returned HTTP 400 mentioning temperature; retrying without it (cached for this session)")
@@ -19269,6 +19308,7 @@ class UnifiedClient:
             'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
             'authgpt': self._send_authgpt,  # ChatGPT subscription via OAuth
+            'authnan': self._send_authnan,  # NanoGPT subscription via browser approval
             'authgrok': self._send_authgrok,  # Grok account via xAI OAuth
             'authcd': self._send_authcd,  # Claude subscription via OAuth
             'authgem': self._send_authgem,  # Gemini via Google OAuth + AI Studio
@@ -19352,6 +19392,8 @@ class UnifiedClient:
         """
         client_type = getattr(self, 'client_type', 'openai')
         model_snapshot = self._get_active_request_model()
+        if re.match(r'^authnan\d{0,4}/', str(model_snapshot or ''), re.I):
+            return 'authnan'
         if str(model_snapshot or '').lower().startswith('ollamapull/'):
             return 'ollamapull'
         local_route = self._local_openai_route(model_snapshot)
@@ -23841,7 +23883,8 @@ class UnifiedClient:
         )
     
     def _send_openai_compatible(self, messages, temperature, max_tokens, base_url, 
-                                response_name, provider="generic", headers=None, model_override=None) -> UnifiedResponse:
+                                response_name, provider="generic", headers=None, model_override=None,
+                                *, api_key_override=None, allow_endpoint_override=True) -> UnifiedResponse:
         """Send request to OpenAI-compatible APIs with safety settings"""
         max_retries = self._get_max_retries()
         api_delay = self._get_send_interval()
@@ -23909,11 +23952,11 @@ class UnifiedClient:
                 effective_model = effective_model[len('together/'):]
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
-        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-        actual_api_key = self._get_active_request_api_key()
+        use_custom_endpoint = allow_endpoint_override and os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        actual_api_key = self._get_active_request_api_key() if api_key_override is None else api_key_override
         try:
             tls = self._get_thread_local_client()
-            if getattr(tls, 'use_individual_endpoint', False):
+            if allow_endpoint_override and getattr(tls, 'use_individual_endpoint', False):
                 actual_api_key = getattr(tls, 'api_key', actual_api_key)
                 tls_endpoint = getattr(tls, 'azure_endpoint', None)
                 if tls_endpoint and not actual_api_key:
@@ -24103,7 +24146,7 @@ class UnifiedClient:
         # Route image/video output mode through the dedicated image edit endpoint
         # without changing where normal text requests go.
         try:
-            image_edit_base_url = '' if provider in ('ollama', 'lmstudio') or self._should_suppress_custom_image_edit_endpoint() else (
+            image_edit_base_url = '' if not allow_endpoint_override or provider in ('ollama', 'lmstudio') or self._should_suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
@@ -24681,10 +24724,10 @@ class UnifiedClient:
                         # NanoGPT video models require a completely different endpoint;
                         # bail out of the SDK chat path and redirect immediately.
                         if provider == 'nanogpt':
-                            base_url_root = (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
+                            base_url_root = "https://nano-gpt.com" if api_key_override is not None else (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
                             return self._send_nanogpt_video(
                                 messages, effective_model, base_url_root,
-                                self.api_key or "", response_name
+                                actual_api_key, response_name
                             )
                     
                     # Add image output config if enabled (for compatible models)
@@ -26074,6 +26117,7 @@ class UnifiedClient:
                         return self._send_openai_compatible(
                             messages, None, max_tokens, base_url, response_name,
                             provider=provider, headers=headers, model_override=effective_model,
+                            api_key_override=api_key_override, allow_endpoint_override=allow_endpoint_override,
                         )
                     if isinstance(e, ReasoningEffortRejected):
                         raise UnifiedClientError(str(e), error_type="validation", http_status=400) from e
@@ -26081,7 +26125,15 @@ class UnifiedClient:
                     if self._is_stop_requested():
                         self._cancelled = True
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                    
+
+                    if api_key_override is not None and provider == 'nanogpt' and status in (401, 429):
+                        response_headers = getattr(getattr(e, 'response', None), 'headers', {}) or {}
+                        raise UnifiedClientError(
+                            f"AuthNan request rejected (HTTP {status})",
+                            error_type='auth_error' if status == 401 else 'rate_limit', http_status=status,
+                            details={'retry_after_seconds': self._parse_retry_after(response_headers.get('Retry-After', ''))},
+                        ) from e
+
                     error_str = str(e).lower()
                     if (
                         getattr(e, "error_type", None) == "prohibited_content"
@@ -30107,18 +30159,96 @@ class UnifiedClient:
     # NanoGPT (nano-gpt.com) – chat / image / video endpoint routing
     # =========================================================================
 
-    def _send_nanogpt(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+    def _send_authnan(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Use a browser-approved NanoGPT key with the subscription chat API."""
+        if _authnan_auth is None:
+            raise UnifiedClientError('AuthNan is unavailable in this build', error_type='config_error')
+        match = re.match(r'^authnan(\d{0,4})/(.+)$', self._get_active_request_model(), re.I)
+        if not match:
+            raise UnifiedClientError('Enter a model name after authnan/', error_type='validation')
+        digits, model = match.groups()
+        pool_mode = bool(digits) and int(digits) == 0
+        candidates = (_authnan_auth.get_rotating_account_pool() if pool_mode
+                      else [(int(digits or 0), _authnan_auth.get_store(int(digits or 0)))])
+        if not candidates:
+            raise UnifiedClientError('NanoGPT account pool is empty. Sign in using authnan/ or authnanN/ first.', error_type='auth_error')
+        max_attempts = 1 if pool_mode else max(1, self._get_max_retries())
+        last_error = None
+        for account_id, store in candidates:
+            recovered = False
+            attempt = 0
+            while attempt < max_attempts:
+                if self._should_abort_retry() or _authnan_auth.is_cancelled():
+                    raise UnifiedClientError('NanoGPT request cancelled', error_type='cancelled')
+                try:
+                    key = store.get_valid_access_token(auto_login=not pool_mode)
+                except Exception as exc:
+                    if self._should_abort_retry() or _authnan_auth.is_cancelled():
+                        raise UnifiedClientError('NanoGPT sign-in cancelled', error_type='cancelled') from exc
+                    last_error = UnifiedClientError(f'NanoGPT account #{account_id}: {exc}', error_type='auth_error')
+                    if pool_mode:
+                        break
+                    raise last_error from exc
+                try:
+                    print(f'🔐 NanoGPT account #{account_id}: subscription chat (model={model})')
+                    return self._send_nanogpt(
+                        messages, temperature, max_tokens, response_name,
+                        model_override=model, api_key_override=key,
+                        chat_base_url=_authnan_auth.SUBSCRIPTION_BASE_URL,
+                    )
+                except Exception as exc:
+                    if self._should_abort_retry():
+                        raise UnifiedClientError('NanoGPT request cancelled', error_type='cancelled') from exc
+                    status = getattr(exc, 'http_status', None) or getattr(exc, 'status_code', None)
+                    status = status or getattr(getattr(exc, 'response', None), 'status_code', None)
+                    if status not in (401, 429):
+                        raise
+                    last_error = exc
+                    if (getattr(exc, 'details', None) or {}).get('job_submitted'):
+                        # Keep status polling tied to the submitted job/account.
+                        if status == 401:
+                            try:
+                                store.recover_from_unauthorized(key, auto_login=False)
+                            except RuntimeError:
+                                pass
+                        raise
+                    if status == 401:
+                        try:
+                            store.recover_from_unauthorized(key, auto_login=not pool_mode and not recovered)
+                        except Exception as login_exc:
+                            if self._should_abort_retry() or _authnan_auth.is_cancelled():
+                                raise UnifiedClientError('NanoGPT sign-in cancelled', error_type='cancelled') from login_exc
+                            if not pool_mode:
+                                raise UnifiedClientError(f'NanoGPT reauthentication failed: {login_exc}', error_type='auth_error', http_status=401) from login_exc
+                        if pool_mode or recovered:
+                            break
+                        recovered = True
+                        continue  # One reauthentication does not consume a normal retry.
+                    attempt += 1
+                    if pool_mode or attempt >= max_attempts:
+                        break
+                    wait = (getattr(exc, 'details', None) or {}).get('retry_after_seconds')
+                    if wait is None:
+                        wait = self._get_send_interval()
+                    if not self._sleep_with_cancel(wait, 0.2):
+                        raise UnifiedClientError('NanoGPT request cancelled', error_type='cancelled')
+        if last_error is not None:
+            raise last_error
+        raise UnifiedClientError('No usable NanoGPT accounts', error_type='auth_error')
+
+    def _send_nanogpt(self, messages, temperature, max_tokens, response_name,
+                      *, model_override=None, api_key_override=None, chat_base_url=None) -> UnifiedResponse:
         """Route a request to nano-gpt.com.
 
         * Default  → POST /api/v1/chat/completions  (OpenAI-compatible)
-        * ENABLE_IMAGE_OUTPUT_MODE=1 → POST /v1/images/generations
+        * ENABLE_IMAGE_OUTPUT_MODE=1 → POST /v1/images/generations (authnan: /api/v1/images/generations)
         * ENABLE_VIDEO_OUTPUT_MODE=1 → POST /api/generate-video  (async/poll)
         """
-        base_url = (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
-        api_key = self.api_key or ""
+        base_url = "https://nano-gpt.com" if api_key_override is not None else (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
+        api_key = self._get_active_request_api_key() if api_key_override is None else api_key_override
 
         # Strip the nan/ routing prefix so the bare model name is sent to the API
-        effective_model = self.model or ""
+        effective_model = self._get_active_request_model() if model_override is None else model_override
         if effective_model.lower().startswith("nan/"):
             effective_model = effective_model[4:]
 
@@ -30154,10 +30284,12 @@ class UnifiedClient:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                base_url=f"{base_url}/api/v1",
+                base_url=chat_base_url or f"{base_url}/api/v1",
                 response_name=response_name,
                 provider="nanogpt",
                 model_override=effective_model,
+                api_key_override=api_key_override,
+                allow_endpoint_override=api_key_override is None,
             )
 
     def _shrink_nanogpt_image_data_url(self, data_url: str, force_webp: bool = False) -> str:
@@ -30414,7 +30546,8 @@ class UnifiedClient:
             prompt = "Generate an image"
 
         image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
-        url = f"{base_url}/v1/images/generations"
+        image_path = '/api/v1/images/generations' if re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I) else '/v1/images/generations'
+        url = f"{base_url}{image_path}"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -30447,6 +30580,12 @@ class UnifiedClient:
                 if not self._is_stop_requested():
                     print(f"🖼️ [NanoGPT] Generating image via {url} (model={model})")
                 resp = _req.post(url, json=payload, headers=headers, timeout=120)
+                if resp.status_code in (401, 429) and re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I):
+                    status = resp.status_code
+                    details = {'retry_after_seconds': self._parse_retry_after(resp.headers.get('Retry-After', ''))}
+                    resp.close()
+                    raise UnifiedClientError(f'AuthNan image request rejected (HTTP {status})',
+                        error_type='auth_error' if status == 401 else 'rate_limit', http_status=status, details=details)
                 if resp.status_code not in (200, 201):
                     err = resp.text[:400]
                     err_type = ""
@@ -30767,6 +30906,12 @@ class UnifiedClient:
             print(f"   📤 model={model} | duration={payload.get('duration','')} | resolution={payload.get('resolution','')} | prompt={_prompt_preview!r}")
         try:
             resp = _req.post(gen_url, json=payload, headers=headers, timeout=60)
+            if resp.status_code in (401, 429) and re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I):
+                status = resp.status_code
+                details = {'retry_after_seconds': self._parse_retry_after(resp.headers.get('Retry-After', ''))}
+                resp.close()
+                raise UnifiedClientError(f'AuthNan video request rejected (HTTP {status})',
+                    error_type='auth_error' if status == 401 else 'rate_limit', http_status=status, details=details)
             if resp.status_code not in (200, 201, 202):
                 err = resp.text[:400]
                 try:
@@ -30801,7 +30946,8 @@ class UnifiedClient:
         for attempt in range(max_attempts):
             if self._is_stop_requested():
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-            time.sleep(poll_interval)
+            if not self._sleep_with_cancel(poll_interval, 0.2):
+                raise UnifiedClientError('Operation cancelled by user', error_type='cancelled')
             try:
                 # NanoGPT spec: GET /api/generate-video/status?runId=...&modelSlug=...
                 # modelSlug is the model name without the 'nan/' prefix
@@ -30812,6 +30958,13 @@ class UnifiedClient:
                     headers={"x-api-key": api_key},
                     timeout=30,
                 )
+                if status_resp.status_code in (401, 429) and re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I):
+                    status = status_resp.status_code
+                    details = {'job_submitted': True, 'run_id': run_id,
+                               'retry_after_seconds': self._parse_retry_after(status_resp.headers.get('Retry-After', ''))}
+                    status_resp.close()
+                    raise UnifiedClientError(f'AuthNan video status rejected (HTTP {status})',
+                        error_type='auth_error' if status == 401 else 'rate_limit', http_status=status, details=details)
                 if status_resp.status_code != 200:
                     print(f"   ⚠️ [NanoGPT] Poll {attempt+1}: HTTP {status_resp.status_code} – retrying…")
                     continue

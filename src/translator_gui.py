@@ -12109,6 +12109,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             authcd_login_needed,
             authgem_login_needed,
             authgpt_login_needed,
+            authnan_login_needed,
             authgrok_login_needed,
             google_credentials_route,
             google_creds_missing_text,
@@ -12166,7 +12167,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         if hasattr(self, 'authds_login_btn'):
             self.authds_login_btn.setVisible(str(model).lower().startswith('authds/'))
 
-        # Show/hide AuthGPT login button
+        # Show/hide browser account login controls.
+        if hasattr(self, 'authnan_login_btn'):
+            needed = authnan_login_needed(model, self.config,
+                hint=bool(getattr(self, '_multi_key_manager_authnan_model_hint', '')
+                          or getattr(self, '_multi_key_manager_authnan_pool_hint', False)))
+            self.authnan_login_btn.setVisible(needed)
+            if needed:
+                self._update_authnan_login_status()
+
         if hasattr(self, 'authgpt_login_btn'):
             # authgpt/ routes, an authgpt0/ pool request, or enabled pool entries
             needs_authgpt = authgpt_login_needed(
@@ -12443,6 +12452,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         pool_ids = self._collect_auth_account_ids_from_pools()
+        pool_ids.setdefault('authnan', set())
+        from settings_rules import authnan_pool_route_requested
+        authnan_model = model if _re.match(r'^authnan\d{0,4}/', model) else str(getattr(self, '_multi_key_manager_authnan_model_hint', '')).lower()
+        authnan_pool_requested = authnan_pool_route_requested(authnan_model, self.config,
+            hint=getattr(self, '_multi_key_manager_authnan_pool_hint', False))
+        if authnan_pool_requested:
+            from authnan_auth import _numbered_account_ids
+            pool_ids['authnan'].update([0] + _numbered_account_ids())
+            pool_ids['authnan'].update(getattr(self, '_authnan_pending_account_ids', set()))
         authgrok_pool_requested = self._authgrok_pool_route_requested(model)
         authgpt_pool_requested = self._authgpt_pool_route_requested(model)
         vertex_model = self._authgem_vertex_control_model()
@@ -12483,13 +12501,14 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         previous_authgrok_model = getattr(self, '_authgrok_account_model_snapshot', None)
         authgrok_primary_id = None
         _prov_patterns = {
+            'authnan': _re.compile(r'^authnan(\d{0,4})/'),
             'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
             'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
             'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
             'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
         }
         for provider, pat in _prov_patterns.items():
-            m = pat.match(model)
+            m = pat.match(authnan_model if provider == 'authnan' else model)
             if m:
                 acct_id = int(m.group(1)) if m.group(1) else 0
                 pool_ids[provider].add(acct_id)
@@ -12497,6 +12516,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     authgrok_primary_id = acct_id
 
         combo_map = {
+            'authnan': 'authnan_acct_combo',
             'authgpt': 'authgpt_acct_combo',
             'authgrok': 'authgrok_acct_combo',
             'authcd':  'authcd_acct_combo',
@@ -12547,6 +12567,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 )
                 if provider == 'authgpt':
                     show_combo = authgpt_pool_requested and hasattr(self, main_btn_name)
+                if provider == 'authnan':
+                    fixed_route = _re.match(r'^authnan(\d{0,4})/', authnan_model)
+                    fixed_route = fixed_route and (not fixed_route.group(1) or int(fixed_route.group(1)) != 0)
+                    show_combo = not fixed_route and (authnan_pool_requested or len(sorted_ids) > 1) and provider_configured
                 if provider == 'authgem' and vertex_model:
                     show_combo = vertex_pool_requested and hasattr(self, main_btn_name)
                 if show_combo:
@@ -12559,6 +12583,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         combo.addItem("+ N", _AUTHGROK_ADD_ACCOUNT_SENTINEL)
                     if provider == 'authgpt':
                         combo.addItem("+ N", "__authgpt_add_account__")
+                    if provider == 'authnan':
+                        combo.addItem("+ N", "__authnan_add_account__")
                     if provider == 'authgem' and vertex_pool_requested:
                         combo.addItem("+ N", "__authgem_add_account__")
                     combo.setCurrentIndex(cur_idx)
@@ -12568,7 +12594,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     combo.hide()
 
         # Update all visible main button labels to reflect current selection
-        for provider in ('authgpt', 'authgrok', 'authcd', 'authgem'):
+        for provider in ('authgpt', 'authgrok', 'authcd', 'authgem', 'authnan'):
             main_btn_name = f"{provider}_login_btn"
             if hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible():
                 update_fn = getattr(self, f'_update_{provider}_login_status', None)
@@ -12589,15 +12615,28 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             return
         combo = getattr(self, f'{provider}_acct_combo', None)
         selected_data = combo.itemData(index) if combo is not None else None
-        if provider in ('authgpt', 'authgem') and selected_data == f'__{provider}_add_account__':
+        if provider in ('authgpt', 'authgem', 'authnan') and selected_data == f'__{provider}_add_account__':
             pending_name = f'_{provider}_pending_account_ids'
             pending = getattr(self, pending_name, set())
             ids = set(self._auth_account_ids.get(provider, [0])) | pending
             account_id = max(ids, default=0) + 1
+            if provider == 'authnan':
+                account_id = next((aid for aid in range(1, 10000) if aid not in ids), None)
+                if account_id is None:
+                    QMessageBox.warning(self, 'NanoGPT Accounts', 'All NanoGPT account slots are in use.')
+                    return
             pending.add(account_id)
             setattr(self, pending_name, pending)
             self._auth_account_ids[provider] = sorted(ids | pending)
             self._auth_account_idx[provider] = self._auth_account_ids[provider].index(account_id)
+            if provider == 'authnan':
+                from types import SimpleNamespace
+                fresh_ids = getattr(self, '_authnan_fresh_account_ids', set())
+                fresh_ids.add(account_id)
+                self._authnan_fresh_account_ids = fresh_ids
+                # This newly allocated slot has no saved file. Make + N start
+                # login immediately even before the background status poll runs.
+                self._auth_status_cache[('authnan', account_id)] = SimpleNamespace(has_tokens=False, account_info={})
             self._refresh_auth_account_arrows()
             QTimer.singleShot(0, getattr(self, f'_{provider}_login_clicked'))
             return
@@ -12904,6 +12943,98 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self._autharena_catalog_retry_pending = False
         self._autharena_catalog_after_login()
 
+    def _get_authnan_account_id(self):
+        import re
+        model = str(getattr(self, 'model_var', '') or self.config.get('model', '')).strip()
+        if not re.match(r'^authnan\d{0,4}/', model, re.I):
+            model = str(getattr(self, '_multi_key_manager_authnan_model_hint', '')).strip()
+        match = re.match(r'^authnan(\d{0,4})/', model, re.I)
+        if match and (not match.group(1) or int(match.group(1)) != 0):
+            return int(match.group(1) or 0)
+        ids = getattr(self, '_auth_account_ids', {}).get('authnan', [0])
+        index = getattr(self, '_auth_account_idx', {}).get('authnan', 0)
+        return ids[index] if 0 <= index < len(ids) else 0
+
+    def _update_authnan_login_status(self):
+        from html import escape
+        status = self._auth_status_snapshot('authnan')
+        account_id = self._get_authnan_account_id()
+        suffix = f' #{account_id}' if account_id else ''
+        busy = getattr(self, '_authnan_login_busy', False)
+        self.authnan_login_btn.setEnabled(status is not None and not busy)
+        if busy:
+            self.authnan_login_btn.setText('⏳ NanoGPT signing in…')
+        elif status is None:
+            self.authnan_login_btn.setText(f'⏳ NanoGPT{suffix} loading…')
+        else:
+            self.authnan_login_btn.setText(f'✅ NanoGPT{suffix}' if status.has_tokens else f'🔐 NanoGPT{suffix} Login')
+        identity = status.account_info if status is not None else {}
+        detail = escape(str(identity.get('email') or identity.get('user_id') or ''))
+        tip = ('Account: ' + detail + '<br>Click to log out.<br>') if status is not None and status.has_tokens else 'Approve access in your browser. No API key needs to be pasted.<br>'
+        self.authnan_login_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em;'>" + tip +
+            'Chat uses your NanoGPT subscription endpoint. Account and key settings govern overage; '
+            'explicit provider selection can use paid balance. Images and video use separate endpoints.</p></qt>')
+        self.authnan_login_btn.setStyleSheet('background-color: #28a745; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px;' if status is not None and status.has_tokens else 'background-color: #6750a4; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px;')
+
+    def _authnan_login_clicked(self):
+        if getattr(self, '_authnan_login_busy', False):
+            return
+        account_id = self._get_authnan_account_id()
+        status = self._auth_status_cache.get(('authnan', account_id))
+        if status is None:
+            self._update_authnan_login_status()
+            return
+        logout = status.has_tokens
+        if logout and QMessageBox.question(self, 'NanoGPT Account',
+                f'Log out of NanoGPT account slot #{account_id}? This removes the saved key from Glossarion. '
+                'You can revoke it separately in NanoGPT API settings.', QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._authnan_login_busy = True
+        self._authnan_login_account_id = account_id
+        new_account = account_id in getattr(self, '_authnan_fresh_account_ids', set())
+        self._update_authnan_login_status()
+
+        def work():
+            try:
+                import authnan_auth
+                store = authnan_auth.get_store(account_id)
+                if not getattr(store, '_desktop_change_listener', False):
+                    store.on_token_change(lambda: QMetaObject.invokeMethod(self, '_authnan_login_status_changed', Qt.QueuedConnection))
+                    store._desktop_change_listener = True
+                if logout:
+                    store.clear_tokens()
+                else:
+                    authnan_auth.reset_cancel()
+                    authnan_auth.run_oauth_flow(store=store, new_account=new_account)
+                    getattr(self, '_authnan_fresh_account_ids', set()).discard(account_id)
+                self._authnan_login_error = ''
+                self._authnan_login_result = 'Logged out' if logout else 'Signed in'
+            except Exception as exc:
+                self._authnan_login_error = str(exc)
+            QMetaObject.invokeMethod(self, '_authnan_login_finished', Qt.QueuedConnection)
+
+        threading.Thread(target=work, daemon=True, name='NanoGPT sign-in').start()
+
+    @Slot()
+    def _authnan_login_status_changed(self):
+        self._authnan_status_revision = getattr(self, '_authnan_status_revision', 0) + 1
+        self._auth_status_cache = {key: value for key, value in getattr(self, '_auth_status_cache', {}).items() if key[0] != 'authnan'}
+        self._refresh_auth_account_arrows()
+        self._update_authnan_login_status()
+
+    @Slot()
+    def _authnan_login_finished(self):
+        self._authnan_login_busy = False
+        self._authnan_login_status_changed()
+        error = getattr(self, '_authnan_login_error', '')
+        account_id = self._authnan_login_account_id
+        if error:
+            self.append_log(f'❌ NanoGPT #{account_id}: {error}')
+            QMessageBox.warning(self, 'NanoGPT Login Failed', error)
+        else:
+            self.append_log(f'✅ NanoGPT #{account_id}: {self._authnan_login_result}')
+            self._schedule_current_provider_catalog_refresh()
+
     def _get_authgpt_account_id(self):
         """Return the numeric account ID for the AuthGPT provider.
 
@@ -12934,6 +13065,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self._auth_status_pending = set()
         if key not in self._auth_status_pending and not getattr(self, '_applying_auth_status', False):
             self._auth_status_pending.add(key)
+            status_revision = getattr(self, '_authnan_status_revision', 0)
             def load():
                 try:
                     import importlib
@@ -12944,7 +13076,12 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         result = importlib.import_module('ocagy_cli').get_account_summary()
                     else:
                         store = importlib.import_module(provider + '_auth').get_store(account_id)
+                        if provider == 'authnan' and not getattr(store, '_desktop_change_listener', False):
+                            store.on_token_change(lambda: QMetaObject.invokeMethod(self, '_authnan_login_status_changed', Qt.QueuedConnection))
+                            store._desktop_change_listener = True
                         result = SimpleNamespace(has_tokens=bool(store.has_tokens), account_info=dict(store.account_info))
+                        if provider == 'authnan':
+                            result.authnan_revision = status_revision
                 except Exception:
                     result = None
                 try:
@@ -12958,6 +13095,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     def _receive_auth_status_snapshot(self, key, result):
         self._auth_status_pending.discard(key)
         if result is None:
+            return
+        if key[0] == 'authnan' and getattr(result, 'authnan_revision', 0) != getattr(self, '_authnan_status_revision', 0):
+            self._update_authnan_login_status()
             return
         self._auth_status_cache[key] = result
         provider, account_id = key
@@ -13505,7 +13645,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             return
 
         both_visible = (
-            hasattr(self, 'authgpt_login_btn') and self.authgpt_login_btn.isVisible()
+            any(hasattr(self, name) and getattr(self, name).isVisible() for name in ('authgpt_login_btn', 'authnan_login_btn'))
             and hasattr(self, 'authgem_login_btn') and self.authgem_login_btn.isVisible()
         )
 
@@ -16066,6 +16206,18 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.authgpt_acct_combo.hide()
         model_btn_layout.addWidget(self.authgpt_acct_combo)
 
+        self.authnan_login_btn = QPushButton('🔐 NanoGPT Login')
+        self.authnan_login_btn.clicked.connect(self._authnan_login_clicked)
+        self.authnan_login_btn.hide()
+        model_btn_layout.addWidget(self.authnan_login_btn)
+        self.authnan_acct_combo = QComboBox()
+        self.authnan_acct_combo.setStyleSheet(_acct_combo_style)
+        self.authnan_acct_combo.setToolTip('Select NanoGPT account slot; + N opens a fresh signed-out browser window to add a different account')
+        self.authnan_acct_combo.setFixedWidth(54)
+        self.authnan_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authnan', idx))
+        self.authnan_acct_combo.hide()
+        model_btn_layout.addWidget(self.authnan_acct_combo)
+
         # AuthGrok Login button (xAI OAuth; xAI's page supports Google sign-in)
         self.authgrok_login_btn = QPushButton("🔐 Grok Login")
         self.authgrok_login_btn.setStyleSheet(
@@ -16330,10 +16482,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         
         # State for arrow-based account slot cycling
         self._auth_account_ids = {
-            'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0]
+            'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0], 'authnan': [0]
         }
         self._auth_account_idx = {
-            'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0
+            'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0, 'authnan': 0
         }
         
         model_btn_layout.addStretch()
@@ -28358,6 +28510,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
+                ("🔑", "authnan/", "AuthNan", "NanoGPT subscription via browser login", "#281418", "#e88080"),
                 ("🏟️", "autharena/", "AuthArena", "Arena Login; no API key", "#123028", "#34d399"),
                 ("✕", "authgrok/", "AuthGrok", "Grok via xAI OAuth login", "#111111", "#d8d8d8"),
                 ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1438", "#d97706"),

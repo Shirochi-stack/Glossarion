@@ -1186,6 +1186,7 @@ def request_hard_stop_for_shutdown(owner=None, translation_stop_flag=None, gloss
     for _helper_module in (
         "authnd_auth",
         "authgpt_auth",
+        "authnan_auth",
         "authgem_auth",
         "authcd_auth",
         "gemini_free",

@@ -374,6 +374,8 @@ def _get_static_model_options() -> List[str]:
         "authcd/claude-opus-4-7", "authcd/claude-opus-4-6", "authcd/claude-haiku-4-5",
 
         # nano-gpt provider models
+        # Pick this route, sign in, then poll the current subscription catalog.
+        "authnan/",
         "nan/deepseek/deepseek-v4-flash", "nan/deepseek/deepseek-v4-flash:thinking", "nan/deepseek/deepseek-v4-pro",
         "nan/deepseek/deepseek-v4-pro:thinking", "nan/TEE/kimi-k2.6", "nan/TEE/glm-5.1", "nan/TEE/glm-5.1-thinking",
         "nan/moonshotai/kimi-k2.6:thinking","nan/moonshotai/kimi-k2.6","nan/anthropic/claude-opus-4.7", "nan/anthropic/claude-opus-4.7:thinking",
@@ -787,7 +789,7 @@ _BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 
 
 _NUMBERED_MODEL_COMPLETION_RE = re.compile(
-    r"^(autharena|authgem-vertex|antigravity|authgpt|authgrok|authcd|authgem|authnd|authza|ocagy)"
+    r"^(autharena|authgem-vertex|antigravity|authgpt|authnan|authgrok|authcd|authgem|authnd|authza|ocagy)"
     r"(\d{1,4})(?=/|$)",
     re.IGNORECASE,
 )
@@ -910,13 +912,15 @@ def _authenticated_catalog_target(
 ) -> Optional[Tuple[str, str, int, str]]:
     """Return (cache name, dropdown prefix, account id, route) for auth routes."""
     value = str(active_model or "").strip().lower()
-    match = re.match(r"^(authgpt|authcd|authgem|authnd|authza)(\d{0,4})/", value)
+    match = re.match(r"^(authgpt|authnan|authcd|authgem|authnd|authza)(\d{0,4})/", value)
     if not match:
         return None
     route = match.group(1)
     account_id = int(match.group(2) or 0)
     provider_name = route if not account_id else f"{route}:{account_id}"
     prefix = f"{route}{account_id if account_id else ''}/"
+    if route == 'authnan' and match.group(2) and account_id == 0:
+        provider_name, prefix = 'authnan:pool', 'authnan0/'
     return provider_name, prefix, account_id, route
 
 
@@ -1007,6 +1011,8 @@ def _provider_catalog_variant(provider: str) -> Optional[str]:
     if str(provider or "").split(":", 1)[0] == "nanogpt":
         # Older NanoGPT cache entries only contain text models.
         return "text_image_video_v1"
+    if str(provider or "").split(":", 1)[0] == "authnan":
+        return "subscription_text_image_video_v1"
     if str(provider or "").split(":", 1)[0] == "authgpt":
         # Replace catalogs fetched from Codex with client_version=0.0.0.
         return "account_models_v1"
@@ -1427,12 +1433,15 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
         # needed when the user actually sends a request.
         return True
     module_name = {
+        "authnan": "authnan_auth",
         "authgpt": "authgpt_auth",
         "authcd": "authcd_auth",
         "authgem": "authgem_auth",
         "authza": "glm_proxy",
     }[route]
     module = __import__(module_name)
+    if route == "authnan" and re.match(r'^authnan0{1,4}/', str(active_model).strip(), re.I):
+        return bool(module.get_account_pool())
     if route == "authza":
         if module.has_credentials(account_id):
             return True
@@ -1472,12 +1481,18 @@ def _fetch_authenticated_catalog(
         )
     else:
         module_name = {
+            "authnan": "authnan_auth",
             "authgpt": "authgpt_auth",
             "authcd": "authcd_auth",
             "authgem": "authgem_auth",
         }[route]
         module = __import__(module_name)
         store = module.get_store(account_id)
+        if route == "authnan" and re.match(r'^authnan0{1,4}/', str(active_model).strip(), re.I):
+            pool = module.get_account_pool()
+            if not pool:
+                raise ValueError('No saved NanoGPT accounts')
+            store = pool[0][1]
         access_token = store.get_valid_access_token(auto_login=False)
         kwargs = {"timeout": max(1, int(round(timeout)))}
         if route == "authgem":
@@ -1708,6 +1723,8 @@ def due_provider_catalog_for_model(
     # a login window. The actual session validation remains in the worker.
     if provider == "authgrok" or provider.startswith("authgrok:"):
         return provider
+    if provider == "authnan" or provider.startswith("authnan:"):
+        return provider if _module_bundled('authnan_auth') else None
 
     authenticated_target = _authenticated_catalog_target(active_model)
     if authenticated_target is not None and authenticated_target[0] == provider:
@@ -1882,11 +1899,11 @@ def refresh_provider_model_catalogs(
         built_in_names.update(name for name in failed if name.startswith("authgrok"))
         built_in_names.update(
             name for name in successful
-            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authnan", "authcd", "authgem", "authnd", "authza"}
         )
         built_in_names.update(
             name for name in failed
-            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authnan", "authcd", "authgem", "authnd", "authza"}
         )
         for name in failed:
             if name in built_in_names:
@@ -2051,6 +2068,18 @@ PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
         <p>Start the local server and load the model first when using <code>ollama/</code> or <code>lmstudio/</code>.
            The <b>🦙 Download Ollama</b> button is available for <code>ollamapull/</code>.</p>
         
+        <h4>NanoGPT Subscription (authnan/)</h4>
+        <p>Select <code>authnan/</code>, click <b>NanoGPT Login</b>, approve access in your browser,
+        then poll models to select a subscription model. Leave the API key blank.</p>
+        <p><code>authnan/model</code> uses the default account; <code>authnanN/model</code> pins slot
+        1–9999. <code>authnan0/model</code> rotates saved accounts and shows a selector with
+        <b>+ N</b> to add a different account in a fresh signed-out browser window.
+        Rotation never opens login during a request.</p>
+        <p>Chat uses <code>/api/subscription/v1/chat/completions</code> throughout retries.
+        Images and video use separate NanoGPT endpoints. Your NanoGPT account and key settings
+        govern paid overage and extras; explicit provider selection always uses pay-as-you-go
+        balance and bypasses subscription coverage.</p>
+
         <h4>ChatGPT Subscription (authgpt/)</h4>
         <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
         <ul>

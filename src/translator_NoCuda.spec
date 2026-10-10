@@ -287,6 +287,7 @@ app_files = [
 
 	# AuthGPT - ChatGPT subscription OAuth
 	('authgpt_auth.py', '.'),
+    ('authnan_auth.py', '.'),  # NanoGPT subscription browser login
 	('reasoning_compatibility.py', '.'),
 	('temperature_compatibility.py', '.'),
 	('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
@@ -656,6 +657,7 @@ app_modules = [
 	'hyphen_textwrap',
 	'ImageRenderer',
 	'large_env',
+	'authnan_auth',  # NanoGPT subscription browser login
 	'authgpt_auth',  # ChatGPT subscription OAuth
 	'reasoning_compatibility',
 	'temperature_compatibility',

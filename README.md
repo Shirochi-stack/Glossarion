@@ -140,6 +140,7 @@
 | **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
 | **Zhipu Intl.** | `za/*` | za/glm-4.6, za/glm-4-plus |
 | **NanoGPT** | `nan/*` | nan/gpt-image-2, nan/deepseek/deepseek-v4-flash, nan/openai/gpt-latest |
+| **NanoGPT Subscription** | `authnan/*`, `authnanN/*`, `authnan0/*` | Browser login; select models from the subscription catalog. [Account and billing guide](docs/authnan.md) |
 | **SambaNova** | `sam/*` | sam/DeepSeek-V3.2, sam/Meta-Llama-3.3-70B-Instruct, sam/gpt-oss-120b |
 | **Fireworks** | `fireworks/*` | fireworks/llama-v3-70b |
 | **Together AI** | `together/*` | together/llama-3-70b |
@@ -338,6 +339,7 @@ Glossarion/
 │   ├── review_dialog.py            # Translation review UI
 │   ├── other_settings.py           # Advanced settings dialogs
 │   ├── authgpt_auth.py             # ChatGPT OAuth integration
+│   ├── authnan_auth.py             # NanoGPT browser login and subscription accounts
 │   ├── authgrok_auth.py            # xAI/Grok OAuth integration
 │   ├── autharena_proxy.py          # Arena browser-session proxy and streaming
 │   ├── api_key_encryption.py       # API key encryption at rest

@@ -2762,6 +2762,7 @@ class MultiAPIKeyDialog(QDialog):
         return (
             self._model_needs_google_creds(model)
             or model.startswith('authgpt')
+            or model.startswith('authnan')
             or model.startswith('authgrok')
             or model.startswith('authcd')
             or model.startswith('authgem')
@@ -2860,6 +2861,8 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui._multi_key_manager_autharena_model_hint = self._pending_autharena_model()
             self.translator_gui._multi_key_manager_authgem_vertex_model_hint = self._pending_autharena_model('authgem-vertex')
             self.translator_gui._multi_key_manager_authgpt_pool_hint = self._has_pending_authgrok_pool_model('authgpt')
+            self.translator_gui._multi_key_manager_authnan_pool_hint = self._has_pending_authgrok_pool_model('authnan')
+            self.translator_gui._multi_key_manager_authnan_model_hint = self._pending_autharena_model('authnan')
             setattr(
                 self.translator_gui,
                 '_multi_key_manager_needs_google_creds_hint',

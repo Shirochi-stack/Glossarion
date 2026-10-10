@@ -66,13 +66,13 @@ __all__ = [
     "iter_enabled_key_pool_models", "is_vertex_route", "model_needs_google_creds",
     "has_google_creds_model_in_key_pools", "has_vertex_model_in_key_pools",
     "has_authgpt_in_key_pools", "has_authgrok_in_key_pools", "has_authgem_in_key_pools",
-    "has_authgem_vertex_in_key_pools", "has_authcd_in_key_pools",
-    "authgpt_pool_route_requested", "authgrok_pool_route_requested", "authgem_vertex_control_model",
+    "has_authgem_vertex_in_key_pools", "has_authcd_in_key_pools", "has_authnan_in_key_pools",
+    "authgpt_pool_route_requested", "authgrok_pool_route_requested", "authgem_vertex_control_model", "authnan_pool_route_requested",
     "collect_auth_account_ids_from_pools", "model_account_ids",
     "google_credentials_route", "google_creds_ready_text", "google_creds_missing_text", "google_creds_status",
     "INVALID_GOOGLE_CREDENTIALS", "google_credentials_error", "google_credentials_load_error",
     "is_google_service_account",
-    "authgpt_login_needed", "authgrok_login_needed", "authcd_login_needed", "authgem_login_needed",
+    "authgpt_login_needed", "authgrok_login_needed", "authcd_login_needed", "authgem_login_needed", "authnan_login_needed",
     "excluded_route_reason", "route_controls",
     # chunk size / compression
     "parse_chunk_size_text", "factor_for_chunk_size", "record_chunk_size", "remember_manual_chunk_size",
@@ -149,6 +149,7 @@ LOGIN_KEY_POOL_TOGGLES = {
 #: Numbered account routes (TranslatorGUI._collect_auth_account_ids_from_pools): the digits
 #: after the provider name are the token-store slot (``authgpt/`` = slot 0).
 AUTH_ACCOUNT_ROUTE_PATTERNS = {
+    'authnan': re.compile(r'^authnan(\d{0,4})/'),
     'authgpt': re.compile(r'^authgpt(\d{0,4})/'),
     'authgrok': re.compile(r'^authgrok(\d{0,4})/'),
     'authcd': re.compile(r'^authcd(\d{0,4})/'),
@@ -241,6 +242,23 @@ def has_vertex_model_in_key_pools(config=None, *, pool_models=None):
     except Exception:
         pass
     return False
+
+
+def has_authnan_in_key_pools(config=None, *, pool_models=None):
+    return any(re.match(r'^authnan\d{0,4}/', str(model or '').strip(), re.I)
+               for _pool, _toggle, model in _pool_source(config or {}, pool_models)())
+
+
+def authnan_pool_route_requested(active_model, config=None, *, hint=False, pool_models=None):
+    if hint or re.match(r'^authnan0{1,4}/', str(active_model or '').strip(), re.I):
+        return True
+    return any(re.match(r'^authnan0{1,4}/', str(model or '').strip(), re.I)
+               for _pool, _toggle, model in _pool_source(config or {}, pool_models)())
+
+
+def authnan_login_needed(model, config=None, *, hint=False):
+    return bool(re.match(r'^authnan\d{0,4}/', str(model or '').strip(), re.I)
+                or hint or has_authnan_in_key_pools(config))
 
 
 def has_authgpt_in_key_pools(config):
@@ -425,7 +443,7 @@ def collect_auth_account_ids_from_pools(config):
     Returns dict: {'authgpt': {0, 2}, 'authgrok': {0}, 'authcd': {1}, 'authgem': {0, 3}}.
     Moved from TranslatorGUI._collect_auth_account_ids_from_pools.
     """
-    result = {'authgpt': set(), 'authgrok': set(), 'authcd': set(), 'authgem': set()}
+    result = {provider: set() for provider in AUTH_ACCOUNT_ROUTE_PATTERNS}
     patterns = AUTH_ACCOUNT_ROUTE_PATTERNS
     try:
         pool_map = LOGIN_KEY_POOL_TOGGLES
@@ -446,6 +464,11 @@ def collect_auth_account_ids_from_pools(config):
                             result[provider].add(acct_id)
     except Exception:
         pass
+    # NanoGPT login controls also cover media, metadata, and QA pools.
+    for _pool, _toggle, model in iter_enabled_key_pool_models(config or {}):
+        match = patterns['authnan'].match(str(model or '').strip().lower())
+        if match:
+            result['authnan'].add(int(match.group(1) or 0))
     return result
 
 
@@ -651,6 +674,7 @@ def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=
 #: routes). Their rows stay visible, disabled with this reason; a value chosen on desktop is
 #: kept in config.json untouched.
 EXCLUDED_ROUTE_PREFIXES = {
+    'authnan': "NanoGPT browser login is currently available in the desktop app.",
     'ocagy': "OCAGY runs through a desktop npm/bun CLI, which a phone cannot start.",
     'ocz/': "OpenCode Zen free models need the desktop npm/bun CLI.",
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",
@@ -687,6 +711,7 @@ class RouteControls:
     authgrok_pool: bool                      # authgrok0/
     account_ids: Mapping[str, Tuple[int, ...]] = field(default_factory=dict)
     needs_api_key: Optional[bool] = None     # UnifiedClient._model_needs_api_key (None: unknown)
+    authnan_pool: bool = False
 
     def needs_login(self, provider):
         return provider in self.logins
@@ -731,6 +756,8 @@ def route_controls(model, config=None, *, platform='mobile', hints=None, api_key
         return authgpt_pool_route_requested(m, config, hint=hints.get('authgpt_pool', False))
 
     logins = []
+    if authnan_login_needed(model, config, hint=hints.get('authnan_pool', False)):
+        logins.append('authnan')
     if authgpt_login_needed(model, config, pool_route_requested=pool_route):
         logins.append('authgpt')
     if authgrok_login_needed(model, config, hint=hints.get('authgrok_pool', False)):
@@ -759,6 +786,7 @@ def route_controls(model, config=None, *, platform='mobile', hints=None, api_key
         authgrok_pool=authgrok_pool_route_requested(model, config, hint=hints.get('authgrok_pool', False)),
         account_ids={provider: tuple(sorted(slots)) for provider, slots in ids.items()},
         needs_api_key=_needs_api_key(model) if api_key_check else None,
+        authnan_pool=authnan_pool_route_requested(model, config, hint=hints.get('authnan_pool', False)),
     )
 
 
