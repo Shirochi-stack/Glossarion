@@ -233,7 +233,13 @@ def test_spawn_site_inventory_matches_the_patch_table():
     counts = {name: len(_spawn_sites(_tree(name))) for name in PATCHED_FILES}
     # Desktop branches are kept verbatim, so every original spawn site is still there.
     assert counts["Chapter_Extractor.py"] == 1
-    assert counts["GlossaryManager.py"] == 3          # spawn Pool, filter pool, scoring executor_cls
+    # spawn Pool, scoring executor_cls; the filter pool is built by _filter_executor(ProcessPoolExecutor, ...)
+    # since cf142abd ("stop flags": a stopped filter terminates its own pool), still behind the mobile gate
+    assert counts["GlossaryManager.py"] == 2
+    gm = (SRC / "GlossaryManager.py").read_text(encoding="utf-8-sig")
+    assert gm.count("_filter_executor(ProcessPoolExecutor,") == 1
+    site = gm.index("_filter_executor(ProcessPoolExecutor,")
+    assert "mobile_runtime.processes_available()" in gm[gm.rindex("use_process_pool_filtering =", 0, site):site]
     assert counts["TransateKRtoEN.py"] == 3           # PDF Manager + pool, auto-glossary pool
     assert counts["glossary_process_worker.py"] == 1
     assert counts["unified_glossary.py"] == 1

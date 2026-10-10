@@ -380,8 +380,10 @@ U9_IMPORTERS = {
     "gemini_free": ("browser_driver",),
     "update_manager": ("update_core",),
 }
-MANGA_FULL_SPECS = ("translator_Heavy.spec", "translator_NoCuda.spec", "translator_linux_NoCuda.spec")
-MANGA_FILES_ONLY_SPECS = ("translator_lite_mac_NoCuda.spec", "translator_lite_mac_intel_NoCuda.spec")
+# 7e767a19 ("auth"): the Mac NoCuda specs ship the manga stack as modules too (full manga tier)
+MANGA_FULL_SPECS = ("translator_Heavy.spec", "translator_NoCuda.spec", "translator_linux_NoCuda.spec",
+                    "translator_lite_mac_NoCuda.spec", "translator_lite_mac_intel_NoCuda.spec")
+MANGA_FILES_ONLY_SPECS = ()
 #: Manga module -> the U8 cores it imports at module level.
 U8_IMPORTERS = {
     "manga_integration": ("manga_env", "manga_files_core", "manga_runner", "manga_editor_core"),
