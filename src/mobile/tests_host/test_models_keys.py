@@ -179,8 +179,9 @@ def test_rank_models_exact_prefix_segment_contains_and_account_aliases():
 
 
 def test_authnd_recommends_the_newest_largest_nemotron():
-    """Welcome's NVIDIA Build pick: the version after "nemotron", then the total size (the first NNNb; the
-    MoE active size "a3b" / "a55b" is not a size), then Ultra > Super > Nano; non-chat variants skipped."""
+    """Welcome's NVIDIA Build pick (owner order, U15): never an "a3b" (tiny active size) model while another
+    Nemotron exists, then the total size (the first NNNb; the MoE active size "a3b" / "a55b" is not a size),
+    then the version after "nemotron", then Ultra > Super > Nano; non-chat variants skipped."""
     nd = "authnd/nvidia/"
     models = [nd + "nemotron-3-nano-30b-a3b", nd + "nemotron-3-super-120b-a12b", nd + "nemotron-3-ultra-550b-a55b",
               nd + "llama-3.1-nemotron-ultra-253b-v1", nd + "nemotron-nano-9b-v2", nd + "nemotron-3-safety-guard-8b",
@@ -188,8 +189,11 @@ def test_authnd_recommends_the_newest_largest_nemotron():
     assert mc.recommended_model("authnd", models) == nd + "nemotron-3-ultra-550b-a55b"
     assert mc.recommended_model("authnd", models[:2]) == nd + "nemotron-3-super-120b-a12b"
     assert mc.recommended_model("authnd", [nd + "nemotron-3-nano-30b-a3b"]) == nd + "nemotron-3-nano-30b-a3b"
-    # a newer version wins over a bigger older one; at equal version and no size the tier decides
-    assert mc.recommended_model("authnd", [nd + "llama-3.1-nemotron-ultra-253b-v1", nd + "nemotron-3-nano-30b-a3b"])         == nd + "nemotron-3-nano-30b-a3b"
+    # an a3b model loses to an older one, however new; more parameters win over a newer version
+    assert mc.recommended_model("authnd", [nd + "llama-3.1-nemotron-ultra-253b-v1", nd + "nemotron-3-nano-30b-a3b"])         == nd + "llama-3.1-nemotron-ultra-253b-v1"
+    assert mc.recommended_model("authnd", [nd + "nemotron-3.5-ultra-700b-a3b", nd + "nemotron-3-ultra-550b-a55b"])         == nd + "nemotron-3-ultra-550b-a55b"
+    assert mc.recommended_model("authnd", [nd + "nemotron-3.5-super-120b-a12b", nd + "nemotron-3-ultra-550b-a55b"])         == nd + "nemotron-3-ultra-550b-a55b"
+    # at equal size and no size the version, then the tier decides
     tiers = [nd + "nemotron-3-nano", nd + "nemotron-3-ultra", nd + "nemotron-3-super"]
     assert mc.recommended_model("authnd", tiers) == nd + "nemotron-3-ultra"
     assert mc.recommended_model("authnd", [nd + "nemotron-3-safety-guard-8b"]) is None

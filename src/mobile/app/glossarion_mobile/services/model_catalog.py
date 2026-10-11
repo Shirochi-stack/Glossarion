@@ -432,18 +432,26 @@ _ND_TIERS = (("ultra", 3), ("super", 2), ("nano", 0), ("mini", 0))
 _ND_SIZE = re.compile(r"(?<![a-z\d.])(\d+(?:\.\d+)?)b(?![a-z])")
 
 
+#: Owner (U15): an authnd/ pick never has this few active parameters (``a3b``) while another Nemotron exists.
+_ND_MIN_ACTIVE_B = 3.0
+
+
 def _nemotron_key(stem: str) -> tuple:
-    """The authnd/ rank of a Nemotron model name (lower case, without the route): the version right after
-    "nemotron" ("nemotron-3-…" -> 3; else a later "v2"), then the largest total size (the first ``NNNb`` -
-    ``a55b`` / ``a3b`` are active sizes), then the tier (Ultra > Super > Nano); preview builds lose ties."""
+    """The authnd/ rank of a Nemotron model name (lower case, without the route), owner order (U15): never a
+    tiny-active model (``a3b`` and below), then the largest total size (the first ``NNNb``; ``a55b`` / ``a3b``
+    are active sizes), then the version right after "nemotron" ("nemotron-3-…" -> 3; else a later "v2"), then
+    the tier (Ultra > Super > Nano); preview builds lose ties. So nemotron-3-ultra-550b-a55b beats a newer
+    -a3b model."""
     after = stem.split("nemotron", 1)[1]
     sizes = [float(n) for n in _ND_SIZE.findall(after)]
+    active = [float(n) for n in re.findall(r"(?<![a-z\d])a(\d+(?:\.\d+)?)b(?![a-z])", after)]
     rest = _ND_SIZE.sub("", after)
     rest = re.sub(r"(?<![a-z\d])a\d+(?:\.\d+)?b(?![a-z])", "", rest)  # the active size ("a3b")
     lead = re.match(r"^[-_ ]?(\d+(?:\.\d+)?)(?![\d.]*b)", after)
     version = float(lead.group(1)) if lead else _version(rest)
     tier = next((rank for word, rank in _ND_TIERS if word in stem), 1)
-    return version, (sizes[0] if sizes else 0.0), tier, "preview" not in stem, -len(stem)
+    tiny_active = bool(active) and min(active) <= _ND_MIN_ACTIVE_B
+    return not tiny_active, (sizes[0] if sizes else 0.0), version, tier, "preview" not in stem, -len(stem)
 
 
 def _version(text: str) -> float:

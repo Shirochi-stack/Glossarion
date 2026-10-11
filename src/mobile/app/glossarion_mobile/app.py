@@ -689,6 +689,8 @@ class GlossarionApp:
             return None
         self.shell.show(match, reset=reset, in_app=source == "app", alone=alone)
         self.page.update()
+        if match.name == "home" and source == "app":
+            self.dispatcher.spawn(self._resume_welcome())  # back on the chat from the drawer (owner U15)
         return match
 
     @staticmethod
@@ -792,12 +794,25 @@ class GlossarionApp:
         route = self.shell.pop_view(view, keep_above=keep_above)
         self.page.update()
         await self._sync_route(route)
+        await self._resume_welcome()
+
+    async def _resume_welcome(self) -> None:
+        """Owner (U15): the first-run Welcome is not lost by backing out of a screen opened from it (or of
+        itself): on the chat home with it unfinished, it opens again on the same step."""
+        feature = self.chat_feature
+        try:
+            if (feature is not None and not self.shell.stack and not self.shell.overlays
+                    and callable(getattr(feature, "welcome_resumable", None)) and feature.welcome_resumable()):
+                await self.navigate(build_route("welcome"))
+        except Exception:
+            log.exception("reopening the welcome flow failed")
 
     def back(self) -> None:
         """Tablet main-area back button."""
         route = self.shell.pop()
         self.page.update()
         self.dispatcher.spawn(self._sync_route(route))
+        self.dispatcher.spawn(self._resume_welcome())
 
     async def _sync_route(self, route: str) -> None:
         await self._push_client_route(route)

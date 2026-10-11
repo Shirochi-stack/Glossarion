@@ -245,6 +245,10 @@ class ChatFeature:
         self._share: Any = None
         self._unsubs: list = []
         self.welcome_shown = False
+        #: Owner (U15): the session's Welcome (flow + the screen's sign-in rows) survives leaving it for
+        #: another screen; ``welcome_resumable`` reopens it on the same step until it is finished or skipped.
+        self._welcome_flow: Any = None
+        self._welcome_screen: Any = None
         #: Extra long-press sheet rows after Pin (U9 Series' "Move to Series…"): ``chat -> [ActionItem]``.
         self.chat_action_providers: list = []
         # auto-migrate (UI_SPEC §2.17): one move at a time; workspaces the user agreed to merge into a
@@ -635,11 +639,15 @@ class ChatFeature:
         configured_mode = None
         if env is not None and env.config_get("glossary_mode_dialog_shown", False):
             configured_mode = env.config_get("auto_glossary_mode", None)
-        flow = WelcomeFlow(
-            glossary_mode=configured_mode or DEFAULT_GLOSSARY_MODE,
-            target_language=(env.config_get("output_language", None) if env else None) or "English",
-            signed_in="authgpt" in (state.signed_in.value if state is not None else ()),
-        )
+        flow = self._welcome_flow if self.welcome_resumable() else None
+        if flow is None:
+            flow = WelcomeFlow(
+                glossary_mode=configured_mode or DEFAULT_GLOSSARY_MODE,
+                target_language=(env.config_get("output_language", None) if env else None) or "English",
+                signed_in="authgpt" in (state.signed_in.value if state is not None else ()),
+            )
+        previous = self._welcome_screen if flow is self._welcome_flow else None
+        self._welcome_flow = flow
 
         screen: Any = None
 
@@ -721,7 +729,19 @@ class ChatFeature:
             default_max_tokens=int((env.config_get("max_output_tokens", None) if env else None) or 16384),
             default_chunk_size=str((env.config_get("manual_chunk_size", "") if env else "") or ""),
         )
+        if previous is not None:  # the sign-in rows, model lines and permission state of the same session
+            for name in ("provider_status", "model_notes", "keyless_chosen", "permission_state"):
+                if hasattr(previous, name):
+                    setattr(screen, name, getattr(previous, name))
+        self._welcome_screen = screen
         return screen
+
+    def welcome_resumable(self) -> bool:
+        """The session's Welcome was opened and is neither finished nor skipped (owner U15: leaving it for
+        another screen and coming back to the chat must not lose it)."""
+        flow = self._welcome_flow
+        return (flow is not None and not (getattr(flow, "finished", False) or getattr(flow, "skipped", False))
+                and self.needs_welcome())
 
     def needs_welcome(self) -> bool:
         prefs = getattr(self.app, "prefs", None)

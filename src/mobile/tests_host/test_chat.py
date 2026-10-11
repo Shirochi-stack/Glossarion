@@ -1193,7 +1193,9 @@ def test_welcome_flow_state():
     assert flow.step_id == "sign_in" and flow.glossary_mode == "balanced"
     assert flow.next() == "providers" and flow.skipped_sign_in  # Skip for now
     assert flow.back() == "sign_in"
-    assert flow.mark_signed_in() == "language_glossary" and flow.signed_in and not flow.skipped_sign_in
+    # owner U15: a sign-in keeps step 1 on screen and Next goes through step 2 (the dots count it)
+    assert flow.mark_signed_in() == "sign_in" and flow.signed_in and not flow.skipped_sign_in
+    assert flow.next() == "providers" and flow.next() == "language_glossary"
     flow.select_mode("full")
     flow.select_mode("bogus")
     assert flow.glossary_mode == "full"

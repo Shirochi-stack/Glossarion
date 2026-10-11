@@ -107,9 +107,7 @@ class WelcomeFlow:
     def next(self) -> str:
         if self.step_id == "sign_in" and not self.signed_in:
             self.skipped_sign_in = True
-        if self.step_id == "sign_in" and self.signed_in:
-            return self.go("language_glossary")  # step 2 is optional once signed in
-        if not self.is_last:
+        if not self.is_last:  # step 2 (other providers) is shown even after a sign-in: the dots count it
             return self.go(STEPS[self.step + 1])
         return self.step_id
 
@@ -123,7 +121,7 @@ class WelcomeFlow:
     def mark_signed_in(self) -> str:
         self.signed_in = True
         self.skipped_sign_in = False
-        return self.go("language_glossary") if self.step_id == "sign_in" else self.step_id
+        return self.step_id  # stays on step 1 ("✓ signed in" + its model); Next goes on
 
     def select_mode(self, mode: str) -> None:
         if mode in {card[0] for card in GLOSSARY_MODE_CARDS}:
