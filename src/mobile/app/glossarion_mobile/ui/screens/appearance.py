@@ -1,7 +1,7 @@
 """Appearance (``/settings/appearance``; UI_SPEC §4.15 General › Appearance, §6).
 
 Theme System / Light / Dark / AMOLED, accent (Halgakos Rose · Desktop Blue ·
-Library Violet), text scale 85–130 %, reduce motion and haptics. These are
+Library Violet), text scale 50–130 % (default 85 %), reduce motion and haptics. These are
 mobile-only, so they live in ``mobile_state.json`` (``Prefs`` key ``appearance``),
 never in the shared config.json. The desktop "Auto DPI / GUI scale" settings are
 listed disabled with a ReasonChip (the OS scales the UI); their config values
@@ -28,16 +28,21 @@ __all__ = [
     "APPEARANCE_PREF",
     "AppearanceScreen",
     "DEFAULT_APPEARANCE",
+    "DEFAULT_TEXT_SCALE",
     "TEXT_SCALE_RANGE",
     "apply_appearance",
     "normalize_appearance",
 ]
 
 APPEARANCE_PREF = "appearance"
-TEXT_SCALE_RANGE = (0.85, 1.30)
+#: Owner #31: the default is 85 % (at 100 % the Theme row's "System" wrapped onto a second line on phones)
+#: and the size can go down to 50 %; the slider moves in 5 % steps.
+TEXT_SCALE_RANGE = (0.50, 1.30)
+TEXT_SCALE_STEP = 0.05
+DEFAULT_TEXT_SCALE = 0.85
 ACCENT_LABELS = {"halgakos_rose": "Halgakos Rose", "desktop_blue": "Desktop Blue", "library_violet": "Library Violet"}
 THEME_LABELS = {"system": "System", "light": "Light", "dark": "Dark", "amoled": "AMOLED"}
-DEFAULT_APPEARANCE = {"theme": "system", "accent": "halgakos_rose", "text_scale": 1.0, "reduce_motion": False,
+DEFAULT_APPEARANCE = {"theme": "system", "accent": "halgakos_rose", "text_scale": DEFAULT_TEXT_SCALE, "reduce_motion": False,
                       "haptics": True}
 #: Desktop scaling settings that do not apply on a phone (shown disabled, values kept).
 DESKTOP_SCALING_KEYS = ("auto_dpi_scale", "gui_scale_factor", "gui_font_scale")
@@ -54,7 +59,7 @@ def normalize_appearance(value: Any) -> dict:
         if accent in tokens.ACCENTS:
             data["accent"] = accent
         try:
-            scale = round(float(value.get("text_scale", 1.0)), 2)
+            scale = round(float(value.get("text_scale", DEFAULT_TEXT_SCALE)), 2)
             data["text_scale"] = min(TEXT_SCALE_RANGE[1], max(TEXT_SCALE_RANGE[0], scale))
         except (TypeError, ValueError):
             pass
@@ -108,6 +113,7 @@ class AppearanceScreen(PageScreen):
         self.theme_buttons = ft.SegmentedButton(
             segments=[ft.Segment(value=k, label=ft.Text(v)) for k, v in THEME_LABELS.items()],
             selected=[values["theme"]],
+            show_selected_icon=False,  # the check mark took the room "System" needs on a phone (owner #31)
             on_change=lambda e: self.set_value("theme", next(iter(e.control.selected or ["system"]))),
             key="appearance-theme",
         )
@@ -123,7 +129,8 @@ class AppearanceScreen(PageScreen):
         }
         self.scale_label = ft.Text(f"Text size {int(round(values['text_scale'] * 100))}%",
                                    theme_style=ft.TextThemeStyle.LABEL_MEDIUM)
-        self.scale_slider = ft.Slider(min=TEXT_SCALE_RANGE[0], max=TEXT_SCALE_RANGE[1], divisions=9,
+        self.scale_slider = ft.Slider(min=TEXT_SCALE_RANGE[0], max=TEXT_SCALE_RANGE[1],
+                                      divisions=round((TEXT_SCALE_RANGE[1] - TEXT_SCALE_RANGE[0]) / TEXT_SCALE_STEP),
                                       value=values["text_scale"], key="appearance-scale",
                                       on_change_end=lambda e: self.set_value("text_scale", e.control.value))
         self.motion_switch = ft.Switch(label="Reduce motion", value=values["reduce_motion"],

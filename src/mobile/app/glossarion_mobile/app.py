@@ -40,7 +40,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import quote
 
 import flet as ft
@@ -215,8 +215,8 @@ class GlossarionApp:
             on_navigate=self._drawer_navigate,
             on_open_chat=self._open_chat,
             on_chat_long_press=self._chat_actions,
-            on_new_chat=lambda e: self.chat_view._on_new_chat(e),
-            on_new_scratch=lambda e: self.chat_view._on_new_scratch(e),
+            on_new_chat=lambda e: self._drawer_new_chat(self.chat_view._on_new_chat, e),
+            on_new_scratch=lambda e: self._drawer_new_chat(self.chat_view._on_new_scratch, e),
             on_status=self._on_status_chip,
             on_settings=lambda e: self._drawer_navigate("settings"),
             on_keys=lambda e: self._drawer_shortcut(KEYS_ROUTE),
@@ -764,6 +764,18 @@ class GlossarionApp:
         """A drawer / sidebar destination: the stack restarts from the route's static parents."""
         self.navigate_to(route_name, reset=True)
 
+    def _drawer_new_chat(self, create: Callable[[Any], Any], e: Any = None) -> Any:
+        """Drawer / sidebar "New chat" / "New scratch chat" (owner #6): create the chat, then show it like a
+        drawer chat row does (the drawer closes and the chat replaces any screen on top), so the tap visibly
+        does something."""
+        before = self.state.current_chat.value
+        created = create(e)
+        cid = self.state.current_chat.value
+        if cid and (cid != before or (self.shell is not None and self.shell.stack)):
+            self._open_chat(cid)  # shows the chat over any screen on top (and closes the drawer)
+        self.dispatcher.spawn(self.close_drawer())
+        return created
+
     def _drawer_shortcut(self, route_name: str) -> None:
         """A drawer / sidebar footer shortcut into Settings (the footer's API keys, owner #17): the page alone
         on the stack, so one Back returns to the chat (Settings > API keys opened from Settings home still goes
@@ -913,8 +925,8 @@ class GlossarionApp:
         block = self.state.send_block()
         if block is not None and block.fix_action == "sign_in_chatgpt":
             self._drawer_navigate("settings.accounts")
-        else:
-            self.chat_view.open_model_sheet("model")
+        else:  # the drawer's model is the global one: new chats start on it (and the open chat follows)
+            self.chat_view.open_model_sheet("model", global_scope=True, follow_open_chat=True)
 
     def _on_help(self, e: Any = None) -> ActionSheet:
         sheet = ActionSheet(

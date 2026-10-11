@@ -1590,7 +1590,17 @@ class ChatStoreAdapter:
         if session is None:
             return {"ok": False, "notices": [{"level": "warning", "title": "Attachment unavailable",
                                               "text": "This chat no longer exists."}]}
+        target = self.migration_target(cid, folder)
         result = self.binding_for(cid).migrate_attachment(session, folder, confirm_merge)
+        if isinstance(result, dict) and result.get("ok") and target and os.path.isdir(target):
+            # issues 19 / 20: the book's glossary (kept in the workspace when its chat run ended) joins
+            # <output root>/Glossary/<book>/, where the Library's next run of the book continues it
+            try:
+                from glossarion_mobile.services.workspace_sync import carry_glossary
+
+                carry_glossary(target, os.path.dirname(target))
+            except Exception:
+                log.exception("moving the glossary of a migrated workspace failed")
         with self._lock:
             self._bodies = OrderedDict((k, v) for k, v in self._bodies.items() if k[0] != session.get("id"))
         self.attachment_folders(cid)

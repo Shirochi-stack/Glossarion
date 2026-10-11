@@ -1,7 +1,7 @@
 """Effective text scale (UI_SPEC §6.2, §7.5): Appearance text size × the system font scale.
 
 Flutter scales every ``Text`` by the system font size (Android up to 200 %, iOS Dynamic Type)
-on top of the app's own Appearance scale (85–130 %, baked into the theme's text styles).
+on top of the app's own Appearance scale (50–130 %, baked into the theme's text styles).
 Flet 1.0.3 does not report the system scale to Python, so the layout rules that switch at
 >= 160 % (composer pills → "Options (n)", the mode chip, the header's model-only subtitle,
 wrapped stat rows, scrollable tab bars, hidden bottom-bar labels) only saw the app scale and

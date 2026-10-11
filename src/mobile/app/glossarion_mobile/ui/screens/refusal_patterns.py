@@ -121,7 +121,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui import tokens
     from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
     from glossarion_mobile.ui.screens.base import Screen
-    from glossarion_mobile.ui.theme import HIT_TARGET
+    from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 except ImportError:  # pragma: no cover - Flet missing
     ft = None  # type: ignore[assignment]
     Screen = object  # type: ignore[assignment,misc]
@@ -171,7 +171,7 @@ class RefusalPatternsScreen(Screen):  # type: ignore[misc,valid-type]
         self.disable_switch = ft.Switch(label="Disable refusal pattern checks", value=self.model.disabled(),
                                         on_change=lambda e: self.model.set_disabled(bool(e.control.value)))
         self.limit_field = ft.TextField(value=str(self.model.length_limit()), label="Length limit", suffix=ft.Text("chars"),
-                                        width=180, dense=True, keyboard_type=ft.KeyboardType.NUMBER,
+                                        width=180, dense=True, keyboard_type=number_keyboard(),
                                         on_blur=self._on_limit, on_submit=self._on_limit,
                                         border_radius=tokens.RADII["field"])
         self.new_field = ft.TextField(hint_text="Add a pattern (case-insensitive)", dense=True, expand=True,

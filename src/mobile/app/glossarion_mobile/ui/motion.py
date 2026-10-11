@@ -32,6 +32,7 @@ __all__ = [
     "rotation_animation",
     "set_reduce_motion",
     "shimmer",
+    "spin_animation",
     "static_placeholder",
     "subscribe",
     "switcher_transition",
@@ -90,6 +91,12 @@ def switcher_transition(preferred: Any = None) -> Any:
 def rotation_animation(ms: int = tokens.MOTION["sheet_ms"]) -> Optional[int]:
     """``animate_rotation`` for a turning control; None under reduce motion (it swaps instead)."""
     return None if reduced() else int(ms)
+
+
+def spin_animation(ms: int) -> Optional[ft.Animation]:
+    """``animate_rotation`` for a continuously turning control (linear, ``ms`` per animation); None under
+    reduce motion (it stands still)."""
+    return None if reduced() else ft.Animation(int(ms), ft.AnimationCurve.LINEAR)
 
 
 def static_placeholder(content: ft.Control, *, color: Any = None, key: Optional[str] = None) -> ft.Control:

@@ -28,7 +28,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.theme import HIT_TARGET, mono_family
+from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, number_keyboard
 
 log = logging.getLogger("glossarion.ui")
 
@@ -471,7 +471,7 @@ class MultiplierEditor(FullScreenEditor):
     def build_body(self) -> ft.Control:
         rows: list = []
         for language, number in self.values.items():
-            field = ft.TextField(value=f"{number:g}", dense=True, width=110, keyboard_type=ft.KeyboardType.NUMBER,
+            field = ft.TextField(value=f"{number:g}", dense=True, width=110, keyboard_type=number_keyboard(),
                                  border_radius=tokens.RADII["field"], color=ft.Colors.ON_SURFACE,
                                  key=f"multiplier-{language}")
             self.fields[language] = field

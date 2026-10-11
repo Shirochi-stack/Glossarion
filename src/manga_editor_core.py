@@ -1070,6 +1070,50 @@ def _persist_current_image_state(self):
         traceback.print_exc()
 
 
+def _persisted_text_maps(state):
+    """The OCR / translation entries of a page's persisted state, keyed by region index:
+    ``(active_rec, recognition_data, active_trans, translation_data)``; deleted entries skipped.
+    Mobile only (MangaEditorSession.page_snapshot). It mirrors the parsing in
+    ``_rehydrate_text_state_from_persisted``, which stays verbatim: the desktop runs that function in
+    ImageRenderer's namespace, where this helper does not exist (tests/test_manga_editor_core.py)."""
+    state = state or {}
+    # Recognized texts
+    rec = state.get('recognized_texts') or []
+    active_rec = []
+    recognition_data = {}
+    for i, r in enumerate(rec):
+        if isinstance(r, dict) and r.get('deleted'):
+            continue
+        if isinstance(r, str):
+            if not _manga_output_text(r):
+                continue
+            active_rec.append({'text': r, 'bbox': [0, 0, 100, 100], 'region_index': i})
+            recognition_data[int(i)] = {'text': r, 'bbox': [0, 0, 100, 100]}
+        elif isinstance(r, dict) and 'text' in r:
+            if not _manga_output_text(r.get('text')):
+                continue
+            idx = r.get('region_index', i)
+            active_rec.append({'text': r.get('text', ''), 'bbox': r.get('bbox', [0, 0, 100, 100]), 'region_index': idx})
+            recognition_data[int(idx)] = {'text': r.get('text', ''), 'bbox': r.get('bbox', [0, 0, 100, 100])}
+
+    # Translated texts
+    trans = state.get('translated_texts') or []
+    active_trans = []
+    translation_data = {}
+    for i, t in enumerate(trans):
+        if isinstance(t, dict) and t.get('deleted'):
+            continue
+        idx = t.get('original', {}).get('region_index', i) if isinstance(t, dict) else i
+        if isinstance(t, dict):
+            t = {**t, 'translation': _manga_output_text(t.get('translation'))}
+            translation_data[int(idx)] = {
+                'original': t.get('original', {}).get('text', ''),
+                'translation': t.get('translation', '')
+            }
+        active_trans.append(t)
+    return active_rec, recognition_data, active_trans, translation_data
+
+
 def _rehydrate_text_state_from_persisted(self, image_path: str):
     """Rebuild in-memory recognition/translation data from persisted state without redrawing.
     Returns (ocr_count, trans_count).
@@ -9377,6 +9421,13 @@ class MangaEditorSession:
     def set_owner(self, owner):
         """Use ``owner`` (a HeadlessOwner built on the job thread) as ``main_gui``."""
         if owner is not None:
+            if owner is not self.main_gui:
+                # A new job: its process env and UnifiedClient key pools are fresh (mobile restores
+                # both when a job ends), so a MangaTranslator cached by an earlier step holds a client
+                # built for the previous job (UnifiedClient fixes multi-key mode at init). Drop it so
+                # the next translate goes through the desktop lookup again (use_multi_api_keys ->
+                # USE_MULTI_API_KEYS + the in-memory translation pool, then a new client).
+                self._manga_translator = None
             self.main_gui = owner
             self.apply_settings(owner)
 
@@ -9478,12 +9529,19 @@ class MangaEditorSession:
         translation = getattr(self, '_translation_data', {}) or {}
         boxes = []
         if image_path and current and os.path.normcase(image_path) == os.path.normcase(current):
+            # The in-memory text maps first (edits not persisted yet), then the page's persisted
+            # recognized / translated texts: when a run wrote the state without filling this session's
+            # maps (a batch Start; a page restored before its texts were persisted) they were empty and
+            # the box sheet showed blank OCR / translation fields.
+            _rec, saved_recognition, _trans, saved_translation = _persisted_text_maps(state)
             for idx, box in enumerate(self.image_preview_widget.viewer.rectangles):
                 record = box.to_dict()
                 record['index'] = idx
                 key = box.region_index if box.region_index is not None else idx
-                record['ocr_text'] = (recognition.get(key) or {}).get('text', '')
-                record['translation'] = (translation.get(key) or {}).get('translation', '')
+                record['ocr_text'] = ((recognition.get(key) or {}).get('text', '')
+                                      or (saved_recognition.get(key) or {}).get('text', ''))
+                record['translation'] = ((translation.get(key) or {}).get('translation', '')
+                                         or (saved_translation.get(key) or {}).get('translation', ''))
                 boxes.append(record)
         return {
             'image_path': image_path,
@@ -9689,6 +9747,11 @@ class MangaEditorSession:
         if not self.image_preview_widget.current_image_path:
             raise ValueError("No manga page is open")
         self._rendering_in_progress = False
+        # Every step is a new click: clear the stop flags a previous Stop latched (stop_flag,
+        # env, MangaTranslator / UnifiedClient / module flags), as the desktop click handlers do.
+        # The per-box OCR / Clean / Save & Update Overlay handlers do not reset on their own, so
+        # without this one Stop left every later step "cancelled by user".
+        _reset_cancellation_flags(self)
         return self.image_preview_widget.current_image_path
 
     def _finish(self):

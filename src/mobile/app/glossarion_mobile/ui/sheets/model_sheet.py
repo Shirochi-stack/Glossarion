@@ -1200,6 +1200,7 @@ class ModelSheet:
             else:
                 items.append(ActionItem(f"{title} · Sign in{mark}", lambda r=route: self._sign_in_route(r, 0),
                                         icon="LOGIN", key=f"auth-menu-{route}"))
+        items.append(self._deepseek_item(models))
         title = mc.LOGIN_TITLES.get(current, current)
         slot = f" #{account}" if account else ""
         items.append(ActionItem(f"Sign in to {title}{slot} again", lambda: self._sign_in_route(current, account),
@@ -1211,6 +1212,31 @@ class ModelSheet:
             sheet.show(self._page)
         self.action_sheet = sheet
         return sheet
+
+    def _deepseek_item(self, models: Sequence[str]) -> ActionItem:
+        """DeepSeek (authds/: its own site in the in-app browser, not an OAuth slot): signed in, it switches to
+        its Flash model; else the same sign-in sheet as Accounts and the Welcome, then the switch."""
+        from glossarion_mobile.services import webview_bridge
+
+        title = mc.LOGIN_TITLES.get("authds", "DeepSeek")
+        best = mc.recommended_model("authds", models) or mc.DEEPSEEK_DEFAULT_MODEL
+        available, reason = webview_bridge.availability()
+        if not available:
+            return ActionItem(title, None, icon="ACCOUNT_CIRCLE", key="auth-menu-authds",
+                              disabled_reason=reason or "Needs the in-app browser")
+        return ActionItem(f"{title} · {best}", lambda m=best: self._deepseek_switch(m), icon="ACCOUNT_CIRCLE",
+                          key="auth-menu-authds")
+
+    async def _deepseek_switch(self, model: str) -> None:
+        from glossarion_mobile.ui.screens.accounts import deepseek_session_present, show_deepseek_sign_in
+
+        if await deepseek_session_present(self.env.run_io):
+            self.select("model", model)
+            return
+        page = self._page
+        self.close()
+        if page is not None:
+            show_deepseek_sign_in(page, run_io=self.env.run_io, on_signed_in=lambda: self.select("model", model))
 
     def _sign_in_route(self, route: str, account: int = 0) -> None:
         self.close()

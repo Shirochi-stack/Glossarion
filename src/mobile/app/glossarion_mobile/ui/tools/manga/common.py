@@ -14,7 +14,8 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import icon_data
 
-__all__ = ["CHIP_STATUS", "JobEnds", "MangaTab", "export_sheet", "option_chip", "push", "reason_or_chip"]
+__all__ = ["CHIP_STATUS", "JobEnds", "MangaTab", "TranslationModel", "export_sheet", "option_chip", "push",
+           "reason_or_chip"]
 
 log = logging.getLogger("glossarion.tools.manga")
 
@@ -182,3 +183,101 @@ class MangaTab:
 
         return card(title, controls, icon=icon, key=key, subtitle=subtitle, trailing=trailing)
 
+
+
+class TranslationModel:
+    """The manga translator's own model + API key (``services.manga`` PREF_MODEL / PREF_API_KEY in
+    Prefs, the key ``ENC:``), remembered between runs: the shared ``ModelPicker`` (the ModelSheet in
+    field mode) and the KeyEditor's ``KeyField`` (Paste · Copy · Test). Empty = the main model /
+    API key, which the field shows as its hint; "Use main" forgets both. Start and the editor steps
+    send them with every job (``services.manga.translation_params``)."""
+
+    def __init__(self, ctx: Any) -> None:
+        from glossarion_mobile.services import manga as svc
+        from glossarion_mobile.ui.screens.key_editor import KeyField
+        from glossarion_mobile.ui.sheets.model_sheet import ModelPicker, sheet_env
+
+        self.ctx = ctx
+        self.prefs = getattr(ctx, "prefs", None)
+        env = sheet_env()
+        self.env = env
+        model = svc.translation_model(self.prefs)
+        self.main_model = str(ctx.cfg("model", "") or "")
+        self.picker = ModelPicker(value=model or self.main_model, label="Model", env=env,
+                                  on_change=self._on_model, key="mf-translation-model")
+        key = svc.translation_api_key(self.prefs)
+        self.key_field = KeyField(
+            value=key, label="API key", on_change=self._on_key,
+            hint="Empty: the main API key",
+            on_test=(lambda value: env.test_key(value or str(ctx.cfg("api_key", "") or ""), self.model))
+            if env.test_key is not None else None,
+            read_clipboard=env.read_clipboard, copy_text=env.copy_text)
+        self.reset_button = ft.TextButton(content="Use main model and key", icon=ft.Icons.RESTART_ALT,
+                                          on_click=lambda e: self.use_main(), key="mf-translation-main")
+        self.note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                            key="mf-translation-note")
+        self._render_note()
+
+    @property
+    def model(self) -> str:
+        return str(self.picker.value or "") or self.main_model
+
+    def controls(self) -> list:
+        return [self.picker, self.key_field, ft.Row([self.reset_button], wrap=True), self.note]
+
+    def _render_note(self) -> None:
+        from glossarion_mobile.services import manga as svc
+
+        own_model = bool(svc.translation_model(self.prefs))
+        own_key = bool(svc.translation_key_token(self.prefs))
+        if own_model or own_key:
+            parts = [("its own model" if own_model else "the main model"),
+                     ("its own API key" if own_key else "the main API key")]
+            self.note.value = f"The manga translator uses {parts[0]} and {parts[1]}."
+        else:
+            self.note.value = "The manga translator uses the main model and API key until you pick its own."
+        self.reset_button.disabled = not (own_model or own_key)
+
+    def _on_model(self, value: str) -> None:
+        from glossarion_mobile.services import manga as svc
+
+        try:
+            svc.save_translation_model(self.prefs, value)
+        except Exception as exc:
+            self.ctx.say(f"Could not save the model: {exc}")
+        self._render_note()
+        push(self.note, self.reset_button)
+
+    def _on_key(self, value: str) -> None:
+        from glossarion_mobile.services import manga as svc
+
+        try:
+            svc.save_translation_api_key(self.prefs, value)
+        except Exception as exc:  # ShareError: this phone cannot encrypt; nothing stored in plain text
+            message = str(getattr(exc, "message", "") or exc)
+            if message != getattr(self, "_last_error", None):  # once, not on every keystroke
+                self._last_error = message
+                self.ctx.say(message)
+            return
+        self._render_note()
+        push(self.note, self.reset_button)
+
+    def use_main(self) -> None:
+        from glossarion_mobile.services import manga as svc
+
+        try:
+            svc.save_translation_model(self.prefs, "")
+            svc.save_translation_api_key(self.prefs, "")
+        except Exception as exc:
+            self.ctx.say(f"Could not reset: {exc}")
+        self.main_model = str(self.ctx.cfg("model", "") or "")
+        self.picker.value = self.main_model
+        self.picker.field.value = self.main_model
+        self.key_field.set_value("", notify=False)
+        self._render_note()
+        push(self.picker.field, self.note, self.reset_button)
+
+    def params(self) -> dict:
+        from glossarion_mobile.services import manga as svc
+
+        return svc.translation_params(self.prefs)

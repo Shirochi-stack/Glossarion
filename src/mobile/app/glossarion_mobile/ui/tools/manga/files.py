@@ -11,6 +11,8 @@
   ``manga_skipped_processing_files``, ``manga_selected_folder_roots``).
 * Image range ("blank = all, e.g. 3-8") with the desktop status line, process grouping
   (split first-level subfolders into groups; a group picker when there are several).
+* Translation model: the tool's own model + API key (``TranslationModel``, Prefs; empty = the main
+  ones), remembered between runs and sent with every manga job.
 * Run: Start / Stop (a ``manga`` job; the second Stop forces), progress, the job's LogConsole;
   Create CBZ at end · Auto consolidate (config switches the runner reads). Start first offers
   the download of a model the run loads that is not on the device yet (``ensure_models``).
@@ -41,7 +43,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.components.empty_state import faded_mascot
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, hint_text
-from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
+from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, TranslationModel, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
 __all__ = ["FilesTab", "SORT_LABELS"]
@@ -175,7 +177,10 @@ class FilesTab(MangaTab):
             self.console_holder,
         ], icon="PLAY_CIRCLE", key="mf-run")
         output = self.section("Output", [self.output_holder, self.output_list], icon="IOS_SHARE", key="mf-output")
-        self.root = ft.ListView(controls=[sources, run, output], expand=True, spacing=tokens.SPACING["md"],
+        self.translation = TranslationModel(self.ctx)
+        model = self.section("Translation model", self.translation.controls(), icon="SMART_TOY",
+                             key="mf-translation")
+        self.root = ft.ListView(controls=[sources, model, run, output], expand=True, spacing=tokens.SPACING["md"],
                                 padding=ft.Padding.symmetric(horizontal=12, vertical=8), key=self.key)
         self.refresh(push_now=False)
         return self.root
@@ -621,7 +626,8 @@ class FilesTab(MangaTab):
         try:
             spec = svc.batch_spec(self.session.files, output_root=self.ctx.output_root, glossary_only=glossary_only,
                                   editor_session=self.session.editor_token or "",
-                                  imported_ocr=self._imported_ocr_path())
+                                  imported_ocr=self._imported_ocr_path(),
+                                  translation=svc.translation_params(self.ctx.prefs))
         except ValueError as exc:
             self.ctx.say(str(exc))
             return None
@@ -730,9 +736,10 @@ class FilesTab(MangaTab):
         self.refresh()
         if self.screen is not None:
             try:
-                self.screen.editor_tab.refresh()
+                # the open page comes back from the state the run wrote, on the Translated view
+                self.screen.editor_tab.after_batch()
             except Exception:
-                pass
+                log.debug("editor refresh after the batch failed", exc_info=True)
         # a glossary pass (or a run with the glossary workflow) wrote <source>/Glossary/...: only the
         # job's config snapshot knew it, so the selection's auto-load runs again for Settings
         self.ctx.spawn(self._refresh_glossary())

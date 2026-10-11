@@ -480,7 +480,12 @@ def test_manifest_declares_service_trampoline_and_icon():
     meta = {m.get(ANDROID_NS + "name"): m.get(ANDROID_NS + "resource") for m in app.findall("meta-data")}
     icon_name = re.search(r"_kNotificationIconMetaData =\s*'([^']+)'", DART_SERVICE.read_text(encoding="utf-8")).group(1)
     assert meta[icon_name] == "@drawable/glossarion_native_ic_notification"
-    assert (FLUTTER_PKG / "android" / "src" / "main" / "res" / "drawable" / "glossarion_native_ic_notification.xml").is_file()
+    # owner #22: the Halgakos silhouette per density (tools/make_mascot_assets.py) + the colour large icon
+    res = FLUTTER_PKG / "android" / "src" / "main" / "res"
+    for bucket in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
+        assert (res / f"drawable-{bucket}" / "glossarion_native_ic_notification.png").is_file(), bucket
+    assert not (res / "drawable" / "glossarion_native_ic_notification.xml").exists()  # one resource per name
+    assert (res / "drawable-nodpi" / "glossarion_native_ic_large.png").is_file()
 
     permissions = {p.get(ANDROID_NS + "name") for p in root.findall("uses-permission")}
     assert "android.permission.FOREGROUND_SERVICE_DATA_SYNC" in permissions

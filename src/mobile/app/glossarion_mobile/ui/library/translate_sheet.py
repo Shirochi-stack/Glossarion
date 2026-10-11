@@ -59,6 +59,18 @@ async def confirm_output_root(ctx: Any, books: Sequence[Mapping[str, Any]]) -> b
     if not callable(check):
         return True
     rows = [dict(book) for book in books or ()]
+    adopt = getattr(service, "adopt_workspaces_blocking", None)
+    if callable(adopt):
+        # Issue 18: a workspace outside the Library's output folder moves (or merges) into it with its
+        # glossary, so the run continues there; the question below is left for what could not move
+        try:
+            adopted = await ctx.io(adopt, rows)
+            rows = list(adopted.get("books") or rows)
+            if adopted.get("moved"):
+                count = len(adopted["moved"])
+                ctx.say(f"Moved {count} book folder{'s' if count != 1 else ''} into the Library's output folder")
+        except Exception:
+            log.debug("moving the workspaces into the output folder failed", exc_info=True)
     try:
         info = await ctx.io(check, rows)
     except Exception:
@@ -66,6 +78,14 @@ async def confirm_output_root(ctx: Any, books: Sequence[Mapping[str, Any]]) -> b
         return True
     if not info:
         return True
+    if not str(info.get("new_override") or "") and callable(getattr(service, "apply_output_override_blocking", None)):
+        # the books are in the Library's own output folder and only the process root points elsewhere
+        # (an earlier switch): back to the Library's folder without asking
+        try:
+            await ctx.io(service.apply_output_override_blocking, "")
+            return True
+        except Exception:
+            log.debug("switching back to the Library's output folder failed", exc_info=True)
     from glossarion_mobile.ui.tools.common import ask
 
     answer = await ask(ctx, OUTPUT_MISMATCH_TITLE, str(info.get("prompt") or ""),

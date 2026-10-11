@@ -32,6 +32,7 @@ __all__ = [
     "is_dark",
     "log_text",
     "mono_family",
+    "number_keyboard",
     "page_platform",
     "resolve_color",
     "semantic",
@@ -190,6 +191,18 @@ def icon_data(name: Any) -> Any:
 def page_platform(page: Any) -> str:
     platform = getattr(page, "platform", None)
     return str(getattr(platform, "value", platform) or "")
+
+
+def number_keyboard() -> ft.KeyboardType:
+    """``TextField.keyboard_type`` of a number field (owner #29).
+
+    On iOS ``NUMBER`` is the number pad, which has no Return key and no decimal point: the keyboard of a
+    chunk-size / temperature field could not be closed (``on_submit`` never fired, Flet 1.0.3 has no blur())
+    and a float could not be typed. ``DATETIME`` is iOS's numbers-and-punctuation keyboard (digits, ``.``,
+    ``-`` and Return). Other platforms keep ``NUMBER``."""
+    from glossarion_mobile.runtime_bootstrap import detect_platform
+
+    return ft.KeyboardType.DATETIME if detect_platform() == "ios" else ft.KeyboardType.NUMBER
 
 
 def mono_family(page: Any = None) -> str:

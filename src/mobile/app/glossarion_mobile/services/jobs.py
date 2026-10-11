@@ -145,6 +145,42 @@ SIGN_IN_PROVIDER_MARKERS = (
 SIGN_IN_MARKERS = tuple(marker for marker, _provider in SIGN_IN_PROVIDER_MARKERS)
 
 
+#: Owner #30: a job that never needs the model (``model_catalog.MODEL_FREE_JOB_KINDS``: Compile EPUB / PDF,
+#: the file tools, the QA scan, ...) must never start a sign-in. The EPUB converter still translates headers /
+#: the title / metadata through the configured model when those options are on, and with no saved login the
+#: ChatGPT / Claude / Gemini / Grok auth modules fell back to their interactive browser login (on the phone the
+#: in-app browser opened over the app). The shared modules refuse that login at once in a headless
+#: environment (``get_valid_access_token``'s ``is_headless`` check), so such a job runs with this variable
+#: set (``no_sign_in_scope``); its requests fail like any other unusable
+#: route and no "Sign-in required" prompt is sent for it.
+NO_SIGN_IN_ENV = ("HF_SPACES", "true")
+
+
+def sign_in_allowed(kind: Any) -> bool:
+    """False for a job kind that never needs the model (see ``NO_SIGN_IN_ENV``)."""
+    from glossarion_mobile.services.model_catalog import MODEL_FREE_JOB_KINDS
+
+    return str(getattr(kind, "value", kind) or "") not in MODEL_FREE_JOB_KINDS
+
+
+@contextlib.contextmanager
+def no_sign_in_scope(kind: Any) -> Iterator[None]:
+    """``NO_SIGN_IN_ENV`` set while a job of ``kind`` runs, when its kind never needs the model."""
+    if sign_in_allowed(kind):
+        yield
+        return
+    name, value = NO_SIGN_IN_ENV
+    previous = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
 def sign_in_provider(line: str) -> Optional[str]:
     """The provider whose login a job log line says is missing (``SIGN_IN_PROVIDER_MARKERS``)."""
     for marker, provider in SIGN_IN_PROVIDER_MARKERS:
@@ -184,6 +220,13 @@ AUTO_ACCEPT_GLOSSARY_PARAM = "auto_accept_glossary"
 #: ``tests_host/test_glossary_auto_accept.py`` checks the desktop source still has it).
 GLOSSARY_ACCEPTED_LINE = "✅ Direct Text: generated glossary accepted"
 GLOSSARY_AUTO_ACCEPTED_LINE = GLOSSARY_ACCEPTED_LINE + " (Always accept is on)"
+
+
+#: Issue 12: the progress line while the gate's glossary is refined (the review alerts are hidden meanwhile).
+GLOSSARY_REFINING_TEXT = "Refining the glossary…"
+#: Job event while the gate's glossary is refined: the "Glossary ready" notification is withdrawn (the
+#: question is delivered again when the refinement ends and the question still waits).
+QUESTION_SUSPENDED_EVENT = "question_suspended"
 
 
 def is_glossary_question(kind: Any) -> bool:
@@ -424,6 +467,9 @@ class JobSnapshot:
     # U9: the request wait the API client last logged (rate limit / key cooldown / network):
     # {"kind", "seconds", "since", "until", "line"}; transient (never persisted), see ``active_issue``.
     issue: Optional[Mapping[str, Any]] = None
+    # Issue 12: the pending glossary question is being refined (``JobService.refine_at_gate``): its "action
+    # required" alerts (notification, JobStrip warning, Book page review) stay hidden until it ends
+    refining: bool = False
 
     def active_issue(self, now: Optional[float] = None) -> Optional[dict]:
         """The issue chip state while the job runs and the wait has not expired, else None."""
@@ -599,6 +645,7 @@ class _Job:
     message_listeners: list = field(default_factory=list)
     message_lock: threading.RLock = field(default_factory=threading.RLock)
     issue: Optional[dict] = None  # U9: the last request wait (direct_text_stream.classify_request_issue)
+    refining: bool = False  # issue 12: the gate's glossary is being refined (``refine_at_gate``)
 
     def snapshot(self) -> JobSnapshot:
         return JobSnapshot(
@@ -626,6 +673,7 @@ class _Job:
             question=dict(self.question) if self.question else None,
             result=dict(self.result),
             issue=dict(self.issue) if self.issue else None,
+            refining=self.refining,
         )
 
 
@@ -714,7 +762,7 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     if snap.question:
         question = snap.question if isinstance(snap.question, Mapping) else {}
         if is_glossary_question(_question_kind(question)):
-            return "Waiting for your glossary decision"
+            return GLOSSARY_REFINING_TEXT if getattr(snap, "refining", False) else "Waiting for your glossary decision"
         # Tools › Async batch asks the dialog's question (``async_batch_question``)
         data = question.get("data")
         title = str((data if isinstance(data, Mapping) else {}).get("title") or "")
@@ -756,8 +804,8 @@ def notification_text(snap: JobSnapshot) -> str:
     elif snap.state is JobState.FORCE_STOPPING:
         details.append("force stopping")
     if snap.question:
-        details = ["waiting for your glossary decision" if is_glossary_question(_question_kind(snap.question))
-                   else "waiting for your answer"]
+        details = [("refining the glossary" if getattr(snap, "refining", False) else "waiting for your glossary decision")
+                   if is_glossary_question(_question_kind(snap.question)) else "waiting for your answer"]
     return f"{text}: {' · '.join(details)}" if details else text
 
 
@@ -797,7 +845,7 @@ def strip_model_for(snap: Optional[JobSnapshot], queued: int = 0, now: Optional[
         kind_icon=kind_icon(snap.kind),
         queued=queued,
         state=state,
-        warning=bool(snap.question),
+        warning=bool(snap.question) and not getattr(snap, "refining", False),
         owner_chat=owner_chat,
         chat_card=chat_card,
     )
@@ -1282,6 +1330,9 @@ class JobService:
         self._thread: Optional[threading.Thread] = None
         self._answers: dict[str, tuple[threading.Event, list]] = {}
         self.adopted_ids: list[str] = []  # interrupted jobs found at this launch (launch banner)
+        #: ``spec -> params | None``: the params a Resume without its own runs with (the chat sets it:
+        #: a chat job resumed from the Jobs page / banner uses the chat's model now, ``ChatRuns.with_current_model``)
+        self.resume_params: Optional[Callable[[JobSpec], Optional[Mapping[str, Any]]]] = None
         # Stop protocols requested on the UI loop run in order on one short-lived ``gl-job-stop``
         # thread (env writes, backend imports, watchdog resets never block the loop). The lock is
         # held while a protocol runs; a job takes it around its run reset, so a late protocol of
@@ -1553,6 +1604,12 @@ class JobService:
                     return None
         if snap is None:
             return None
+        if params is None and self.resume_params is not None:
+            try:
+                params = self.resume_params(snap.spec)
+            except Exception:
+                log.exception("resume params hook failed")
+                params = None
         new_id = self.submit(snap.spec if params is None else replace(snap.spec, params=dict(params)))
         if from_interrupted:
             self._resolve_interrupted(job_id, "resumed")
@@ -1801,16 +1858,53 @@ class JobService:
         def log(text: Any = "", *args: Any, **kwargs: Any) -> None:
             self._job_log(job, text, kwargs)
 
+        # Issue 14: the book's glossary progress file records the refined entry types as completed (the
+        # Glossary Progress refinement rows), like the desktop's refinement pass
+        from glossarion_mobile.job_kinds.glossary import progress_for_glossary
+
+        progress_path = progress_for_glossary(glossary_path)
         planned = bind_call(gpc.plan_manual_glossary_refinement, owner, glossary_path=glossary_path,
-                            progress_path=None, source_path=None, selected_types=types,
+                            progress_path=progress_path, source_path=None, selected_types=types,
                             target_chunk_count=None, log=log)
         if not planned:
             raise RuntimeError("The selected entry type(s) contain no glossary entries")
         options, plan = planned[0], planned[1]
         log(f"\n✨ Refining the generated glossary before translation: {', '.join(types)}")
-        gpc.run_manual_glossary_refinement(owner, glossary_path, None, options, plan)
+        question = self._suspend_question(job)
+        try:
+            gpc.run_manual_glossary_refinement(owner, glossary_path, progress_path, options, plan)
+        finally:
+            self._resume_question(job, question)
         log("✨ Glossary refinement finished: review it, then choose Edit, Yes or No")
         return {"ok": True, "glossary_path": glossary_path}
+
+    def _suspend_question(self, job: _Job) -> Optional[dict]:
+        """Issue 12: the gate's "action required" alerts go away while its glossary is refined (the
+        notification is withdrawn through ``QUESTION_SUSPENDED_EVENT``; the JobStrip warning and the Book
+        page review follow ``JobSnapshot.refining``). Returns the question being refined."""
+        with self._lock:
+            question = dict(job.question) if job.question else None
+            job.refining = True
+            job.warning = False
+        if question is not None:
+            self._post(self._deliver_event, job.id, QUESTION_SUSPENDED_EVENT,
+                       {"id": question.get("id"), "kind": question.get("kind")})
+        self._changed()
+        return question
+
+    def _resume_question(self, job: _Job, question: Optional[dict]) -> None:
+        """The refinement ended: a question that still waits raises its alerts again (delivered anew to the
+        question listeners: the "Glossary ready" notification / snackbar unless its card is on screen)."""
+        with self._lock:
+            job.refining = False
+            waiting = question is not None and bool(job.question) and job.question.get("id") == question.get("id")
+            if waiting:
+                job.warning = True
+            snap = job.snapshot()
+            current = dict(job.question) if waiting else None
+        if current is not None:
+            self._post(self._deliver_question, snap, current)
+        self._changed()
 
     def pending_question(self, job_id: Optional[str] = None) -> Optional[dict]:
         with self._lock:
@@ -2029,7 +2123,8 @@ class JobService:
             config = self._config_snapshot(job)
             config_taken = True
             lock = self.backend.job_lock
-            with self.backend.scoped_process_state(capture_stdout=host.log, lock=lock):
+            with self.backend.scoped_process_state(capture_stdout=host.log, lock=lock), \
+                    no_sign_in_scope(job.spec.kind):
                 # Held from the run reset to the owner latch: a stop protocol still running on
                 # gl-job-stop (the previous job's, or this job's own) never interleaves with them.
                 with self._stop_lock:
@@ -2143,7 +2238,8 @@ class JobService:
             if not line.strip():
                 continue
             self._write_log_file(job, line)
-            provider = sign_in_provider(line) if not job.sign_in_flagged else None
+            provider = (sign_in_provider(line)
+                        if not job.sign_in_flagged and sign_in_allowed(job.spec.kind) else None)
             if provider is not None:
                 job.sign_in_flagged = True
                 self._post(self._deliver_event, job.id, "sign_in_required",

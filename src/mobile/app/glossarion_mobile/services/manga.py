@@ -93,7 +93,10 @@ __all__ = [
     "OCR_PROVIDERS",
     "ONNX_INPAINT_MODELS",
     "OptionRow",
+    "PARAM_API_KEY",
     "PREFS_CBZ_JOBS",
+    "PREF_API_KEY",
+    "PREF_MODEL",
     "PresetsBusy",
     "P_BUBBLE_DETECTION",
     "P_DETECTOR",
@@ -104,6 +107,7 @@ __all__ = [
     "STEP_LABELS",
     "TOOL_ROUTE",
     "apply_phone_defaults",
+    "apply_translation_key",
     "azure_docintel_backend",
     "batch_spec",
     "borrow_azure_credentials",
@@ -144,9 +148,15 @@ __all__ = [
     "rendering_reset_available",
     "rendering_reset_updates",
     "run_ocr_provider",
+    "save_translation_api_key",
+    "save_translation_model",
     "step_spec",
     "test_image_edit_endpoint",
     "top_level_defaults",
+    "translation_api_key",
+    "translation_key_token",
+    "translation_model",
+    "translation_params",
     "value_reason",
     "zip_images",
 ]
@@ -2108,19 +2118,129 @@ def ensure_run_models(config: Mapping[str, Any], *, kinds: Optional[Sequence[str
 
 
 # ---------------------------------------------------------------------------
+# The manga translator's own model + API key (mobile only: Prefs, never config.json)
+# ---------------------------------------------------------------------------
+
+#: Prefs (mobile_state.json) keys of the manga translator's model and API key. The desktop manga tab
+#: has no model / key of its own (it reads the main GUI's); on the phone the tool keeps its own,
+#: remembered between runs, like a chat keeps its own model. Empty = the main model / key.
+PREF_MODEL = "manga_translation_model"
+PREF_API_KEY = "manga_translation_api_key"  # ``ENC:`` only (SecretBox), never plain text
+#: Job param carrying the ``ENC:`` key (job params are written to active.state: never the plain key).
+PARAM_API_KEY = "manga_api_key"
+
+
+_BOX: Any = None
+
+
+def _secret_box() -> Any:
+    """The app's ``ENC:`` codec (SecureStorage key), kept: the key field saves on every keystroke and
+    a SecretBox probes the handler once."""
+    global _BOX
+    if _BOX is None:
+        from glossarion_mobile.services.share_links import SecretBox
+
+        _BOX = SecretBox()
+    return _BOX
+
+
+def translation_model(prefs: Any) -> str:
+    """The manga translator's saved model ('' = the main model)."""
+    try:
+        return str(prefs.get(PREF_MODEL, "") or "").strip() if prefs is not None else ""
+    except Exception:
+        return ""
+
+
+def translation_key_token(prefs: Any) -> str:
+    """The saved ``ENC:`` API key of the manga translator ('' = the main API key)."""
+    try:
+        token = str(prefs.get(PREF_API_KEY, "") or "") if prefs is not None else ""
+    except Exception:
+        return ""
+    return token if token.startswith("ENC:") else ""
+
+
+def translation_api_key(prefs: Any) -> str:
+    """Blocking-light: the saved API key in plain text ('' when none or not decryptable)."""
+    token = translation_key_token(prefs)
+    if not token:
+        return ""
+    try:
+        return _secret_box().open(token)
+    except Exception:
+        return ""
+
+
+def save_translation_model(prefs: Any, model: Any) -> str:
+    value = str(model or "").strip()
+    if prefs is not None:
+        prefs.set(PREF_MODEL, value)
+    return value
+
+
+def save_translation_api_key(prefs: Any, value: Any) -> bool:
+    """Store the key ``ENC:`` (empty: forget it, the main key is used). Raises ``ShareError`` when
+    this phone cannot encrypt (nothing is stored in plain text)."""
+    plain = str(value or "").strip()
+    if prefs is None:
+        return False
+    prefs.set(PREF_API_KEY, _secret_box().seal(plain) if plain else "")
+    return bool(plain)
+
+
+def translation_params(prefs: Any) -> dict:
+    """Job params for the manga translator's model / key: ``config_overrides`` {model} (the job's
+    HeadlessOwner is built with it, like a chat's own model) and the ``ENC:`` key (decrypted on the
+    job thread by :func:`apply_translation_key`)."""
+    params: dict = {}
+    model = translation_model(prefs)
+    if model:
+        params["config_overrides"] = {"model": model}
+    token = translation_key_token(prefs)
+    if token:
+        params[PARAM_API_KEY] = token
+    return params
+
+
+def apply_translation_key(owner: Any, params: Mapping[str, Any]) -> Optional[str]:
+    """Job thread: put the manga translator's own API key (``params[PARAM_API_KEY]``) on the job's
+    owner, where the manga code looks it up (``main_gui.api_key_entry``, then ``config['api_key']``).
+    Returns a job-log line, or None when the main key is used."""
+    token = str((params or {}).get(PARAM_API_KEY) or "")
+    if not token or owner is None:
+        return None
+    try:
+        plain = _secret_box().open(token)
+    except Exception as exc:
+        return f"⚠️ The manga translator's API key could not be decrypted ({exc}); using the main API key"
+    if not plain:
+        return None
+    config = getattr(owner, "config", None)
+    if isinstance(config, dict):
+        config["api_key"] = plain
+    entry = getattr(owner, "api_key_entry", None)
+    setter = getattr(entry, "setText", None)
+    if callable(setter):
+        setter(plain)
+    return "🔑 Using the manga translator's own API key"
+
+
+# ---------------------------------------------------------------------------
 # Jobs
 # ---------------------------------------------------------------------------
 
 
 def batch_spec(files: MangaFileList, *, title: str = "", output_root: str = "", glossary_only: bool = False,
-               editor_session: str = "", imported_ocr: str = "", model_kinds: Optional[Sequence[str]] = None) -> Any:
+               editor_session: str = "", imported_ocr: str = "", model_kinds: Optional[Sequence[str]] = None,
+               translation: Optional[Mapping[str, Any]] = None) -> Any:
     """The MANGA job for the current Files selection (Start / Generate glossary): every file in
     visible order with the range, skips, folder roots and CBZ jobs (the runner applies them like
     the desktop Start; all process groups run). ``imported_ocr``: the last imported OCR JSON, which
     the run reuses like the desktop's (``manga_env.import_ocr_session`` before Start).
     ``model_kinds``: the downloadable models the job fetches before it starts
     (``ensure_run_models``; default: every model the run loads, the detector only for a
-    glossary pass)."""
+    glossary pass). ``translation``: the tool's own model / key (:func:`translation_params`)."""
     from glossarion_mobile.services.jobs import JobSpec
 
     params = files.run_params()
@@ -2135,6 +2255,8 @@ def batch_spec(files: MangaFileList, *, title: str = "", output_root: str = "", 
         params["model_kinds"] = list(model_kinds)
     params["editor_session"] = editor_session  # the runner updates that session's page state
     params["imported_ocr"] = str(imported_ocr or "")
+    if translation:  # the tool's own model / key (translation_params)
+        params.update(dict(translation))
     groups = files.groups()
     name = title or (groups[0].name if len(groups) == 1 and groups[0].name else "") or (
         os.path.basename(os.path.dirname(run_files[0])) if len(run_files) > 1 else os.path.basename(run_files[0]))

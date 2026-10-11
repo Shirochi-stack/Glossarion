@@ -71,7 +71,7 @@ from glossarion_mobile.ui.settings.model import (
     summarize,
     tile_kind,
 )
-from glossarion_mobile.ui.theme import HIT_TARGET, semantic
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic
 
 __all__ = [
     "DropdownTile",
@@ -527,7 +527,7 @@ class NumberTile(SettingTile):
                                       f"max {summarize(high, 'number')}" if high is not None else "") if p)
         self.field = ft.TextField(
             color=ft.Colors.ON_SURFACE,
-            value="", dense=True, width=150, keyboard_type=ft.KeyboardType.NUMBER,
+            value="", dense=True, width=150, keyboard_type=number_keyboard(),
             border_radius=tokens.RADII["field"], on_submit=self._on_submit, on_blur=self._on_submit,
         )
         self.minus = ft.IconButton(icon=ft.Icons.REMOVE, tooltip="Decrease", on_click=lambda e: self.step(-1),

@@ -28,6 +28,7 @@ import flet as ft
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
 from glossarion_mobile.ui.glossary.entry_sheet import field_label
+from glossarion_mobile.ui.theme import number_keyboard
 
 __all__ = [
     "ABOUT_FORMAT",
@@ -162,7 +163,7 @@ class TrimSheet:
         self.on_apply = on_apply
         self.preview_text = preview
         self.field = ft.TextField(label="Keep first", value=str(min(100, self.total)),
-                                  suffix=f"entries (out of {self.total})", keyboard_type=ft.KeyboardType.NUMBER,
+                                  suffix=f"entries (out of {self.total})", keyboard_type=number_keyboard(),
                                   dense=True, key="trim-n")
         self.preview = ft.Text("Click 'Preview Changes' to see the effect", theme_style=ft.TextThemeStyle.BODY_SMALL,
                                color=ft.Colors.ON_SURFACE_VARIANT, key="trim-preview")
@@ -240,7 +241,7 @@ class FilterEntriesSheet:
                                     theme_style=ft.TextThemeStyle.BODY_SMALL))
             for name in types:
                 check = ft.Checkbox(label=f"Keep {name}", value=True, expand=True, key=f"fe-type-{name}")
-                limit = ft.TextField(hint_text="All", width=90, dense=True, keyboard_type=ft.KeyboardType.NUMBER,
+                limit = ft.TextField(hint_text="All", width=90, dense=True, keyboard_type=number_keyboard(),
                                      key=f"fe-limit-{name}")
                 self.type_checks[name] = check
                 self.type_limits[name] = limit
@@ -309,7 +310,7 @@ class BackupSettingsSheet:
         self.enabled = ft.Switch(label="Enable automatic backups before modifications", value=bool(enabled),
                                  on_change=lambda e: self._sync(), key="bk-enabled")
         self.max_field = ft.TextField(label="Maximum backups to keep", value=str(int(max_backups)), suffix="(0 = unlimited)",
-                                      keyboard_type=ft.KeyboardType.NUMBER, dense=True, key="bk-max")
+                                      keyboard_type=number_keyboard(), dense=True, key="bk-max")
         location = [ft.Text("📁 Backup Location:", weight=ft.FontWeight.W_600)]
         if glossary_path:
             backups = os.path.join(os.path.dirname(glossary_path), "Backups")

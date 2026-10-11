@@ -55,7 +55,7 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.foreground import poll_sleep
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools.common import hint_text
 
 __all__ = ["ARGOS_REASON", "LEGEND", "NOTEPAD_REASON", "PROVIDERS", "ReviewerBinding", "ReviewerRequest",
@@ -1093,7 +1093,7 @@ class SdlxliffScreen(Screen):
         from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 
         field_control = ft.TextField(label="Score threshold (lower flags more rows, higher flags fewer):",
-                                     value=f"{self.binding.threshold():g}", keyboard_type=ft.KeyboardType.NUMBER,
+                                     value=f"{self.binding.threshold():g}", keyboard_type=number_keyboard(),
                                      key="sdl-threshold-field")
         loop = asyncio.get_running_loop()
         answer: asyncio.Future = loop.create_future()

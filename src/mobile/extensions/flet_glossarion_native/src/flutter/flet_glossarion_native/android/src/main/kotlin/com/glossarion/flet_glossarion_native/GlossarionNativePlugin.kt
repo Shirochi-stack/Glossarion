@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -473,7 +474,7 @@ class GlossarionNativePlugin :
         val autoCancel = args["auto_cancel"] as? Boolean ?: !ongoing
 
         val builder = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(R.drawable.glossarion_native_ic_notification)
+            .setSmallIcon(R.drawable.glossarion_native_ic_notification)  // the Halgakos silhouette
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -482,6 +483,14 @@ class GlossarionNativePlugin :
             .setOnlyAlertOnce(true)
             .setSilent(silent)
             .setContentIntent(notificationIntent(context, id, payload, null, 0))
+
+        // the colour Halgakos beside the text (tools/make_mascot_assets.py builds both drawables)
+        try {
+            BitmapFactory.decodeResource(context.resources, R.drawable.glossarion_native_ic_large)
+                ?.let { builder.setLargeIcon(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "notification large icon: $e")
+        }
 
         val progress = args["progress"] as? List<*>
         val indeterminate = args["indeterminate"] as? Boolean ?: false

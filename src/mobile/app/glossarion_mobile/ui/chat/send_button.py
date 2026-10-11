@@ -14,6 +14,7 @@ force stop).
 
 from __future__ import annotations
 
+import math
 from dataclasses import field
 from typing import Any, Callable, Optional
 
@@ -21,11 +22,19 @@ import flet as ft
 
 from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.chat.send_state import SendAction, SendInputs, SendState, SendStopMachine
+from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = ["SendStopButton"]
 
 _MUTED = ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+
+#: owner #17: while a job runs, Stop is the Halgakos mascot turning (one turn per SPIN_TURN_MS). Each
+#: linear rotation covers SPIN_TURNS turns; its ``on_animation_end`` queues the next, so the client turns
+#: the image smoothly and the server only hears from it once per SPIN_TURNS turns.
+SPIN_TURN_MS = 1600
+SPIN_TURNS = 8
+SPIN_SIZE = 36
 
 
 @ft.control
@@ -55,7 +64,12 @@ class SendStopButton(ft.Container):
         self.height = tokens.SIZES["hit_target"]
         self.alignment = ft.Alignment.CENTER
         self.rendered_state: Optional[SendState] = None
+        self.spin_image: Optional[ft.Image] = None
         self.render()
+
+    def did_mount(self) -> None:
+        super().did_mount()
+        self._start_spin()
 
     # ---- rendering -----------------------------------------------------------------
 
@@ -63,9 +77,43 @@ class SendStopButton(ft.Container):
     def state(self) -> SendState:
         return self.machine.state
 
+    def _spinner(self, key: str, tooltip: str) -> ft.Control:
+        """RUNNING: the mascot turning (still under reduce motion), tappable to stop, read out as "Stop"."""
+        self.spin_image = ft.Image(
+            src=HALGAKOS_ASSET, width=SPIN_SIZE, height=SPIN_SIZE, fit=ft.BoxFit.CONTAIN,
+            semantics_label="Stop", gapless_playback=True, rotate=ft.Rotate(angle=0),
+            animate_rotation=motion.spin_animation(SPIN_TURN_MS * SPIN_TURNS),
+            on_animation_end=self._spin_more, key=f"{key}-mascot",
+        )
+        return ft.Container(
+            key=key,
+            width=tokens.SIZES["hit_target"],
+            height=tokens.SIZES["hit_target"],
+            alignment=ft.Alignment.CENTER,
+            tooltip=tooltip,
+            on_click=self._on_tap,
+            ink=True,
+            border_radius=tokens.RADII["full"],
+            content=self.spin_image,
+        )
+
+    def _spin_more(self, e: Any = None) -> None:
+        """Queue the next SPIN_TURNS turns while the spinner is on screen (not under reduce motion)."""
+        image = self.spin_image
+        if image is None or motion.reduced() or self.rendered_state is not SendState.RUNNING:
+            return
+        before = image.rotate
+        image.rotate = ft.Rotate(angle=float(getattr(before, "angle", 0) or 0) + SPIN_TURNS * 2 * math.pi)
+        try:
+            image.update()
+        except Exception:  # not mounted (yet / any more): turn from the angle the client has once mounted
+            image.rotate = before
+
     def _visual_control(self, state: SendState) -> ft.Control:
         visual = self.machine.visual
         key = f"send-{state.value}"
+        if state is SendState.RUNNING:
+            return self._spinner(key, visual.tooltip)
         if state is SendState.STOPPING:
             return ft.Container(
                 key=key,
@@ -128,6 +176,7 @@ class SendStopButton(ft.Container):
         state = self.machine.state
         changed = state is not self.rendered_state
         if changed:
+            self.spin_image = None
             # scale morph; a cross-fade under reduce motion (UI_SPEC §6.3)
             self.switcher.transition = motion.switcher_transition(ft.AnimatedSwitcherTransition.SCALE)
             self.switcher.content = self._visual_control(state)
@@ -144,7 +193,15 @@ class SendStopButton(ft.Container):
         self.machine.apply(inputs)
         changed = self.render()
         self._push()
+        self._start_spin()
         return changed
+
+    def _start_spin(self) -> None:
+        """A freshly shown spinner starts turning once the client has it (an implicit animation runs on a
+        change, so the first angle goes out after the push that showed the image at 0)."""
+        image = self.spin_image
+        if image is not None and not float(getattr(image.rotate, "angle", 0) or 0):
+            self._spin_more()
 
     def _push(self) -> None:
         try:
@@ -158,6 +215,7 @@ class SendStopButton(ft.Container):
         action = self.machine.tap()
         self.render()
         self._push()
+        self._start_spin()
         if self.on_action is not None and action is not SendAction.NONE:
             self.on_action(action)
         return action

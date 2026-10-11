@@ -960,6 +960,9 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     use = next(c for c in signed.controls[0].controls if getattr(c, "key", None) == "welcome-use-authgem")
     use.on_click(None)
     assert queries == ["authgem"] and use.content == "Change model"
+    # the ModelSheet's pick (the global model, ChatView.open_model_sheet(global_scope=True)) comes back to that row
+    screen.model_chosen("authgem/gemini-3.5-pro")
+    assert screen.model_notes["authgem"] == "✓ Using authgem/gemini-3.5-pro" and screen.changing_provider is None
     # ChatGPT: the default GPT-6 Luna is gone from the catalog -> the newest Luna, said so
     assert asyncio.run(screen.check_model("authgpt")) == "authgpt/gpt-5.6-luna"
     assert "no longer offered" in screen.model_notes["authgpt"]
@@ -1552,6 +1555,10 @@ def test_appearance_prefs_apply_theme_scale_and_haptics():
 
     assert normalize_appearance({"theme": "AMOLED", "accent": "nope", "text_scale": 9}) == {
         "theme": "amoled", "accent": "halgakos_rose", "text_scale": 1.3, "reduce_motion": False, "haptics": True}
+    # owner #31: 85 % by default, down to 50 %
+    assert normalize_appearance(None)["text_scale"] == 0.85 and normalize_appearance({})["text_scale"] == 0.85
+    assert normalize_appearance({"text_scale": 0.5})["text_scale"] == 0.5
+    assert normalize_appearance({"text_scale": 0.2})["text_scale"] == 0.5
     page = types.SimpleNamespace(theme=None, dark_theme=None, theme_mode=None, update=lambda: None)
     state = types.SimpleNamespace(text_scale=types.SimpleNamespace(value=1.0, set=lambda v: setattr(state.text_scale, "value", v)))
     haptics = types.SimpleNamespace(enabled=True)

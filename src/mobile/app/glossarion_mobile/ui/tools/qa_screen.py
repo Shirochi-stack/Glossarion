@@ -37,7 +37,7 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text
@@ -131,7 +131,7 @@ class QaScannerScreen(Screen):
         if sample is None:
             sample = qm.MOBILE_QUICK_SAMPLE_SIZE
         self.sample_field = ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(sample), dense=True,
-                                         keyboard_type=ft.KeyboardType.NUMBER, helper=qm.QUICK_SAMPLE_HINT,
+                                         keyboard_type=number_keyboard(), helper=qm.QUICK_SAMPLE_HINT,
                                          on_blur=self._on_sample, on_submit=self._on_sample, key="qa-sample")
         self.auto_search = ft.Switch(label="Auto-search output", value=bool(self.ctx.cfg("qa_auto_search_output", True)),
                                      on_change=self._on_auto_search, key="qa-auto-search")

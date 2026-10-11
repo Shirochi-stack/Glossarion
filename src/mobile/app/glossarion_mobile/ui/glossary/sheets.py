@@ -23,6 +23,7 @@ import flet as ft
 
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
+from glossarion_mobile.ui.theme import number_keyboard
 
 __all__ = ["ExtractSheet", "IMAGE_EXTENSIONS", "ModeSheet", "PlanGlossarySheet", "RefineSheet"]
 
@@ -202,7 +203,7 @@ class RefineSheet:
         self.warning = ft.Text("", color=ft.Colors.ERROR, theme_style=ft.TextThemeStyle.BODY_SMALL, visible=False,
                                key="rf-warning")
         self.chunks = ft.TextField(label="Exact total chunk count (optional)", dense=True,
-                                   keyboard_type=ft.KeyboardType.NUMBER, key="rf-chunks")
+                                   keyboard_type=number_keyboard(), key="rf-chunks")
         self.summary = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="rf-summary")
         rows += [self.summary, self.warning, self.chunks]
         if reason:

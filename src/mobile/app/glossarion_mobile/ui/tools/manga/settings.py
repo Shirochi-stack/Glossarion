@@ -46,7 +46,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
 from glossarion_mobile.ui.tools.manga.common import MangaTab, push, reason_or_chip
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools.manga.models import ModelDownloadRow, ModelManagerSheet
 
 __all__ = ["CURATED_KEYS", "SCHEMA_GROUPS", "SettingsTab", "group_manga_keys", "preview_style"]
@@ -1217,7 +1217,7 @@ class SettingsTab(MangaTab):
 
         def field(label: str, which: str, value: int, ui_key: str) -> ft.TextField:
             return ft.TextField(label=label, value=str(value), width=170, dense=True,
-                                keyboard_type=ft.KeyboardType.NUMBER, helper=f"{lo}–{hi}", key=self.k(ui_key),
+                                keyboard_type=number_keyboard(), helper=f"{lo}–{hi}", key=self.k(ui_key),
                                 on_submit=lambda e: self.set_font_bound(which, e.control.value),
                                 on_blur=lambda e: self.set_font_bound(which, e.control.value))
 

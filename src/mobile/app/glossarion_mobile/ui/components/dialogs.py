@@ -17,8 +17,10 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
+from glossarion_mobile.ui.components.sheet import fits_compact, page_width, text_height
+from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ConfirmDialog", "close_dialog", "show_snackbar"]
+__all__ = ["ConfirmDialog", "close_dialog", "dialog_height", "fit_dialog_column", "show_snackbar"]
 
 
 def close_dialog(page: Any, dialog: Any) -> bool:
@@ -61,6 +63,24 @@ def close_dialog(page: Any, dialog: Any) -> bool:
     return True
 
 
+def dialog_height(width: float, title: str, body: str, items: Sequence[str] = ()) -> float:
+    """Upper estimate (dp, 200 % text) of an AlertDialog on a ``width`` dp page: title, body text,
+    bullet items and the button row."""
+    width = max(120.0, min(float(tokens.SIZES["dialog_max"]), width - 80))  # dialog insets + padding
+    return (text_height(title, width, 22) + text_height(body, width) + 8 * len(items)
+            + sum(text_height(f"• {item}", width, 12) for item in items) + 140)
+
+
+def fit_dialog_column(page: Any, column: ft.Column, title: str, body: str, items: Sequence[str] = ()) -> None:
+    """Scroll a dialog's body Column only when it may not fit (owner #21).
+
+    Flet 1.0.3 lays a scrolling Column out as tall as the space it may take, so a short confirmation
+    ("Delete selected", "Retranslate selected") opened screen-high with empty space under its text. As the
+    compact sheets do (``fits_compact``), it keeps its natural height unless it may not fit."""
+    fits = fits_compact(page, dialog_height(page_width(page), title, body, items))
+    column.scroll = None if fits else ft.ScrollMode.AUTO
+
+
 class ConfirmDialog:
     def __init__(
         self,
@@ -80,6 +100,8 @@ class ConfirmDialog:
         self.state = "idle"
         self.result: Optional[bool] = None
         self._page: Any = None
+        self.body = body
+        self.items = [str(item) for item in items or ()]
         content: list[ft.Control] = []
         if body:
             content.append(ft.Text(body, theme_style=ft.TextThemeStyle.BODY_MEDIUM))
@@ -92,19 +114,18 @@ class ConfirmDialog:
             ft.ButtonStyle(bgcolor=ft.Colors.ERROR, color=ft.Colors.ON_ERROR) if destructive else None
         )
         self.confirm_button = ft.FilledButton(content=confirm_label, on_click=self._on_confirm, style=confirm_style)
+        self.column = ft.Column(content, tight=True, spacing=8, scroll=ft.ScrollMode.AUTO)
         self.dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(title),
-            content=ft.Container(
-                width=tokens.SIZES["dialog_max"],
-                content=ft.Column(content, tight=True, spacing=8, scroll=ft.ScrollMode.AUTO),
-            ),
+            content=ft.Container(width=tokens.SIZES["dialog_max"], content=self.column),
             actions=[self.cancel_button, self.confirm_button],
             actions_alignment=ft.MainAxisAlignment.END,
         )
 
     def show(self, page: Any) -> None:
         self._page = page
+        fit_dialog_column(page, self.column, self.title, self.body, self.items)
         if self.state == "closed":  # shown again
             self.state = "idle"
             self._set_running(False)
@@ -155,14 +176,33 @@ def show_snackbar(
     on_action: Optional[Callable[[], Any]] = None,
     duration_ms: int = 4000,
 ) -> ft.SnackBar:
-    """Show a SnackBar (``page.show_dialog``); returns it for tests."""
+    """Show a SnackBar (``page.show_dialog``); returns it for tests.
+
+    A bar without an action gets its dismiss ✕ on the LEFT (owner #15): Flutter's ``show_close_icon``
+    puts it at the trailing edge, right over the chat composer's Stop button, so a user closing the
+    message stopped the job instead."""
+    text = ft.Text(message)
     bar = ft.SnackBar(
-        content=ft.Text(message),
+        content=text,
         action=action_label,
         on_action=(lambda e: call_handler(on_action)) if on_action is not None else None,
         duration=duration_ms,
         behavior=ft.SnackBarBehavior.FLOATING,
-        show_close_icon=action_label is None,
+        show_close_icon=False,
     )
+    if action_label is None:
+        text.expand = True
+        bar.content = ft.Row(
+            [
+                ft.IconButton(
+                    icon=ft.Icons.CLOSE, tooltip="Dismiss", icon_color=ft.Colors.ON_INVERSE_SURFACE,
+                    size_constraints=HIT_TARGET, key="snackbar-close",
+                    on_click=lambda e: close_dialog(page, bar),
+                ),
+                text,
+            ],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
     page.show_dialog(bar)
     return bar

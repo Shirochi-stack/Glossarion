@@ -955,7 +955,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui.foreground import poll_sleep
     from glossarion_mobile.ui.screens.base import Screen
     from glossarion_mobile.ui.settings.model import mask_secret
-    from glossarion_mobile.ui.theme import HIT_TARGET, status_color
+    from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, status_color
 except ImportError:  # pragma: no cover - Flet missing
     ft = None  # type: ignore[assignment]
     Screen = object  # type: ignore[assignment,misc]
@@ -1074,7 +1074,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self.rotation_switch = rotation_switch
         self.frequency_field = ft.TextField(value=str(self.controller.setting("rotation_frequency", 1)), label="Every",
                                             suffix=ft.Text("requests"), width=150, dense=True,
-                                            keyboard_type=ft.KeyboardType.NUMBER, on_blur=self._on_frequency,
+                                            keyboard_type=number_keyboard(), on_blur=self._on_frequency,
                                             on_submit=self._on_frequency, border_radius=tokens.RADII["field"])
         rotation = SectionCard(title="Rotation", icon="AUTORENEW", children=[
             ft.Row([rotation_switch, self.frequency_field], wrap=True, spacing=12,
@@ -1082,7 +1082,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         for spec in self.controller.specs:
             self.pool_chips[spec.id] = ft.Chip(label=ft.Text(self._chip_label(spec)), selected=spec.id == self.pool,
                                                show_checkmark=False, on_click=lambda e, p=spec.id: self.select_pool(p),
-                                               key=f"pool-{spec.slug}")
+                                               key=ft.ScrollKey(f"pool-{spec.slug}"))
         self.chip_row = ft.Row(list(self.pool_chips.values()), scroll=ft.ScrollMode.AUTO, spacing=6)
         self.pool_header = ft.Container()
         self.selection_bar = ft.Container(visible=False)
@@ -1121,6 +1121,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
                 self._ticker = self.spawn(self._tick_live_stats())
             except Exception:
                 self._ticker = None
+        self.scroll_chip_into_view(duration=0)
 
     def dispose(self) -> None:
         self._stop_tests.set()
@@ -1202,6 +1203,32 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self.selected.clear()
         self.render()
         _push(self.list_view)
+        self.scroll_chip_into_view()
+
+    def scroll_chip_into_view(self, duration: int = 200) -> Any:
+        """Scroll the horizontal pool-chip strip so the selected pool's chip is visible (a route that
+        opens e.g. the Vision pool lands on a chip far off-screen to the right)."""
+        row = getattr(self, "chip_row", None)
+        chip = self.pool_chips.get(self.pool)
+        if row is None or chip is None:
+            return None
+        try:
+            row.page  # noqa: B018 - raises until the strip is mounted
+        except Exception:
+            return None
+
+        async def go() -> None:
+            try:
+                if not duration:
+                    await asyncio.sleep(0.15)  # first show: the client lays the chips out first
+                await row.scroll_to(scroll_key=chip.key, duration=duration)
+            except Exception:
+                log.debug("pool chip scroll_to failed", exc_info=True)
+
+        try:
+            return self.spawn(go())
+        except Exception:
+            return None
 
     def render(self) -> None:
         spec = self.spec
@@ -1839,7 +1866,7 @@ class BulkFieldSheet:
             label, kind, low, high, _clear = BULK_NUMBER_FIELDS[field]
             value = sample.get(field)
             self.input = ft.TextField(value="" if value in (None, "") else str(value), label=label, dense=True,
-                                      keyboard_type=ft.KeyboardType.NUMBER,
+                                      keyboard_type=number_keyboard(),
                                       helper=f"{low}–{high:,}" if kind == "int" else f"{low}–{high}",
                                       key="bulk-number")
             controls.append(self.input)

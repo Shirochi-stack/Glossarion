@@ -1178,6 +1178,57 @@ class LibraryService:
                 lock.release()
         return dict(info) if info else None
 
+    def adopt_workspaces_blocking(self, books: Sequence[Mapping[str, Any]]) -> dict:
+        """Issue 18: every book's workspace under the Library's output root before it continues.
+
+        A workspace found under another folder than the Library's output root (the app's Output folder:
+        ``output_roots()[0]``) is moved there - merged when that root already holds the same book
+        (``workspace_sync.adopt_workspace``) - together with its glossary folder (``<root>/Glossary/<book>/``:
+        glossary progress, glossary text cache), so the run continues from the existing progress and caches
+        instead of asking "Output Folder Mismatch" and starting a second workspace. Only while no job owns
+        the process (``JOB_LOCK`` taken without waiting): a running job may be writing the folder.
+
+        Returns ``{"books": [rows with their new output_folder], "moved": [(old, new)], "kept": [(name,
+        reason)], "busy": bool}``."""
+        rows = [dict(b) for b in books or ()]
+        out: dict = {"books": rows, "moved": [], "kept": [], "busy": False}
+        roots = self.output_roots()
+        target_root = str(roots[0]) if roots else ""
+        candidates = [r for r in rows if str(r.get("output_folder") or "") and os.path.isdir(str(r.get("output_folder")))]
+        if not target_root or not candidates:
+            return out
+        from glossarion_mobile.services.workspace_sync import adopt_workspace, same_dir
+
+        pending = [r for r in candidates if not same_dir(os.path.dirname(os.path.abspath(str(r["output_folder"]))),
+                                                         target_root)]
+        if not pending:
+            return out
+        lock = self._job_lock()
+        if lock is not None and not lock.acquire(blocking=False):
+            out["busy"] = True
+            return out
+        try:
+            for row in pending:
+                folder = str(row["output_folder"])
+                if os.path.basename(os.path.dirname(os.path.abspath(folder))).casefold() == "attachments":
+                    # a chat's attachment workspace: the chat's own Migrate moves it (and its links)
+                    out["kept"].append((str(row.get("name") or os.path.basename(folder)), "a chat attachment"))
+                    continue
+                outcome = adopt_workspace(folder, target_root, self.raw_source(row))
+                if outcome["status"] in ("moved", "merged"):
+                    out["moved"].append((folder, outcome["target"]))
+                    row["output_folder"] = outcome["target"]
+                    if row.get("path") and _norm(row.get("path")) == _norm(folder):
+                        row["path"] = outcome["target"]
+                elif outcome["status"] == "kept":
+                    out["kept"].append((str(row.get("name") or os.path.basename(folder)), outcome["reason"]))
+        finally:
+            if lock is not None:
+                lock.release()
+            if out["moved"]:
+                self.mark_dirty()
+        return out
+
     def apply_output_override_blocking(self, root: str) -> str:
         """``LibraryShelf.apply_output_override``: the process ``OUTPUT_DIRECTORY`` becomes ``root`` so the
         next translation writes into the folder that holds the book's progress. Returns the root used.

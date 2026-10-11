@@ -1055,6 +1055,36 @@ def _gp_chips(stats: Mapping[str, Any]) -> tuple:
     return tuple(chips)
 
 
+def workspace_root_owner(service: Any, book: Mapping[str, Any]) -> Any:
+    """A ``ProgressOwner`` whose ``base_dir`` is the folder holding the book's workspace, or None when that
+    folder is already one of the searched roots (the output root) or there is no workspace.
+
+    ``glossary_progress_core``'s locator searches the output root, the app folder and ``owner.base_dir``
+    (each as ``<root>/Glossary/<book>/`` and ``<root>/<book>/Glossary/``). A chat book's glossary lives
+    beside its workspace instead: ``<run root>/Glossary/<book>/`` while the run is live, and
+    ``Attachments/<book>/Glossary/`` once the run finished (``workspace_sync.stash_run_glossary``), so the
+    workspace's own parent is searched as the last root."""
+    folder = book_workspace(service, book)
+    if not folder:
+        return None
+    parent = os.path.dirname(os.path.abspath(folder))
+    if not parent or not os.path.isdir(parent):
+        return None
+    roots = [os.environ.get("OUTPUT_DIRECTORY") or ""]
+    try:
+        roots.extend(service.output_roots())
+    except Exception:
+        pass
+    if any(r and _norm_path(r) == _norm_path(parent) for r in roots):
+        return None
+    try:
+        owner = make_owner(service)
+    except Exception:
+        return None
+    owner.base_dir = parent
+    return owner
+
+
 def _find_glossary_progress_path(service: Any, book: Mapping[str, Any],
                                   progress: Optional[ProgressView] = None) -> Optional[str]:
     """Blocking: where the book's glossary progress file is now (None when there is none)."""
@@ -1064,11 +1094,20 @@ def _find_glossary_progress_path(service: Any, book: Mapping[str, Any],
     try:
         state = progress.state if progress is not None else None
         owner = getattr(state, "owner", None) or make_owner(service)
-        found = gpc.find_glossary_progress(owner, _source_for(service, book))
+        source = _source_for(service, book)
+        found = gpc.find_glossary_progress(owner, source)
+        if not found:
+            beside = workspace_root_owner(service, book)
+            found = gpc.find_glossary_progress(beside, source) if beside is not None else None
     except Exception:
         log.debug("looking up the glossary progress failed", exc_info=True)
         return None
     return str(found) if found else None
+
+
+def find_glossary_progress_path(service: Any, book: Mapping[str, Any]) -> Optional[str]:
+    """Blocking: the book's glossary progress file (output root, app folder, then beside its workspace)."""
+    return _find_glossary_progress_path(service, book)
 
 
 def glossary_signature(view: Optional[GlossaryView], service: Any = None, book: Optional[Mapping[str, Any]] = None,
@@ -1144,6 +1183,11 @@ def load_glossary_view(service: Any, book: Mapping[str, Any], *, previous: Optio
                                                source_filenames=list(pair.get("raw_filenames") or []) or None)
         else:
             model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog)
+            if model is None:
+                # a chat book: its glossary progress sits beside the workspace (``workspace_root_owner``)
+                beside = workspace_root_owner(service, book)
+                if beside is not None:
+                    model = gpc.open_glossary_progress(beside, source, output_dir=output_dir, prog=prog)
         if model is None:
             return GlossaryView(book_title=title, empty=True, groups=groups)
         path = model._find_gp_for_file(model.fp) or getattr(model, "gp_path", None)

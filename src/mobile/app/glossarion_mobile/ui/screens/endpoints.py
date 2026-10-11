@@ -129,6 +129,21 @@ def dependency_reasons() -> dict:
 # ---- shared test path ---------------------------------------------------------------------------------
 
 
+def _clear_stale_stop() -> None:
+    """A test is a new run: clear the stop state an earlier Stop latched (``TRANSLATION_CANCELLED``,
+    ``GRACEFUL_STOP``, the ``unified_api_client`` / ``TransateKRtoEN`` stop flags), the run-start
+    reset every job gets (``stop_control.reset_for_new_run``). Without it, a key or endpoint test
+    after a stopped run (a manga Stop latches them until the next run) failed with "Operation
+    cancelled by user". Only called while no job holds the run lock; the env part is restored by
+    the caller's scope."""
+    try:
+        import stop_control
+
+        stop_control.reset_for_new_run("translation")
+    except Exception:
+        log.debug("stop reset before the test failed", exc_info=True)
+
+
 def run_in_run_env(config: Mapping[str, Any], fn: Callable[[], Any], *, lock_timeout: float = 2.0,
                    input_kind: str = "epub", data_dir: Optional[str] = None,
                    owner_factory: Optional[Callable[..., Any]] = None,
@@ -161,6 +176,7 @@ def run_in_run_env(config: Mapping[str, Any], fn: Callable[[], Any], *, lock_tim
                 large_env.update_env(dict(env or {}))
             except ImportError:
                 os.environ.update({str(k): str(v) for k, v in dict(env or {}).items() if v is not None})
+            _clear_stale_stop()
             return fn()
     finally:
         lock.release()

@@ -33,7 +33,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import ChoiceDialog, JobWatch, action_button, card, hint_text
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
@@ -143,7 +143,7 @@ class AsyncBatchScreen(Screen):
                                      value=bool(self.ctx.cfg(WAIT_KEY, False)), on_change=self._on_wait,
                                      key="async-wait")
         self.poll_field = ft.TextField(label="Poll interval (seconds)", value=str(self.ctx.cfg(POLL_KEY, 60)),
-                                       dense=True, keyboard_type=ft.KeyboardType.NUMBER, width=200,
+                                       dense=True, keyboard_type=number_keyboard(), width=200,
                                        on_blur=self._on_poll, on_submit=self._on_poll, key="async-poll")
         config = card("Async Processing Configuration", [self.wait_switch, self.poll_field,
                                                          hint_text(CHUNKING_NOTE, key="async-chunk-note")],

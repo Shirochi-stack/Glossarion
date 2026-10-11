@@ -28,7 +28,9 @@ bound they stay disabled ("Not available in this session").
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
@@ -68,6 +70,12 @@ __all__ = [
 ]
 
 NO_GLOSSARY_FILE_TEXT = "No editable glossary file was found. You can continue or stop this run."
+#: Issue 27: "Always accept" asks for a second tap within this many seconds.
+ALWAYS_ACCEPT_LABEL = "Always accept"
+ACTION_REQUIRED_LABEL = "GLOSSARION · ACTION REQUIRED"
+REFINING_LABEL = "GLOSSARION · REFINING THE GLOSSARY…"
+ALWAYS_CONFIRM_LABEL = "Tap again to always accept"
+ALWAYS_CONFIRM_SECONDS = 2.0
 _MUTED = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
 
 #: (id, label, icon, milestone when it ships or None)
@@ -129,6 +137,7 @@ def glossary_preview(path: str, limit: int = 5) -> dict:
         items = parse_glossary_content(text, ".json" if ext == ".json" else ".csv")
         entries = len(items)
         preview = [(str(item.get("raw_name") or ""), str(item.get("translated_name") or "")) for item in items[:limit]]
+        info["types"] = glossary_type_counts(items)
     except Exception:
         lines = [line for line in text.splitlines() if line.strip()]
         entries = len(lines)
@@ -136,6 +145,24 @@ def glossary_preview(path: str, limit: int = 5) -> dict:
     info["entries"] = entries
     info["preview"] = preview
     return info
+
+
+def glossary_type_counts(items: Sequence[dict]) -> list:
+    """``[(label, count)]`` per glossary type column value, in first-seen order ("Characters", "Terms", ...)."""
+    counts: dict = {}
+    for item in items or ():
+        kind = str((item or {}).get("type") or "terms").strip().lower() or "terms"
+        counts[kind] = counts.get(kind, 0) + 1
+    out = []
+    for kind, count in counts.items():
+        label = kind.replace("_", " ").title()
+        out.append((label if label.endswith("s") else label + "s", count))
+    return out
+
+
+def type_counts_text(types: Sequence) -> str:
+    """"Characters 42 · Terms 18" for the approval card's per-type row."""
+    return " · ".join(f"{label} {int(count):,}" for label, count in (types or ()))
 
 
 def save_text_keep_bom(path: str, text: str, has_bom: bool) -> None:
@@ -187,10 +214,14 @@ class GlossaryApprovalCard(ft.Container):
         self.on_refine = on_refine
         self.answered: Optional[bool] = None
         self.always_accepted = False
+        self.types_text: Optional[ft.Text] = None
+        self._always_armed_at: Optional[float] = None
         success = semantic("success", dark)
         exists = bool(self.info.get("exists"))
+        self.action_label = ft.Text(ACTION_REQUIRED_LABEL, theme_style=ft.TextThemeStyle.LABEL_SMALL,
+                                    color=ft.Colors.TERTIARY, key="approval-action-label")
         body: list[ft.Control] = [
-            ft.Text("GLOSSARION · ACTION REQUIRED", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.TERTIARY),
+            self.action_label,
             ft.Text("Glossary generation complete", theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
             ft.Text("Accept this glossary and start translation?", theme_style=ft.TextThemeStyle.BODY_MEDIUM),
         ]
@@ -206,6 +237,11 @@ class GlossaryApprovalCard(ft.Container):
                     spacing=6,
                 )
             )
+            # Issue 25: totals per type column value ("Characters 42 · Terms 18")
+            self.types_text = ft.Text(type_counts_text(self.info.get("types") or ()),
+                                      theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED, key="approval-types",
+                                      visible=bool(self.info.get("types")))
+            body.append(self.types_text)
             for raw, translated in list(self.info.get("preview") or [])[:5]:
                 body.append(
                     ft.Text(f"{raw} → {translated}" if translated else raw, theme_style=ft.TextThemeStyle.BODY_SMALL,
@@ -225,10 +261,12 @@ class GlossaryApprovalCard(ft.Container):
         self.refine_button = ft.FilledTonalButton(content="✨ Refine", disabled=not exists, key="approval-refine",
                                                   visible=on_refine is not None, on_click=lambda e: self.refine(),
                                                   tooltip="Refine this glossary (the refinement settings) before translating")
-        body.append(ft.Row([self.edit_button, self.refine_button, self.yes_button, self.no_button], wrap=True,
-                           spacing=8, run_spacing=8))
+        # Issue 26: ✓ Yes and ■ No always share one row (Edit / Refine above them)
+        body.append(ft.Row([self.edit_button, self.refine_button], wrap=True, spacing=8, run_spacing=8,
+                           key="approval-edit-row"))
+        body.append(ft.Row([self.yes_button, self.no_button], spacing=8, key="approval-answer-row"))
         self.always_button = ft.TextButton(
-            content="Always accept", icon=ft.Icons.DONE_ALL, on_click=lambda e: self.always(),
+            content=ALWAYS_ACCEPT_LABEL, icon=ft.Icons.DONE_ALL, on_click=lambda e: self.always_tap(),
             tooltip="Accept this glossary and every generated glossary from now on (Chat settings to change)",
             visible=on_always is not None, key="approval-always",
         )
@@ -260,6 +298,7 @@ class GlossaryApprovalCard(ft.Container):
             return False
         self.refine_button.disabled = True
         self.refine_button.content = "✨ Refining…"
+        self.action_label.value = REFINING_LABEL  # issue 12: no "action required" while it refines
         self._push()
         self.on_refine()
         return True
@@ -273,22 +312,64 @@ class GlossaryApprovalCard(ft.Container):
                        for raw, translated in list(info.get("preview") or [])[:5]]
             controls = list(self.content.controls)
             first = next((i for i, c in enumerate(controls) if isinstance(c, ft.Row)), None)
-            if first is not None:  # the "name · N entries" row, then the old preview lines
+            if first is not None:  # the "name · N entries" row, the per-type row, then the old preview lines
                 row = controls[first]
                 texts = [c for c in row.controls if isinstance(c, ft.Text)]
                 if texts:
                     texts[0].value = f"{info.get('name')} · {int(info.get('entries') or 0):,} entries"
+                if self.types_text is not None and first + 1 < len(controls) and controls[first + 1] is self.types_text:
+                    self.types_text.value = type_counts_text(info.get("types") or ())
+                    self.types_text.visible = bool(info.get("types"))
+                    first += 1
                 end = first + 1
                 while end < len(controls) and isinstance(controls[end], ft.Text):
                     end += 1
                 self.content.controls = controls[:first + 1] + preview + controls[end:]
         self.refine_button.content = "✨ Refined" if ok else "✨ Refine"
+        self.action_label.value = ACTION_REQUIRED_LABEL
         self.refine_button.disabled = bool(ok) or self.answered is not None
         self._push()
 
     def _push(self) -> None:
         try:
             self.update()
+        except Exception:
+            pass
+
+    def always_tap(self, now: Optional[float] = None) -> bool:
+        """Issue 27: the "Always accept" button needs a second tap within ``ALWAYS_CONFIRM_SECONDS`` (the label
+        reads "Tap again to always accept" meanwhile), so one stray tap never turns the setting on."""
+        if self.answered is not None or self.on_always is None:
+            return False
+        now = time.monotonic() if now is None else now
+        armed = self._always_armed_at
+        if armed is not None and now - armed <= ALWAYS_CONFIRM_SECONDS:
+            self._always_armed_at = None
+            return self.always()
+        self._always_armed_at = now
+        self.always_button.content = ALWAYS_CONFIRM_LABEL
+        self._push()
+        self._schedule_disarm(now)
+        return False
+
+    def _schedule_disarm(self, armed_at: float) -> None:
+        """Put the label back once the confirmation window has passed (no second tap)."""
+        try:
+            page = self.page
+        except Exception:
+            page = None
+        if page is None or not hasattr(page, "run_task"):
+            return
+
+        async def disarm() -> None:
+            await asyncio.sleep(ALWAYS_CONFIRM_SECONDS)
+            if self._always_armed_at == armed_at and self.answered is None:
+                self._always_armed_at = None
+                self.always_button.content = ALWAYS_ACCEPT_LABEL
+                self._push()
+
+        try:
+            page.run_task(disarm)
         except Exception:
             pass
 
@@ -316,6 +397,8 @@ def glossary_question(snapshot: Any) -> Optional[dict]:
     question = getattr(snapshot, "question", None) if snapshot is not None else None
     if not isinstance(question, dict) or not is_glossary_question(question.get("kind")):
         return None
+    if getattr(snapshot, "refining", False):
+        return None  # issue 12: no review alert while the gate's glossary is refined
     return question
 
 
@@ -507,6 +590,11 @@ def _row_signature(segment: dict) -> tuple:
 REQUEST_ROW_HEIGHT = 50
 REQUESTS_BOX_HEIGHT = 260
 
+#: owner #16: a Result lists at most OUTPUT_GROUP_LIMIT files of one kind; a longer group (per-chapter
+#: SDLXLIFF files) shows its first OUTPUT_GROUP_PREVIEW and a "+N more" chip that unfolds it
+OUTPUT_GROUP_LIMIT = 3
+OUTPUT_GROUP_PREVIEW = 2
+
 
 def request_summary(segments: Sequence[dict]) -> str:
     """The collapsed Requests line: "12/33 done · 3 in flight · Chapter 21 · Thinking"."""
@@ -606,6 +694,7 @@ class JobCard(ft.Container):
         self.on_open_request = on_open_request
         self.on_open_output = on_open_output
         self.outputs: list = []
+        self.outputs_expanded: set = set()  # output kinds whose long file list is unfolded (``set_outputs``)
         self.dark = dark
         self.status = ""
         # action id -> disabled reason (None: enabled) set by the chat (``set_action_reason``); it wins
@@ -626,10 +715,17 @@ class JobCard(ft.Container):
         self.failed_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
                                    visible=False, key="job-qa-failed",
                                    on_click=lambda e: self.on_action("progress") if self.on_action else None)
-        # U12 item 3: the rows sit in a box of at most REQUESTS_BOX_HEIGHT that scrolls itself to the newest
-        # row, so a running card never grows with its requests (and never drags the chat down with it)
-        self.requests_column = ft.ListView([], spacing=2, auto_scroll=True, key="job-requests-list")
-        self.requests_box = ft.Container(content=self.requests_column, height=0)
+        # U12 item 3: a long list sits in a box of REQUESTS_BOX_HEIGHT that scrolls itself to the newest row,
+        # so a running card never grows with its requests (and never drags the chat down with it).
+        # Owner #28 (iOS): a short list is a plain Column at its natural height (rows taller than the
+        # REQUEST_ROW_HEIGHT estimate were clipped in a tiny nested scroller), and the long list stops
+        # following the newest row while the user scrolls up through it (every live repaint pulled it back
+        # to the end, so it could not be scrolled while the job ran). ``requests_column`` is the shown one.
+        self.requests_list = ft.ListView([], spacing=2, auto_scroll=True, key="job-requests-list",
+                                         on_scroll=self._on_requests_scroll, scroll_interval=200)
+        self.requests_short = ft.Column([], spacing=2, tight=True, key="job-requests-short")
+        self.requests_column: Any = self.requests_short
+        self.requests_box = ft.Container(content=self.requests_column, height=None)
         self.earlier_requests_button = ft.TextButton(content="", visible=False,
                                                      on_click=lambda e: self.show_earlier_requests())
         # the running card opens its list (like Jobs › job while the job is active), a Result's stays shut
@@ -872,7 +968,11 @@ class JobCard(ft.Container):
             cache.setdefault(signature, row)
             rows.append(row)
         self._row_cache = cache
+        long_list = len(rows) * REQUEST_ROW_HEIGHT > REQUESTS_BOX_HEIGHT
+        self.requests_column = self.requests_list if long_list else self.requests_short
+        (self.requests_short if long_list else self.requests_list).controls = []
         self.requests_column.controls = rows
+        self.requests_box.content = self.requests_column
         hidden = total - len(shown)
         self.earlier_requests_button.content = EARLIER_REQUESTS_TEMPLATE.format(n=min(hidden, self.row_page),
                                                                                 hidden=hidden)
@@ -880,7 +980,7 @@ class JobCard(ft.Container):
         self.requests_tile.title = f"Requests ({total})"
         self.requests_tile.subtitle = request_summary(self.request_segments) or None
         self.requests_tile.visible = bool(total)
-        self.requests_box.height = min(len(rows) * REQUEST_ROW_HEIGHT, REQUESTS_BOX_HEIGHT)
+        self.requests_box.height = REQUESTS_BOX_HEIGHT if long_list else None
 
     def show_earlier_requests(self) -> None:
         """"↑ Show … earlier requests": one page more of the older rows."""
@@ -901,6 +1001,19 @@ class JobCard(ft.Container):
                     self.set_requests(self.request_segments, force=True)
                 return True
         return False
+
+    def _on_requests_scroll(self, e: Any) -> None:
+        """Follow the newest row only while the long list is scrolled to its end (owner #28)."""
+        try:
+            at_end = float(e.pixels) >= float(e.max_scroll_extent) - REQUEST_ROW_HEIGHT / 2
+        except (AttributeError, TypeError, ValueError):
+            return
+        if self.requests_list.auto_scroll != at_end:
+            self.requests_list.auto_scroll = at_end
+            try:
+                self.requests_list.update()
+            except Exception:
+                pass
 
     def _on_requests_toggle(self, e: Any) -> None:
         value = getattr(e, "data", None)
@@ -924,19 +1037,47 @@ class JobCard(ft.Container):
         self.ocr_tile.visible = bool(entries)
 
     def set_outputs(self, outputs: Sequence[tuple]) -> None:
-        """Result: one chip per output file ``(path, kind)`` (``chat_ops.workspace_outputs``)."""
+        """Result: one chip per output file ``(path, kind)`` (``chat_ops.workspace_outputs``).
+
+        A kind with more than OUTPUT_GROUP_LIMIT files (a book's per-chapter SDLXLIFF files, owner #16)
+        shows its first OUTPUT_GROUP_PREVIEW chips and one "+N more · 12 SDLXLIFF files" chip that expands
+        the group in place (a "Show fewer" chip folds it back)."""
         self.outputs = [(str(path), str(kind)) for path, kind in outputs or ()]
+        counts: dict = {}
+        for _path, kind in self.outputs:
+            counts[kind] = counts.get(kind, 0) + 1
         chips = []
+        seen: dict = {}
         for index, (path, kind) in enumerate(self.outputs):
             label, icon = OUTPUT_KINDS.get(kind, (kind.upper() or "File", "INSERT_DRIVE_FILE"))
+            total = counts[kind]
+            nth = seen[kind] = seen.get(kind, 0) + 1
+            grouped = total > OUTPUT_GROUP_LIMIT
+            expanded = kind in self.outputs_expanded
+            if grouped and not expanded and nth > OUTPUT_GROUP_PREVIEW:
+                if nth == OUTPUT_GROUP_PREVIEW + 1:
+                    chips.append(self._outputs_toggle(
+                        kind, f"+{total - OUTPUT_GROUP_PREVIEW} more · {total} {label} files", ft.Icons.EXPAND_MORE))
+                continue
             name = os.path.basename(path)
             chips.append(ft.Chip(
                 label=ft.Text(f"{label} · {name}", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                 leading=ft.Icon(icon_data(icon), size=16), tooltip=name,
                 on_click=(lambda e, p=path, k=kind: self.on_open_output(p, k)) if self.on_open_output else None,
                 key=f"job-output-{index}"))
+            if grouped and expanded and nth == total:
+                chips.append(self._outputs_toggle(kind, "Show fewer", ft.Icons.EXPAND_LESS))
         self.outputs_row.controls = chips
         self.outputs_row.visible = bool(chips) and not self.phase.live and self.phase.name not in ("plan", "queued")
+
+    def _outputs_toggle(self, kind: str, text: str, icon: Any) -> ft.Chip:
+        def toggle(e: Any = None) -> None:
+            self.outputs_expanded ^= {kind}
+            self.set_outputs(self.outputs)
+            self.push()
+
+        return ft.Chip(label=ft.Text(text, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                       leading=ft.Icon(icon, size=16), on_click=toggle, key=f"job-outputs-toggle-{kind}")
 
     def set_report(self, markdown: str) -> None:
         self.report_md.value = display_markdown(markdown)

@@ -25,7 +25,8 @@ sees the result in the session's page snapshot when the job ends.
 
 Before either kind runs the manga code (mobile, ``services.manga``): the job's config snapshot
 gets the phone defaults Settings shows and the Azure credential mitigation
-(``prepare_run``), ``OUTPUT_DIRECTORY`` is hidden for the job so pages are written next to their
+(``prepare_run``), the tool's own API key goes on the owner (``apply_translation_key``; its own
+model arrives as a ``config_overrides`` entry), ``OUTPUT_DIRECTORY`` is hidden for the job so pages are written next to their
 source like a desktop without an output folder (``hide_output_override``; the job's process
 state puts it back), and the registered models the run loads that are not on the device yet
 are downloaded with progress, verified and resumable, and stopped by the job's Stop
@@ -159,6 +160,10 @@ def _prepare(ctx: Any) -> bool:
     if isinstance(config, dict):
         for note in svc.prepare_run(config):
             ctx.log(note)
+    # the tool's own API key (its model came in as a config override, before the owner was built)
+    note = svc.apply_translation_key(ctx.owner, ctx.params or {})
+    if note:
+        ctx.log(note)
     return svc.hide_output_override()
 
 

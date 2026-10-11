@@ -25,7 +25,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
 from glossarion_mobile.ui.settings.editors import FullScreenEditor
 from glossarion_mobile.ui.settings.model import mask_secret
-from glossarion_mobile.ui.theme import HIT_TARGET, semantic
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic
 
 __all__ = ["KeyEditor", "KeyField", "TEST_LABELS", "normalize_test_result"]
 
@@ -349,7 +349,7 @@ class KeyEditor(FullScreenEditor):
             field = ft.TextField(
                 value=_fmt(value), label=label, dense=True,
                 hint_text=f"Empty = {empty}" if empty else None,
-                keyboard_type=ft.KeyboardType.NUMBER, border_radius=tokens.RADII["field"],
+                keyboard_type=number_keyboard(), border_radius=tokens.RADII["field"],
                 helper=f"{_fmt(low)}–{high:,}" if kind == "int" else f"{_fmt(low)}–{_fmt(high)}",
             )
             self.number_fields[name] = (field, kind, low, high, empty)

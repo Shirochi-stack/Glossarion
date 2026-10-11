@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -156,6 +157,41 @@ def _snapshot_time(snapshot: Any) -> float:
         if isinstance(value, (int, float)) and value:
             return float(value)
     return 0.0
+
+
+def _finish_run_root(run_state: Mapping[str, Any], result: Any) -> None:
+    """A finished chat run's root goes away like ``finish_run(cleanup=True)`` removes it, after its glossary
+    folder (``<run root>/Glossary/<book>/``: the glossary, its progress and its EPUB text cache) was kept
+    inside the attachment workspace (``workspace_sync.stash_run_glossary``), which carries it into the
+    Library with the book: a later Continue reuses the glossary progress and caches (issues 19 / 20)."""
+    temp_root = str(run_state.get("temp_root") or "")
+    if not temp_root:
+        return
+    result = result if isinstance(result, Mapping) else {}
+    if result.get("preserve_temp_root"):
+        return  # finish_run keeps this run root (its response links point into it)
+    workspace = str(result.get("output_folder") or "")
+    if run_state.get("is_attachment") and workspace and os.path.isdir(workspace):
+        book = os.path.splitext(os.path.basename(str(run_state.get("source_path") or "")))[0]
+        try:
+            from glossarion_mobile.services.workspace_sync import stash_run_glossary
+
+            if book and not _inside_folder(workspace, temp_root):
+                stash_run_glossary(temp_root, book, workspace)
+        except Exception:
+            log.exception("keeping the run's glossary folder failed")
+    shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def _inside_folder(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    try:
+        a = os.path.normcase(os.path.abspath(path))
+        b = os.path.normcase(os.path.abspath(root))
+        return os.path.commonpath([a, b]) == b
+    except ValueError:
+        return False
 
 
 def _streamed_text(model: Any, run_state: Mapping) -> bool:
@@ -271,6 +307,17 @@ class ChatRuns:
         """Follow JobService (state changes, questions, progress)."""
         if self._job_unsub is None and self.jobs.available:
             self._job_unsub = self.jobs.subscribe(self.on_snapshot)
+            service = self.jobs.jobs
+            if hasattr(service, "resume_params") and getattr(service, "resume_params", None) is None:
+                service.resume_params = self._resume_params  # Jobs page / launch banner Resume
+
+    def _resume_params(self, spec: Any) -> Optional[dict]:
+        """``JobService.resume_params``: a chat job resumed outside the chat runs with the chat's model now."""
+        origin = getattr(spec, "origin", None) or {}
+        cid = origin.get("cid") if origin.get("type") == "chat" else None
+        if cid is None or getattr(spec, "kind", None) not in CHAT_JOB_KINDS or self.store.session(cid) is None:
+            return None
+        return self.with_current_model(cid, getattr(spec, "params", None) or {})
 
     def detach(self) -> None:
         if self._job_unsub is not None:
@@ -279,6 +326,9 @@ class ChatRuns:
             except Exception:
                 pass
             self._job_unsub = None
+            service = self.jobs.jobs
+            if getattr(service, "resume_params", None) == self._resume_params:
+                service.resume_params = None
 
     # ---- queries ----------------------------------------------------------------------------
 
@@ -765,14 +815,37 @@ class ChatRuns:
                 return True
         return False
 
+    def with_current_model(self, cid: Any, params: Mapping[str, Any]) -> dict:
+        """``params`` of a resubmitted run with the chat's model now: its own (``overrides["model"]``),
+        else the global model (``model_name``) - not the model it was sent with (owner: Resume kept
+        using the Welcome's model after the model was changed). The chat's own model goes into
+        ``config_overrides``; without one the run inherits the global model, as a new Send would."""
+        try:
+            own = str((self.store.overrides(str(cid)) or {}).get("model") or "").strip()
+        except Exception:
+            own = ""
+        model = own or str(self.model_name() or "").strip()
+        if not model:
+            return dict(params)
+        params = dict(params)
+        overrides = dict(params.get("config_overrides") or {})
+        if own:
+            overrides["model"] = own
+        else:
+            overrides.pop("model", None)
+        params["config_overrides"] = overrides
+        params["model"] = model  # the stream's / job card's model name
+        return params
+
     async def resubmit(self, cid: Any, *,
                        profile_check: Optional[Callable[[str], Optional[str]]] = None) -> Optional[ChatRun]:
         """Resume / Retry failed: the same JobSpec params (same run root), so the pipeline continues
         from its ``translation_progress.json`` and only redoes missing or failed chapters.
 
-        Three params follow the chat as it is now: the turn's index (``user_index``), the chat's next
+        Four params follow the chat as it is now: the turn's index (``user_index``), the chat's next
         request number (``request_number``, as a new Send would get: the resumed run's cards do not
-        repeat the stopped run's "Request N") and a prompt profile that no longer exists:
+        repeat the stopped run's "Request N"), the model (:meth:`with_current_model`: the chat's model
+        now, never the one it was sent with) and a prompt profile that no longer exists:
         ``profile_check(name)`` (``ChatView.resume_profile``) answers the profile to run with, None to
         inherit; a profile renamed or deleted since Send never reaches the backend, which would silently
         use the first profile (owner decisions #15 / #16). A profile that still exists stays as sent.
@@ -794,6 +867,7 @@ class ChatRuns:
         counter = getattr(self.store, "request_count", None)
         if "request_number" in params and callable(counter):
             params["request_number"] = counter(cid) + 1
+        params = self.with_current_model(cid, params)
         params = _rechecked_profile(params, profile_check)
         resumed = DirectTextRun.from_dict(run_dict)
         chat_run = ChatRun(
@@ -979,11 +1053,14 @@ class ChatRuns:
             # (the text pipeline writes the source for an unfinished chunk), which the card showed as the
             # answer. Not read: the card says no output was produced; the run root stays for Resume.
             run_state["expected_output"] = ""
-        result = store.finish_run(session, run_state, model if model is not None else [], cleanup=cleanup)
+        # The run root is removed here, not by finish_run: its glossary folder goes with the kept workspace first
+        result = store.finish_run(session, run_state, model if model is not None else [], cleanup=False)
         status = None
         if isinstance(result, Mapping):
             run.output_folder = str(result.get("output_folder") or "")
             status = result.get("status")
+        if cleanup:
+            _finish_run_root(run_state, result)
         self.store.forget_bodies(run.cid)
         self.store.schedule_save()
         return str(status or STATUS["ready"])

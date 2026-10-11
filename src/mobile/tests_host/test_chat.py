@@ -1352,6 +1352,19 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             assert "model" not in adapter.overrides("2") and app.config_store.get("model") != "gpt-6-mini"
             jobs.publish("CANCELLED")
             await tf._wait(lambda: not feature.runs.run_for("2").live, timeout=10)
+            # the drawer's model chip / the Welcome (global_scope): the global model, i.e. every new chat's;
+            # the open chat's own model follows only from the drawer (follow_open_chat)
+            picked: list = []
+            sheet = view.open_model_sheet("model", global_scope=True, on_picked=lambda f, v: picked.append((f, v)))
+            sheet.select("model", "gpt-6-mini")
+            assert app.config_store.get("model") == "gpt-6-mini" and "model" not in adapter.overrides("2")
+            assert picked == [("model", "gpt-6-mini")]
+            adapter.set_override("2", "model", "gpt-own")
+            view.open_model_sheet("model", global_scope=True, follow_open_chat=True).select("model", "gpt-6")
+            assert app.config_store.get("model") == "gpt-6" and adapter.overrides("2")["model"] == "gpt-6"
+            view.open_model_sheet("model").select("model", "gpt-6-mini")  # the chat header: this chat only
+            assert app.config_store.get("model") == "gpt-6" and adapter.overrides("2")["model"] == "gpt-6-mini"
+            adapter.set_override("2", "model", None)
             # Vision / Refine mode options: the shared settings tiles of their schema keys (global keys)
             vision = view.open_mode_options("vision")
             assert {"vision_ocr_skip_translation", "process_webnovel_images", "vision_ocr_keep_images"} <= set(vision.tiles)
@@ -1541,6 +1554,34 @@ def test_relaunch_card_state_and_resume_resolve_the_interrupted_job(desktop_stor
         relaunched.detach()
         service.close()
         adapter.close()
+
+
+def test_resume_runs_with_the_chats_model_now(desktop_store_cls, tmp_path):
+    """Resume (owner: "Continue translation" kept the Welcome's model): the resubmitted params carry the chat's
+    model now - its own, else the global one (the run inherits it) - never the model it was sent with; the same
+    for a chat job resumed from the Jobs page (``JobService.resume_params``)."""
+    from glossarion_mobile.ui.chat.run_request import DIRECT_TEXT_JOB_KIND
+    from glossarion_mobile.services.jobs import JobSpec
+
+    jobs = FakeJobService()
+    jobs.resume_params = None
+    adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
+    assert jobs.resume_params == runs._resume_params  # installed by attach()
+    current = ["gpt-drawer"]
+    runs.model_name = lambda: current[0]
+    sent = {"model": "gpt-welcome", "config_overrides": {"model": "gpt-welcome", "active_profile": "P"}}
+    out = runs.with_current_model("5", sent)
+    assert out["model"] == "gpt-drawer" and out["config_overrides"] == {"active_profile": "P"}
+    adapter.set_override("5", "model", "gpt-chat")
+    out = runs.with_current_model("5", sent)
+    assert out["model"] == "gpt-chat" and out["config_overrides"] == {"model": "gpt-chat", "active_profile": "P"}
+    assert sent["config_overrides"]["model"] == "gpt-welcome"  # the stored spec is not changed
+    spec = JobSpec(DIRECT_TEXT_JOB_KIND, "Chat", (), sent, {"type": "chat", "cid": "5"})
+    assert jobs.resume_params(spec)["config_overrides"]["model"] == "gpt-chat"
+    assert jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "library"})) is None
+    runs.detach()
+    assert jobs.resume_params is None
+    adapter.close()
 
 
 def test_resume_rechecks_a_send_time_profile_that_no_longer_exists(desktop_store_cls, tmp_path):

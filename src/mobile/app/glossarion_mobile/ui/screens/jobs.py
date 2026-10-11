@@ -52,6 +52,7 @@ from glossarion_mobile.services.background import IOS_BACKGROUND_NOTICE, Backgro
 from glossarion_mobile.services.files import FileBridge
 from glossarion_mobile.services.intents import IntentImport, IntentRouter
 from glossarion_mobile.services.jobs import (
+    QUESTION_SUSPENDED_EVENT,
     JobService,
     JobSnapshot,
     JobSpec,
@@ -904,10 +905,11 @@ class JobsFeature:
 
     def _on_job_event(self, job_id: str, kind: str, data: Any) -> None:
         """Job events JobService does not consume itself (UI loop)."""
-        if kind == "question_resolved":
+        if kind in ("question_resolved", QUESTION_SUSPENDED_EVENT):
             # answered in the app (card / sheet / dialog), from the notification, or given up by Stop: the
             # "Glossary ready" / "Answer needed" notification has nothing left to answer (posted by JobService,
-            # so this also runs while the dispatcher's pump is parked with the app hidden).
+            # so this also runs while the dispatcher's pump is parked with the app hidden). Issue 12: also while
+            # the gate's glossary is refined; the question is delivered again once the refinement ends.
             self.spawn(self.notifications.cancel_action(job_id))
             return
         if kind == "sign_in_required":
@@ -1063,9 +1065,27 @@ class JobsFeature:
                        disabled_reason=action.disabled_reason, key=f"intent-{action.id}")
             for action in first.actions
         ]
+        model_item = self._intent_model_item(imports)
+        if model_item is not None:
+            items.append(model_item)
         sheet = ActionSheet(items, title=title, subtitle="Saved to the Inbox", tablet=self._tablet())
         sheet.show(self.page)
         return sheet
+
+    def _intent_model_item(self, imports: list) -> Optional[ActionItem]:
+        """The Open-with sheet's model row: the global model (a new chat's, so "Translate in new chat" runs
+        with it); a tap opens the ModelSheet, and the sheet comes back showing the pick."""
+        chat_view = getattr(self.app, "chat_view", None)
+        env = getattr(chat_view, "env", None) if chat_view is not None else None
+        if env is None or not callable(getattr(chat_view, "open_model_sheet", None)):
+            return None
+        model = str(env.config_get("model", "") or "") or "not set"
+
+        def change() -> Any:
+            return chat_view.open_model_sheet("model", global_scope=True,
+                                              on_picked=lambda field_name, value: self._present_imports(imports))
+
+        return ActionItem(f"Model: {model} · Change", change, icon="SMART_TOY_OUTLINED", key="intent-model")
 
     # ---- lifecycle / recovery -------------------------------------------------------------------------
 

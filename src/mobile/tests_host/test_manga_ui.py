@@ -1587,13 +1587,18 @@ def test_editor_tab_boxes_steps_sheet_and_ocr(iso, tmp_path, monkeypatch):
         tab.selected = 0
         await tab.toggle_exclude()
         assert fake_session.calls[-1] == ("set_box_excluded", 0, True) and tab.boxes[0]["exclude_from_clean"]
-        sheet = tab.long_press_at(15, 35)
+        # long-press selects the box: its translation is edited in place, in the panel under the page
+        panel = tab.long_press_at(15, 35)
+        assert panel is ctx.extras["manga_box_panel"] and panel.index == 0
+        assert tab.panel_holder.content is panel.control
+        # not recognized yet: Translate this text waits for OCR (desktop flow); the OCR text is read-only
+        # in its compact sheet
+        assert panel.translate_button.disabled and not panel.ocr_item.disabled
+        sheet = tab.open_ocr_sheet()
         assert sheet is ctx.extras["manga_box_sheet"] and sheet.index == 0
-        # not recognized yet: the OCR text is read-only and Translate this text waits for OCR (desktop flow)
-        assert sheet.ocr_field.read_only and sheet.translate_button.disabled and not sheet.ocr_button.disabled
-        sheet.translation_field.value = "Hello!"
-        sheet.free_text.value = True
-        await tab.box_action("save", 0, sheet.changes())
+        assert sheet.ocr_field.read_only and not sheet.ocr_button.disabled
+        panel.translation_field.value = "Hello!"
+        await tab.box_action("save", 0, {**panel.changes(), "free_text": True})
         assert ("edit_box_text", 0, None, "Hello!") in fake_session.calls
         assert ("set_box_free_text", 0, True) in fake_session.calls
         job_id = await tab.box_action("translate", 0, {})
@@ -1918,12 +1923,13 @@ def test_editor_tab_edits_boxes_on_the_real_editor_session(iso, tmp_path, monkey
         assert (tab.boxes[0]["x"], tab.boxes[0]["y"]) == (20.0, 30.0)
         await tab.toggle_exclude()
         assert tab.boxes[0]["exclude_from_clean"] is True
-        sheet = tab.long_press_at(25, 45)
-        assert sheet is not None and sheet.ocr_field.read_only and sheet.translate_button.disabled
-        sheet.translation_field.value = "Hello!"
-        sheet.free_text.value = True
-        await tab.box_action("save", 0, sheet.changes())
+        panel = tab.long_press_at(25, 45)
+        assert panel is not None and panel.translate_button.disabled and tab.open_ocr_sheet().ocr_field.read_only
+        panel.translation_field.value = "Hello!"
+        await tab.box_action("save", 0, {**panel.changes(), "free_text": True})
         assert tab.boxes[0]["translation"] == "Hello!" and tab.boxes[0]["free_text"] is True
+        # the panel shows the saved texts again (built from the page state, not blank)
+        assert tab.panel is not None and tab.panel.translation_field.value == "Hello!"
         path = await tab.export_ocr()
         assert path and path.startswith(str(iso["Output"]))
         document = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -2277,12 +2283,12 @@ def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, mo
         panning = tab.interactive
         await tab.step_page(1)  # another page: another viewer
         assert tab.interactive is not panning
-        # tablets keep the source side (and its zoom) while the translated side is rebuilt
-        ctx.tablet = True
-        tab.refresh()
-        row = tab.viewer_holder.content
-        tab.refresh()
-        assert tab.viewer_holder.content is row and row.controls[0].content.content is tab.interactive
+        # Raw / Source / Translated only change the image under the boxes: same viewer (and zoom)
+        viewer = tab.interactive
+        tab.set_view("raw")
+        assert tab.interactive is viewer and tab.page_image.src == tab.image_path
+        tab.set_view("translated")  # not translated yet: the raw page, with a hint
+        assert tab.interactive is viewer and tab.view_hint.visible and tab.page_image.src == tab.image_path
         screen.dispose()
 
     asyncio.run(scenario())
@@ -2360,7 +2366,7 @@ def test_lookups_a_running_job_refused_run_again_once_a_job_ends(mobile, tmp_pat
             screen.select_tab("editor")
             await _settle(30)
             assert editor.image_path == pages[0] and editor.translated_view == ""
-            assert editor._translated_viewer().content.value.startswith("Wait for the running job")
+            assert editor.view == "translated" and editor.view_hint.value.startswith("Wait for the running job")
             assert await editor.open_ocr_files() is None
             assert ctx.notes[-1][0] == "Wait for the running job to finish"
             screen.select_tab("files")
@@ -2375,7 +2381,7 @@ def test_lookups_a_running_job_refused_run_again_once_a_job_ends(mobile, tmp_pat
         await _settle(30)
         assert sorted(manga.last_outputs) == sorted(outputs)
         assert files_tab.cbz_button.tooltip is None and not files_tab.cbz_button.disabled
-        assert editor.translated_view and editor._translated_viewer().content.content.src == editor.translated_view
+        assert editor.translated_view and editor.page_image.src == editor.translated_view
         screen.dispose()
 
     asyncio.run(scenario())

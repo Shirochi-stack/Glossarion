@@ -147,7 +147,10 @@ def _snackbar_notify(page, bars):
 
 
 def _text(bar) -> str:
-    return str(getattr(bar.content, "value", ""))
+    content = bar.content
+    if type(content).__name__ == "Row":  # a bar without an action: [dismiss ✕, message] (owner #15)
+        content = next(c for c in content.controls if type(c).__name__ == "Text")
+    return str(getattr(content, "value", ""))
 
 
 # ==========================================================================

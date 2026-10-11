@@ -19,6 +19,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.tools import qa_model as qm
+from glossarion_mobile.ui.theme import number_keyboard
 from glossarion_mobile.ui.tools.common import hint_text, section_header
 
 __all__ = ["CustomModeSheet"]
@@ -60,16 +61,16 @@ class CustomModeSheet:
         c_low, c_high, _ = qm.CUSTOM_LIMITS["consecutive_chapters"]
         self.consecutive = ft.TextField(label="Consecutive chapters to check:", dense=True,
                                         value=str(self.values.get("consecutive_chapters", 2)),
-                                        keyboard_type=ft.KeyboardType.NUMBER, key="qa-custom-consecutive",
+                                        keyboard_type=number_keyboard(), key="qa-custom-consecutive",
                                         helper=f"{c_low}-{c_high}")
         self.sample = ft.TextField(label="Sample size for comparison (characters):", dense=True,
                                    value=str(self.values.get("sample_size", 3000)),
-                                   keyboard_type=ft.KeyboardType.NUMBER, key="qa-custom-sample",
+                                   keyboard_type=number_keyboard(), key="qa-custom-sample",
                                    helper="-1 = use all characters, 0 = disable duplicate detection")
         m_low, m_high, _ = qm.CUSTOM_LIMITS["min_text_length"]
         self.min_length = ft.TextField(label="Minimum text length to process (characters):", dense=True,
                                        value=str(self.values.get("min_text_length", 500)),
-                                       keyboard_type=ft.KeyboardType.NUMBER, key="qa-custom-min-length",
+                                       keyboard_type=number_keyboard(), key="qa-custom-min-length",
                                        helper=f"{m_low}-{m_high}")
         self.check_all = ft.Switch(label="Check all file pairs (slower but more thorough)",
                                    value=bool(self.values.get("check_all_pairs", False)), key="qa-custom-all-pairs")

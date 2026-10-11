@@ -426,6 +426,24 @@ _SKIP_WORDS = ("image", "tts", "audio", "live", "embed", "vision", "multi-agent"
 DEEPSEEK_DEFAULT_MODEL = "authds/flash"
 #: authnd/ Nemotron variants that are not chat models.
 _ND_SKIP_WORDS = ("safety", "guard", "reward", "parse", "retriever", "rerank", "ocr")
+#: authnd/ Nemotron tiers at the same version: Ultra > Super > (plain) > Nano / Mini.
+_ND_TIERS = (("ultra", 3), ("super", 2), ("nano", 0), ("mini", 0))
+#: a total parameter size ("550b", "1.5b"); not the active one of an MoE ("a55b", "a3b")
+_ND_SIZE = re.compile(r"(?<![a-z\d.])(\d+(?:\.\d+)?)b(?![a-z])")
+
+
+def _nemotron_key(stem: str) -> tuple:
+    """The authnd/ rank of a Nemotron model name (lower case, without the route): the version right after
+    "nemotron" ("nemotron-3-…" -> 3; else a later "v2"), then the largest total size (the first ``NNNb`` -
+    ``a55b`` / ``a3b`` are active sizes), then the tier (Ultra > Super > Nano); preview builds lose ties."""
+    after = stem.split("nemotron", 1)[1]
+    sizes = [float(n) for n in _ND_SIZE.findall(after)]
+    rest = _ND_SIZE.sub("", after)
+    rest = re.sub(r"(?<![a-z\d])a\d+(?:\.\d+)?b(?![a-z])", "", rest)  # the active size ("a3b")
+    lead = re.match(r"^[-_ ]?(\d+(?:\.\d+)?)(?![\d.]*b)", after)
+    version = float(lead.group(1)) if lead else _version(rest)
+    tier = next((rank for word, rank in _ND_TIERS if word in stem), 1)
+    return version, (sizes[0] if sizes else 0.0), tier, "preview" not in stem, -len(stem)
 
 
 def _version(text: str) -> float:
@@ -442,7 +460,8 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
     ChatGPT: the default ``gpt-6-luna`` while listed, else the newest Luna (the light tier), else the newest
     plain GPT; Claude: the newest Sonnet; Gemini: the newest Flash (not Lite/image/TTS/live); Grok: the
     newest plain Grok (no build/composer/multi-agent variants); NanoGPT: the newest GLM; NVIDIA Build (authnd/):
-    the Nemotron with the highest number (version after "nemotron", then size). Preview builds lose ties."""
+    the newest, largest Nemotron (:func:`_nemotron_key`: version after "nemotron", total size, Ultra > Super >
+    Nano). Preview builds lose ties."""
     route = str(route or "").lower()
     names = [str(m) for m in (models or ()) if str(m).lower().startswith(route + "/")
              or re.match(rf"^{re.escape(route)}\d*/", str(m).lower())]
@@ -477,12 +496,10 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
         best = None
         for name in names:
             stem = name.split("/", 1)[-1].lower()
-            if "nemotron" not in stem or any(w in stem for w in _SKIP_WORDS + _ND_SKIP_WORDS):
+            skip = tuple(w for w in _SKIP_WORDS if w != "nano") + _ND_SKIP_WORDS  # Nano ranks last, not out
+            if "nemotron" not in stem or any(w in stem for w in skip):
                 continue
-            after = stem.split("nemotron", 1)[1]
-            sizes = [int(n) for n in re.findall(r"(\d+)b(?![a-z])", after)]
-            key = (_version(re.sub(r"\d+b(?![a-z])", "", after)), max(sizes or [0]),
-                   "preview" not in stem, -len(stem))
+            key = _nemotron_key(stem)
             if best is None or key > best[0]:
                 best = (key, name)
         return best[1] if best else None

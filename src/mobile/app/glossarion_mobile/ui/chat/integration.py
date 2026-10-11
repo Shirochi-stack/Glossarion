@@ -87,18 +87,11 @@ def _norm(path: Any) -> str:
 
 
 def _chapter_hashes(folder: Any) -> set:
-    """The ``content_hash`` of every chapter in ``<folder>/translation_progress.json`` (the pipeline
-    hashes each chapter's source text); empty when there is no readable progress."""
-    try:
-        with open(os.path.join(str(folder), "translation_progress.json"), encoding="utf-8") as stream:
-            progress = json.load(stream)
-    except (OSError, ValueError):
-        return set()
-    chapters = progress.get("chapters") if isinstance(progress, dict) else None
-    if not isinstance(chapters, dict):
-        return set()
-    return {str(entry["content_hash"]) for entry in chapters.values()
-            if isinstance(entry, dict) and entry.get("content_hash")}
+    """The ``content_hash`` of every chapter in ``<folder>/translation_progress.json``
+    (``workspace_sync.chapter_hashes``)."""
+    from glossarion_mobile.services.workspace_sync import chapter_hashes
+
+    return chapter_hashes(folder)
 
 
 def _inside(path: Any, root: Any) -> bool:
@@ -170,6 +163,47 @@ def _reader_workspace(folder: str, source: str = "") -> str:
             except OSError:
                 continue
     return max(candidates)[1] if candidates else ""
+
+
+def _has_translation_progress(workspace: str) -> bool:
+    """``translation_progress.json`` of ``workspace`` lists at least one chapter (blocking). The pipeline
+    writes the file before its glossary pass, so an existing but empty one is no translation progress."""
+    path = os.path.join(workspace, "translation_progress.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    chapters = data.get("chapters")
+    return bool(chapters) or bool(data.get("chapter_chunks"))
+
+
+def _glossary_workspace(folder: str, source: str = "") -> str:
+    """The workspace folder of a chat run that has no ``translation_progress.json`` yet (blocking): the
+    run's ``<stem>`` folder under ``folder`` (its run root / output folder), else ``folder`` itself."""
+    if not folder or not os.path.isdir(folder):
+        return ""
+    stem = os.path.splitext(os.path.basename(str(source or "")))[0]
+    if stem:
+        child = os.path.join(folder, stem)
+        if os.path.isdir(child):
+            return child
+        if os.path.basename(os.path.normpath(folder)).casefold() == stem.casefold():
+            return folder
+    return folder
+
+
+def _book_glossary_progress(library: Any, book: dict) -> str:
+    """The book's ``*_glossary_progress.json`` (the Book page's lookup, ``progress_model``), else ''."""
+    try:
+        from glossarion_mobile.ui.library import progress_model as pm
+
+        return str(pm.find_glossary_progress_path(library, book) or "")
+    except Exception:
+        log.debug("looking up the glossary progress failed", exc_info=True)
+        return ""
 
 
 class ChatFeature:
@@ -607,11 +641,19 @@ class ChatFeature:
             signed_in="authgpt" in (state.signed_in.value if state is not None else ()),
         )
 
+        screen: Any = None
+
         def choose_model(query: Optional[str] = None) -> Any:
             chat_view = getattr(self.app, "chat_view", None)
             if chat_view is None:
                 return None
-            sheet = chat_view.open_model_sheet("model")
+
+            def picked(field_name: str, value: str) -> None:
+                if field_name == "model" and screen is not None:
+                    screen.model_chosen(value)
+
+            # the Welcome sets the global model (new chats start on it), never the open chat's own
+            sheet = chat_view.open_model_sheet("model", global_scope=True, on_picked=picked)
             if query and hasattr(sheet, "set_query"):
                 sheet.set_query(query)  # step 2 after a sign-in: that provider's models
             return sheet
@@ -659,7 +701,7 @@ class ChatFeature:
             if env is not None:
                 env.config_set_many({"api_key": key})
 
-        return WelcomeScreen(
+        screen = WelcomeScreen(
             match,
             flow=flow,
             login_panel_factory=lambda on_done: LoginPanel(self.oauth, provider="authgpt", account_id=0,
@@ -679,6 +721,7 @@ class ChatFeature:
             default_max_tokens=int((env.config_get("max_output_tokens", None) if env else None) or 16384),
             default_chunk_size=str((env.config_get("manual_chunk_size", "") if env else "") or ""),
         )
+        return screen
 
     def needs_welcome(self) -> bool:
         prefs = getattr(self.app, "prefs", None)
@@ -916,10 +959,7 @@ class ChatFeature:
                 notify("The Progress manager is not available in this session")
             return None
 
-        def target() -> Optional[dict]:
-            workspace = _reader_workspace(str(folder or ""), str(source or ""))
-            if not workspace:
-                return None
+        def make_book(workspace: str) -> dict:
             name = os.path.basename(os.path.normpath(workspace))
             progress = os.path.join(workspace, "translation_progress.json")
             book = {"name": name, "folder_name": name, "path": workspace, "output_folder": workspace,
@@ -929,12 +969,29 @@ class ChatFeature:
                 book["raw_source_path"] = str(source)
             return book
 
-        book = await self._run_io(target)
-        if book is None:
+        def target() -> Optional[tuple]:
+            workspace = _reader_workspace(str(folder or ""), str(source or ""))
+            if workspace and _has_translation_progress(workspace):
+                return make_book(workspace), False
+            # Issue 11: no translation progress yet (only the glossary was extracted): the Glossary
+            # Progress manager of that book instead of an empty Progress manager
+            candidate = workspace or _glossary_workspace(str(folder or ""), str(source or ""))
+            if candidate:
+                book = make_book(candidate)
+                if _book_glossary_progress(library, book):
+                    return book, True
+            return (make_book(workspace), False) if workspace else None
+
+        found = await self._run_io(target)
+        if found is None:
             if notify is not None:
                 notify("No translation progress in this chat's workspace yet")
             return None
+        book, glossary_only = found
         bid = library.bid_for(book)
+        if glossary_only and not select:
+            navigate("tools.progress.glossary", None, {"out": bid})
+            return bid
         if select:
             from glossarion_mobile.ui.library.chapters_tab import request_range_selection
 
@@ -1120,36 +1177,19 @@ class ChatFeature:
         """The Library folder ``target`` is this book's own workspace: its ``source_epub.txt`` points at
         the attachment (same file, or the same content), and the translation it already holds is of the
         same chapters (``_same_chapters``). A path alone proves nothing: FileBridge reuses a freed Inbox
-        name, so a different book can sit at the path a Library book's pointer names."""
-        try:
-            import library_core  # shared (U5)
-        except Exception:
-            return False
-        read_pointer = getattr(library_core, "_read_source_epub_pointer", None)
-        same_content = getattr(library_core, "_same_file_content", None)
-        if read_pointer is None:
-            return False
-        pointed = read_pointer(target)
-        if not pointed:
-            return False
-        for raw in (source, read_pointer(folder)):
-            if not raw or not os.path.isfile(raw):
-                continue
-            if _norm(raw) == _norm(pointed) or (same_content is not None and same_content(raw, pointed)):
-                return ChatFeature._same_chapters(folder, target)
-        return False
+        name, so a different book can sit at the path a Library book's pointer names.
+        (``workspace_sync.same_book``, which the Library's Continue uses too.)"""
+        from glossarion_mobile.services.workspace_sync import same_book
+
+        return same_book(target, folder, source)
 
     @staticmethod
     def _same_chapters(folder: str, target: str) -> bool:
         """``target`` holds no translation yet, or at least half of the chapters either workspace
-        translated carry the same pipeline ``content_hash`` (``translation_progress.json``): the two
-        translations are of the same book, so merging replaces nothing of another book's."""
-        theirs = _chapter_hashes(target)
-        if not theirs:
-            return True
-        mine = _chapter_hashes(folder)
-        shared = len(mine & theirs)
-        return bool(mine) and shared > 0 and shared * 2 >= min(len(mine), len(theirs))
+        translated carry the same pipeline ``content_hash`` (``workspace_sync.same_chapters``)."""
+        from glossarion_mobile.services.workspace_sync import same_chapters
+
+        return same_chapters(folder, target)
 
     def auto_migrate_blocking(self, cid: Any, folder: str) -> dict:
         """Blocking: move one chat book's ``Attachments/<stem>`` workspace into the Library when it is

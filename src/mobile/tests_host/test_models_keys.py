@@ -178,6 +178,50 @@ def test_rank_models_exact_prefix_segment_contains_and_account_aliases():
     assert mc.login_route("gpt-6") == (None, 0)
 
 
+def test_authnd_recommends_the_newest_largest_nemotron():
+    """Welcome's NVIDIA Build pick: the version after "nemotron", then the total size (the first NNNb; the
+    MoE active size "a3b" / "a55b" is not a size), then Ultra > Super > Nano; non-chat variants skipped."""
+    nd = "authnd/nvidia/"
+    models = [nd + "nemotron-3-nano-30b-a3b", nd + "nemotron-3-super-120b-a12b", nd + "nemotron-3-ultra-550b-a55b",
+              nd + "llama-3.1-nemotron-ultra-253b-v1", nd + "nemotron-nano-9b-v2", nd + "nemotron-3-safety-guard-8b",
+              "nemotron-3-ultra-999b"]  # another route's model never counts
+    assert mc.recommended_model("authnd", models) == nd + "nemotron-3-ultra-550b-a55b"
+    assert mc.recommended_model("authnd", models[:2]) == nd + "nemotron-3-super-120b-a12b"
+    assert mc.recommended_model("authnd", [nd + "nemotron-3-nano-30b-a3b"]) == nd + "nemotron-3-nano-30b-a3b"
+    # a newer version wins over a bigger older one; at equal version and no size the tier decides
+    assert mc.recommended_model("authnd", [nd + "llama-3.1-nemotron-ultra-253b-v1", nd + "nemotron-3-nano-30b-a3b"])         == nd + "nemotron-3-nano-30b-a3b"
+    tiers = [nd + "nemotron-3-nano", nd + "nemotron-3-ultra", nd + "nemotron-3-super"]
+    assert mc.recommended_model("authnd", tiers) == nd + "nemotron-3-ultra"
+    assert mc.recommended_model("authnd", [nd + "nemotron-3-safety-guard-8b"]) is None
+
+
+@needs_flet
+def test_auth_menu_offers_deepseek(monkeypatch):
+    """The account chip's "Switch sign-in" menu lists DeepSeek (authds/: the in-app browser sign-in, not an OAuth
+    slot): signed in, it switches to its Flash model; without the in-app browser the row says why."""
+    from glossarion_mobile.services import webview_bridge
+    from glossarion_mobile.ui.screens import accounts
+    from glossarion_mobile.ui.sheets.model_sheet import ModelSheet, SheetEnv
+
+    selected: list = []
+    sheet = ModelSheet(current_model="authgpt/gpt-6-luna", env=SheetEnv(signed_in_keys=lambda: {"authgpt"}),
+                       models=["authgpt/gpt-6-luna", "authds/expert", "authds/flash"],
+                       on_select=lambda *args: selected.append(args))
+    monkeypatch.setattr(webview_bridge, "availability", lambda: (False, "No in-app browser"))
+    row = {i.key: i for i in sheet.open_auth_menu("authgpt").items}["auth-menu-authds"]
+    assert row.disabled_reason == "No in-app browser"
+    monkeypatch.setattr(webview_bridge, "availability", lambda: (True, ""))
+    row = {i.key: i for i in sheet.open_auth_menu("authgpt").items}["auth-menu-authds"]
+    assert row.label == "DeepSeek · authds/flash" and row.disabled_reason is None
+
+    async def present(run_io=None):
+        return True
+
+    monkeypatch.setattr(accounts, "deepseek_session_present", present)
+    asyncio.run(row.on_select())
+    assert selected == [("model", "authds/flash", False)]
+
+
 def test_group_models_puts_polled_first_and_labels_custom_routes():
     routes = [{"prefix": "lan/", "routing": "http://192.168.1.2:11434/v1", "endpoint_type": "/chat/completions"}]
     polled = {"gpt-6-mini"}

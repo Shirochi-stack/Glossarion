@@ -2,7 +2,7 @@
 
 Header "📖 {book_title}" + the file chip "📁 <base>_glossary_progress.json"; the
 "⚠️ Progress file was deleted. Waiting for a new glossary progress file…" banner;
-the glossary file card (Open in editor · Extract / Continue extraction job ·
+the glossary file card (Open in editor · Extract / Continue (extraction) job ·
 ⋯ Delete glossary files · Restore backup · Load as manual glossary - the U6 GlossaryFeature
 hooks, ``LibraryService.glossary_hooks``); the stats
 chips (Total · ✅ Completed · ⏭️ Skipped · 🔄 In Progress · ❌ Failed · 🔗 Merged ·
@@ -201,11 +201,12 @@ class GlossaryTab:
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="gp-bulk")
         self.root = ft.Column([
             ft.Container(content=ft.Column([
-                ft.Row([self.title_text, self.file_chip], wrap=True, spacing=8),
+                # Issue 13: the Total label sits next to the title
+                ft.Row([self.title_text, self.total_text, self.file_chip], wrap=True, spacing=8,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.banner,
                 self.file_card,
                 self.stats_row,
-                self.total_text,
                 self.path_row,
                 self.selection_bar.control,
             ], spacing=6, tight=True), padding=ft.Padding.only(left=12, right=12, top=8)),
@@ -248,7 +249,8 @@ class GlossaryTab:
         file_name = self.file_card.content.controls[0]
         file_name.value = os.path.basename(view.glossary_file) if view.glossary_file else "No glossary file yet"
         self.ctx.spawn(self.reload_file_summary(view.glossary_file or ""))
-        self.extract_button.content = "Continue extraction" if view.path else "Extract glossary"
+        # Issue 13: "Continue" (not "Continue extraction") so the ⋯ menu stays on the same row
+        self.extract_button.content = "Continue" if view.path else "Extract glossary"
         self._render_chips()
         self.total_text.value = view.total_text
         self._update_rows(previous)

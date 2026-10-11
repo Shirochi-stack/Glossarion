@@ -50,6 +50,7 @@ from glossarion_mobile.ui.screens.welcome_flow import (
     WelcomeFlow,
     welcome_glossary_updates,
 )
+from glossarion_mobile.ui.theme import number_keyboard
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ TOKEN_SLIDER = (1024, 131072)
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
 PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
-                        "authnan": "authnan/", "authds": "authds/"}
+                        "authnan": "authnan/", "authds": "authds/", "authnd": "authnd/"}
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
@@ -143,6 +144,7 @@ class WelcomeScreen(Screen):
         self.default_chunk_size = default_chunk_size
         self.model_notes: dict = {}  # provider -> the model check's line
         self.keyless_chosen: set = set()  # keyless routes whose recommended model is in use
+        self.changing_provider: Optional[str] = None  # the row whose "Change model" opened the ModelSheet
         self.page_area = ft.Container(expand=True)
         self.dots = ft.Row([], alignment=ft.MainAxisAlignment.CENTER, spacing=6)
         self.back_button = ft.TextButton(content="Back", on_click=lambda e: self.back())
@@ -258,7 +260,7 @@ class WelcomeScreen(Screen):
         current = int(self.flow.max_output_tokens or self.default_max_tokens or 16384)
         low, high = TOKEN_SLIDER
         field = ft.TextField(label="Output token limit", value=str(current), dense=True, width=170,
-                             keyboard_type=ft.KeyboardType.NUMBER, key="welcome-max-tokens")
+                             keyboard_type=number_keyboard(), key="welcome-max-tokens")
         slider = ft.Slider(min=low, max=high, value=max(low, min(high, current)), expand=True,
                            key="welcome-max-tokens-slider")
 
@@ -285,7 +287,7 @@ class WelcomeScreen(Screen):
         field.on_change = from_field
         chunk = ft.TextField(label="Chunk size (tokens)", hint_text="Blank = auto", dense=True, width=170,
                              value=self.flow.chunk_size or self.default_chunk_size or "",
-                             keyboard_type=ft.KeyboardType.NUMBER, key="welcome-chunk-size",
+                             keyboard_type=number_keyboard(), key="welcome-chunk-size",
                              on_change=lambda e: setattr(self.flow, "chunk_size",
                                                          str(e.control.value or "").strip()))
         return ft.Column([
@@ -615,15 +617,33 @@ class WelcomeScreen(Screen):
             self.navigate(route_name)
 
     def _choose_model(self) -> None:
+        self.changing_provider = None  # "Choose another model": the pick's own provider row
         self._call(self.on_choose_model)
 
     def use_provider(self, provider: str) -> None:
         """After a step-2 sign-in: the ModelSheet searching that provider's models (the default
-        model stays ``authgpt/gpt-6-luna``, which needs ChatGPT, until another one is chosen)."""
+        model stays ``authgpt/gpt-6-luna``, which needs ChatGPT, until another one is chosen).
+        The pick sets the global model and comes back through :meth:`model_chosen`."""
         if self.on_use_provider is not None:
             call_handler(self.on_use_provider, PROVIDER_MODEL_QUERY.get(provider, provider))
         else:
             self._choose_model()
+        self.changing_provider = provider
+
+    def model_chosen(self, model: str) -> None:
+        """A model picked in the ModelSheet (the global model now): the row that opened it says so; the
+        other rows' "Using …" lines no longer hold (one model is in use)."""
+        from glossarion_mobile.services import model_catalog as mc
+
+        model = str(model or "")
+        provider = self.changing_provider or mc.login_route(model)[0] or model.split("/", 1)[0]
+        self.changing_provider = None
+        for other in [p for p, note in self.model_notes.items() if p != provider and str(note).startswith("✓")]:
+            self.model_notes.pop(other, None)
+        self.model_notes[provider] = f"✓ Using {model}"
+        if provider in dict(KEYLESS):
+            self.keyless_chosen.add(provider)  # its row keeps "Change model"
+        self.render()
 
     def _save_key(self) -> None:
         value = (self.api_key_field.value or "").strip()

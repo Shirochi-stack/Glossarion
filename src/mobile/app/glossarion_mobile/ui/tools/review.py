@@ -31,7 +31,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.sheet import fits_compact, scroll_column, sheet_frame
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import (
     JobWatch,
@@ -411,7 +411,7 @@ class ReviewScreen(Screen):
 
         def field(key: str, label: str, numeric: bool = True) -> ft.TextField:
             control = ft.TextField(label=label, value=str(self.ctx.cfg(key, DISPLAY_DEFAULTS[key])), dense=True,
-                                   keyboard_type=ft.KeyboardType.NUMBER if numeric else ft.KeyboardType.TEXT,
+                                   keyboard_type=number_keyboard() if numeric else ft.KeyboardType.TEXT,
                                    on_blur=lambda e, k=key, n=numeric: self.set_display(k, e.control.value, n),
                                    on_submit=lambda e, k=key, n=numeric: self.set_display(k, e.control.value, n),
                                    key=f"review-display-{key}")

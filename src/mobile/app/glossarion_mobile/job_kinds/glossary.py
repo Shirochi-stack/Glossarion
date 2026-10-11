@@ -39,7 +39,7 @@ from typing import Any, Optional
 from glossarion_mobile.job_kinds import owner_method
 from glossarion_mobile.job_kinds.translate import check_inputs, record_output_dirs, resolve_workspace_collisions
 
-__all__ = ["KINDS", "glossary_outputs", "run", "run_pair", "run_refine", "run_unified"]
+__all__ = ["KINDS", "glossary_outputs", "progress_for_glossary", "run", "run_pair", "run_refine", "run_unified"]
 
 
 def _job_error(message: str) -> Exception:
@@ -115,6 +115,43 @@ def run(ctx: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def progress_for_glossary(glossary_path: str) -> Optional[str]:
+    """The ``*_glossary_progress.json`` that belongs to a glossary file, else None (blocking).
+
+    Issue 14: a refinement started without the progress file (the approval card's ✨ Refine, Settings ›
+    "Refine a glossary now…", the Glossary Manager) never recorded its entry types as completed, so the
+    Glossary Progress refinement rows stayed open. The extractor writes ``<book>_glossary.csv`` and
+    ``<book>_glossary_progress.json`` side by side (``Glossary/<book>/``); a workspace's canonical
+    ``glossary.csv`` belongs to the book's Glossary folder beside or inside the workspace."""
+    if not glossary_path:
+        return None
+    folder = os.path.dirname(os.path.abspath(str(glossary_path)))
+    stem = os.path.splitext(os.path.basename(str(glossary_path)))[0]
+    base = stem[: -len("_glossary")] if stem.lower().endswith("_glossary") else ""
+    candidates = []
+    if base:
+        candidates.append(os.path.join(folder, f"{base}_glossary_progress.json"))
+    else:
+        book = os.path.basename(folder)
+        try:
+            from glossary_paths import sanitize_glossary_folder_name
+
+            book_dir = sanitize_glossary_folder_name(book)
+        except Exception:
+            book_dir = book
+        candidates += [os.path.join(os.path.dirname(folder), "Glossary", book_dir, f"{book}_glossary_progress.json"),
+                       os.path.join(folder, "Glossary", f"{book}_glossary_progress.json")]
+    candidates.append(os.path.join(folder, "glossary_progress.json"))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    try:
+        matches = [os.path.join(folder, n) for n in os.listdir(folder) if n.lower().endswith("_glossary_progress.json")]
+    except OSError:
+        matches = []
+    return matches[0] if len(matches) == 1 else None
+
+
 def run_refine(ctx: Any) -> dict:
     params = ctx.params
     glossary_path = os.path.abspath(str(params.get("glossary_path") or (ctx.inputs[0] if ctx.inputs else "")))
@@ -123,7 +160,7 @@ def run_refine(ctx: Any) -> dict:
     selected = [str(t) for t in (params.get("selected_types") or []) if str(t or "").strip()]
     if not selected:
         raise _job_error("Choose at least one entry type to refine.")
-    progress_path = str(params.get("progress_path") or "") or None
+    progress_path = str(params.get("progress_path") or "") or progress_for_glossary(glossary_path)
     source_path = str(params.get("source_path") or "") or None
     target = params.get("target_chunk_count")
     owner = ctx.owner

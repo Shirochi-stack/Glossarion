@@ -226,9 +226,14 @@ class Composer(ft.Container):
             content_padding=ft.Padding.all(4),
             hint_text=HINT_EMPTY,
             on_change=self._on_text_change,
+            # owner #29: whether the message field holds the focus (ChatView._keep_keyboard_down moves the
+            # focus off it only then, never off a field the user has just tapped)
+            on_focus=lambda e: setattr(self, "field_focused", True),
+            on_blur=lambda e: setattr(self, "field_focused", False),
             expand=True,
             text_style=ft.TextStyle(size=tokens.TYPE_SCALE["body_large"].size),
         )
+        self.field_focused = False
         self.expand_button = ft.IconButton(
             icon=ft.Icons.OPEN_IN_FULL,
             icon_size=20,

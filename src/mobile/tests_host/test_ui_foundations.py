@@ -1133,7 +1133,7 @@ def test_output_mode_row_and_send_button():
         (SendInputs(has_content=True), SendState.IDLE_READY, ft.FilledIconButton),
         (SendInputs(has_content=True, other_job_running=True), SendState.QUEUE, ft.FilledTonalIconButton),
         (SendInputs(block=SIGN_IN), SendState.BLOCKED, ft.IconButton),
-        (SendInputs(own_job_state="RUNNING"), SendState.RUNNING, ft.FilledIconButton),
+        (SendInputs(own_job_state="RUNNING"), SendState.RUNNING, ft.Container),  # owner #17: the spinning mascot
         (SendInputs(own_job_state="STOPPING"), SendState.FINISHING, ft.Container),
         (SendInputs(own_job_state="FORCE_STOPPING"), SendState.STOPPING, ft.Container),
     ]:

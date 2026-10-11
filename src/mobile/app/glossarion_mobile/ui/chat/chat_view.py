@@ -674,8 +674,16 @@ class ChatView:
     async def _keep_keyboard_down(self, delay: float = 0.35) -> None:
         """Owner (U13): entering a chat never brings the keyboard up; only a tap on the message field does.
         Closing the drawer gives focus back to the field that had it (Flutter's route focus restore), so
-        once the drawer has closed the focus moves to the menu button (Flet 1.0.3 has no blur())."""
+        once the drawer has closed the focus moves to the menu button (Flet 1.0.3 has no blur()).
+
+        Owner #29 (iOS): the focus moves only off the message field (its on_focus / on_blur), checked once
+        more a little later for a focus restore still on its way; a number field the user tapped meanwhile
+        (Chat settings, Welcome's chunk size) keeps the focus and its keyboard."""
         await asyncio.sleep(delay)
+        if not getattr(self.composer, "field_focused", False):
+            await asyncio.sleep(0.35)
+            if not getattr(self.composer, "field_focused", False):
+                return
         button = getattr(self.header, "menu_button", None)
         focus = getattr(button, "focus", None)
         if callable(focus):
@@ -2585,6 +2593,11 @@ class ChatView:
                 self.notify("The generated glossary file could not be found.")
                 return
             table = self.glossary_table_opener  # GlossaryFeature (U6): the Glossary Manager's editor
+            if table is not None:
+                # Issue 24: ✏️ Edit opens the glossary table editor directly (the raw text editor is
+                # its "Edit as text"); the job keeps waiting on the card
+                table(path)
+                return
             editor = GlossaryEditorView(path, info.get("text") or "", has_bom=bool(info.get("bom")), mono=self.env.mono,
                                         on_close=lambda: self._close_overlay(editor.view),
                                         on_saved=lambda p: self.notify(f"Saved edited glossary: {os.path.basename(p)}"),
@@ -3714,7 +3727,8 @@ class ChatView:
             profiles=self._profiles(),
             languages=self.env.languages,
             on_changed=self.apply_settings_changed,
-            on_choose_model=lambda scope: self.open_model_sheet("model", chat_scope=scope == "chat"),
+            on_choose_model=lambda scope: self.open_model_sheet("model", chat_scope=scope == "chat",
+                                                                global_scope=scope != "chat"),
             scope=scope,
             prefs=getattr(self.env, "prefs", None),  # the mobile-only All-chats values (Always accept)
             ctx=self.env,  # Edit prompt / New profile… open on the chat's SettingsContext
@@ -3737,8 +3751,15 @@ class ChatView:
             return None
         return self.open_model_sheet("model", one_shot=True)
 
-    def open_model_sheet(self, tab: str = "model", chat_scope: bool = False, one_shot: bool = False) -> Any:
-        """The ModelSheet (UI_SPEC §2.2): catalog search, favourites, provider groups, route row."""
+    def open_model_sheet(self, tab: str = "model", chat_scope: bool = False, one_shot: bool = False,
+                         global_scope: bool = False, follow_open_chat: bool = False,
+                         on_picked: Optional[Callable[[str, str], Any]] = None) -> Any:
+        """The ModelSheet (UI_SPEC §2.2): catalog search, favourites, provider groups, route row.
+
+        A model picked here is the open chat's own (owner U13), except with ``global_scope``: the global
+        model, i.e. the model of every new chat (the drawer's model chip, the Welcome, Chat settings ›
+        All chats); ``follow_open_chat`` (the drawer) also moves an open chat that has its own model to
+        it. ``on_picked(field, value)`` runs after a pick was applied (the Welcome's "Using …" line)."""
         context = self.state.chat_context.value
         if self.env is None:
             titles = {
@@ -3761,8 +3782,16 @@ class ChatView:
         from glossarion_mobile.ui.sheets.model_sheet_min import ModelSheetMin, load_model_catalog
 
         signed = self.state.signed_in.value
+
+        def select(field_name: str, value: str, this_chat_only: bool) -> None:
+            self._on_model_sheet_select(field_name, value, this_chat_only, global_scope=global_scope,
+                                        follow_open_chat=follow_open_chat)
+            if on_picked is not None:
+                on_picked(field_name, value)
+
+        global_model = str(self.env.config_get("model", "") or "") if global_scope else ""
         sheet = ModelSheetMin(
-            current_model=context.model,
+            current_model=global_model or context.model,
             current_profile=context.profile,
             current_language=context.target_language,
             profiles=self._profiles(),
@@ -3771,7 +3800,7 @@ class ChatView:
             tab=tab,
             chat_scope=chat_scope and not one_shot,
             one_shot=one_shot,
-            on_select=self._on_model_once_select if one_shot else self._on_model_sheet_select,
+            on_select=self._on_model_once_select if one_shot else select,
             on_sign_in=self.open_login_sheet,
             on_accounts=lambda: self.navigate("settings.accounts"),
         )
@@ -3795,10 +3824,11 @@ class ChatView:
         if key and value:
             self.begin_send(once={key: value})
 
-    def _on_model_sheet_select(self, field_name: str, value: str, this_chat_only: bool) -> None:
+    def _on_model_sheet_select(self, field_name: str, value: str, this_chat_only: bool,
+                               global_scope: bool = False, follow_open_chat: bool = False) -> None:
         key = {"model": "model", "profile": "active_profile", "language": "output_language"}[field_name]
         override_key = {"model": "model", "profile": "profile", "language": "target_language"}[field_name]
-        if field_name == "model" and self.bound:
+        if field_name == "model" and self.bound and not global_scope:
             this_chat_only = True  # owner (U13): every chat keeps its own model; Settings sets the default
             self.env.chats.set_override(self.cid, override_key, value)
         else:
@@ -3808,6 +3838,9 @@ class ChatView:
             from glossarion_mobile.state.setting_writes import write_setting
 
             write_setting(self.env.store, key, value)
+            if (field_name == "model" and follow_open_chat and self.bound
+                    and (self.env.chats.overrides(self.cid) or {}).get("model")):
+                self.env.chats.set_override(self.cid, override_key, value)  # the drawer: the open chat too
         self.apply_settings_changed()
 
     def _sheet_nav(self, route_name: str) -> None:
