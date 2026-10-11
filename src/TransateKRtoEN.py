@@ -27253,7 +27253,9 @@ def main(log_callback=None, stop_callback=None):
                     ):
                         from glossary_translation_gate import refinement_complete
 
-                        refinement_progress_path = os.path.join(out, 'glossary_progress.json')
+                        from GlossaryManager import _minimal_refinement_progress_file
+
+                        refinement_progress_path = _minimal_refinement_progress_file(out)
                         try:
                             with open(refinement_progress_path, 'r', encoding='utf-8') as progress_stream:
                                 refinement_progress = json.load(progress_stream)

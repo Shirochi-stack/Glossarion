@@ -2549,6 +2549,28 @@ def _custom_entry_types_for_refinement():
     from extract_glossary_from_epub import get_custom_entry_types
     return get_custom_entry_types()
 
+def _minimal_refinement_progress_file(output_dir):
+    """The book's ``<book>_glossary_progress.json``, where the other glossary passes and the Glossary
+    Progress manager keep their state (``TransateKRtoEN._single_pass_glossary_paths``). Refinement
+    statuses an earlier minimal pass left in the generic ``<output>/glossary_progress.json`` are carried
+    over once; that generic file is only used when the book's path cannot be resolved."""
+    legacy = os.path.join(output_dir, "glossary_progress.json")
+    try:
+        from TransateKRtoEN import _single_pass_glossary_paths
+        progress_file = _single_pass_glossary_paths(output_dir)[3]
+    except Exception:
+        return legacy
+    try:
+        from glossary_refinement import load_refinement_progress, update_refinement_progress
+        current = load_refinement_progress(progress_file)
+        for key, entry in load_refinement_progress(legacy).items():
+            if key not in current and isinstance(entry, dict):
+                update_refinement_progress(progress_file, key, entry)
+    except Exception as exc:
+        print(f"⚠️ Could not carry refinement progress from {legacy}: {exc}")
+    return progress_file
+
+
 def _refine_csv_lines_if_enabled(csv_lines, output_dir, *, extraction_complete=True):
     """Run the shared glossary refinement step for the minimal glossary path."""
     if not _glossary_refinement_enabled():
@@ -2611,7 +2633,7 @@ def _refine_csv_lines_if_enabled(csv_lines, output_dir, *, extraction_complete=T
                 chunk_timeout = None
 
         splitter = ChapterSplitter(model_name=MODEL, target_tokens=available_tokens)
-        progress_file = os.path.join(output_dir, "glossary_progress.json")
+        progress_file = _minimal_refinement_progress_file(output_dir)
         refined_entries = refine_glossary_entries(
             entries,
             client=client,
