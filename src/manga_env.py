@@ -162,6 +162,29 @@ class MangaEnvMixin:
         if hasattr(self, 'main_gui') and self.main_gui:
             self.main_gui.graceful_stop_active = False
 
+    def _manga_pool_api_key(self, model):
+        """With the main API key empty: the translation key pools (multi-key pool when it is on, the
+        optional fallback key list) can still run the job. An entry is usable as UnifiedClient admits
+        it (``_key_data_is_usable``): a key, or a model that signs in without one (authgpt/, authcd/,
+        authgem/...). Returns that entry's key, 'own-auth' for a sign-in model, or '' when none.
+        An entry for ``model`` is preferred."""
+        config = getattr(self.main_gui, 'config', None) or {}
+        entries = []
+        if config.get('use_multi_api_keys'):
+            entries += list(config.get('multi_api_keys') or [])
+        if config.get('use_fallback_keys'):
+            entries += list(config.get('fallback_keys') or [])
+        try:
+            from unified_api_client import UnifiedClient as _UC
+            usable = [entry for entry in entries if _UC._key_data_is_usable(entry)]
+        except Exception:
+            return ''
+        wanted = str(model or '').strip().lower()
+        usable.sort(key=lambda entry: str(entry.get('model') or '').strip().lower() != wanted)
+        for entry in usable:
+            return str(entry.get('api_key') or '').strip() or 'own-auth'
+        return ''
+
     def _prepare_manga_run_env(self, start_token=None):
         """Run start: thread limits, OCR config + credentials, API client and key pools,
         Vision keys, custom-api OCR env (split verbatim from ``_start_translation_heavy``, U8).
@@ -400,6 +423,7 @@ class MangaEnvMixin:
         if not api_key and ocr_config.get('provider') == 'custom-api':
             api_key = 'dummy-key-for-custom-api'
         
+        api_key = api_key or self._manga_pool_api_key(model)  # a key from the translation key pools
         if not api_key:
             self._log("❌ API key not found. Please configure your API key in the main settings.", "error")
             self._stop_startup_heartbeat()

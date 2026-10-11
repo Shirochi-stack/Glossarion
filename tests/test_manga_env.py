@@ -92,7 +92,7 @@ NEW_METHODS = {
     "MangaHooksMixin": {"_log", "_reset_ui_state", "_monitor_translation_output", "_update_manga_image_range_display",
                         "_add_manga_file_item", "_rebuild_manga_file_listbox"},
     "MangaEnvMixin": {"_init_manga_run_state", "_init_manga_prompt_state", "_reset_manga_graceful_stop_env",
-                      "_prepare_manga_run_env", "_apply_manga_batch_env"},
+                      "_prepare_manga_run_env", "_apply_manga_batch_env", "_manga_pool_api_key"},
 }
 #: Module-level names moved out of manga_integration (re-exported there).
 MOVED_MODULE_NAMES = {
@@ -268,7 +268,8 @@ def _inline_start_translation_heavy(text):
     replace(["            self._reset_manga_graceful_stop_env()"], _indent(graceful, 8))
     prep = _body_lines(env["_prepare_manga_run_env"])
     assert prep[0] == "    import os" and prep[-1] == "    return ocr_config, api_key, model, needs_new_client"
-    prep = [re.sub(r"^(\s+)return None$", r"\1return", line) for line in prep[1:-1]]
+    prep = [re.sub(r"^(\s+)return None$", r"\1return", line) for line in prep[1:-1]
+            if line != POOL_KEY_LINE]  # the one owner-requested addition (not in the legacy method)
     replace(["            prepared = self._prepare_manga_run_env(start_token)",
              "            if prepared is None:",
              "                return",
@@ -278,9 +279,15 @@ def _inline_start_translation_heavy(text):
     return "\n".join(lines)
 
 
+#: Owner request (2026-10-11): an empty main API key falls back to the translation key pools
+#: (``_manga_pool_api_key``) before "API key not found".
+POOL_KEY_LINE = "    api_key = api_key or self._manga_pool_api_key(model)  # a key from the translation key pools"
+
+
 def test_split_out_methods_have_exactly_the_documented_edits():
     env = _new_methods("manga_env", "MangaEnvMixin")
     prep = _body_lines(env["_prepare_manga_run_env"])
+    assert prep.count(POOL_KEY_LINE) == 1
     assert sum(1 for line in prep if re.fullmatch(r"\s+return None", line)) == 6
     assert sum(1 for line in prep if re.fullmatch(r"\s+return", line)) == 0
     assert "self._reset_ui_state(start_token)" in "\n".join(prep)
@@ -1908,3 +1915,22 @@ def test_desktop_manga_tab_and_settings_dialog_build_offscreen(tmp_path, monkeyp
     # os._exit tears the process down; that is after the checks above have printed 'ok'.
     teardown_fault = sys.platform == "win32" and proc.returncode in (3221225477, -1073741819)
     assert built and (proc.returncode == 0 or teardown_fault), proc.stdout[-3000:] + proc.stderr[-4000:]
+
+
+def test_empty_main_key_runs_on_a_sign_in_model_in_the_key_pool():
+    """Owner (2026-10-11): a multi-key / fallback pool entry with authgpt/ (no API key) lets manga start."""
+    import manga_env
+
+    def mixin(config):
+        obj = manga_env.MangaEnvMixin.__new__(manga_env.MangaEnvMixin)
+        obj.main_gui = types.SimpleNamespace(config=config)
+        return obj
+
+    pool = [{"api_key": "", "model": "authgpt/gpt-6-luna", "enabled": True}]
+    assert mixin({"use_multi_api_keys": True, "multi_api_keys": pool})._manga_pool_api_key("gpt-4o") == "own-auth"
+    assert mixin({"use_fallback_keys": True, "fallback_keys": pool})._manga_pool_api_key("x") == "own-auth"
+    assert mixin({"use_multi_api_keys": False, "multi_api_keys": pool})._manga_pool_api_key("x") == ""
+    disabled = [{**pool[0], "enabled": False}]
+    assert mixin({"use_multi_api_keys": True, "multi_api_keys": disabled})._manga_pool_api_key("x") == ""
+    keyed = [{"api_key": "k1", "model": "gpt-4o"}, {"api_key": "k2", "model": "gemini-2.5-flash"}]
+    assert mixin({"use_multi_api_keys": True, "multi_api_keys": keyed})._manga_pool_api_key("gemini-2.5-flash") == "k2"
