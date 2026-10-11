@@ -266,6 +266,8 @@ app_files = [
     ('app_version.py', '.'),
     ('authnd_auth.py', '.'),
     ('authds_auth.py', '.'),
+    ('cdp_browser.py', '.'),  # Chrome/Edge DevTools helper for authds/ and authchatgpt/
+    ('authchatgpt_auth.py', '.'),  # ChatGPT web chat
     ('config_backup.py', '.'),
     ('epub_metadata_utils.py', '.'),
     ('glossary_compressor.py', '.'),
@@ -469,6 +471,8 @@ app_modules = [
     'app_version',
     'authnd_auth',
     'authds_auth',
+    'cdp_browser',  # Chrome/Edge DevTools helper for authds/ and authchatgpt/
+    'authchatgpt_auth',  # ChatGPT web chat
     'config_backup',
     'enhanced_text_extractor',
     'epub_metadata_utils',

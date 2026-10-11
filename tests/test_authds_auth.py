@@ -254,7 +254,7 @@ def shared_browser(monkeypatch):
     monkeypatch.setattr(ds, '_Page', Tab)
     monkeypatch.setattr(ds, 'has_session', lambda: True)
     yield SimpleNamespace(opened=opened, closed=closed, launches=launches, shutdowns=shutdowns)
-    assert ds._browser_session is None
+    assert ds._LEASES.session is None
 
 
 def test_batch_completions_overlap_in_independent_tabs(monkeypatch, shared_browser):

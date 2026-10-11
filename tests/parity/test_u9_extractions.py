@@ -172,9 +172,10 @@ def test_provider_info_is_the_frozen_text():
     node = method_node(frozen("src/translator_gui.py"), "TranslatorGUI", "_show_model_info_dialog")
     assign = next(n for n in node.body if isinstance(n, ast.Assign)
                   and any(isinstance(t, ast.Name) and t.id == "info_text" for t in n.targets))
-    # sections the owner added after the move (19ff9fe8 authds, bf89c022 authnan); the rest stays frozen
+    # sections the owner added after the move (19ff9fe8 authds, bf89c022 authnan, authchatgpt); the rest stays frozen
     current_html = model_options.PROVIDER_INFO_HTML
-    for title in ("<h4>DeepSeek web chat (authds/)</h4>", "<h4>NanoGPT Subscription (authnan/)</h4>"):
+    for title in ("<h4>DeepSeek web chat (authds/)</h4>", "<h4>NanoGPT Subscription (authnan/)</h4>",
+                  "<h4>ChatGPT web chat (authchatgpt/)</h4>"):
         start = current_html.index(title)
         end = current_html.find("<h4>", start + len(title))
         current_html = current_html[:start] + current_html[end:]

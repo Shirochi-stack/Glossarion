@@ -13147,10 +13147,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 )
             else:
                 self.authgpt_login_btn.setText(f"🔐 ChatGPT{acct_suffix} Login")
+                model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
+                if model.startswith('authchatgpt/'):
+                    tip = ("Optional: authchatgpt/ uses ChatGPT's web chat logged out. "
+                           "Log in to use your ChatGPT account's models and limits.")
+                else:
+                    tip = "Log in with your ChatGPT Plus/Pro subscription via browser. No API key needed."
                 self.authgpt_login_btn.setToolTip(
                     "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-                    "Log in with your ChatGPT Plus/Pro subscription via browser. "
-                    "No API key needed.</p></qt>"
+                    f"{tip}</p></qt>"
                 )
                 self.authgpt_login_btn.setStyleSheet(
                     "background-color: #10a37f; color: white; font-weight: bold; "

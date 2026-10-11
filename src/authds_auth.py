@@ -10,22 +10,19 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
-import sys
 import threading
 import time
 import urllib.request
 from contextlib import contextmanager
 
 import browser_driver
+import cdp_browser
 import mobile_runtime
 
 BASE_URL = "https://chat.deepseek.com"
 POW_WORKER_URL = "https://fe-static.deepseek.com/chat/static/76608.8f2a9fa413.js"
 _cancel = threading.Event()
-_gate = threading.Lock()
-_browser_session = None
 _login_gate = threading.Lock()
 _login_generation = 0
 
@@ -61,63 +58,22 @@ def has_session():
 
 
 def _browser_binary():
-    configured = os.environ.get("AUTHDS_BROWSER_BINARY")
-    if configured:
-        if Path(configured).is_file():
-            return configured
-        raise AuthDSError("AUTHDS_BROWSER_BINARY does not point to a browser executable.", "config_error")
-    candidates = []
-    for root in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"),
-                 os.environ.get("LOCALAPPDATA")):
-        if root:
-            candidates += [str(Path(root) / p) for p in
-                           ("Google/Chrome/Application/chrome.exe", "Microsoft/Edge/Application/msedge.exe")]
-    candidates += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
-    for candidate in candidates:
-        if Path(candidate).is_file():
-            return candidate
-    for name in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge"):
-        found = shutil.which(name)
-        if found:
-            return found
+    found = cdp_browser.find_browser_binary(
+        "AUTHDS_BROWSER_BINARY", lambda message: AuthDSError(message, "config_error"))
+    if found:
+        return found
     raise AuthDSError("AuthDS needs Google Chrome or Microsoft Edge installed. You can also set AUTHDS_BROWSER_BINARY.", "config_error")
 
+class _Page(cdp_browser.CdpPage):
+    command_failed = "AuthDS browser command failed."
+    command_timed_out = "AuthDS browser command timed out."
+    script_failed = "AuthDS browser script failed. Reload DeepSeek and sign in again."
 
-class _Page:
-    def __init__(self, url, cancel_check=None):
-        import websocket
-        self.ws = websocket.create_connection(url, timeout=1, suppress_origin=True,
-                                              http_no_proxy=["127.0.0.1", "localhost"])
-        self.sequence = 0
-        self.cancel_check = cancel_check
-        self.debugger_url = url
+    def check(self, cancel_check):
+        _check(cancel_check)
 
-    def call(self, method, params=None, timeout=20):
-        import websocket
-        self.sequence += 1
-        request_id = self.sequence
-        self.ws.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            _check(self.cancel_check)
-            try:
-                message = json.loads(self.ws.recv())
-            except websocket.WebSocketTimeoutException:
-                continue
-            if message.get("id") != request_id:
-                continue
-            if "error" in message:
-                raise AuthDSError("AuthDS browser command failed.", "browser_error")
-            return message.get("result", {})
-        raise AuthDSError("AuthDS browser command timed out.", "timeout")
-
-    def evaluate(self, expression):
-        result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
-        if result.get("exceptionDetails"):
-            raise AuthDSError("AuthDS browser script failed. Reload DeepSeek and sign in again.", "browser_error")
-        return result.get("result", {}).get("value")
-
+    def error(self, message, error_type):
+        return AuthDSError(message, error_type)
 
 #: browser_driver page owner (Glossarion Mobile's in-app WebView): cancel_stream() closes only these pages.
 BROWSER_OWNER = "authds"
@@ -192,6 +148,16 @@ def driver_session_present(cancel_check=None):
     return present
 
 
+_READY = "document.readyState !== 'loading' && location.origin === 'https://chat.deepseek.com'"
+_NOT_LOADED = "DeepSeek page did not finish loading. Check your connection and try again."
+
+
+def _launch_ready(page, cancel_check):
+    # navigation may destroy the old JS context
+    cdp_browser.wait_until(page, _READY, timeout=30, check=_check, error=AuthDSError, message=_NOT_LOADED,
+                           cancel_check=cancel_check, tolerate=("browser_error", "timeout", "api_error"))
+
+
 @contextmanager
 def _launch_browser(*, visible=False, cancel_check=None):
     if browser_driver.use_driver("AUTHDS_MODE"):
@@ -202,147 +168,42 @@ def _launch_browser(*, visible=False, cancel_check=None):
     # Keep the process-spawn gate in the same function for the mobile collector.
     if not mobile_runtime.subprocesses_available():
         raise AuthDSError("AuthDS web login currently needs the desktop app and Chrome/Edge. On mobile, use deepseek/ with an API key.", "config_error")
-    directory = profile_dir()
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    port_file = directory / "DevToolsActivePort"
-    port_file.unlink(missing_ok=True)
-    args = [_browser_binary(), "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={directory}", "--no-first-run", "--no-default-browser-check",
+    with cdp_browser.launch(
+            binary=_browser_binary(), profile=profile_dir(), start_url=BASE_URL, ready=_launch_ready,
+            page_factory=lambda url, check: _Page(url, check), check=_check, error=AuthDSError,
+            closed_message="AuthDS browser closed. Close any other AuthDS login window and try again.",
+            connect_message="AuthDS could not connect to its browser.", visible=visible,
             # Remote debugging sets navigator.webdriver, which makes DeepSeek's captcha always fail.
-            "--disable-blink-features=AutomationControlled", BASE_URL]
-    if not visible:
-        args.insert(1, "--headless=new")
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    page = None
-    try:
-        deadline = time.monotonic() + 40
-        while time.monotonic() < deadline:
-            _check(cancel_check)
-            if proc.poll() is not None:
-                raise AuthDSError("AuthDS browser closed. Close any other AuthDS login window and try again.", "browser_error")
-            try:
-                port = int(port_file.read_text().splitlines()[0])
-                # Bypass global HTTP proxy settings for the local debugging connection.
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=1) as response:
-                    tabs = json.load(response)
-                target = next(t for t in tabs if t.get("type") == "page" and
-                              t.get("url", "").startswith(BASE_URL + "/"))
-                page = _Page(target["webSocketDebuggerUrl"], cancel_check)
-                ready_deadline = time.monotonic() + 30
-                while time.monotonic() < ready_deadline:
-                    _check(cancel_check)
-                    try:
-                        ready = page.evaluate("document.readyState !== 'loading' && location.origin === 'https://chat.deepseek.com'")
-                    except AuthDSError:
-                        ready = False  # navigation may destroy the old JS context
-                    if ready:
-                        break
-                    time.sleep(.2)
-                else:
-                    raise AuthDSError("DeepSeek page did not finish loading. Check your connection and try again.", "browser_error")
-                break
-            except (OSError, ValueError, StopIteration, KeyError):
-                time.sleep(.2)
-        if page is None:
-            raise AuthDSError("AuthDS could not connect to its browser.", "browser_error")
+            extra_args=("--disable-blink-features=AutomationControlled",),
+            cancel_check=cancel_check) as page:
         yield page
-    finally:
-        if page:
-            try:
-                page.ws.send(json.dumps({"id": 999999, "method": "Browser.close"}))
-            except Exception:
-                pass
-            page.ws.close()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+
+
+def _tab_ready(page, cancel_check):
+    cdp_browser.wait_until(page, _READY, timeout=30, check=_check, error=AuthDSError, message=_NOT_LOADED,
+                           cancel_check=cancel_check)
+
+
+_LEASES = cdp_browser.BrowserLeases(
+    launch=lambda **kwargs: _launch_browser(**kwargs), page_factory=lambda url, check: _Page(url, check),
+    check=_check, url=BASE_URL, ready=_tab_ready)
+_gate = _LEASES.gate
 
 
 @contextmanager
 def _open_browser(*, visible=False, cancel_check=None):
     """Lease an independent tab; only browser/profile management is serialized."""
-    global _browser_session
     if browser_driver.use_driver("AUTHDS_MODE") or not mobile_runtime.subprocesses_available():
         with _launch_browser(visible=visible, cancel_check=cancel_check) as page:
             yield page
         return
-
-    # A visible login needs the profile released by an existing headless browser.
-    # Background requests may also share an already visible browser after login.
-    while True:
-        with _serialized(cancel_check):
-            if _browser_session is None:
-                manager = _launch_browser(visible=visible, cancel_check=cancel_check)
-                control = manager.__enter__()
-                control.cancel_check = None  # this connection belongs to all leases
-                _browser_session = {"manager": manager, "control": control,
-                                    "visible": visible, "users": 0}
-            session = _browser_session
-            if not visible or session["visible"]:
-                session["users"] += 1
-                break
-        _check(cancel_check)
-        time.sleep(.2)
-
-    page = None
-    target_id = None
-    try:
-        with _serialized(cancel_check):
-            control = session["control"]
-            target_id = control.call("Target.createTarget", {"url": BASE_URL})["targetId"]
-            page = _Page(control.debugger_url.rsplit("/", 1)[0] + "/" + target_id, cancel_check)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            _check(cancel_check)
-            try:
-                if page.evaluate("document.readyState !== 'loading' && location.origin === 'https://chat.deepseek.com'"):
-                    break
-            except AuthDSError as exc:
-                if exc.error_type != "browser_error":
-                    raise
-            time.sleep(.2)
-        else:
-            raise AuthDSError("DeepSeek page did not finish loading. Check your connection and try again.", "browser_error")
+    with _LEASES.open(visible=visible, cancel_check=cancel_check) as page:
         yield page
-    finally:
-        # Cleanup must run even after cancellation; closing one tab must never
-        # terminate the browser used by another active completion.
-        if page:
-            try:
-                page.ws.close()
-            except Exception:
-                pass
-        with _gate:
-            try:
-                if target_id:
-                    session["control"].call("Target.closeTarget", {"targetId": target_id})
-            except Exception:
-                pass
-            finally:
-                session["users"] -= 1
-                if session["users"] == 0:
-                    _browser_session = None
-                    session["manager"].__exit__(None, None, None)
 
 
-@contextmanager
 def _serialized(cancel_check=None, gate=None):
     # Serialize profile startup and control commands, never completion streams.
-    gate = _gate if gate is None else gate
-    while not gate.acquire(timeout=.2):
-        _check(cancel_check)
-    try:
-        _check(cancel_check)
-        yield
-    finally:
-        gate.release()
-
+    return _LEASES.serialized(cancel_check, gate)
 
 _TOKEN_PRESENT = """(() => {
  if (location.origin !== 'https://chat.deepseek.com') return false;
@@ -407,16 +268,17 @@ def resolve_model(model):
     return choices[name]
 
 
-def build_prompt(messages):
+def build_prompt(messages, error=AuthDSError, label="AuthDS"):
+    """One web-chat prompt from chat messages, keeping each role as a ``[role]`` header."""
     parts = []
     for message in messages:
         content = message.get("content", "")
         if not isinstance(content, str):
-            raise AuthDSError("AuthDS currently supports text messages only.", "config_error")
+            raise error(f"{label} currently supports text messages only.", "config_error")
         if content:
             parts.append(f"[{message.get('role', 'user')}]\n{content}")
     if not parts:
-        raise AuthDSError("AuthDS cannot send an empty prompt.", "config_error")
+        raise error(f"{label} cannot send an empty prompt.", "config_error")
     return "\n\n".join(parts)
 
 

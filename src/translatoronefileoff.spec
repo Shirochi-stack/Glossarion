@@ -251,6 +251,8 @@ app_files = [
 	('glm_proxy.py', '.'),
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('authds_auth.py', '.'),  # DeepSeek web session
+	('cdp_browser.py', '.'),  # Chrome/Edge DevTools helper for authds/ and authchatgpt/
+	('authchatgpt_auth.py', '.'),  # ChatGPT web chat
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('opera_aria.py', '.'),  # Opera Ask AI (Aria) backend route
 	('token_encryption.py', '.'),
@@ -462,6 +464,8 @@ app_modules = [
 	'glm_proxy',  # Z.AI Coding Plan login proxy
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'authds_auth',  # DeepSeek web session
+	'cdp_browser',  # Chrome/Edge DevTools helper for authds/ and authchatgpt/
+	'authchatgpt_auth',  # ChatGPT web chat
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'opera_aria',  # Opera Ask AI (Aria) backend route
 	'token_encryption',  # Encrypted token storage

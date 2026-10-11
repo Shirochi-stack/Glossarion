@@ -452,6 +452,13 @@ def _get_static_model_options() -> List[str]:
         "authds/pro",
         "authds/flash-thinking",
         "authds/pro-thinking",
+        # ChatGPT web chat (chatgpt.com; no API key, login optional - reuses the authgpt/ login)
+        "authchatgpt/auto",
+        "authchatgpt/gpt-6",
+        "authchatgpt/gpt-6-mini",
+        "authchatgpt/gpt-6-instant",
+        "authchatgpt/gpt-6-thinking",
+        "authchatgpt/gpt-6-pro",
         "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",
         "authnd/deepseek-ai/deepseek-v4-flash",
@@ -2057,6 +2064,13 @@ PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
         Sign in on DeepSeek's website, using Google if preferred. No API key is needed.
         Add <code>-thinking</code> to either model name for DeepThink mode.
         Requires desktop Chrome or Edge; web-chat account limits apply.</p>
+
+        <h4>ChatGPT web chat (authchatgpt/)</h4>
+        <p>Select <code>authchatgpt/auto</code> (or any chatgpt.com model slug, such as <code>authchatgpt/gpt-6</code>)
+        and translate: no API key and no login are needed. Logging in is optional: click ChatGPT Login
+        (the same login as <code>authgpt/</code>) to use your account's models, such as
+        <code>-thinking</code>, <code>-instant</code> and <code>-pro</code>, and its limits; those chats are temporary.
+        Requires desktop Chrome or Edge; logged-out use has ChatGPT's guest limits.</p>
 
         <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
         <p>Use models running on your computer without an API key or custom endpoint toggle.</p>

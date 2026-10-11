@@ -601,7 +601,8 @@ def authgpt_login_needed(model, config=None, *, pool_route_requested=None, in_ke
     """Whether the ChatGPT (AuthGPT) login control applies to *model* (on_model_change).
 
     True for ``authgpt/`` / ``authgptN/`` routes, an authgpt0/ pool request, or an enabled
-    pool entry with an authgpt model.
+    pool entry with an authgpt model. ``authchatgpt/`` shows it too: that route runs logged
+    out and uses the same (optional) login when it is saved.
     """
     if pool_route_requested is None:
         def pool_route_requested(m):
@@ -609,7 +610,7 @@ def authgpt_login_needed(model, config=None, *, pool_route_requested=None, in_ke
     if in_key_pools is None:
         def in_key_pools():
             return has_authgpt_in_key_pools(config)
-    _gpt_match = re.match(r'^authgpt\d{0,4}/', model)
+    _gpt_match = re.match(r'^authgpt\d{0,4}/|^authchatgpt/', model)
     needs_authgpt = _gpt_match is not None or pool_route_requested(model)
 
     # Also check enabled key pools for authgpt models
@@ -678,6 +679,7 @@ EXCLUDED_ROUTE_PREFIXES = {
     'ocz/': "OpenCode Zen free models need the desktop npm/bun CLI.",
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",
     'search/opera': "Opera Aria mints its token by driving a desktop Opera browser.",
+    'authchatgpt/': "ChatGPT web chat drives a desktop Chrome or Edge browser.",
 }
 
 

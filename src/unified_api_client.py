@@ -1620,6 +1620,14 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authds_cancel_stream = None
     _authds_reset_cancel = None
 
+# AuthChatGPT - chatgpt.com web chat (optional, no API key; reuses the authgpt/ login)
+try:
+    from authchatgpt_auth import cancel_stream as _authchatgpt_cancel_stream
+    from authchatgpt_auth import reset_cancel as _authchatgpt_reset_cancel
+except (ImportError, _MOBILE_IMPORT_FAILURE):
+    _authchatgpt_cancel_stream = None
+    _authchatgpt_reset_cancel = None
+
 # AuthND - NVIDIA Build browser-backed route (optional, no API key)
 try:
     from authnd_auth import send_chat_completion as _authnd_send
@@ -3015,6 +3023,7 @@ class UnifiedClient:
         'search/': 'search',
         'search': 'search',
         'authds/': 'authds',
+        'authchatgpt/': 'authchatgpt',
         'authnd/': 'authnd',
         'authnd': 'authnd',
         'eh/': 'electronhub',
@@ -3082,7 +3091,7 @@ class UnifiedClient:
         'authgem', 'authgem-vertex',
         'vertex/', 'ocagy/', 'ocagy', 'ocz/',
         'antigravity/', 'antigravity',
-        'authza/', 'authza', 'authnd/', 'authnd', 'authds/',
+        'authza/', 'authza', 'authnd/', 'authnd', 'authds/', 'authchatgpt/',
         'search/', 'search', 'authcd/', 'authcd',
     )
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
@@ -4334,6 +4343,12 @@ class UnifiedClient:
         try:
             if _authds_cancel_stream is not None:
                 _authds_cancel_stream()
+        except Exception:
+            pass
+
+        try:
+            if _authchatgpt_cancel_stream is not None:
+                _authchatgpt_cancel_stream()
         except Exception:
             pass
 
@@ -9198,6 +9213,11 @@ class UnifiedClient:
         elif self.client_type == 'authds':
             # Session/browser is initialized on demand, without an API key.
             from authds_auth import resolve_model
+            resolve_model(model_snapshot)
+
+        elif self.client_type == 'authchatgpt':
+            # Browser opens on demand; the authgpt/ login is optional and never prompted here.
+            from authchatgpt_auth import resolve_model
             resolve_model(model_snapshot)
 
         elif self.client_type == 'authnd':
@@ -15123,6 +15143,11 @@ class UnifiedClient:
                     _authds_reset_cancel()
             except Exception:
                 pass
+            try:
+                if _authchatgpt_reset_cancel is not None:
+                    _authchatgpt_reset_cancel()
+            except Exception:
+                pass
             # Reset AuthND cancel event
             try:
                 if _authnd_reset_cancel is not None:
@@ -19135,7 +19160,7 @@ class UnifiedClient:
         try:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
-            deferred_provider_boundary = {'authnd', 'authza', 'autharena', 'authds'}
+            deferred_provider_boundary = {'authnd', 'authza', 'autharena', 'authds', 'authchatgpt'}
             active_model_lower = str(
                 self._get_active_request_model() or ''
             ).strip().lower()
@@ -19146,7 +19171,7 @@ class UnifiedClient:
             except Exception:
                 actual_provider_lower = ''
             defer_progress_callback = (
-                active_model_lower.startswith(('authnd', 'authza', 'autharena', 'authds/'))
+                active_model_lower.startswith(('authnd', 'authza', 'autharena', 'authds/', 'authchatgpt/'))
                 or str(getattr(self, 'client_type', '') or '').lower()
                 in deferred_provider_boundary
                 or actual_provider_lower in deferred_provider_boundary
@@ -19321,6 +19346,7 @@ class UnifiedClient:
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI login-plan/general API via local proxy
             'authds': self._send_authds,  # DeepSeek web session
+            'authchatgpt': self._send_authchatgpt,  # chatgpt.com web chat
             'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
             'search': self._send_search_gemini,  # Google Search/Gemini browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
@@ -29389,7 +29415,19 @@ class UnifiedClient:
         )
 
     def _send_authds(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        from authds_auth import send_chat_completion, AuthDSError
+        import authds_auth
+        return self._send_web_chat(messages, 'authds', 'AuthDS',
+                                   authds_auth.send_chat_completion, authds_auth.AuthDSError)
+
+    def _send_authchatgpt(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """chatgpt.com web chat; logged out, or on the authgpt/ login when one is saved."""
+        import authchatgpt_auth
+        return self._send_web_chat(messages, 'authchatgpt', 'AuthChatGPT',
+                                   authchatgpt_auth.send_chat_completion, authchatgpt_auth.AuthChatGPTError)
+
+    def _send_web_chat(self, messages, tag, label, send_chat_completion, route_error) -> UnifiedResponse:
+        """A browser web-chat route (authds/, authchatgpt/): watchdog claim, stop checks and
+        streamed log lines around the route's ``send_chat_completion``."""
         tls = self._get_thread_local_client()
         model = self._get_active_request_model()
         started = False
@@ -29403,7 +29441,7 @@ class UnifiedClient:
         def before_send():
             nonlocal started
             if cancelled():
-                raise UnifiedClientError("AuthDS: stopped before sending", error_type="cancelled")
+                raise UnifiedClientError(f"{label}: stopped before sending", error_type="cancelled")
             request_id = getattr(tls, 'current_request_id', None)
             if request_id:
                 claimed = _api_watchdog_mark_in_flight(
@@ -29411,7 +29449,7 @@ class UnifiedClient:
                     allow_during_graceful=bool(getattr(self, '_ignore_graceful_stop', False)),
                 )
                 if not claimed:
-                    raise UnifiedClientError("AuthDS: request cancelled before sending", error_type="cancelled")
+                    raise UnifiedClientError(f"{label}: request cancelled before sending", error_type="cancelled")
             callback = getattr(tls, 'pre_api_call_callback', None)
             if callable(callback):
                 tls.last_pre_api_call_callback = callback
@@ -29442,7 +29480,7 @@ class UnifiedClient:
                 return
             if phase != 'thinking':
                 phase = 'thinking'
-                print("🧠 [authds] Thinking...")
+                print(f"🧠 [{tag}] Thinking...")
             if log_thinking:
                 _log_text_stream(delta, think_buf, think_line)
 
@@ -29452,7 +29490,7 @@ class UnifiedClient:
             if log_stream and not self._is_stop_requested():
                 if phase == 'thinking':
                     flush_thinking()
-                    print("🧠 [authds] Thinking complete")
+                    print(f"🧠 [{tag}] Thinking complete")
                 phase = 'text'
                 _log_text_stream(delta, log_buf, print)
 
@@ -29464,7 +29502,7 @@ class UnifiedClient:
             )
             return UnifiedResponse(content=result['content'], finish_reason=result['finish_reason'],
                                    usage=result.get('usage'), raw_response=result)
-        except AuthDSError as exc:
+        except route_error as exc:
             raise UnifiedClientError(str(exc), error_type=exc.error_type) from exc
         finally:
             flush_thinking()
@@ -33090,6 +33128,11 @@ def set_stop_flag(value: bool = True):
     except Exception:
         pass
     try:
+        from authchatgpt_auth import cancel_stream as gpt_cancel, reset_cancel as gpt_reset
+        gpt_cancel() if value else gpt_reset()
+    except Exception:
+        pass
+    try:
         UnifiedClient.set_global_cancellation(global_stop_flag)
     except Exception:
         pass
@@ -33194,6 +33237,11 @@ def hard_cancel_all():
     if _authds_cancel_stream is not None:
         try:
             _authds_cancel_stream()
+        except Exception:
+            pass
+    if _authchatgpt_cancel_stream is not None:
+        try:
+            _authchatgpt_cancel_stream()
         except Exception:
             pass
     if _authnd_cancel_stream is not None:
