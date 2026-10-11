@@ -31,7 +31,8 @@
 # (default "Apple Distribution", or "Apple Development" for the debugging/development export method).
 #
 # This workflow never creates a release. On a v* tag push (like build-macos.yml) its update-release job
-# attaches the APK/AAB/IPA to the release that already exists for that tag (gh release upload --clobber);
+# attaches the APKs and the IPA to the release that already exists for that tag (gh release upload --clobber;
+# the AAB stays a run artifact: only the Play Store takes it, phones cannot install it);
 # without one it uploads nothing. Every run also keeps the files as run artifacts for 7 days.
 #
 # Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
@@ -1308,7 +1309,7 @@ jobs:
   # replaces files of the same name (--clobber), like build-macos.yml updating its tag's release.
   # ---------------------------------------------------------------------------------------------
   update-release:
-    name: Update the tag's release (APK / AAB / IPA)
+    name: Update the tag's release (APK / IPA)
     needs: [android, ios, ios-signed]
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.android.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -1331,10 +1332,10 @@ jobs:
             echo "::notice title=No release::No release exists for $TAG yet; nothing was uploaded (this job never creates one)."
             exit 0
           fi
-          mapfile -t files < <(find release-files -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.ipa' \) \
+          mapfile -t files < <(find release-files -type f \( -name '*.apk' -o -name '*.ipa' \) \
             -not -path '*Simulator*' | sort)
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "::warning::No APK/AAB/IPA found in the run artifacts"
+            echo "::warning::No APK/IPA found in the run artifacts"
             exit 0
           fi
           printf 'Uploading %s\n' "${files[@]}"
