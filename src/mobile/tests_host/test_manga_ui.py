@@ -25,6 +25,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import shutil
 import struct
 import sys
 import threading
@@ -677,8 +678,10 @@ class FakeEditorSession:
         self.output_revision = 0
         self._log_callback = None
         self.rendered: dict = {}
+        self.cleaned: dict = {}
         self.image_state_manager = types.SimpleNamespace(name="state")
         self.hold = None
+        self.no_clean = False  # Clean makes no cleaned image (the inpainter did not load)
 
     def set_pages(self, pages):
         self.pages = list(pages)
@@ -691,7 +694,7 @@ class FakeEditorSession:
     def page_snapshot(self, path=None):
         path = path or self.current_page
         boxes = [dict(b, index=i) for i, b in enumerate(self.boxes.get(path, []))]
-        return {"image_path": path, "boxes": boxes, "cleaned_path": None,
+        return {"image_path": path, "boxes": boxes, "cleaned_path": self.cleaned.get(path),
                 "rendered_path": self.rendered.get(path), "translated_path": None, "revision": self.output_revision}
 
     def add_box(self, x, y, w, h, *, shape="rect", polygon=None):
@@ -741,6 +744,13 @@ class FakeEditorSession:
 
     def clean(self, image=None, *, owner=None):
         self._step("clean", image, owner)
+        if image and not self.no_clean:
+            stem, ext = os.path.splitext(image)
+            cleaned = f"{stem}_cleaned{ext}"
+            shutil.copyfile(image, cleaned)
+            self.cleaned[image] = cleaned
+            self.output_revision += 1
+        return self.cleaned.get(image)
 
     def recognize(self, image=None, *, owner=None):
         self._step("recognize", image, owner)
@@ -791,12 +801,20 @@ def test_step_adapter_calls_the_session_with_the_job_owner(tmp_path, monkeypatch
     session = FakeEditorSession([page, other])
     token = svc.register_editor_session(session)
     owner = types.SimpleNamespace(config={})
-    for step in ("detect", "clean", "recognize", "render"):
+    for step in ("detect", "recognize", "render", "clean"):
         ctx = FakeCtx(owner, params=svc.step_spec(step, token, page).params)
         assert manga_kind.run_step(ctx)["ok"] is True
         assert session.calls[-1] == (step, page, owner)
         assert ctx.results["manga_step"] == step and ("manga_step", {"step": step, "image": page}) in ctx.events
-        assert ctx.outputs == []  # nothing rendered yet in the fake
+        # nothing rendered yet in the fake; Clean made the cleaned page
+        assert ctx.outputs == ([session.cleaned[page]] if step == "clean" else [])
+    # a Clean that made no (new) cleaned image fails instead of ending "Clean done" with nothing done
+    session.no_clean = True
+    ctx = FakeCtx(owner, params=svc.step_spec("clean", token, page).params)
+    outcome = manga_kind.run_step(ctx)
+    assert outcome["ok"] is False and "no cleaned image was made" in outcome["error"]
+    session.no_clean = False
+    session.cleaned.clear()
     ctx = FakeCtx(owner, params=svc.step_spec("translate", token, page).params)
     manga_kind.run_step(ctx)
     assert ctx.outputs == [page] and ctx.results["manga_revision"] == session.output_revision
@@ -1592,11 +1610,11 @@ def test_editor_tab_boxes_steps_sheet_and_ocr(iso, tmp_path, monkeypatch):
         assert panel is ctx.extras["manga_box_panel"] and panel.index == 0
         assert tab.panel_holder.content is panel.control
         # not recognized yet: Translate this text waits for OCR (desktop flow); the OCR text is read-only
-        # in its compact sheet
-        assert panel.translate_button.disabled and not panel.ocr_item.disabled
-        sheet = tab.open_ocr_sheet()
-        assert sheet is ctx.extras["manga_box_sheet"] and sheet.index == 0
-        assert sheet.ocr_field.read_only and not sheet.ocr_button.disabled
+        # on the panel's OCR tab
+        assert panel.translate_button.disabled and not panel.ocr_button.disabled
+        assert tab.show_box_tab("ocr") is panel and panel.tab == "ocr" and panel.ocr_body.visible
+        assert panel.ocr_field.read_only and not panel.translation_body.visible
+        panel.select_tab("translated")
         panel.translation_field.value = "Hello!"
         await tab.box_action("save", 0, {**panel.changes(), "free_text": True})
         assert ("edit_box_text", 0, None, "Hello!") in fake_session.calls
@@ -1924,7 +1942,7 @@ def test_editor_tab_edits_boxes_on_the_real_editor_session(iso, tmp_path, monkey
         await tab.toggle_exclude()
         assert tab.boxes[0]["exclude_from_clean"] is True
         panel = tab.long_press_at(25, 45)
-        assert panel is not None and panel.translate_button.disabled and tab.open_ocr_sheet().ocr_field.read_only
+        assert panel is not None and panel.translate_button.disabled and tab.show_box_tab("ocr").ocr_field.read_only
         panel.translation_field.value = "Hello!"
         await tab.box_action("save", 0, {**panel.changes(), "free_text": True})
         assert tab.boxes[0]["translation"] == "Hello!" and tab.boxes[0]["free_text"] is True
@@ -2266,29 +2284,112 @@ def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, mo
         assert (surface.on_pan_start, surface.on_pan_update, surface.on_pan_end, surface.on_tap_down) == (
             None, None, None, None)
         assert surface.on_long_press_start is not None
+        # pinch zoom with a boundary margin; the boxes are drawn in the same transformed stack as the page
+        assert (viewer.min_scale, viewer.max_scale) == (me.MIN_ZOOM, me.MAX_ZOOM) and me.MAX_ZOOM > 1
+        assert viewer.boundary_margin is not None
+        assert tab.stack.controls == [tab.page_image, tab.canvas, surface] and viewer.content.content is tab.stack
         # a refresh (box picked, step done) keeps the same viewer, so its zoom stays
         tab.selected = None
         tab.refresh()
         await tab._apply_snapshot(await tab._snapshot())
         assert tab.interactive is viewer and tab.viewer_holder.content.content is viewer
-        # an edit tool: a viewer that stays put, under new keys, with the drag handlers on the surface
+        # an edit tool: the same viewer (the zoom stays) holding still, a new surface (new key) with the
+        # drag handlers
         tab.set_tool("box")
-        assert tab.interactive is not viewer and tab.interactive.key != viewer.key
-        assert not tab.interactive.pan_enabled and tab.gestures.on_pan_start is not None
-        editing = tab.interactive
+        assert tab.interactive is viewer and not viewer.pan_enabled and not viewer.scale_enabled
+        assert tab.gestures is not surface and tab.gestures.key != surface.key
+        assert tab.gestures.on_pan_start is not None and tab.stack.controls[-1] is tab.gestures
+        editing = tab.gestures
         tab.refresh()
-        assert tab.interactive is editing
+        assert tab.gestures is editing
         tab.set_tool("pan")
-        assert tab.interactive is not editing and tab.gestures.on_pan_start is None
-        panning = tab.interactive
+        assert tab.interactive is viewer and viewer.pan_enabled and tab.gestures.on_pan_start is None
         await tab.step_page(1)  # another page: another viewer
-        assert tab.interactive is not panning
-        # Raw / Source / Translated only change the image under the boxes: same viewer (and zoom)
+        assert tab.interactive is not viewer
+        # the display modes only change the image under the boxes: same viewer (and zoom)
         viewer = tab.interactive
-        tab.set_view("raw")
+        tab.set_view("original")
         assert tab.interactive is viewer and tab.page_image.src == tab.image_path
-        tab.set_view("translated")  # not translated yet: the raw page, with a hint
+        tab.set_view("translated")  # not translated yet: the original page, with a hint
         assert tab.interactive is viewer and tab.view_hint.visible and tab.page_image.src == tab.image_path
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_editor_display_mode_button_clean_and_box_tabs(iso, tmp_path, monkeypatch):
+    """The desktop's one display-mode button (✒️ translated -> 🧽 cleaned -> 📄 original), a finished
+    Clean showing the cleaned page, and the box panel's OCR / Translated tabs with ⋯ in their row."""
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga import editor as me
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    pages = [write_png(tmp_path / "in" / f"{n}.png", 100, 200) for n in (1, 2)]
+    fake_session = FakeEditorSession(pages)
+    monkeypatch.setitem(sys.modules, "manga_editor_core",
+                        _module("manga_editor_core", MangaEditorSession=lambda *a, **k: fake_session,
+                                default_state_file=lambda: str(tmp_path / "state.json")))
+    monkeypatch.setattr(me, "image_size", lambda path: (100, 200))
+    monkeypatch.setitem(sys.modules, "manga_models", None)
+    assert [me.next_view(v) for v in me.VIEW_MODES] == ["cleaned", "original", "translated"]
+    assert [(v[0], v[1]) for v in me.VIEWS] == [("translated", "✒️"), ("cleaned", "🧽"), ("original", "📄")]
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        jobs = FakeJobs()
+        ctx = _ctx(page, {}, jobs=jobs, files=FakeFiles(), output_root=str(iso["Output"]))
+        manga = _session(tmp_path, {})
+        manga.files.host.selected_files = list(pages)
+        manga.loaded = True
+        screen = MangaScreen(parse_route("/tools/manga?tab=editor"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        tab = screen.editor_tab
+        await tab.open_page(0)
+        # one button in the preview toolbar row (first; the ⋯ last), showing the current state
+        assert tab.toolbar.controls[0] is tab.view_button and tab.toolbar.controls[-1] is tab.more_menu
+        assert tab.view == "translated" and tab.view_emoji.value == "✒️"
+        assert tab.view_button.tooltip == "Showing translated output (click to cycle)"
+        viewer = tab.interactive
+        assert tab.cycle_view() == "cleaned" and tab.view_emoji.value == "🧽"
+        assert tab.view_button.tooltip == "Showing cleaned images (click to cycle)"
+        assert tab.view_hint.value.startswith("Not cleaned yet")
+        assert tab.cycle_view() == "original" and tab.view_emoji.value == "📄"
+        assert tab.cycle_view() == "translated" and tab.interactive is viewer
+        # Clean: the step's cleaned page is loaded and shown (desktop: the button switches to 🧽)
+        job_id = await tab.run_step("clean")
+        assert jobs.specs[-1].params["step"] == "clean"
+        fake_session.clean(pages[0])
+        jobs.finish(job_id, result={"manga_step": "clean"})
+        await _settle()
+        assert tab.step_status.value == "Clean done"
+        assert tab.view == "cleaned" and tab.view_emoji.value == "🧽" and tab.cleaned_view
+        assert tab.cleaned_view.startswith(manga.view_cache) and tab.page_image.src == tab.cleaned_view
+        assert not tab.view_hint.visible and tab.interactive is viewer
+        # the session points its output at the cleaned file after a Clean: still not the translated view
+        snapshot = fake_session.page_snapshot
+        monkeypatch.setattr(fake_session, "page_snapshot",
+                            lambda path=None: dict(snapshot(path), translated_path=fake_session.cleaned[pages[0]]))
+        await tab._apply_snapshot(await tab._snapshot())
+        assert tab.translated_view == "" and tab.share_item.disabled
+        tab.set_view("translated")
+        assert tab.page_image.src == tab.cleaned_view and tab.view_hint.value.startswith("Not translated yet")
+        # the box panel: OCR / Translated tabs, each edited in place, ⋯ in the same row
+        fake_session.add_box(10, 20, 40, 60)
+        fake_session.boxes[pages[0]][0].update(ocr_text="原文", translation="Hi")
+        await tab._apply_snapshot(await tab._snapshot())
+        panel = tab.long_press_at(15, 35)
+        header = panel.control.content.controls[0]
+        assert header.controls == [panel.title, panel.tabs, panel.menu] and not header.wrap
+        assert panel.tab == "translated" and panel.translation_body.visible and not panel.ocr_body.visible
+        assert tab.show_box_tab("ocr") is panel and panel.ocr_body.visible and not panel.ocr_field.read_only
+        panel.ocr_field.value = "原文!"
+        panel.translation_field.value = "Hello"
+        assert panel.changes() == {"ocr_text": "原文!", "translation": "Hello"}
+        await tab.box_action("save", 0, panel.changes())
+        assert ("edit_box_text", 0, "原文!", "Hello") in fake_session.calls
+        assert tab.panel.tab == "ocr"  # the rebuilt panel stays on the tab being edited
         screen.dispose()
 
     asyncio.run(scenario())

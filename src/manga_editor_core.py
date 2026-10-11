@@ -9778,6 +9778,12 @@ class MangaEditorSession:
         """Clean: inpaint the page's boxes (detecting first when there are none); the cleaned path."""
         with self._op_lock:
             page = self._begin(owner, image_path)
+            # The desktop tab preloads the inpainter into MangaTranslator's pool when it opens
+            # (MangaTranslationTab.__init__ -> _preload_shared_inpainter), and Clean's worker only
+            # checks one out of that pool (_get_or_init_shared_local_inpainter refuses to create
+            # one). Without the preload a session's Clean waited 30 s, logged "Failed to get shared
+            # inpainter" and left the page uncleaned (Translate loads its own: _run_inpainting_sync).
+            _preload_shared_inpainter(self)
             self._run_action(_on_clean_image_clicked, (), _CLEAN_WORKERS)
             self._finish()
             return (self.image_state_manager.get_state(page) or {}).get('cleaned_image_path')

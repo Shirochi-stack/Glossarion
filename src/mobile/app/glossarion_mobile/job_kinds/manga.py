@@ -365,6 +365,7 @@ def run_step(ctx: Any) -> dict:
                 pass
 
     session._log_callback = log_line
+    cleaned_before = _cleaned_stamp(session, params.get("image")) if step == "clean" else None
     try:
         with _StopBridge(ctx, lambda mode: session.stop(force=mode != "graceful")):
             result = _call_step(session, step, params, ctx.owner)
@@ -394,7 +395,24 @@ def run_step(ctx: Any) -> dict:
         ctx.add_outputs(outputs)
     if ctx.stop_requested():
         return {"ok": None, "outputs": outputs}
+    if step == "clean":
+        cleaned = _cleaned_stamp(session, params.get("image"))
+        if cleaned is None or cleaned == cleaned_before:
+            # the desktop Clean only logs why (no boxes left to clean, the inpainter did not load):
+            # the job must not end "Clean done" with the page unchanged
+            return {"ok": False, "outputs": outputs,
+                    "error": "no cleaned image was made (see the job log: no boxes to clean, or the "
+                             "inpainting model could not load)"}
     return {"ok": True, "outputs": outputs}
+
+
+def _cleaned_stamp(session: Any, image: Any) -> Optional[tuple]:
+    """(path, mtime) of the page's cleaned image in the editor session, None when it has none."""
+    try:
+        path = str((session.page_snapshot(image) or {}).get("cleaned_path") or "")
+        return (path, os.stat(path).st_mtime_ns) if path else None
+    except Exception:
+        return None
 
 
 KINDS = {

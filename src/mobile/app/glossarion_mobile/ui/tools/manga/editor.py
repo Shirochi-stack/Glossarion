@@ -5,26 +5,31 @@ same code the desktop preview runs):
 
 * **Page strip** of the Files selection (skipped pages dimmed with ⏭️; long-press a thumbnail for
   the desktop thumbnail menu's "⏭️ Skip Processing" / "▶️ Process This Image").
-* **One page view, Raw | Source | Translated** (the desktop preview's merged source / output view and
-  its display-mode cycle 📄 original / 🧽 cleaned / ✒️ translated): the same boxes and tools over
-  the raw page, the cleaned page or the translated render, so the manual editing happens on the
-  Translated view. A finished Translate / Translate all / Start switches to Translated.
-* **Pan** mode: ``InteractiveViewer`` (pinch zoom, pan). **Edit** modes: ``Stack(Image,
-  canvas.Canvas, GestureDetector(drag_interval=24))`` with Select/Move (drag a box, drag its
-  bottom-right corner to resize), Box, Circle and Lasso; Delete and Exclude from Clean act on
-  the selected box. Brush / Eraser stay visible, disabled (no shared mask editor yet).
+* **One page view** (the desktop preview's merged source / output view) over the full width and
+  every dp of height the controls leave. Its toolbar row starts with the desktop's **display-mode
+  button** (``MangaImagePreviewWidget.cleaned_toggle_btn``): one button showing the current state,
+  ✒️ translated → 🧽 cleaned → 📄 original on each tap; the same boxes and tools stay over the
+  translated render, the cleaned page or the original page. A finished Translate / Translate all /
+  Start switches to ✒️, a finished Clean to 🧽 (desktop ``_restore_clean_button``); the mode is also
+  the session preview's ``source_display_mode`` the shared Clean-this-box code reads.
+* The page sits in an ``InteractiveViewer`` (pinch zoom 1-8x, pan, a boundary margin) with its box
+  overlay in the same transformed ``Stack(Image, canvas.Canvas, GestureDetector)``, so the boxes
+  stay on the image at every zoom; the viewer (and its zoom) is kept across the tools. **Pan**
+  mode: the viewer pans and zooms. **Edit** modes (the zoom stays where Pan left it): Select/Move
+  (drag a box, drag its bottom-right corner to resize), Box, Circle and Lasso; Delete and Exclude
+  from Clean act on the selected box.
 * **Workflow buttons** Detect · Clean · Recognize · Translate · Translate all · Save & Update
   Overlay, and the per-box OCR / Translate / Clean actions — ``manga_step`` jobs on the
   JobService: OCR and translation need the job's HeadlessOwner (plan §1), which only exists on
   the job thread. Box edits (add, move, resize, delete, texts, flags) are session calls on the
   io pool; editing waits while a step runs (the session runs one step at a time). A step that
   loads a model not on the device yet (detector / ONNX inpainter) offers its download first.
-* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` under the page: its
-  translation is edited in place; the OCR text opens in a compact ``OcrSheet``. Import OCR (renders
-  imported translations: a job) / Export OCR (``manga_ocr_io`` JSON in the OCR Text folder) / the
-  auto-saved OCR files.
-* The editor rewrites the same output file on every render, so the Source / Translated views show a
-  versioned copy (``page_<id>_v3_<mtime>.png``): Flet's ``Image`` cache never shows an old render.
+* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` under the page: OCR
+  and Translated tabs, each text edited in place. The toolbar's ⋯ holds Share, Import OCR
+  (renders imported translations: a job) / Export OCR (``manga_ocr_io`` JSON in the OCR Text
+  folder) / the auto-saved OCR files and Files.
+* The editor rewrites the same output file on every render, so the cleaned / translated views show
+  a versioned copy (``page_<id>_v3_<mtime>.png``): Flet's ``Image`` cache never shows an old render.
 
 Box geometry is in image pixels (the session's scene coordinates); the canvas maps it to the
 displayed size (``scale = displayed width / image width``).
@@ -46,15 +51,14 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.components.empty_state import faded_mascot
 from glossarion_mobile.ui.tools.common import JobWatch, hint_text
-from glossarion_mobile.ui.tools.manga.box_sheet import ITERATION_CHOICES, BoxPanel, OcrSheet, box_signature
+from glossarion_mobile.ui.tools.manga.box_sheet import COMPACT_BUTTON, ITERATION_CHOICES, BoxPanel, box_signature
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
-__all__ = ["EditorTab", "Geometry", "TOOLS", "hit_test", "lasso_bounds", "normalize_rect"]
+__all__ = ["EditorTab", "Geometry", "TOOLS", "VIEWS", "hit_test", "lasso_bounds", "next_view", "normalize_rect"]
 
 log = logging.getLogger("glossarion.tools.manga")
 
-MASK_REASON = "Brush and eraser are desktop only (experimental mask painting there; not planned for mobile)"
 #: (tool id, label, icon, disabled reason)
 TOOLS = (
     ("pan", "Pan / zoom", "PAN_TOOL", None),
@@ -67,14 +71,31 @@ STEP_BUTTONS = (("detect", "Detect", "CENTER_FOCUS_STRONG"), ("clean", "Clean", 
                 ("recognize", "Recognize", "DOCUMENT_SCANNER"), ("translate", "Translate", "TRANSLATE"),
                 ("translate_all", "Translate all", "LIBRARY_BOOKS"), ("render", "Update overlay", "AUTO_FIX_NORMAL"))
 HANDLE = 24.0  # dp: the resize handle
+THUMB_W, THUMB_H = 40, 52  # dp: a page strip thumbnail
 MIN_BOX = 8.0  # image px
 DRAG_INTERVAL = 24
 BOX_COLOR = "#E18F98"
 SELECTED_COLOR = "#5A9FD4"
 EXCLUDED_COLOR = "#9E9E9E"
 SHAPES = {"box": "rect", "circle": "ellipse", "lasso": "polygon"}
-#: The page view's background (desktop ``source_display_mode``: original / cleaned / translated).
-VIEWS = (("raw", "Raw"), ("source", "Source"), ("translated", "Translated"))
+#: The page view's display mode, in the order the desktop button cycles it
+#: (``MangaImagePreviewWidget._cycle_source_display_mode``: translated -> cleaned -> original):
+#: (``source_display_mode``, the button's emoji, its tooltip, its colour).
+VIEWS = (("translated", "✒️", "Showing translated output (click to cycle)", "#28a745"),
+         ("cleaned", "🧽", "Showing cleaned images (click to cycle)", "#4a7ba7"),
+         ("original", "📄", "Showing original images (click to cycle)", "#6c757d"))
+VIEW_MODES = tuple(view[0] for view in VIEWS)
+#: Steps after which the desktop shows the translated output.
+TRANSLATED_STEPS = ("translate", "render", "translate_all", "translate_box", "import_ocr")
+MIN_ZOOM, MAX_ZOOM = 1.0, 8.0
+BOUNDARY = 32  # dp the zoomed page may be pulled past its edges
+GUTTER = 2  # dp around the editor: the page takes the full width
+
+
+def next_view(view: str) -> str:
+    """The display mode after ``view`` (the desktop button's cycle)."""
+    index = VIEW_MODES.index(view) if view in VIEW_MODES else -1
+    return VIEW_MODES[(index + 1) % len(VIEW_MODES)]
 
 
 # ---------------------------------------------------------------------------
@@ -178,38 +199,41 @@ class EditorTab(MangaTab):
         self.watch = JobWatch(ctx, self._on_step_end, self._on_step_change)
         self.job_ends = JobEnds(ctx, self._on_any_job_end)
         self._view_pending = False  # the translated page's lookup was refused by a running job
-        self.sheet: Optional[OcrSheet] = None
         self.panel: Optional[BoxPanel] = None  # the selected box's inline editor
+        self.panel_tab = "translated"  # the BoxPanel tab last shown (OCR / Translated)
         self.step_progress_text = ""
         self._gen = 0
         self._editing = False  # a box edit is in flight on the io pool
         self._listening = False
-        # the page viewer kept across refreshes (and view switches) while the page and the Pan / Edit
-        # mode stay the same, so the InteractiveViewer keeps its zoom and pan
+        # the page viewer kept across refreshes, display-mode switches and tool changes while the
+        # page stays the same, so the InteractiveViewer keeps its zoom and pan
         self._source_cache: Optional[tuple] = None  # (signature, control)
+        self._surface_mode: Optional[bool] = None  # the gesture surface's mode (True: an edit tool)
 
     # ---- build --------------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
         self._source_cache = None  # a new tree: nothing to keep in place
         self.panel = None
-        self.strip = ft.ListView(controls=[], horizontal=True, height=76, spacing=6, key="me-strip")
-        self.view_buttons = ft.SegmentedButton(
-            segments=[ft.Segment(value=value, label=ft.Text(label)) for value, label in VIEWS],
-            selected=[self.view], show_selected_icon=False, on_change=self._on_view, key="me-view")
-        self.share_button = ft.IconButton(icon=ft.Icons.IOS_SHARE, tooltip="Share or save the translated page",
-                                          key="me-share", size_constraints=HIT_TARGET,
-                                          on_click=lambda e: self.share_translated())
+        self.strip = ft.ListView(controls=[], horizontal=True, height=THUMB_H + 8, spacing=4, expand=True,
+                                 key="me-strip")
+        # the desktop display-mode button: one button, the current state, cycling on each tap
+        self.view_emoji = ft.Text(VIEWS[0][1], size=16)
+        self.view_button = ft.IconButton(icon=self.view_emoji, tooltip=VIEWS[0][2],
+                                         size_constraints=HIT_TARGET, key="me-view",
+                                         on_click=lambda e: self.cycle_view())
         self.view_hint = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                  visible=False, key="me-view-hint")
         self.panel_holder = ft.Container(key="me-box-panel-holder")
-        self.page_label = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="me-page-label")
+        self.page_label = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="me-page-label")
         self.prev_button = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous page", key="me-prev",
                                          size_constraints=HIT_TARGET,
                                          on_click=lambda e: self.ctx.spawn(self.step_page(-1)))
         self.next_button = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next page", key="me-next",
                                          size_constraints=HIT_TARGET,
                                          on_click=lambda e: self.ctx.spawn(self.step_page(1)))
+        self.pages_row = ft.Row([self.prev_button, self.page_label, self.next_button, self.strip], spacing=0,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-pages")
         self.tool_buttons: dict = {}
         tool_controls: list = []
         for tool_id, label, icon, reason in TOOLS:
@@ -219,8 +243,6 @@ class EditorTab(MangaTab):
                                    on_click=lambda e, t=tool_id: self.set_tool(t))
             self.tool_buttons[tool_id] = button
             tool_controls.append(button)
-        self.edit_button = ft.IconButton(icon=ft.Icons.EDIT_NOTE, tooltip="Edit OCR text", key="me-edit-box",
-                                         size_constraints=HIT_TARGET, on_click=lambda e: self.open_ocr_sheet())
         self.exclude_button = ft.IconButton(icon=ft.Icons.BLOCK, tooltip="Exclude from Clean", key="me-exclude",
                                             size_constraints=HIT_TARGET,
                                             on_click=lambda e: self.ctx.spawn(self.toggle_exclude()))
@@ -230,31 +252,43 @@ class EditorTab(MangaTab):
         self.clear_button = ft.IconButton(icon=ft.Icons.CLEAR_ALL, tooltip="Clear boxes", key="me-clear-boxes",
                                           size_constraints=HIT_TARGET,
                                           on_click=lambda e: self.ctx.spawn(self.clear_boxes()))
-        self.toolbar = ft.Row([*tool_controls, ft.VerticalDivider(width=8), self.edit_button, self.exclude_button,
-                               self.delete_button, self.clear_button], scroll=ft.ScrollMode.AUTO, spacing=0,
-                              key="me-toolbar")
+        self.share_item = ft.PopupMenuItem(content="Share or save the translated page", icon=ft.Icons.IOS_SHARE,
+                                           key="me-share", on_click=lambda e: self.share_translated())
+        self.more_menu = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT, tooltip="More editor actions", key="me-more", size_constraints=HIT_TARGET,
+            items=[
+                self.share_item,
+                ft.PopupMenuItem(),
+                ft.PopupMenuItem(content="Import OCR", icon=ft.Icons.FILE_UPLOAD, key="me-import-ocr",
+                                 on_click=lambda e: self.ctx.spawn(self.import_ocr())),
+                ft.PopupMenuItem(content="Export OCR", icon=ft.Icons.FILE_DOWNLOAD, key="me-export-ocr",
+                                 on_click=lambda e: self.ctx.spawn(self.export_ocr())),
+                ft.PopupMenuItem(content="Auto-saved OCR", icon=ft.Icons.HISTORY, key="me-ocr-files",
+                                 on_click=lambda e: self.ctx.spawn(self.open_ocr_files())),
+                ft.PopupMenuItem(content="Files", icon=ft.Icons.PHOTO_LIBRARY, key="me-files",
+                                 on_click=lambda e: self.screen.select_tab("files") if self.screen else None),
+            ])
+        # the preview toolbar: one row, the display-mode button first and the ⋯ last (pinned), the
+        # tools between them scroll on a narrow phone
+        self.tools_row = ft.Row([*tool_controls, ft.VerticalDivider(width=8), self.exclude_button,
+                                 self.delete_button, self.clear_button], scroll=ft.ScrollMode.AUTO, spacing=0,
+                                expand=True, key="me-tools")
+        self.toolbar = ft.Row([self.view_button, self.tools_row, self.more_menu], spacing=0,
+                              vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-toolbar")
         self.viewer_holder = ft.Container(expand=True, key="me-viewer-holder")
         self.step_buttons: dict = {}
         for step, label, icon in STEP_BUTTONS:
             self.step_buttons[step] = ft.FilledTonalButton(content=label,
                                                            icon=getattr(ft.Icons, icon, ft.Icons.PLAY_ARROW),
-                                                           key=f"me-step-{step}",
+                                                           key=f"me-step-{step}", style=COMPACT_BUTTON,
                                                            on_click=lambda e, s=step: self.ctx.spawn(self.run_step(s)))
         self.step_status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="me-step-status")
         self.step_bar = ft.ProgressBar(visible=False, key="me-step-progress")
         self.stop_button = ft.TextButton(content="Stop", icon=ft.Icons.STOP, visible=False, key="me-step-stop",
-                                         on_click=lambda e: self._stop())
+                                         style=COMPACT_BUTTON, on_click=lambda e: self._stop())
         self.step_reason = ft.Container(key="me-step-reason")
-        more = ft.Row([
-            ft.TextButton(content="Import OCR", icon=ft.Icons.FILE_UPLOAD, key="me-import-ocr",
-                          on_click=lambda e: self.ctx.spawn(self.import_ocr())),
-            ft.TextButton(content="Export OCR", icon=ft.Icons.FILE_DOWNLOAD, key="me-export-ocr",
-                          on_click=lambda e: self.ctx.spawn(self.export_ocr())),
-            ft.TextButton(content="Auto-saved OCR", icon=ft.Icons.HISTORY, key="me-ocr-files",
-                          on_click=lambda e: self.ctx.spawn(self.open_ocr_files())),
-            ft.TextButton(content="Files", icon=ft.Icons.PHOTO_LIBRARY, key="me-files",
-                          on_click=lambda e: self.screen.select_tab("files") if self.screen else None),
-        ], wrap=True, spacing=4)
+        self.status_row = ft.Row([self.step_status, self.stop_button, self.step_reason], wrap=True, spacing=6,
+                                 key="me-status")
         # the non-chibi Halgakos, faded, where a page will appear (owner, 2026-10-09)
         self.empty = ft.Container(
             content=ft.Column([faded_mascot(), hint_text("Add images in the Files tab, then open a page here.")],
@@ -263,20 +297,18 @@ class EditorTab(MangaTab):
         )
         self.root = ft.Column([
             self.empty,
-            self.strip,
-            ft.Row([self.view_buttons, self.share_button, self.prev_button, self.page_label, self.next_button],
-                   wrap=True, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            self.view_hint,
+            self.pages_row,
             self.toolbar,
+            self.view_hint,
             self.viewer_holder,
             self.panel_holder,
-            ft.Row(list(self.step_buttons.values()), scroll=ft.ScrollMode.AUTO, spacing=6, key="me-steps"),
-            ft.Row([self.step_status, self.stop_button, self.step_reason], wrap=True, spacing=6),
+            ft.Row(list(self.step_buttons.values()), scroll=ft.ScrollMode.AUTO, spacing=4, key="me-steps"),
+            self.status_row,
             self.step_bar,
-            more,
-        ], expand=True, spacing=tokens.SPACING["sm"], key=self.key)
+        ], expand=True, spacing=tokens.SPACING["xs"], key=self.key)
         self.refresh(push_now=False)
-        return ft.Container(content=self.root, padding=ft.Padding.symmetric(horizontal=8, vertical=6), expand=True)
+        return ft.Container(content=self.root, padding=ft.Padding.symmetric(horizontal=GUTTER, vertical=GUTTER),
+                            expand=True)
 
     # ---- lifecycle ----------------------------------------------------------------------------------
 
@@ -390,7 +422,13 @@ class EditorTab(MangaTab):
         """Blocking: the versioned display copy of the page's translated output. Raises
         ``MangaBusy`` when the page's output path cannot be looked up while a job runs."""
         snap = self.snapshot
-        path = str(snap.get("translated_path") or snap.get("rendered_path") or "")
+        path = str(snap.get("translated_path") or "")
+        cleaned = str(snap.get("cleaned_path") or "")
+        if path and cleaned and os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(cleaned)):
+            # a Clean points the session's output at the cleaned image (the desktop output viewer
+            # shows it): that is the cleaned view, the translated one stays the rendered page
+            path = ""
+        path = path or str(snap.get("rendered_path") or "")
         if not path or not os.path.isfile(path):
             candidate = self.session.files.output_path_for(self.image_path) if self.image_path else ""
             path = candidate if candidate and os.path.isfile(candidate) else ""
@@ -467,7 +505,7 @@ class EditorTab(MangaTab):
         has_page = bool(files) and bool(self.image_path)
         self.empty.visible = not files
         self.strip.controls = [self._thumb(i, p) for i, p in enumerate(files)]
-        self.strip.visible = bool(files)
+        self.pages_row.visible = bool(files)
         self.page_label.value = f"{self.session.page_index + 1} / {len(files)}" if files else ""
         busy = self.busy
         self.prev_button.disabled = busy or not files or self.session.page_index <= 0
@@ -475,11 +513,11 @@ class EditorTab(MangaTab):
         for tool_id, button in self.tool_buttons.items():
             button.selected = tool_id == self.tool
         box_selected = has_page and self.selected is not None and 0 <= self.selected < len(self.boxes)
-        for button in (self.delete_button, self.exclude_button, self.edit_button):
+        for button in (self.delete_button, self.exclude_button):
             button.disabled = busy or not box_selected
         self.clear_button.disabled = busy or not has_page or not self.boxes
-        self.view_buttons.selected = [self.view]
-        self.share_button.disabled = not (has_page and self.translated_view)
+        self._render_view_button()
+        self.share_item.disabled = not (has_page and self.translated_view)
         hint = self._view_hint_text() if has_page else ""
         self.view_hint.value = hint
         self.view_hint.visible = bool(hint)
@@ -497,6 +535,8 @@ class EditorTab(MangaTab):
         """The selected box's ``BoxPanel`` under the page. Kept (with what is being typed) while the
         box shows the same texts and flags; rebuilt, under a new key, when they change."""
         if not box_selected:
+            if self.panel is not None:
+                self.panel_tab = self.panel.tab
             self.panel = None
             self.panel_holder.content = None
             return
@@ -508,13 +548,15 @@ class EditorTab(MangaTab):
                 getattr(panel, "_reasons", None) == reasons:
             self.panel_holder.content = panel.control
             return
-        typed = panel.translation_field.value if panel is not None and \
+        typing = panel if panel is not None and \
             panel.signature == box_signature(box, index) else None  # only the step state changed
+        if panel is not None:
+            self.panel_tab = panel.tab
         panel = BoxPanel(box, index, on_action=lambda name, i, changes: self.ctx.spawn(self.box_action(name, i, changes)),
-                         on_edit_ocr=lambda i: self.open_ocr_sheet(i), on_iterations=lambda i: self.open_iterations(i),
-                         busy_reason=reasons[0], steps_reason=reasons[1])
-        if typed is not None:
-            panel.translation_field.value = typed
+                         on_iterations=lambda i: self.open_iterations(i), busy_reason=reasons[0],
+                         steps_reason=reasons[1], tab=self.panel_tab)
+        if typing is not None:
+            panel.keep_typing(typing)
         panel._reasons = reasons
         self.panel = panel
         self.ctx.extras["manga_box_panel"] = panel
@@ -523,12 +565,12 @@ class EditorTab(MangaTab):
     def _thumb(self, index: int, path: str) -> ft.Control:
         current = index == self.session.page_index
         skipped = self.is_skipped(path)
-        image: ft.Control = ft.Image(src=path, width=52, height=68, fit=ft.BoxFit.COVER, cache_width=104,
-                                     border_radius=4, gapless_playback=True)
+        image: ft.Control = ft.Image(src=path, width=THUMB_W, height=THUMB_H, fit=ft.BoxFit.COVER,
+                                     cache_width=THUMB_W * 2, border_radius=4, gapless_playback=True)
         if skipped:  # the desktop skip marker (⏭️), dimmed like the Files tab row
-            image = ft.Stack([image, ft.Container(content=ft.Text("⏭️", size=12), right=1, top=1,
+            image = ft.Stack([image, ft.Container(content=ft.Text("⏭️", size=10), right=1, top=1,
                                                   bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.SURFACE),
-                                                  border_radius=4, padding=1)], width=52, height=68)
+                                                  border_radius=4, padding=1)], width=THUMB_W, height=THUMB_H)
         return ft.Container(
             content=image,
             border=ft.Border.all(3 if current else 1, ft.Colors.PRIMARY if current else ft.Colors.OUTLINE_VARIANT),
@@ -576,16 +618,16 @@ class EditorTab(MangaTab):
 
     def _viewer(self) -> ft.Control:
         """One page view on every device (the desktop preview's merged source / output view): the
-        Raw / Source / Translated choice only changes the image under the boxes."""
+        display mode only changes the image under the boxes."""
         return self._source_viewer()
 
     def background(self) -> str:
-        """The image under the boxes for the chosen view: Raw = the page; Source = its cleaned image
-        (the page until it is cleaned); Translated = the translated render (else the cleaned image,
-        else the page)."""
+        """The image under the boxes for the display mode: original = the page; cleaned = its
+        cleaned image (the page until it is cleaned); translated = the translated render (else the
+        cleaned image, else the page)."""
         if self.view == "translated" and self.translated_view:
             return self.translated_view
-        if self.view in ("translated", "source") and self.cleaned_view:
+        if self.view in ("translated", "cleaned") and self.cleaned_view:
             return self.cleaned_view
         return self.image_path
 
@@ -594,9 +636,9 @@ class EditorTab(MangaTab):
             if self._view_pending:
                 return "Wait for the running job: the translated page shows once it has finished"
             return "Not translated yet: run Translate (or Start in Files). Showing the " + (
-                "cleaned page." if self.cleaned_view else "raw page.")
-        if self.view == "source" and not self.cleaned_view:
-            return "Not cleaned yet: showing the raw page."
+                "cleaned page." if self.cleaned_view else "original page.")
+        if self.view == "cleaned" and not self.cleaned_view:
+            return "Not cleaned yet: run Clean. Showing the original page."
         return ""
 
     def share_translated(self) -> Any:
@@ -646,23 +688,31 @@ class EditorTab(MangaTab):
         return shapes
 
     def _source_viewer(self) -> ft.Control:
-        """The page (the chosen view's image) with its boxes. Pan mode: the InteractiveViewer pans and zooms, and the
-        gesture surface on top only takes long-presses (box sheet): a pan recognizer there would
-        win Flutter's gesture arena against the viewer's own and swallow one-finger panning. Edit
-        modes: the surface takes taps and drags, the viewer stays put. The control is kept (same
-        objects, same keys, updated in place) while the page and the mode stay the same, so a
-        refresh (a box selected, a step finished) keeps the zoom; a new page or mode rebuilds it
-        under new keys (Flet freezes a subtree re-created under an old key)."""
+        """The page (the display mode's image) with its boxes, in an ``InteractiveViewer`` (pinch
+        zoom, pan, a boundary margin). Image, box canvas and gesture surface share one
+        aspect-ratio ``Stack`` inside the viewer, so the viewer's transform moves them together:
+        the boxes stay on the image at every zoom, and the surface's local positions stay in the
+        unzoomed page coordinates the ``Geometry`` maps. The stack is centred in the viewer (fit:
+        the whole page, full width or full height).
+
+        Pan mode: the viewer pans and zooms, and the surface only takes long-presses (box panel):
+        a pan recognizer there would win Flutter's gesture arena against the viewer's own and
+        swallow one-finger panning. Edit modes: the viewer holds the zoom Pan left, and the surface
+        takes taps and drags. The viewer is kept (same objects, same keys, updated in place) while
+        the page stays the same, so a refresh, a display-mode switch and a tool change keep the
+        zoom; only the gesture surface is swapped (under a new key) when the mode changes. A new
+        page rebuilds it under new keys (Flet freezes a subtree re-created under an old key)."""
         geometry = self.geometry
         aspect = (geometry.image_w / geometry.image_h) if geometry.image_w and geometry.image_h else 0.7
         editing = self.tool != "pan"
-        signature = (self.image_path, editing, round(aspect, 6))
+        signature = (self.image_path, round(aspect, 6))
         cached = self._source_cache
         background = self.background()
         if cached is not None and cached[0] == signature:
             self.canvas.shapes = self._shapes()
-            if self.page_image.src != background:  # Raw / Source / Translated: same viewer, same zoom
+            if self.page_image.src != background:  # another display mode: same viewer, same zoom
                 self.page_image.src = background
+            self._set_surface(editing)
             return cached[1]
         # every layer fills the aspect-ratio box: image, shapes, then the gesture surface on top
         self.canvas = cv.Canvas(shapes=self._shapes(), on_resize=self._on_canvas_resize, left=0, top=0, right=0,
@@ -670,6 +720,26 @@ class EditorTab(MangaTab):
         image = ft.Image(src=background, fit=ft.BoxFit.FILL, gapless_playback=True, left=0, top=0, right=0,
                          bottom=0, key=f"me-image-{self._gen}")
         self.page_image = image
+        self.stack = ft.Stack([image, self.canvas], aspect_ratio=aspect, key=f"me-stack-{self._gen}")
+        self.interactive = ft.InteractiveViewer(
+            # the centring frame fills the viewport and lets the aspect-ratio stack size itself
+            content=ft.Container(content=self.stack, alignment=ft.Alignment.CENTER, key=f"me-frame-{self._gen}"),
+            min_scale=MIN_ZOOM, max_scale=MAX_ZOOM, boundary_margin=ft.Margin.all(BOUNDARY),
+            key=f"me-iv-{self._gen}")
+        self._surface_mode = None
+        self._set_surface(editing)
+        container = ft.Container(content=self.interactive, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                                 border_radius=tokens.RADII["field"], clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                                 key=f"me-source-{self._gen}")
+        self._source_cache = (signature, container)
+        return container
+
+    def _set_surface(self, editing: bool) -> None:
+        """The gesture surface for the Pan / Edit mode (a new one, under a new key, when the mode
+        changes) and the viewer's own pan / zoom (Pan mode only)."""
+        if self._surface_mode is editing:
+            return
+        self._surface_mode = editing
         handlers: dict = {"on_long_press_start": self._on_long_press}
         if editing:
             handlers.update(on_tap_down=self._on_tap, on_pan_start=self._on_pan_start,
@@ -677,13 +747,9 @@ class EditorTab(MangaTab):
         self.gestures = ft.GestureDetector(
             content=ft.Container(bgcolor=ft.Colors.TRANSPARENT), drag_interval=DRAG_INTERVAL,
             left=0, top=0, right=0, bottom=0, key=f"me-gestures-{self._gen}", **handlers)
-        stack = ft.Stack([image, self.canvas, self.gestures], aspect_ratio=aspect, key=f"me-stack-{self._gen}")
-        self.interactive = ft.InteractiveViewer(content=stack, min_scale=1.0, max_scale=6.0, pan_enabled=not editing,
-                                                scale_enabled=not editing, key=f"me-iv-{self._gen}")
-        container = ft.Container(content=self.interactive, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
-                                 border_radius=tokens.RADII["field"], key=f"me-source-{self._gen}")
-        self._source_cache = (signature, container)
-        return container
+        self.stack.controls = [self.page_image, self.canvas, self.gestures]
+        self.interactive.pan_enabled = not editing
+        self.interactive.scale_enabled = not editing
 
     def _steps_reason(self) -> Optional[str]:
         if not self.ctx.has_kind(svc.KIND_STEP):
@@ -714,15 +780,43 @@ class EditorTab(MangaTab):
 
     # ---- view / tools ---------------------------------------------------------------------------------
 
-    def _on_view(self, e: Any = None) -> None:
-        chosen = list(self.view_buttons.selected or [self.view])
-        self.set_view(chosen[0])
+    def cycle_view(self) -> str:
+        """The display-mode button: translated -> cleaned -> original -> translated (desktop
+        ``_cycle_source_display_mode``)."""
+        self.set_view(next_view(self.view))
+        return self.view
 
     def set_view(self, view: str) -> None:
-        if view not in dict(VIEWS):
+        if view not in VIEW_MODES:
             return
         self.view = view
+        self._sync_session_view()
         self.refresh()
+
+    def _sync_session_view(self) -> None:
+        """The display mode is also the session preview's ``source_display_mode``: the shared
+        Clean-this-box result handler reads it (desktop ``_update_image_preview_with_result``:
+        re-render in translated, else show the cleaned page)."""
+        preview = getattr(self.session.editor, "image_preview_widget", None)
+        if preview is not None:
+            try:
+                preview.source_display_mode = self.view
+            except Exception:
+                pass
+
+    def _render_view_button(self) -> None:
+        """The display-mode button shows the current mode (the desktop button's emoji, tooltip and colour)."""
+        _mode, emoji, tooltip, color = VIEWS[VIEW_MODES.index(self.view)] if self.view in VIEW_MODES else VIEWS[0]
+        button = self.view_button
+        self.view_emoji.value = emoji
+        button.tooltip = tooltip
+        button.bgcolor = color
+
+    def _session_view(self) -> str:
+        """The session preview's display mode (set by the shared step code), '' when unknown."""
+        preview = getattr(self.session.editor, "image_preview_widget", None)
+        mode = getattr(preview, "source_display_mode", "") if preview is not None else ""
+        return mode if mode in VIEW_MODES else ""
 
     def set_tool(self, tool: str) -> None:
         reason = {t: r for t, _l, _i, r in TOOLS}.get(tool)
@@ -929,16 +1023,20 @@ class EditorTab(MangaTab):
         value = not bool(self.boxes[index].get("exclude_from_clean"))
         return await self._box_call(lambda: es.set_box_excluded(index, value))
 
-    def open_ocr_sheet(self, index: Optional[int] = None) -> Optional[OcrSheet]:
-        """The box's OCR text in a compact sheet (the desktop's Edit OCR popup)."""
+    def show_box_tab(self, tab: str, index: Optional[int] = None) -> Optional[BoxPanel]:
+        """Select a box (default: the selected one) and show its panel's ``ocr`` / ``translated`` tab
+        (the desktop's "📝 OCR Recognition Result" / "🌍 Translation Result")."""
         index = self.selected if index is None else index
         if index is None or not (0 <= index < len(self.boxes)):
             return None
-        box = self.boxes[index]
-        self.sheet = OcrSheet(box, index, on_action=lambda name, i, changes: self.ctx.spawn(
-            self.box_action(name, i, changes)), busy_reason=self._busy_reason(), steps_reason=self._steps_reason())
-        self.ctx.extras["manga_box_sheet"] = self.sheet
-        return self.sheet.show(self.ctx.page)
+        if self.selected != index:
+            self.selected = index
+            self.refresh()
+        panel = self.panel
+        if panel is not None:
+            panel.select_tab(tab)
+            self.panel_tab = panel.tab
+        return panel
 
     def open_iterations(self, index: int) -> Any:
         """Set Inpainting Iterations (Auto or 0-50, the desktop dialog's range) for a box."""
@@ -965,7 +1063,7 @@ class EditorTab(MangaTab):
         return sheet
 
     async def box_action(self, name: str, index: int, changes: dict) -> Optional[str]:
-        """BoxPanel / OcrSheet actions: apply the edits (session calls), then the action itself."""
+        """BoxPanel actions: apply the edits (session calls), then the action itself."""
         es = self.session.editor
         if es is None:
             return None
@@ -1010,6 +1108,7 @@ class EditorTab(MangaTab):
         es = await self._editor()
         if es is None:
             return None
+        self._sync_session_view()
         if step == "detect" and self.boxes:
             from glossarion_mobile.ui.tools.common import ask
 
@@ -1097,8 +1196,14 @@ class EditorTab(MangaTab):
 
     async def _reload_after_step(self, step: str) -> None:
         await self._apply_snapshot(await self._snapshot())
-        if step in ("translate", "render", "translate_all", "translate_box", "import_ocr") and self.translated_view:
+        if step == "clean" and self.cleaned_view:
+            self.set_view("cleaned")  # desktop _restore_clean_button: the cleaned page is shown
+        elif step in TRANSLATED_STEPS and self.translated_view:
             self.set_view("translated")  # the page just translated: where the manual editing happens
+        elif self._session_view() and self._session_view() != self.view:
+            # the shared step code switched the preview (Clean this box outside the translated
+            # view shows the cleaned page)
+            self.set_view(self._session_view())
         if self.screen is not None and step in ("translate_all", "translate"):
             try:
                 self.screen.files_tab.refresh()

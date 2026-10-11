@@ -228,37 +228,41 @@ def test_editor_session_job_owner_texts_and_stop(tmp_path, monkeypatch):
 
 
 @needs_flet
-def test_box_panel_and_compact_ocr_sheet():
-    from glossarion_mobile.ui.tools.manga.box_sheet import NOT_RECOGNIZED, BoxPanel, OcrSheet, box_signature
+def test_box_panel_ocr_and_translated_tabs():
+    """The box panel: OCR and Translated tabs, each text edited in place (no OCR sheet), the ⋯ menu
+    in the header row, compact type."""
+    from glossarion_mobile.ui import tokens
+    from glossarion_mobile.ui.tools.manga.box_sheet import BOX_TABS, NOT_RECOGNIZED, BoxPanel, box_signature
 
     actions = []
     box = {"ocr_text": "原文", "translation": "Hi", "free_text": False, "exclude_from_clean": False}
     panel = BoxPanel(box, 2, on_action=lambda *a: actions.append(a))
-    assert panel.translation_field.value == "Hi" and panel.ocr_preview.value == "原文"
-    assert not panel.translate_button.disabled
+    assert [label for _name, label in BOX_TABS] == ["OCR", "Translated"]
+    assert panel.translation_field.value == "Hi" and panel.ocr_field.value == "原文"
+    assert not panel.ocr_field.read_only and not panel.translate_button.disabled
+    assert panel.tab == "translated" and panel.translation_body.visible and not panel.ocr_body.visible
+    header = panel.control.content.controls[0]
+    assert header.controls[-1] is panel.menu and panel.tabs in header.controls and not header.wrap
+    assert panel.translation_field.text_style.size == tokens.TYPE_SCALE["body_small"].size
     assert panel.changes() == {}
     panel.translation_field.value = "Hello"
     panel.act("save_render")
     panel.set_flag("free_text", True)
+    panel.select_tab("ocr")
+    assert panel.tab == "ocr" and panel.ocr_body.visible and not panel.translation_body.visible
+    assert panel.tabs.selected_index == 0
+    panel.ocr_field.value = "原文!"
+    panel.act("ocr")
     assert actions == [("save_render", 2, {"translation": "Hello"}),
-                       ("save", 2, {"translation": "Hello", "free_text": True})]
+                       ("save", 2, {"translation": "Hello", "free_text": True}),
+                       ("ocr", 2, {"ocr_text": "原文!", "translation": "Hello"})]
     assert panel.signature == box_signature(box, 2) != box_signature({**box, "translation": "Hello"}, 2)
+    again = BoxPanel(box, 2, on_action=lambda *a: None, tab="ocr")
+    again.keep_typing(panel)
+    assert again.tab == "ocr" and again.ocr_field.value == "原文!" and again.translation_field.value == "Hello"
+    # not recognized: the OCR text is read-only (desktop), Translate this text waits for OCR
     empty = BoxPanel({}, 0, on_action=lambda *a: None)
-    assert empty.translate_button.disabled and empty.ocr_preview.value == NOT_RECOGNIZED
-
-    class Page:
-        width, height = 400.0, 800.0
-
-        def __init__(self):
-            self.shown = []
-
-        def show_dialog(self, dialog):
-            self.shown.append(dialog)
-
-    page = Page()
-    sheet = OcrSheet(box, 2, on_action=lambda *a: actions.append(a)).show(page)
-    assert page.shown == [sheet.dialog] and sheet.body.scroll is None  # compact: not full screen
-    short = Page()
-    short.height = 300.0
-    assert OcrSheet(box, 2, on_action=lambda *a: None).show(short).body.scroll is not None
-    assert OcrSheet({}, 0, on_action=lambda *a: None).ocr_field.read_only
+    assert empty.translate_button.disabled and empty.ocr_field.read_only
+    assert empty.ocr_field.hint_text == NOT_RECOGNIZED
+    empty.ocr_field.value = "typed"
+    assert empty.changes() == {}
