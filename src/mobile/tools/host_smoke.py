@@ -62,7 +62,8 @@ What it does (plan section 9, build-ci design section 7.4):
    ``pdf_mupdf_html`` (the WeasyPrint-subset shim; skipped until it is bundled) and
    ``headless_owner_env`` (the app's Env preview path: a ``HeadlessOwner`` built from a
    fresh-install config and ``run_env.build_translation_env``; the desktop defaults
-   ``authgpt/gpt-6-luna`` / ``AUTO_GLOSSARY_MODE=off`` must come out, and the process
+   (``AUTO_GLOSSARY_MODE=off``) with Glossarion Mobile's own default model
+   (``setting_writes.MOBILE_DEFAULT_MODEL``, authchatgpt/auto) must come out, and the process
    env, cwd and config.json must be left as they were) and ``manga_pipeline`` (U8: RT-DETR
    through the bundled ``bubble_detector``'s Python onnxruntime path on a tiny synthetic
    export planted in ``BUBBLE_CACHE_DIR``, then one fixture page through
@@ -150,6 +151,7 @@ _HARNESS_FILE = os.path.normcase(os.path.abspath(__file__))
 HOST_CHECKS = ("key_material", "chapter_extractor_pool", "jaro_winkler", "pdf_mupdf_html", "headless_owner_env",
                "manga_pipeline")
 # What a desktop fresh install runs with (U0 oracle; HeadlessOwner replays the desktop startup).
+# Mobile runs it with its own default model instead (check_headless_owner_env).
 FRESH_INSTALL_ENV = {"MODEL": "authgpt/gpt-6-luna", "AUTO_GLOSSARY_MODE": "off"}
 # A tiny RT-DETR-shaped ONNX export (inputs images [1,3,640,640] / orig_target_sizes [1,2]; three
 # constant detections: a bubble, a text bubble and one below the 0.3 threshold), built with
@@ -1088,9 +1090,13 @@ def make_host_checks(selftest: Any, keys: KeyState) -> Dict[str, Callable]:
         if not result.ok:
             raise AssertionError(f"build_env_preview failed: {result.error}")
         env = {row.key: row.value for row in result.rows}
-        wrong = {k: env.get(k) for k, v in FRESH_INSTALL_ENV.items() if env.get(k) != v}
+        # the desktop's fresh-install env, except the model: mobile's own default (owner 2026-10-12)
+        from glossarion_mobile.state.setting_writes import MOBILE_DEFAULT_MODEL
+
+        expected = {**FRESH_INSTALL_ENV, "MODEL": MOBILE_DEFAULT_MODEL}
+        wrong = {k: env.get(k) for k, v in expected.items() if env.get(k) != v}
         if wrong:
-            raise AssertionError(f"fresh-install run env differs from the desktop: {wrong} (expected {FRESH_INSTALL_ENV})")
+            raise AssertionError(f"fresh-install run env differs from the desktop: {wrong} (expected {expected})")
         if result.count < 300:
             raise AssertionError(f"only {result.count} variables in the translation env (desktop builds ~400)")
         changed = sorted(k for k in set(env_before) | set(os.environ) if env_before.get(k) != os.environ.get(k))
