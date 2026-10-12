@@ -232,7 +232,7 @@ _CHIP_BY_PROVIDER = {
     "xai": "xai", "authgrok": "xai",
     "mistral": "mistral",
     "openrouter": "openrouter",
-    "nvidia": "nvidia", "authnd": "nvidia",
+    "nvidia": "nvidia", "authnd": "nvidia", "authchatgpt": "openai",
     "ollama": "local", "lmstudio": "local", "ollamapull": "local",
 }
 _PROVIDER_LABELS = {
@@ -240,7 +240,7 @@ _PROVIDER_LABELS = {
     "authgem-vertex": "Gemini Vertex (sign-in)", "authgem-key": "Gemini key route", "vertex": "Vertex AI",
     "anthropic": "Anthropic", "authcd": "Claude (sign-in)", "deepseek": "DeepSeek", "authds": "DeepSeek web (sign-in)", "chutes": "Chutes",
     "xai": "xAI", "authgrok": "Grok (sign-in)", "mistral": "Mistral", "openrouter": "OpenRouter",
-    "nvidia": "NVIDIA NIM", "authnd": "NVIDIA Build (browser)", "ollama": "Ollama", "lmstudio": "LM Studio",
+    "nvidia": "NVIDIA NIM", "authnd": "NVIDIA Build (browser)", "authchatgpt": "ChatGPT web (browser)", "ollama": "Ollama", "lmstudio": "LM Studio",
     "ollamapull": "Managed Ollama", "groq": "Groq", "literouter": "LiteRouter", "opencode": "OpenCode Go",
     "opencode-zen": "OpenCode Zen", "electronhub": "ElectronHub", "nanogpt": "NanoGPT", "sambanova": "SambaNova",
     "together": "Together AI", "zai": "Z.AI", "zhipu": "Zhipu", "fireworks": "Fireworks", "cohere": "Cohere",
@@ -500,6 +500,8 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
         return pick(names, "glm")
     if route == "authds":  # DeepSeek web: Flash is its light tier; the route's model names are fixed
         return next((n for n in names if n.lower().split("/", 1)[-1] == "flash"), DEEPSEEK_DEFAULT_MODEL)
+    if route == "authchatgpt":  # ChatGPT web: auto works logged out and logged in
+        return next((n for n in names if n.lower() == "authchatgpt/auto"), names[0] if names else None)
     if route == "authnd":
         best = None
         for name in names:

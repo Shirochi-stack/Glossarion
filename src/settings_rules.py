@@ -679,7 +679,6 @@ EXCLUDED_ROUTE_PREFIXES = {
     'ocz/': "OpenCode Zen free models need the desktop npm/bun CLI.",
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",
     'search/opera': "Opera Aria mints its token by driving a desktop Opera browser.",
-    'authchatgpt/': "ChatGPT web chat drives a desktop Chrome or Edge browser.",
 }
 
 

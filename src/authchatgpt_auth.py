@@ -1,14 +1,22 @@
-"""ChatGPT web chat (chatgpt.com) through a dedicated, headless Chrome/Edge profile.
+"""ChatGPT web chat (chatgpt.com) in a browser page: no API key, login optional.
 
 Works without an account: chatgpt.com answers logged-out visitors. The ChatGPT login is
 optional and is the same one ``authgpt/`` uses (``authgpt_auth`` default token store): when
 it is present, the page's backend calls carry that OAuth access token, so the chat runs on
 the user's account and plan. The page itself produces the anti-abuse proofs (sentinel,
-Turnstile, proof of work) for every request; Glossarion only replaces the prompt and the
-model of the request the page sends, and reads the streamed answer.
+Turnstile, proof of work) for every request; Glossarion only replaces the prompt, the model
+and the thinking effort of the request the page sends, and reads the streamed answer.
 
-Every completion opens a new tab and a new chat. Logged-in chats are temporary chats, so
-translations do not fill the account's chat history. Desktop only.
+Models are named like chatgpt.com's own picker: ``authchatgpt/<version>-<effort>`` such as
+``gpt-6-instant``, ``gpt-6-medium``, ``gpt-5.6-sol-extra-high`` or ``gpt-6-pro``. The page
+resolves the name against the account's live picker (``/models`` ``versions`` and their
+``intelligence_presets``: model slug + thinking effort). ``auto`` and plain chatgpt.com model
+slugs work too.
+
+Desktop runs the page in a dedicated headless Chrome/Edge profile driven over DevTools
+(``cdp_browser``). Glossarion Mobile runs it in a hidden in-app WebView (``browser_driver``),
+like ``authnd/`` and ``authds/``. Every completion opens a new page and a new chat;
+logged-in chats are temporary chats, so translations do not fill the account's history.
 """
 from __future__ import annotations
 
@@ -20,6 +28,7 @@ import threading
 import time
 from contextlib import contextmanager
 
+import browser_driver
 import cdp_browser
 import mobile_runtime
 from authds_auth import build_prompt as _build_prompt
@@ -27,12 +36,21 @@ from authds_auth import build_prompt as _build_prompt
 BASE_URL = "https://chatgpt.com"
 PREFIX = "authchatgpt/"
 DEFAULT_MODEL = "auto"
+#: browser_driver page owner (Glossarion Mobile's in-app WebView): cancel_stream() closes only these pages.
+BROWSER_OWNER = "authchatgpt"
 # chatgpt.com serves logged-out visitors a different web app whose requests cannot carry
 # the OAuth token; any session cookie makes it serve the regular app (still logged out
 # until the token is added to its backend calls).
 _APP_COOKIE = {"name": "__Secure-next-auth.session-token", "value": "glossarion",
                "url": BASE_URL + "/", "httpOnly": True, "secure": True}
+_APP_COOKIE_JS = ("document.cookie = '__Secure-next-auth.session-token=glossarion; Secure; Path=/; "
+                  "SameSite=Lax'; true")
+_PLANS = {"free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "team": "Team",
+          "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "guest": "Guest"}
 _cancel = threading.Event()
+_announced = {}  # run id -> login lines already logged in that run
+_rejected = set()  # access tokens chatgpt.com refused: later requests go logged out at once
+_announce_lock = threading.Lock()
 
 
 class AuthChatGPTError(RuntimeError):
@@ -43,6 +61,7 @@ class AuthChatGPTError(RuntimeError):
 
 def cancel_stream():
     _cancel.set()
+    browser_driver.cancel_pages(BROWSER_OWNER)
 
 
 def reset_cancel():
@@ -60,13 +79,13 @@ def profile_dir():
 
 
 def resolve_model(model):
-    """The chatgpt.com model slug of ``authchatgpt/<slug>`` (``auto`` when empty)."""
+    """The picker name of ``authchatgpt/<name>`` (``auto`` when empty); the page resolves it."""
     name = re.sub(r"^authchatgpt/", "", str(model).strip(), flags=re.IGNORECASE).strip().lower()
     if not name:
         return DEFAULT_MODEL
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name):
-        raise AuthChatGPTError(f"Unknown AuthChatGPT model '{name}'. Use a chatgpt.com model slug such as "
-                               "auto, gpt-6 or gpt-6-thinking.", "config_error")
+        raise AuthChatGPTError(f"Unknown AuthChatGPT model '{name}'. Use a name from chatgpt.com's picker "
+                               "such as gpt-6-instant, gpt-6-medium or gpt-6-pro, or auto.", "config_error")
     return name
 
 
@@ -91,18 +110,64 @@ def has_login():
         return False
 
 
+def login_identity(token):
+    """(email, plan name) carried by a ChatGPT access token; blanks when unknown."""
+    try:
+        import authgpt_auth
+        claims = authgpt_auth._decode_jwt_payload(token) or {}
+    except Exception:
+        claims = {}
+    email = (claims.get("https://api.openai.com/profile") or {}).get("email") or claims.get("email") or ""
+    plan = str((claims.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type") or "")
+    return email, _PLANS.get(plan.lower(), plan.replace("_", " ").title())
+
+
+def _announce(key, message, log_fn):
+    """Log ``message`` once per Glossarion run (``GLOSSARION_RUN_ID``) and login state."""
+    run = os.environ.get("GLOSSARION_RUN_ID", "")
+    with _announce_lock:
+        seen = _announced.setdefault(run, set())
+        if key in seen:
+            return
+        seen.add(key)
+    log_fn(message)
+
+
+def _announce_logged_in(token, log_fn):
+    email, plan = login_identity(token)
+    _announce(f"in:{email}", f"🔐 AuthChatGPT: Logged in to ChatGPT as {email or 'your ChatGPT account'}"
+              + (f" · {plan} plan" if plan else "") + ".", log_fn)
+
+
+def _announce_logged_out(log_fn):
+    _announce("out", "🔓 AuthChatGPT: No ChatGPT login found. Using ChatGPT logged out (guest models and "
+              "limits); click ChatGPT Login to use your account.", log_fn)
+
+
+def _reject(token, reason, log_fn):
+    _rejected.add(token)
+    _announce("rejected", f"🔓 AuthChatGPT: ChatGPT did not accept the saved login ({reason.rstrip('.')}). Using "
+              "ChatGPT logged out; click ChatGPT Login to sign in again.", log_fn)
+
+
 def _access_token(log_fn):
     """The saved ChatGPT access token, refreshed when due; None means logged out. Never
     opens a login: without a usable token the chat runs logged out."""
     try:
         store = _token_store()
         if not store.has_tokens:
+            _announce_logged_out(log_fn)
             return None
-        return store.get_valid_access_token(auto_login=False)
+        token = store.get_valid_access_token(auto_login=False)
     except Exception:
-        log_fn("AuthChatGPT: the saved ChatGPT login could not be refreshed; continuing logged out. "
-               "Click ChatGPT Login to sign in again.")
+        _announce("unusable", "🔓 AuthChatGPT: The saved ChatGPT login could not be refreshed. Using ChatGPT "
+                  "logged out; click ChatGPT Login to sign in again.", log_fn)
         return None
+    if token in _rejected:
+        _announce("rejected", "🔓 AuthChatGPT: ChatGPT did not accept the saved login. Using ChatGPT logged out; "
+                  "click ChatGPT Login to sign in again.", log_fn)
+        return None
+    return token
 
 
 def _refreshed_token(rejected):
@@ -119,7 +184,7 @@ def _refreshed_token(rejected):
 
 
 # ---------------------------------------------------------------------------
-# Browser
+# Browser: desktop Chrome/Edge over DevTools
 # ---------------------------------------------------------------------------
 
 class _Page(cdp_browser.CdpPage):
@@ -146,7 +211,8 @@ def _browser_binary():
 @contextmanager
 def _launch_browser(*, visible=False, cancel_check=None):
     if not mobile_runtime.subprocesses_available():
-        raise AuthChatGPTError("AuthChatGPT needs the desktop app and Chrome/Edge.", "config_error")
+        raise AuthChatGPTError("AuthChatGPT needs the in-app browser here, or the desktop app with Chrome/Edge.",
+                               "config_error")
     with cdp_browser.launch(
             binary=_browser_binary(), profile=profile_dir(), start_url="about:blank",
             ready=lambda page, check: None, page_factory=lambda url, check: _Page(url, check),
@@ -160,12 +226,24 @@ def _launch_browser(*, visible=False, cancel_check=None):
 
 _READY = ("location.origin === 'https://chatgpt.com' && !!window.__glossarionGPT && "
           "!!document.querySelector('#prompt-textarea')")
+_CHALLENGE = "document.title === 'Just a moment...'"
+_NOT_LOADED = "ChatGPT page did not finish loading. Check your connection and try again."
 
 
 def _tab_ready(page, cancel_check):
-    cdp_browser.wait_until(
-        page, _READY, timeout=60, check=_check, error=AuthChatGPTError, cancel_check=cancel_check,
-        message="ChatGPT page did not finish loading. Check your connection and try again.")
+    try:
+        cdp_browser.wait_until(page, _READY, timeout=40, check=_check, error=AuthChatGPTError,
+                               cancel_check=cancel_check, message=_NOT_LOADED)
+        return
+    except AuthChatGPTError as exc:
+        if exc.error_type == "cancelled" or not page.evaluate(_CHALLENGE):
+            raise
+    # A Cloudflare check that never clears is tied to the profile's cookies: start them over.
+    page.call("Network.clearBrowserCookies")
+    page.call("Network.setCookie", _APP_COOKIE)
+    page.call("Page.reload")
+    cdp_browser.wait_until(page, _READY, timeout=45, check=_check, error=AuthChatGPTError,
+                           cancel_check=cancel_check, message=_NOT_LOADED)
 
 
 _LEASES = cdp_browser.BrowserLeases(
@@ -181,29 +259,131 @@ def _prepare(config):
         if agent:
             page.call("Emulation.setUserAgentOverride", {"userAgent": agent})
         page.call("Network.setCookie", _APP_COOKIE)
-        page.call("Page.addScriptToEvaluateOnNewDocument",
-                  {"source": _HOOK_SCRIPT.replace("__CONFIG__", json.dumps(config))})
+        page.call("Page.addScriptToEvaluateOnNewDocument", {"source": _hook(config)})
     return prepare
+
+
+# ---------------------------------------------------------------------------
+# Browser: Glossarion Mobile's hidden in-app WebView
+# ---------------------------------------------------------------------------
+
+class _DriverPage:
+    """A ``browser_driver`` page with the CDP page's ``evaluate`` (mobile)."""
+
+    driver = True
+
+    def __init__(self, page):
+        self.page = page
+
+    def evaluate(self, expression):
+        try:
+            return self.page.run_js(expression, 30000)
+        except browser_driver.BrowserCancelled as exc:
+            raise AuthChatGPTError("AuthChatGPT: translation stopped by user", "cancelled") from exc
+        except Exception as exc:
+            raise AuthChatGPTError("AuthChatGPT browser script failed. Try again.", "browser_error") from exc
+
+
+def _driver_load(wrapped, cancel_check):
+    wrapped.page.load(BASE_URL + "/")
+    cdp_browser.wait_until(
+        wrapped, "document.readyState !== 'loading' && location.origin === 'https://chatgpt.com'", timeout=45,
+        check=_check, error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
+        tolerate=("browser_error", "timeout"), interval=.3)
+
+
+@contextmanager
+def _driver_tab(config, cancel_check=None):
+    """A hooked chatgpt.com page of the registered browser driver (mobile; no subprocess).
+
+    A WebView page cannot run a script before the site's own, so the hook is added once the
+    app has started; the conversation request still goes through it."""
+    try:
+        driver = browser_driver.require_driver("AuthChatGPT")
+    except browser_driver.BrowserUnavailable as exc:
+        raise AuthChatGPTError("AuthChatGPT needs the in-app browser (Glossarion Mobile) or the desktop app "
+                               "with Chrome/Edge.", "config_error") from exc
+
+    def cancelled():
+        return _cancel.is_set() or bool(cancel_check and cancel_check())
+
+    page = driver.open_page(owner=BROWSER_OWNER, cancel_check=cancelled)
+    try:
+        wrapped = _DriverPage(page)
+        _driver_load(wrapped, cancel_check)
+        if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
+            wrapped.evaluate(_APP_COOKIE_JS)
+            _driver_load(wrapped, cancel_check)
+        cdp_browser.wait_until(wrapped, "!!document.querySelector('#prompt-textarea')", timeout=45, check=_check,
+                               error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
+                               tolerate=("browser_error", "timeout"), interval=.3)
+        wrapped.evaluate(_hook(config) + "; true")
+        yield wrapped
+    finally:
+        page.close()
 
 
 @contextmanager
 def _open_tab(config, cancel_check=None):
-    """A new chatgpt.com tab of the shared browser, hooked with ``config``."""
+    """A new chatgpt.com page, hooked with ``config``: a tab of the shared desktop browser,
+    or a hidden in-app WebView page on Glossarion Mobile."""
+    if browser_driver.use_driver("AUTHCHATGPT_MODE"):
+        with _driver_tab(config, cancel_check) as page:
+            yield page
+        return
     if not mobile_runtime.subprocesses_available():
-        raise AuthChatGPTError("AuthChatGPT needs the desktop app and Chrome/Edge.", "config_error")
+        raise AuthChatGPTError("AuthChatGPT needs the in-app browser here, or the desktop app with Chrome/Edge.",
+                               "config_error")
     with _LEASES.open(cancel_check=cancel_check, prepare=_prepare(config)) as page:
         yield page
 
 
-# Runs before the page's own scripts. Logged in, every backend call goes to the account
-# API with the token; the conversation request gets Glossarion's prompt and model, and its
-# streams (the reply may continue on /resume) are copied into a queue Python drains.
+def _hook(config):
+    return _HOOK_SCRIPT.replace("__CONFIG__", json.dumps(config))
+
+
+# Logged in, every backend call goes to the account API with the token; the conversation
+# request gets Glossarion's prompt, model and thinking effort, and its streams (the reply
+# may continue on /resume) are copied into a queue Python drains. The picker catalog
+# (window.__glossarionGPT.loadCatalog) maps picker names to a model slug and an effort.
 _HOOK_SCRIPT = r"""(() => {
  if (window.__glossarionGPT) return;
  const cfg = __CONFIG__;
- const state = window.__glossarionGPT = {chunks:[], requested:false, streams:0, open:0, closedAt:0, status:0, error:null, sentinel:0};
+ const state = window.__glossarionGPT = {chunks:[], requested:false, streams:0, open:0, closedAt:0, status:0,
+  error:null, kind:null, sentinel:0, resolved:null, catalog:null, catalogError:null};
  const nativeFetch = window.fetch;
  const backend = /^\/backend-(anon|api)\//, conversation = /^\/backend-(anon|api)\/f\/conversation(\/resume)?$/;
+ const norm = s => String(s || '').toLowerCase().trim().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
+ let catalogPromise = null;
+ state.loadCatalog = () => catalogPromise || (catalogPromise = (async () => {
+  const path = (cfg.token ? '/backend-api' : '/backend-anon') + '/models?iim=false&is_gizmo=false&supports_model_picker_upgrade_presets=true';
+  const response = await nativeFetch.call(window, path, {credentials:'include',
+   headers: cfg.token ? {authorization:'Bearer ' + cfg.token} : {}});
+  if (!response.ok) throw Error('HTTP ' + response.status);
+  const data = await response.json(), names = {}, locked = {};
+  for (const version of data.versions || []) {
+   if (version.enabled === false) continue;
+   let label = norm(version.display_text_for_intelligence || version.id);
+   if (!label || label === 'auto') continue;
+   if (!label.startsWith('gpt')) label = 'gpt-' + label;
+   for (const preset of version.intelligence_presets || []) {
+    const name = label + '-' + norm(preset.title || preset.selected_display_title);
+    const into = preset.preset_type === 'available' ? names : locked;
+    if (!(name in into)) into[name] = {model:preset.model_slug, effort:preset.thinking_effort || null,
+     title:((version.display_text_for_intelligence || version.id) + ' ' + (preset.title || '')).trim()};
+   }
+  }
+  return state.catalog = {names, locked, slugs:(data.models || []).map(m => m.slug)};
+ })().catch(e => { state.catalogError = String(e && e.message || e); catalogPromise = null; return null; }));
+ async function resolve(name) {
+  const catalog = await state.loadCatalog();
+  if (!catalog) return {model:name, effort:null, title:name};  // picker unavailable: a plain slug
+  if (catalog.names[name]) return catalog.names[name];
+  if (name === 'auto' || catalog.slugs.includes(name)) return {model:name, effort:null, title:name};
+  if (catalog.locked[name]) return {error:name + ' is not included in ' + (cfg.token ? 'this ChatGPT plan' : 'logged-out ChatGPT') + '.'};
+  return {error:'Unknown model ' + name + (cfg.token ? '' : ' for logged-out ChatGPT (log in with ChatGPT Login for more models)')
+   + '. Available: ' + Object.keys(catalog.names).concat('auto').join(', ')};
+ }
  window.fetch = async function(input, init) {
   // Building a Request from a Request consumes its body: inspect first, rebuild only to rewrite.
   const url = new URL(input instanceof Request ? input.url : String(input), location.href);
@@ -218,12 +398,16 @@ _HOOK_SCRIPT = r"""(() => {
   }
   let body = ['GET', 'HEAD'].includes(request.method) ? undefined : await request.clone().arrayBuffer();
   if (isConversation && !url.pathname.endsWith('/resume')) {
-   // One chat turn per tab: a repeated Send never becomes a second request.
+   // One chat turn per page: a repeated Send never becomes a second request.
    if (state.requested) return new Response(null, {status:409});
    state.requested = true;
+   const pick = await resolve(cfg.model);
+   if (pick.error) { state.error = pick.error; state.kind = 'config_error'; return new Response(null, {status:400}); }
+   state.resolved = pick;
    const payload = JSON.parse(new TextDecoder().decode(body));
    payload.messages[payload.messages.length - 1].content = {content_type:'text', parts:[cfg.prompt]};
-   payload.model = cfg.model;
+   payload.model = pick.model;
+   if (pick.effort) payload.thinking_effort = pick.effort; else delete payload.thinking_effort;
    if (cfg.temporary) payload.history_and_training_disabled = true;
    body = JSON.stringify(payload);
   }
@@ -253,11 +437,18 @@ _HOOK_SCRIPT = r"""(() => {
 })()"""
 
 _POLL = """(() => {const s = window.__glossarionGPT; return s ? {chunks:s.chunks.splice(0), streams:s.streams,
- open:s.open, idle:s.closedAt ? Date.now() - s.closedAt : 0, status:s.status, error:s.error, sentinel:s.sentinel} : null;})()"""
+ open:s.open, idle:s.closedAt ? Date.now() - s.closedAt : 0, status:s.status, error:s.error, kind:s.kind,
+ sentinel:s.sentinel, resolved:s.resolved} : null;})()"""
 _COMPOSER = ("(() => {const c = document.querySelector('#prompt-textarea'), b = document.querySelector('[data-testid=\"send-button\"]');"
              " return {text: c ? c.innerText.trim() : null, send: !!b && !b.disabled,"
              " requested: !!(window.__glossarionGPT && (window.__glossarionGPT.requested || window.__glossarionGPT.sentinel))};})()")
+# Plain DOM typing (no DevTools input), so the WebView driver can do it too.
+_TYPE = ("(() => {const c = document.querySelector('#prompt-textarea'); if (!c) return false; c.focus();"
+         " return document.execCommand('insertText', false, '.');})()")
 _SEND = "(() => {const b = document.querySelector('[data-testid=\"send-button\"]'); if (b) b.click(); return true;})()"
+_LOAD_CATALOG = "(() => {window.__glossarionGPT.loadCatalog(); return true;})()"
+_CATALOG = ("(() => {const s = window.__glossarionGPT; return s ? {catalog: s.catalog && {names: s.catalog.names},"
+            " error: s.catalogError} : null;})()")
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +634,7 @@ def _submit(page, cancel_check, before_send_callback):
             return
         waiting = clicked is not None and time.monotonic() - clicked < 8
         if state.get("text") == "" and not waiting:
-            page.evaluate("document.querySelector('#prompt-textarea').focus()")
-            page.call("Input.insertText", {"text": "."})
+            page.evaluate(_TYPE)
         elif state.get("text") and state.get("send") and not waiting:
             if clicked is None and before_send_callback:
                 before_send_callback()
@@ -460,14 +650,17 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
     parser.on_thinking = on_thinking
     started = time.monotonic()
     deadline = started + timeout
+    resolved = None
     while time.monotonic() < deadline:
         _check(cancel_check)
         state = page.evaluate(_POLL)
         if not state:
             raise AuthChatGPTError("AuthChatGPT page was reloaded during translation.", "browser_error")
+        resolved = state.get("resolved") or resolved
         if state.get("error"):
             # Server detail text only: tokens and browser state never reach the log.
-            raise AuthChatGPTError(f"AuthChatGPT: {state['error']}", _kind(state.get("status", 0)))
+            raise AuthChatGPTError(f"AuthChatGPT: {state['error']}",
+                                   state.get("kind") or _kind(state.get("status", 0)))
         for chunk in state.get("chunks", []):
             for delta in parser.feed(chunk):
                 if on_delta:
@@ -478,7 +671,8 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
             if not parser.content.strip():
                 raise AuthChatGPTError("AuthChatGPT returned no answer text.")
             return {"content": parser.content, "reasoning_content": parser.reasoning,
-                    "finish_reason": "stop", "usage": None, "model": parser.model}
+                    "finish_reason": "stop", "usage": None, "model": parser.model,
+                    "thinking_effort": (resolved or {}).get("effort")}
         sentinel = state.get("sentinel") or 0
         if sentinel and not state.get("streams"):
             raise AuthChatGPTError(f"AuthChatGPT: ChatGPT refused the request check (HTTP {sentinel}).",
@@ -494,22 +688,62 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
     raise AuthChatGPTError("AuthChatGPT translation timed out; partial translation discarded.", "timeout")
 
 
+def _login_rejected(exc):
+    """A request that failed because of the login (not the prompt or a limit)."""
+    return exc.error_type == "auth_error" or (
+        exc.error_type == "access_denied" and "unusual activity" in str(exc).lower())
+
+
 def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=print,
                          cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None):
-    slug = resolve_model(model)
+    name = resolve_model(model)
     prompt = build_prompt(messages)
     token = _access_token(log_fn)
-    for attempt in range(2):
-        config = {"token": token, "prompt": prompt, "model": slug, "temporary": bool(token)}
+    refreshed = False
+    while True:
+        config = {"token": token, "prompt": prompt, "model": name, "temporary": bool(token)}
         with _open_tab(config, cancel_check) as page:
             try:
-                return _complete(page, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
+                result = _complete(page, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
+                if token:
+                    _announce_logged_in(token, log_fn)
+                return result
             except AuthChatGPTError as exc:
-                if exc.error_type != "auth_error" or not token or attempt:
+                if not token or not _login_rejected(exc):
                     raise
-        replacement = _refreshed_token(token)
-        if not replacement:
-            log_fn("AuthChatGPT: ChatGPT rejected the saved login; continuing logged out. "
-                   "Click ChatGPT Login to sign in again.")
-        token = replacement
-    raise AuthChatGPTError("AuthChatGPT request failed.", "auth_error")
+                kind, reason = exc.error_type, str(exc).replace("AuthChatGPT: ", "")
+        # The login failed this request: one refresh, then the chat runs logged out.
+        replacement = None if refreshed or kind != "auth_error" else _refreshed_token(token)
+        refreshed = True
+        if replacement:
+            _rejected.add(token)
+            token = replacement
+            continue
+        _reject(token, reason, log_fn)
+        token = None
+
+
+def list_models(timeout=90, log_fn=print, cancel_check=None):
+    """``authchatgpt/`` picker names of the account's (or logged-out) chatgpt.com picker."""
+    token = _access_token(log_fn)
+    while True:
+        config = {"token": token, "prompt": "", "model": DEFAULT_MODEL, "temporary": bool(token)}
+        with _open_tab(config, cancel_check) as page:
+            page.evaluate(_LOAD_CATALOG)
+            deadline = time.monotonic() + timeout
+            error = None
+            while time.monotonic() < deadline and not error:
+                _check(cancel_check)
+                state = page.evaluate(_CATALOG) or {}
+                if state.get("catalog"):
+                    names = state["catalog"].get("names") or {}
+                    return [PREFIX + DEFAULT_MODEL] + [PREFIX + name for name in names]
+                error = state.get("error")
+                time.sleep(.3)
+        if not error:
+            raise AuthChatGPTError("AuthChatGPT timed out reading ChatGPT's models.", "timeout")
+        if token and error == "HTTP 401":
+            _reject(token, error, log_fn)
+            token = None
+            continue
+        raise AuthChatGPTError(f"AuthChatGPT could not read ChatGPT's models ({error}).")

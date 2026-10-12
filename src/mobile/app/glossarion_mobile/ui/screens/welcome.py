@@ -61,13 +61,14 @@ SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude
 OTHER_SIGN_INS = SIGN_INS[1:]
 #: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
 #: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
-KEYLESS = (("authnd", "NVIDIA Build free models (authnd/, no sign-in)"),)
+KEYLESS = (("authchatgpt", "ChatGPT web chat (authchatgpt/, no sign-in)"),
+           ("authnd", "NVIDIA Build free models (authnd/, no sign-in)"))
 #: output-token slider range (the mobile default is 16,384; the field takes any value)
 TOKEN_SLIDER = (1024, 131072)
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
 PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
-                        "authnan": "authnan/", "authds": "authds/", "authnd": "authnd/"}
+                        "authnan": "authnan/", "authds": "authds/", "authnd": "authnd/", "authchatgpt": "authchatgpt/"}
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
@@ -227,7 +228,7 @@ class WelcomeScreen(Screen):
         return ft.Column(lines, spacing=2, tight=True)
 
     async def use_keyless(self, provider: str) -> None:
-        """A keyless route: poll its models first, then use its recommended model (authnd/: the highest
+        """A keyless route: poll its models first, then use its recommended model (authchatgpt/: auto; authnd/: the highest
         Nemotron) and say which; without one, the ModelSheet on its models (a model that exists right now)."""
         from glossarion_mobile.services import model_catalog as mc
 

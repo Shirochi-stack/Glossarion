@@ -452,13 +452,25 @@ def _get_static_model_options() -> List[str]:
         "authds/pro",
         "authds/flash-thinking",
         "authds/pro-thinking",
-        # ChatGPT web chat (chatgpt.com; no API key, login optional - reuses the authgpt/ login)
+        # ChatGPT web chat (chatgpt.com; no API key, login optional - reuses the authgpt/ login).
+        # Named like chatgpt.com's picker: <version>-<thinking effort>; Poll providers lists the
+        # account's own picker (logged out: auto and gpt-6-instant).
         "authchatgpt/auto",
-        "authchatgpt/gpt-6",
-        "authchatgpt/gpt-6-mini",
         "authchatgpt/gpt-6-instant",
-        "authchatgpt/gpt-6-thinking",
+        "authchatgpt/gpt-6-medium",
+        "authchatgpt/gpt-6-high",
+        "authchatgpt/gpt-6-extra-high",
         "authchatgpt/gpt-6-pro",
+        "authchatgpt/gpt-5.6-sol-instant",
+        "authchatgpt/gpt-5.6-sol-medium",
+        "authchatgpt/gpt-5.6-sol-high",
+        "authchatgpt/gpt-5.6-sol-extra-high",
+        "authchatgpt/gpt-5.6-sol-pro",
+        "authchatgpt/gpt-5.5-instant",
+        "authchatgpt/gpt-5.5-medium",
+        "authchatgpt/gpt-5.5-high",
+        "authchatgpt/gpt-5.5-extra-high",
+        "authchatgpt/gpt-5.5-pro",
         "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",
         "authnd/deepseek-ai/deepseek-v4-flash",
@@ -726,6 +738,8 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
     # The local proxy is queried only if it is already running. Catalog
     # discovery must never start the proxy or open an OAuth browser window.
     ProviderCatalogSpec("autharena", "autharena/", "http://127.0.0.1/v1/models", public=True),
+    # chatgpt.com's picker, read in the authchatgpt/ browser page (Cloudflare blocks plain HTTP).
+    ProviderCatalogSpec("authchatgpt", "authchatgpt/", "https://chatgpt.com/backend-api/models", public=True),
     ProviderCatalogSpec(
         "antigravity", "antigravity/", "http://localhost:3000/v1/models",
         public=True, base_url_env="ANTIGRAVITY_PROXY_URL", models_path="/v1/models",
@@ -746,6 +760,7 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("ollama/", "ollama"),
     ("lmstudio/", "lmstudio"),
     ("autharena/", "autharena"),
+    ("authchatgpt/", "authchatgpt"),
     ("authgem-vertex/", "static"),
     ("authgrok/", "authgrok"),
     ("authgem-key/", "static"),
@@ -1295,6 +1310,9 @@ def _fetch_provider_catalog(
     if spec.name == "autharena":
         from autharena_proxy import list_models
         return ["autharena/" + m["id"] for m in list_models(timeout=max(timeout, 120))]
+    if spec.name == "authchatgpt":
+        from authchatgpt_auth import list_models
+        return list_models(timeout=max(timeout, 90), log_fn=lambda _message: None)
     url = _provider_models_url(spec)
     headers = {
         "Accept": "application/json",
@@ -1796,6 +1814,10 @@ def refresh_provider_model_catalogs(
             if not list_accounts():
                 statuses[spec.name] = "waiting for Arena Login"
                 continue
+        if spec.name == "authchatgpt" and only_provider != "authchatgpt" and active_provider != "authchatgpt":
+            # its poll opens a browser page: only when asked for, or when an authchatgpt/ model is selected
+            statuses[spec.name] = "polled when an authchatgpt/ model is selected"
+            continue
         key = _provider_key(spec, active_provider, active_api_key, provider_keys)
         if spec.name.startswith("custom:") and active_api_key:
             key = str(active_api_key).strip()
@@ -2066,11 +2088,13 @@ PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
         Requires desktop Chrome or Edge; web-chat account limits apply.</p>
 
         <h4>ChatGPT web chat (authchatgpt/)</h4>
-        <p>Select <code>authchatgpt/auto</code> (or any chatgpt.com model slug, such as <code>authchatgpt/gpt-6</code>)
-        and translate: no API key and no login are needed. Logging in is optional: click ChatGPT Login
-        (the same login as <code>authgpt/</code>) to use your account's models, such as
-        <code>-thinking</code>, <code>-instant</code> and <code>-pro</code>, and its limits; those chats are temporary.
-        Requires desktop Chrome or Edge; logged-out use has ChatGPT's guest limits.</p>
+        <p>Select <code>authchatgpt/auto</code> and translate: no API key and no login are needed. Models are
+        named like ChatGPT's own picker, version then thinking effort: <code>authchatgpt/gpt-6-instant</code>,
+        <code>-medium</code>, <code>-high</code>, <code>-extra-high</code>, <code>-pro</code>, and the same for
+        <code>gpt-5.6-sol</code> and <code>gpt-5.5</code>; Poll providers lists your own picker. Logging in is optional:
+        click ChatGPT Login (the same login as <code>authgpt/</code>) for your plan's models and limits; those chats are
+        temporary. Logged out, ChatGPT offers <code>auto</code> and <code>gpt-6-instant</code> with guest limits.
+        Runs in Chrome or Edge on desktop and in the in-app browser on mobile.</p>
 
         <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
         <p>Use models running on your computer without an API key or custom endpoint toggle.</p>

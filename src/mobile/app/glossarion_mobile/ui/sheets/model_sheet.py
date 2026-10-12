@@ -135,7 +135,7 @@ DEPENDENCY_ROUTES = {
              "client), so poe/ models cannot run on mobile. The saved p-b cookie is kept for the desktop."),
 }
 #: Browser-backed keyless routes (they run in the hidden in-app browser, services.webview_bridge).
-WEBVIEW_ROUTES = ("authnd/", "search/gemini")
+WEBVIEW_ROUTES = ("authnd/", "search/gemini", "authchatgpt/")
 
 
 def dependency_reason(model: str) -> Optional[tuple]:

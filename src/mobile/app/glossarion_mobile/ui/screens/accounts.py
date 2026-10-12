@@ -102,6 +102,11 @@ EXPERIMENTAL_ACCOUNTS = (
      "No sign-in. A hidden in-app browser asks Google Search AI Mode and reads its answer; long "
      "prompts are split into browser sub-chunks (Settings › Response handling › Gemini Free "
      "browser chunking). Pick the search/gemini model."),
+    ("AuthChatGPT (ChatGPT web chat)", "authchatgpt/",
+     "No sign-in needed. A hidden in-app browser opens chatgpt.com and sends each request through ChatGPT's own "
+     "web chat; logged out it offers authchatgpt/auto and gpt-6-instant with guest limits. Models are named like "
+     "ChatGPT's picker (authchatgpt/gpt-6-medium, -high, -extra-high, -pro); Models › Poll providers lists yours. "
+     "Signing in with ChatGPT is optional and the run log says whether it is used."),
 )
 EXPERIMENTAL_CHIP = "Experimental"
 #: seconds between DeepSeek session checks while its sign-in sheet is open

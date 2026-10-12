@@ -497,7 +497,7 @@ def test_accounts_experimental_rows_follow_the_bridge(monkeypatch):
     assert all(row.trailing.detail == wb.UNSUPPORTED_REASON for row in tile.controls)
     monkeypatch.setattr(wb, "availability", lambda: (True, ""))
     tile = screen._experimental_tile()
-    assert [row.key for row in tile.controls] == ["experimental-authnd/", "experimental-search/gemini"]
+    assert [row.key for row in tile.controls] == ["experimental-authnd/", "experimental-search/gemini", "experimental-authchatgpt/"]
     assert not any(row.disabled for row in tile.controls)
     assert {row.trailing.reason for row in tile.controls} == {accounts.EXPERIMENTAL_CHIP}
     sheet = screen.show_experimental("AuthND (NVIDIA Build)", accounts.EXPERIMENTAL_ACCOUNTS[0][2])
