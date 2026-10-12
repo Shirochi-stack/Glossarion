@@ -267,15 +267,27 @@ def _prepare(config):
 # Browser: Glossarion Mobile's hidden in-app WebView
 # ---------------------------------------------------------------------------
 
+_FRAME_ID = "glossarion-chatgpt"
+_FRAME = f"document.getElementById('{_FRAME_ID}')"
+# The top page only hosts the chat iframe: a small same-origin document, not a second app.
+_HOST_URL = BASE_URL + "/robots.txt"
+
+
 class _DriverPage:
-    """A ``browser_driver`` page with the CDP page's ``evaluate`` (mobile)."""
+    """A ``browser_driver`` page with the CDP page's ``evaluate`` (mobile).
+
+    Once the chat iframe exists, scripts run against its window and document."""
 
     driver = True
 
     def __init__(self, page):
         self.page = page
+        self.framed = False
 
     def evaluate(self, expression):
+        if self.framed:
+            expression = (f"((window, document) => ({expression}))"
+                          f"({_FRAME}.contentWindow, {_FRAME}.contentWindow.document)")
         try:
             return self.page.run_js(expression, 30000)
         except browser_driver.BrowserCancelled as exc:
@@ -284,20 +296,52 @@ class _DriverPage:
             raise AuthChatGPTError("AuthChatGPT browser script failed. Try again.", "browser_error") from exc
 
 
-def _driver_load(wrapped, cancel_check):
-    wrapped.page.load(BASE_URL + "/")
+def _frame_script(config):
+    """Adds the chat iframe to the host page and hooks its window in the same task.
+
+    A WebView cannot run a script before a page's own, but a same-origin iframe keeps its
+    first (about:blank) window when chatgpt.com loads in it: hooked at insertion, the app
+    starts with the hook in place, exactly like the desktop browser's document-start script.
+    The ChatGPT login needs that (a hook added after the app started gets "Unusual activity").
+    """
+    return (f"(() => {{const old = {_FRAME}; if (old) old.remove();"
+            " const frame = document.createElement('iframe');"
+            f" frame.id = '{_FRAME_ID}';"
+            " frame.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff';"
+            " frame.src = 'https://chatgpt.com/'; document.documentElement.appendChild(frame);"
+            f" {_hook(config, 'frame.contentWindow')}; return true;}})()")
+
+
+def _driver_load(wrapped, url, cancel_check):
+    wrapped.page.load(url)
     cdp_browser.wait_until(
         wrapped, "document.readyState !== 'loading' && location.origin === 'https://chatgpt.com'", timeout=45,
         check=_check, error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
         tolerate=("browser_error", "timeout"), interval=.3)
 
 
+def _driver_frame(wrapped, config, cancel_check):
+    """Logged in: chatgpt.com in the chat iframe of a small host page, hooked at insertion."""
+    _driver_load(wrapped, _HOST_URL, cancel_check)
+    if not wrapped.evaluate("document.cookie.indexOf('oai-did=') >= 0"):
+        # A first visit: chatgpt.com sets up its device cookies on a top-level page load.
+        _driver_load(wrapped, BASE_URL + "/", cancel_check)
+        cdp_browser.wait_until(wrapped, "document.cookie.indexOf('oai-did=') >= 0", timeout=30, check=_check,
+                               error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
+                               tolerate=("browser_error", "timeout"), interval=.3)
+        _driver_load(wrapped, _HOST_URL, cancel_check)
+    wrapped.evaluate(_APP_COOKIE_JS)
+    wrapped.evaluate(_frame_script(config))
+    wrapped.framed = True
+    cdp_browser.wait_until(wrapped, _READY, timeout=60, check=_check, error=AuthChatGPTError,
+                           cancel_check=cancel_check, message=_NOT_LOADED,
+                           tolerate=("browser_error", "timeout"), interval=.3)
+    wrapped.evaluate("window.__glossarionGPT.watch()")
+
+
 @contextmanager
 def _driver_tab(config, cancel_check=None):
-    """A hooked chatgpt.com page of the registered browser driver (mobile; no subprocess).
-
-    A WebView page cannot run a script before the site's own, so the hook is added once the
-    app has started; the conversation request still goes through it."""
+    """A hooked chatgpt.com page of the registered browser driver (mobile; no subprocess)."""
     try:
         driver = browser_driver.require_driver("AuthChatGPT")
     except browser_driver.BrowserUnavailable as exc:
@@ -310,14 +354,19 @@ def _driver_tab(config, cancel_check=None):
     page = driver.open_page(owner=BROWSER_OWNER, cancel_check=cancelled)
     try:
         wrapped = _DriverPage(page)
-        _driver_load(wrapped, cancel_check)
-        if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
-            wrapped.evaluate(_APP_COOKIE_JS)
-            _driver_load(wrapped, cancel_check)
-        cdp_browser.wait_until(wrapped, "!!document.querySelector('#prompt-textarea')", timeout=45, check=_check,
-                               error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
-                               tolerate=("browser_error", "timeout"), interval=.3)
-        wrapped.evaluate(_hook(config) + "; true")
+        if config.get("token"):
+            _driver_frame(wrapped, config, cancel_check)
+        else:
+            # Logged out, the app runs as the page itself (in the iframe chatgpt.com refuses a
+            # logged-out turn): the hook is added once it started, which logged-out chat allows.
+            _driver_load(wrapped, BASE_URL + "/", cancel_check)
+            if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
+                wrapped.evaluate(_APP_COOKIE_JS)
+                _driver_load(wrapped, BASE_URL + "/", cancel_check)
+            cdp_browser.wait_until(wrapped, "!!document.querySelector('#prompt-textarea')", timeout=45,
+                                   check=_check, error=AuthChatGPTError, cancel_check=cancel_check,
+                                   message=_NOT_LOADED, tolerate=("browser_error", "timeout"), interval=.3)
+            wrapped.evaluate(_hook(config) + "; true")
         yield wrapped
     finally:
         page.close()
@@ -338,15 +387,16 @@ def _open_tab(config, cancel_check=None):
         yield page
 
 
-def _hook(config):
-    return _HOOK_SCRIPT.replace("__CONFIG__", json.dumps(config))
+def _hook(config, target="window"):
+    """The page hook for ``config``, installed into the window ``target`` (a JS expression)."""
+    return _HOOK_SCRIPT.replace("__CONFIG__", json.dumps(config)).replace("__TARGET__", target)
 
 
 # Logged in, every backend call goes to the account API with the token; the conversation
 # request gets Glossarion's prompt, model and thinking effort, and its streams (the reply
 # may continue on /resume) are copied into a queue Python drains. The picker catalog
 # (window.__glossarionGPT.loadCatalog) maps picker names to a model slug and an effort.
-_HOOK_SCRIPT = r"""(() => {
+_HOOK_SCRIPT = r"""((window) => {
  if (window.__glossarionGPT) return;
  const cfg = __CONFIG__;
  const state = window.__glossarionGPT = {chunks:[], requested:false, streams:0, open:0, closedAt:0, status:0,
@@ -384,7 +434,12 @@ _HOOK_SCRIPT = r"""(() => {
   return {error:'Unknown model ' + name + (cfg.token ? '' : ' for logged-out ChatGPT (log in with ChatGPT Login for more models)')
    + '. Available: ' + Object.keys(catalog.names).concat('auto').join(', ')};
  }
- window.fetch = async function(input, init) {
+ function install(win) {
+  if (win.__glossarionHooked) return;
+  win.__glossarionHooked = true;
+  const nativeFetch = win.fetch, Request = win.Request, Headers = win.Headers, Response = win.Response,
+   URL = win.URL, location = win.location;
+  win.fetch = async function(input, init) {
   // Building a Request from a Request consumes its body: inspect first, rebuild only to rewrite.
   const url = new URL(input instanceof Request ? input.url : String(input), location.href);
   if (url.origin !== location.origin || !backend.test(url.pathname)) return nativeFetch.call(this, input, init);
@@ -433,8 +488,26 @@ _HOOK_SCRIPT = r"""(() => {
    finally { state.open -= 1; state.closedAt = Date.now(); }
   })();
   return new Response(page, {status:response.status, statusText:response.statusText, headers:response.headers});
+  };
+ }
+ install(window);
+ // The page's sentinel iframe (anti-abuse proofs) sends its own requests, which must carry the
+ // same login. A same-origin iframe keeps its first (about:blank) window when its page loads,
+ // so hooking it on insertion runs the hook before the iframe's own scripts.
+ state.watch = () => {
+  if (!window.MutationObserver || !window.document) return false;
+  if (state.watched === window.document) return true;
+  state.watched = window.document;
+  new window.MutationObserver(records => {
+   for (const record of records) for (const node of record.addedNodes) {
+    const frames = node.tagName === 'IFRAME' ? [node] : (node.querySelectorAll ? [...node.querySelectorAll('iframe')] : []);
+    for (const frame of frames) { try { if (frame.contentWindow) install(frame.contentWindow); } catch (_) {} }
+   }
+  }).observe(window.document, {childList:true, subtree:true});
+  return true;
  };
-})()"""
+ state.watch();
+})(__TARGET__)"""
 
 _POLL = """(() => {const s = window.__glossarionGPT; return s ? {chunks:s.chunks.splice(0), streams:s.streams,
  open:s.open, idle:s.closedAt ? Date.now() - s.closedAt : 0, status:s.status, error:s.error, kind:s.kind,
