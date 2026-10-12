@@ -311,11 +311,14 @@ def build_prompt(messages, error=AuthDSError, label="AuthDS", images=None):
             content = "\n".join(text for text in texts if text)
         elif not isinstance(content, str):
             raise error(f"{label} currently supports text messages only.", "config_error")
-        if content:
-            parts.append(f"[{message.get('role', 'user')}]\n{content}")
+        # the same text twice (image requests send their prompt as system and user text) is sent once
+        if content and content.strip() not in {text.strip() for _role, text in parts}:
+            parts.append((message.get('role', 'user'), content))
     if not parts and not images:
         raise error(f"{label} cannot send an empty prompt.", "config_error")
-    return "\n\n".join(parts)
+    if len(parts) == 1:  # one message needs no role header
+        return parts[0][1]
+    return "\n\n".join(f"[{role}]\n{text}" for role, text in parts)
 
 
 class StreamParser:
