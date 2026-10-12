@@ -405,6 +405,34 @@ _HOOK_SCRIPT = r"""((window) => {
  const backend = /^\/backend-(anon|api)\//, conversation = /^\/backend-(anon|api)\/f\/conversation(\/resume)?$/;
  const norm = s => String(s || '').toLowerCase().trim().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
  let catalogPromise = null;
+ // A handed-off answer (Pro runs as a background task) is read from the conversation itself,
+ // as chatgpt.com's own poller does, when no stream delivers it.
+ state.poll = () => {
+  if (state.polling || !state.conversationId) return false;
+  state.polling = true;
+  (async () => {
+   try {
+    const base = cfg.token ? '/backend-api' : '/backend-anon';
+    const response = await nativeFetch.call(window, base + '/conversation/' + state.conversationId, {credentials:'include',
+     headers: cfg.token ? {authorization:'Bearer ' + cfg.token} : {}});
+    state.pollStatus = response.status;
+    if (!response.ok) return;
+    const data = await response.json();
+    let best = null;
+    for (const node of Object.values(data.mapping || {})) {
+     const m = node && node.message, c = (m && m.content) || {};
+     if (!m || !m.author || m.author.role !== 'assistant' || c.content_type !== 'text') continue;
+     if ((m.recipient || 'all') !== 'all' || !(m.channel == null || m.channel === 'final')) continue;
+     if (m.status !== 'finished_successfully' || m.end_turn === false) continue;
+     if (!best || (m.create_time || 0) >= (best.create_time || 0)) best = m;
+    }
+    if (best) state.final = {text:(best.content.parts || []).filter(p => typeof p === 'string').join(''),
+     model:(best.metadata || {}).resolved_model_slug || (best.metadata || {}).model_slug || null};
+   } catch (e) { state.pollError = String(e && e.message || e); }
+   finally { state.polling = false; }
+  })();
+  return true;
+ };
  state.loadCatalog = () => catalogPromise || (catalogPromise = (async () => {
   const path = (cfg.token ? '/backend-api' : '/backend-anon') + '/models?iim=false&is_gizmo=false&supports_model_picker_upgrade_presets=true';
   const response = await nativeFetch.call(window, path, {credentials:'include',
@@ -482,7 +510,10 @@ _HOOK_SCRIPT = r"""((window) => {
   state.streams += 1; state.open += 1;
   (async () => {
    const reader = copy.getReader(), decoder = new TextDecoder();
-   try { while (true) { const {done, value} = await reader.read(); if (done) break; state.chunks.push(decoder.decode(value, {stream:true})); }
+   try { while (true) { const {done, value} = await reader.read(); if (done) break;
+          const text = decoder.decode(value, {stream:true}), id = /"conversation_id":"([0-9a-f-]{36})"/.exec(text);
+          if (id) state.conversationId = id[1];
+          state.chunks.push(text); }
          state.chunks.push(decoder.decode() + '\n\n'); }
    catch (_) { state.chunks.push('\n\n'); }
    finally { state.open -= 1; state.closedAt = Date.now(); }
@@ -511,7 +542,10 @@ _HOOK_SCRIPT = r"""((window) => {
 
 _POLL = """(() => {const s = window.__glossarionGPT; return s ? {chunks:s.chunks.splice(0), streams:s.streams,
  open:s.open, idle:s.closedAt ? Date.now() - s.closedAt : 0, status:s.status, error:s.error, kind:s.kind,
- sentinel:s.sentinel, resolved:s.resolved} : null;})()"""
+ sentinel:s.sentinel, resolved:s.resolved, final:s.final || null} : null;})()"""
+_POLL_ANSWER = "(() => window.__glossarionGPT.poll())()"
+#: seconds between reads of a handed-off answer (chatgpt.com's own poll_interval_ms is 10 s)
+_HANDOFF_POLL_SECONDS = 10
 _COMPOSER = ("(() => {const c = document.querySelector('#prompt-textarea'), b = document.querySelector('[data-testid=\"send-button\"]');"
              " return {text: c ? c.innerText.trim() : null, send: !!b && !b.disabled,"
              " requested: !!(window.__glossarionGPT && (window.__glossarionGPT.requested || window.__glossarionGPT.sentinel))};})()")
@@ -557,6 +591,9 @@ class StreamParser:
         self.error = None
         self.model = None
         self.on_thinking = None
+        # Pro (and other long) answers run as a background task: the first stream hands off
+        # ("stream_handoff") and ends; the answer arrives on the stream that resumes the turn.
+        self.handoff = False
 
     @property
     def content(self):
@@ -577,12 +614,14 @@ class StreamParser:
         outputs = []
         while "\n\n" in self.buffer:
             frame, self.buffer = self.buffer.split("\n\n", 1)
+            if frame.startswith("event: delta_encoding"):
+                self.handoff = False  # a new stream of the turn
             values = [line[5:].lstrip() for line in frame.splitlines() if line.startswith("data:")]
             data = "\n".join(values)
             if not data:
                 continue
             if data == "[DONE]":
-                self.finished = True
+                self.finished = not self.handoff
                 continue
             try:
                 payload = json.loads(data)
@@ -593,8 +632,11 @@ class StreamParser:
         return outputs
 
     def _event(self, payload):
+        if payload.get("type") == "stream_handoff":
+            self.handoff = True
+            return []
         if payload.get("type") == "message_stream_complete":
-            self.finished = True
+            self.finished = not self.handoff
             return []
         if payload.get("error"):
             error = payload["error"]
@@ -609,7 +651,8 @@ class StreamParser:
             self.path, self.operation = payload.get("p"), payload.get("o", self.operation)
         elif "o" in payload:
             self.operation = payload["o"]
-        if isinstance(value, list) and (payload.get("o") == "patch" or "p" not in payload):
+        is_patch = isinstance(value, list) and value and all(isinstance(v, dict) and "p" in v for v in value)
+        if isinstance(value, list) and (payload.get("o") == "patch" or ("p" not in payload and is_patch)):
             outputs = []
             for patch in value:
                 if isinstance(patch, dict) and "p" in patch:
@@ -626,10 +669,23 @@ class StreamParser:
         metadata = message.get("metadata") or {}
         self.model = metadata.get("resolved_model_slug") or metadata.get("model_slug") or self.model
         if not self._visible(message):
+            content = message.get("content")
+            if isinstance(content, dict) and content.get("content_type") == "thoughts":
+                self._thoughts(content.get("thoughts"))
+            elif isinstance(content, dict) and content.get("content_type") == "reasoning_recap":
+                self._thoughts([f"({content.get('content') or 'Finished reasoning'})\n"])  # e.g. "Worked for 48s"
             return []
         message.setdefault("content", {}).setdefault("parts", [""])
         self.answer = message
         return [p for p in message["content"]["parts"] if isinstance(p, str) and p]
+
+    def _thoughts(self, thoughts):
+        for thought in thoughts or ():
+            text = _thought_text(thought)
+            if text:
+                self.reasoning += text
+                if self.on_thinking:
+                    self.on_thinking(text)
 
     def _apply(self, path, operation, value):
         if self.message is None or not isinstance(path, str) or not path.startswith("/message"):
@@ -676,6 +732,9 @@ class StreamParser:
             node[int(last)] = new
         else:
             node[last] = new
+        if keys == ["content", "thoughts"] and operation == "append":
+            self._thoughts(value if isinstance(value, list) else [value])
+            return []
         text = value if isinstance(value, str) and operation == "append" else ""
         if self._visible(self.message):
             self.answer = self.message
@@ -685,6 +744,13 @@ class StreamParser:
             if self.on_thinking:
                 self.on_thinking(text)
         return []
+
+
+def _thought_text(thought):
+    if not isinstance(thought, dict):
+        return thought if isinstance(thought, str) else ""
+    summary, content = str(thought.get("summary") or "").strip(), str(thought.get("content") or "").strip()
+    return "\n".join(part for part in (f"**{summary}**" if summary else "", content) if part) + "\n\n"
 
 
 def _kind(status):
@@ -724,6 +790,7 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
     started = time.monotonic()
     deadline = started + timeout
     resolved = None
+    polled = 0.0
     while time.monotonic() < deadline:
         _check(cancel_check)
         state = page.evaluate(_POLL)
@@ -746,6 +813,19 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
             return {"content": parser.content, "reasoning_content": parser.reasoning,
                     "finish_reason": "stop", "usage": None, "model": parser.model,
                     "thinking_effort": (resolved or {}).get("effort")}
+        final = state.get("final")
+        if parser.handoff and final and str(final.get("text") or "").strip():
+            content = clean_markup(final["text"])
+            if on_delta:
+                on_delta(content)
+            return {"content": content, "reasoning_content": parser.reasoning, "finish_reason": "stop",
+                    "usage": None, "model": final.get("model") or parser.model,
+                    "thinking_effort": (resolved or {}).get("effort")}
+        if parser.handoff and not state.get("open") and time.monotonic() - polled >= _HANDOFF_POLL_SECONDS:
+            if not polled and on_thinking:
+                on_thinking("ChatGPT is working on this in the background (Pro); waiting for its answer…\n")
+            polled = time.monotonic()
+            page.evaluate(_POLL_ANSWER)
         sentinel = state.get("sentinel") or 0
         if sentinel and not state.get("streams"):
             raise AuthChatGPTError(f"AuthChatGPT: ChatGPT refused the request check (HTTP {sentinel}).",
@@ -754,7 +834,8 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
             raise AuthChatGPTError("AuthChatGPT: ChatGPT did not start a reply. It may be showing a "
                                    "usage limit; try again later or click ChatGPT Login.", "rate_limit")
         # A reply that moved to another stream (/resume) is picked up there.
-        if state.get("streams") and not state.get("open") and state.get("idle", 0) > 30000 and not parser.finished:
+        if (state.get("streams") and not state.get("open") and state.get("idle", 0) > 30000
+                and not parser.finished and not parser.handoff):
             raise AuthChatGPTError("AuthChatGPT stream ended before its completion marker. "
                                    "Partial translation discarded.")
         time.sleep(.1)
