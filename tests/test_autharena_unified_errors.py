@@ -26,7 +26,7 @@ def _unified_handlers_code():
     client_node = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "UnifiedClient")
     error_node = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "UnifiedClientError")
     wanted = {"_send_autharena", "_send_internal", "_is_rate_limit_error", "_parse_retry_after",
-              "_indefinite_rate_limit_retry"}
+              "_indefinite_rate_limit_retry", "_blocked_for_session"}
     client_node.body = [node for node in client_node.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), error_node, client_node], type_ignores=[])
     return compile(ast.fix_missing_locations(module), str(SRC / "unified_api_client.py"), "exec")

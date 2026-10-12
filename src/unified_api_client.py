@@ -2564,15 +2564,16 @@ class UnifiedClient:
         return None
 
     def _indefinite_rate_limit_retry(self) -> bool:
-        """Retry rate limits without the attempt cap: the Indefinite Rate Limit Retry toggle (off
-        unless exported), and always for authds/, whose limit is DeepSeek's temporary mute."""
-        if os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "0") == "1":
-            return True
-        try:
-            model = self._get_active_request_model() or getattr(self, 'model', '')
-        except Exception:
-            model = getattr(self, 'model', '')
-        return str(model or '').strip().lower().startswith('authds/')
+        """Retry rate limits without the attempt cap: the Indefinite Rate Limit Retry toggle, off
+        unless the run exports it (a route-level block such as a DeepSeek mute is never retried)."""
+        return os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "0") == "1"
+
+    @staticmethod
+    def _blocked_for_session(exc: Exception) -> bool:
+        """The provider blocked this account for longer than the session (a DeepSeek mute):
+        retrying cannot help, so single-key mode gives up at once."""
+        details = getattr(exc, 'details', None)
+        return isinstance(details, dict) and bool(details.get('session_blocked'))
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         if getattr(exc, 'error_type', None) == 'autharena_stream_error':
@@ -11189,6 +11190,9 @@ class UnifiedClient:
                     if self._multi_key_mode:
                         print(f"🔄 Rate limit error - multi-key mode active, re-raising for key rotation")
                         raise
+                    if self._blocked_for_session(e):
+                        print("⛔ The account is blocked by the provider for this session - not retrying")
+                        raise
                     
                     # In single-key mode, check if indefinite retry is enabled
                     indefinite_retry_enabled = self._indefinite_rate_limit_retry()
@@ -11525,6 +11529,9 @@ class UnifiedClient:
                     # In multi-key mode, always re-raise to let _send_core handle key rotation
                     if self._multi_key_mode:
                         print(f"🔄 Unexpected rate limit error - multi-key mode active, re-raising for key rotation")
+                        raise
+                    if self._blocked_for_session(e):
+                        print("⛔ The account is blocked by the provider for this session - not retrying")
                         raise
                     
                     # In single-key mode, check if indefinite retry is enabled
@@ -29443,10 +29450,30 @@ class UnifiedClient:
     def _send_authchatgpt(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """chatgpt.com web chat; logged out, or on the authgpt/ login when one is saved."""
         import authchatgpt_auth
+        # image output (ENABLE_IMAGE_OUTPUT_MODE): ChatGPT's image tool; the image is saved like the
+        # other image-output routes and returned as a [GENERATED_IMAGE:path] marker
         return self._send_web_chat(messages, 'authchatgpt', 'AuthChatGPT',
-                                   authchatgpt_auth.send_chat_completion, authchatgpt_auth.AuthChatGPTError)
+                                   authchatgpt_auth.send_chat_completion, authchatgpt_auth.AuthChatGPTError,
+                                   extra={'image_output': self._image_output_mode_enabled()},
+                                   response_name=response_name)
 
-    def _send_web_chat(self, messages, tag, label, send_chat_completion, route_error) -> UnifiedResponse:
+    def _save_web_chat_image(self, image: dict, response_name) -> str:
+        """Writes a web-chat route's generated image into the output folder; returns its path."""
+        output_dir = getattr(self, 'output_dir', None) or '.'
+        os.makedirs(output_dir, exist_ok=True)
+        if response_name:
+            stem = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', os.path.splitext(os.path.basename(response_name))[0])
+        else:
+            stem = datetime.now().strftime("%Y%m%d_%H%M%S")
+        extension = {'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif'}.get(image.get('mime'), '.png')
+        filepath = os.path.join(output_dir, stem + extension)
+        with open(filepath, 'wb') as handle:
+            handle.write(image['data'])
+        print(f"   💾 Saved generated image to: {filepath}")
+        return filepath
+
+    def _send_web_chat(self, messages, tag, label, send_chat_completion, route_error,
+                       extra=None, response_name=None) -> UnifiedResponse:
         """A browser web-chat route (authds/, authchatgpt/): watchdog claim, stop checks and
         streamed log lines around the route's ``send_chat_completion``."""
         tls = self._get_thread_local_client()
@@ -29519,17 +29546,23 @@ class UnifiedClient:
             result = send_chat_completion(
                 messages=messages, model=model, timeout=self.request_timeout,
                 cancel_check=cancelled, before_send_callback=before_send,
-                on_delta=stream_delta, on_thinking=stream_thinking, log_fn=print,
+                on_delta=stream_delta, on_thinking=stream_thinking, log_fn=print, **(extra or {}),
             )
-            return UnifiedResponse(content=result['content'], finish_reason=result['finish_reason'],
+            content = result['content']
+            images = result.pop('images', None)  # bytes stay out of raw_response (saved as JSON)
+            if images:
+                content = f"[GENERATED_IMAGE:{self._save_web_chat_image(images[0], response_name)}]"
+            return UnifiedResponse(content=content, finish_reason=result['finish_reason'],
                                    usage=result.get('usage'), raw_response=result)
         except route_error as exc:
             retry_after = getattr(exc, 'retry_after', None)
             # the key rotation (multi-key mode) rests this key for the route's own wait
             tls.rate_limit_retry_after = retry_after
-            finite = retry_after if retry_after and retry_after != float('inf') else None
-            raise UnifiedClientError(str(exc), error_type=exc.error_type,
-                                     details={'retry_after_seconds': finite} if finite else None) from exc
+            if retry_after == float('inf'):  # blocked for the session (a DeepSeek mute)
+                details = {'session_blocked': True}
+            else:
+                details = {'retry_after_seconds': retry_after} if retry_after else None
+            raise UnifiedClientError(str(exc), error_type=exc.error_type, details=details) from exc
         finally:
             flush_thinking()
             if log_buf and log_buf[0]:

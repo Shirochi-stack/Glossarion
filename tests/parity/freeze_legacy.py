@@ -402,7 +402,8 @@ def git_show_text(sha: str, relpath: str) -> str:
     """Return ``git show sha:relpath`` decoded with utf-8-sig and LF line endings."""
     data = _git("show", f"{sha}:{relpath}")
     text = data.decode("utf-8-sig")
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    from parity.approved_changes import apply_to_source  # owner-approved default changes since the pin
+    return apply_to_source(relpath, text.replace("\r\n", "\n").replace("\r", "\n"))
 
 
 class ModuleSource:

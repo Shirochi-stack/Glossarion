@@ -33,12 +33,19 @@ def test_a_muted_account_stays_out_of_the_pool_for_the_session():
     assert pool.keys[1].is_available()  # the other keys keep serving
 
 
-def test_indefinite_retry_is_off_unless_set_except_for_authds(monkeypatch):
+def test_indefinite_retry_follows_the_toggle_only(monkeypatch):
     from unified_api_client import UnifiedClient
     client = object.__new__(UnifiedClient)
     monkeypatch.delenv("INDEFINITE_RATE_LIMIT_RETRY", raising=False)
-    for model, expected in (("authds/flash", True), ("authchatgpt/auto", False), ("gemini-3.5-flash", False)):
-        monkeypatch.setattr(client, "_get_active_request_model", lambda m=model: m)
-        assert client._indefinite_rate_limit_retry() is expected
+    assert client._indefinite_rate_limit_retry() is False  # off unless the run exports it
+    monkeypatch.setenv("INDEFINITE_RATE_LIMIT_RETRY", "0")
+    assert client._indefinite_rate_limit_retry() is False
     monkeypatch.setenv("INDEFINITE_RATE_LIMIT_RETRY", "1")
     assert client._indefinite_rate_limit_retry() is True
+
+
+def test_a_session_block_is_never_retried():
+    from unified_api_client import UnifiedClient, UnifiedClientError
+    blocked = UnifiedClientError("muted", error_type="rate_limit", details={"session_blocked": True})
+    assert UnifiedClient._blocked_for_session(blocked)
+    assert not UnifiedClient._blocked_for_session(UnifiedClientError("429", error_type="rate_limit"))

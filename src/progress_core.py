@@ -1412,7 +1412,7 @@ class ProgressViewMixin:
                     return False
             config = getattr(self, 'config', {})
             if isinstance(config, dict) and bool(
-                config.get('skip_pdf_title_translation', False)
+                config.get('skip_pdf_title_translation', True)
             ):
                 return False
         if hasattr(self, 'translate_book_title_var'):

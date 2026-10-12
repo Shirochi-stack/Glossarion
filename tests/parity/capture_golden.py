@@ -362,7 +362,8 @@ def _literal_from_file(path: Path, name: str):
 
 def load_golden(sha: str, scenario: str) -> dict:
     golden, strings = _literals_from_file(golden_dir(sha) / f"{scenario}.py", "GOLDEN", "STRINGS")
-    return expand_strings(golden, strings)
+    from parity.approved_changes import apply_to_golden  # owner-approved default changes since capture
+    return apply_to_golden(expand_strings(golden, strings))
 
 
 def load_index(sha: str) -> dict:

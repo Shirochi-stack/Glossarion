@@ -26139,7 +26139,7 @@ def main(log_callback=None, stop_callback=None):
     is_txt = input_path.lower().endswith(('.txt',))
     is_pdf_title = input_path.lower().endswith(('.pdf',))
     skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
-    skip_pdf_title = os.getenv('SKIP_PDF_TITLE_TRANSLATION', '0') == '1'
+    skip_pdf_title = os.getenv('SKIP_PDF_TITLE_TRANSLATION', '1') == '1'
     title_translation_allowed = (
         not _non_book_ext
         and not (is_txt and skip_txt_title)

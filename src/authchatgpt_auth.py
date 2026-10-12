@@ -45,7 +45,7 @@ _APP_COOKIE = {"name": "__Secure-next-auth.session-token", "value": "glossarion"
                "url": BASE_URL + "/", "httpOnly": True, "secure": True}
 _APP_COOKIE_JS = ("document.cookie = '__Secure-next-auth.session-token=glossarion; Secure; Path=/; "
                   "SameSite=Lax'; true")
-_PLANS = {"free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "team": "Team",
+_PLANS = {"free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro", "team": "Team",
           "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "guest": "Guest"}
 _cancel = threading.Event()
 _announced = {}  # run id -> login lines already logged in that run
@@ -433,8 +433,51 @@ _HOOK_SCRIPT = r"""((window) => {
     }
     if (best) state.final = {text:(best.content.parts || []).filter(p => typeof p === 'string').join(''),
      model:(best.metadata || {}).resolved_model_slug || (best.metadata || {}).model_slug || null};
+    // generated images: the image tool's multimodal messages (one per variant)
+    const images = [];
+    for (const node of Object.values(data.mapping || {})) {
+     const m = node && node.message, c = (m && m.content) || {};
+     if (!m || !m.author || m.author.role !== 'tool' || m.status !== 'finished_successfully') continue;
+     for (const part of c.parts || []) if (part && part.asset_pointer)
+      images.push({pointer:part.asset_pointer, index:(m.metadata || {}).generation_index || 0});
+    }
+    if (images.length) state.finalImages = images.sort((a, b) => a.index - b.index);
    } catch (e) { state.pollError = String(e && e.message || e); }
    finally { state.polling = false; }
+  })();
+  return true;
+ };
+ // A generated image: its signed download URL, then the bytes (base64) for Python.
+ state.downloads = {};
+ state.download = pointer => {
+  if (state.downloads[pointer]) return true;
+  state.downloads[pointer] = {pending:true};
+  (async () => {
+   try {
+    const fileId = String(pointer).replace(/^[a-z-]+:\/\//, '');
+    let info = null, response = null, failure = '';
+    // a just-finished image can take a moment to become downloadable: retry for up to a minute
+    for (let attempt = 0; attempt < 20; attempt++) {
+     if (attempt) await new Promise(r => setTimeout(r, 3000));
+     const listed = await nativeFetch.call(window, '/backend-api/files/download/' + encodeURIComponent(fileId) +
+      '?conversation_id=' + encodeURIComponent(state.conversationId || '') + '&inline=false',
+      {credentials:'include', headers:{authorization:'Bearer ' + cfg.token}});
+     info = listed.ok ? await listed.json() : null;
+     if (!info || !info.download_url) { failure = 'HTTP ' + listed.status + (info && info.detail ? ': ' + info.detail : ''); continue; }
+     // the signed link is a /backend-api/ URL too: without a ChatGPT cookie session it needs the token
+     const sameSite = new URL(info.download_url, location.href).origin === location.origin;
+     response = await nativeFetch.call(window, info.download_url, {credentials:'include',
+      headers: sameSite ? {authorization:'Bearer ' + cfg.token} : {}});
+     if (response.ok) break;
+     failure = 'HTTP ' + response.status;
+     response = null;
+    }
+    if (!response) throw Error(failure || 'no download URL');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    state.downloads[pointer] = {b64:btoa(binary), mime:response.headers.get('content-type') || info.mime_type || 'image/png'};
+   } catch (e) { state.downloads[pointer] = {error:String(e && e.message || e)}; }
   })();
   return true;
  };
@@ -506,6 +549,8 @@ _HOOK_SCRIPT = r"""((window) => {
    payload.model = pick.model;
    if (pick.effort) payload.thinking_effort = pick.effort; else delete payload.thinking_effort;
    if (cfg.temporary) payload.history_and_training_disabled = true;
+   // image output: what the composer's "Create image" sends
+   if (cfg.imageOutput) payload.system_hints = ['picture_v2'];
    body = JSON.stringify(payload);
   }
   const response = await nativeFetch.call(this, url.toString(), {method:request.method, headers, body,
@@ -556,8 +601,13 @@ _HOOK_SCRIPT = r"""((window) => {
 
 _POLL = """(() => {const s = window.__glossarionGPT; return s ? {chunks:s.chunks.splice(0), streams:s.streams,
  open:s.open, idle:s.closedAt ? Date.now() - s.closedAt : 0, status:s.status, error:s.error, kind:s.kind,
- sentinel:s.sentinel, resolved:s.resolved, final:s.final || null} : null;})()"""
+ sentinel:s.sentinel, resolved:s.resolved, final:s.final || null, finalImages:s.finalImages || null} : null;})()"""
 _POLL_ANSWER = "(() => window.__glossarionGPT.poll())()"
+#: the download state of one generated image (``__POINTER__``): {b64, mime} / {error} / {pending}
+_DOWNLOAD = "(() => {const s = window.__glossarionGPT; s.download(__POINTER__); return s.downloads[__POINTER__] || null;})()"
+#: logged-out chatgpt.com cannot create images ("Log in to use")
+IMAGE_OUTPUT_NEEDS_LOGIN = ("AuthChatGPT needs a ChatGPT login to create images (logged-out ChatGPT cannot). "
+                            "Click ChatGPT Login.")
 #: seconds between reads of a handed-off answer (chatgpt.com's own poll_interval_ms is 10 s)
 _HANDOFF_POLL_SECONDS = 10
 _COMPOSER = ("(() => {const c = document.querySelector('#prompt-textarea'), b = document.querySelector('[data-testid=\"send-button\"]');"
@@ -626,6 +676,7 @@ class StreamParser:
         # Pro (and other long) answers run as a background task: the first stream hands off
         # ("stream_handoff") and ends; the answer arrives on the stream that resumes the turn.
         self.handoff = False
+        self.generated = []  # (generation index, asset pointer) of generated images
 
     @property
     def content(self):
@@ -695,9 +746,21 @@ class StreamParser:
             return self._apply(self.path, self.operation or "append", value)
         return []
 
+    def _collect_images(self, message):
+        # the pointer shows up while the image is still being made: only a finished one is ready
+        if (message.get("author") or {}).get("role") != "tool" or message.get("status") != "finished_successfully":
+            return
+        content = message.get("content")
+        index = (message.get("metadata") or {}).get("generation_index") or 0
+        for part in (content.get("parts") or []) if isinstance(content, dict) else []:
+            pointer = part.get("asset_pointer") if isinstance(part, dict) else None
+            if pointer and pointer not in [p for _i, p in self.generated]:
+                self.generated.append((index, pointer))
+
     def _start(self, message):
         self.message = message
         self.path = self.operation = None
+        self._collect_images(message)
         metadata = message.get("metadata") or {}
         self.model = metadata.get("resolved_model_slug") or metadata.get("model_slug") or self.model
         if not self._visible(message):
@@ -767,6 +830,8 @@ class StreamParser:
         if keys == ["content", "thoughts"] and operation == "append":
             self._thoughts(value if isinstance(value, list) else [value])
             return []
+        if keys[:2] == ["content", "parts"] or keys == ["status"]:
+            self._collect_images(self.message)
         text = value if isinstance(value, str) and operation == "append" else ""
         if self._visible(self.message):
             self.answer = self.message
@@ -832,7 +897,23 @@ def _submit(page, cancel_check, before_send_callback):
     raise AuthChatGPTError("ChatGPT did not accept the message. Try again.", "browser_error")
 
 
-def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None, images=None):
+def _download_image(page, pointer, deadline, cancel_check):
+    """The bytes of a generated image (downloaded by the page, signed URL and all)."""
+    script = _DOWNLOAD.replace("__POINTER__", json.dumps(pointer))
+    while time.monotonic() < deadline:
+        _check(cancel_check)
+        state = page.evaluate(script) or {}
+        if state.get("b64"):
+            import base64
+            return {"mime": state.get("mime") or "image/png", "data": base64.b64decode(state["b64"])}
+        if state.get("error"):
+            raise AuthChatGPTError(f"AuthChatGPT could not download the generated image ({state['error']}).")
+        time.sleep(.5)
+    raise AuthChatGPTError("AuthChatGPT timed out downloading the generated image.", "timeout")
+
+
+def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None, images=None,
+              image_output=False):
     if images:
         _attach(page, images, cancel_check)
     _submit(page, cancel_check, before_send_callback)
@@ -858,6 +939,24 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
                     on_delta(delta)
         if parser.error:
             raise AuthChatGPTError(f"AuthChatGPT: {parser.error}")
+        if image_output and not state.get("open") and (parser.finished or parser.handoff):
+            # the image: from the stream, else from the conversation (generation may finish later)
+            generated = sorted(parser.generated) or [(i.get("index") or 0, i["pointer"])
+                                                      for i in (state.get("finalImages") or [])]
+            if generated:
+                image = _download_image(page, generated[0][1], deadline, cancel_check)
+                final = state.get("final") or {}
+                return {"content": parser.content or clean_markup(final.get("text") or ""),
+                        "reasoning_content": parser.reasoning, "finish_reason": "stop", "usage": None,
+                        "model": parser.model or final.get("model"), "images": [image],
+                        "thinking_effort": (resolved or {}).get("effort")}
+            if time.monotonic() - polled >= _HANDOFF_POLL_SECONDS:
+                if not polled and on_thinking:
+                    on_thinking("ChatGPT is creating the image; waiting for it…\n")
+                polled = time.monotonic()
+                page.evaluate(_POLL_ANSWER)
+            time.sleep(.3)
+            continue
         if parser.finished and not state.get("open"):
             if not parser.content.strip():
                 raise AuthChatGPTError("AuthChatGPT returned no answer text.")
@@ -900,7 +999,10 @@ def _login_rejected(exc):
 
 
 def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=print,
-                         cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None):
+                         cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None,
+                         image_output=False):
+    """One completion. ``image_output``: ask ChatGPT's image tool for an image (the result's
+    ``images``); that needs the login and a regular chat (temporary chats cannot edit images)."""
     name = resolve_model(model)
     images = []
     prompt = build_prompt(messages, images=images)
@@ -909,11 +1011,14 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
     while True:
         if images and not token:
             raise AuthChatGPTError(IMAGES_NEED_LOGIN, "config_error")
-        config = {"token": token, "prompt": prompt, "model": name, "temporary": bool(token), "images": len(images)}
+        if image_output and not token:
+            raise AuthChatGPTError(IMAGE_OUTPUT_NEEDS_LOGIN, "config_error")
+        config = {"token": token, "prompt": prompt, "model": name, "images": len(images),
+                  "temporary": bool(token) and not image_output, "imageOutput": bool(image_output)}
         with _open_tab(config, cancel_check) as page:
             try:
                 result = _complete(page, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking,
-                                   images=images)
+                                   images=images, image_output=image_output)
                 if token:
                     _announce_logged_in(token, log_fn)
                 return result

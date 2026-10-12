@@ -25,6 +25,9 @@ BASE_URL = "https://chat.deepseek.com"
 POW_WORKER_URL = "https://fe-static.deepseek.com/chat/static/76608.8f2a9fa413.js"
 _cancel = threading.Event()
 _login_gate = threading.Lock()
+# A muted account fails every chat until DeepSeek lifts the mute: remembered for the session,
+# so later requests fail at once instead of opening DeepSeek again.
+_muted = {"until": 0.0, "message": ""}
 _login_generation = 0
 
 
@@ -551,6 +554,8 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
                 status = state.get("status", 0)
                 kind = "auth_error" if status == 401 else "access_denied" if status == 403 else "rate_limit" if status == 429 else "api_error"
                 # No server bodies, tokens, or browser state are included in logs.
+                if state.get("retryAfter"):
+                    _muted.update(until=time.time() + float(state["retryAfter"]), message=f"AuthDS: {state['error']}")
                 raise AuthDSError(f"AuthDS: {state['error']}", kind,
                                   retry_after=math.inf if state.get("retryAfter") else None)
             for chunk in state.get("chunks", []):
@@ -581,6 +586,8 @@ def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
     global _login_generation
     resolve_model(model)
     build_prompt(messages, images=[])
+    if time.time() < _muted["until"]:
+        raise AuthDSError(_muted["message"], "rate_limit", retry_after=math.inf)
     login_generation = _login_generation
     # Try the saved session once, then permit an interactive re-login once.
     for attempt in range(2):

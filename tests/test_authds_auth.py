@@ -12,8 +12,10 @@ def frame(value, event=None):
 @pytest.fixture(autouse=True)
 def reset():
     ds.reset_cancel()
+    ds._muted.update(until=0.0, message="")
     yield
     ds.reset_cancel()
+    ds._muted.update(until=0.0, message="")
 
 
 @pytest.mark.parametrize("model,kind,thinking", [
@@ -518,7 +520,7 @@ global.fetch=async (url, options={})=>{
     assert result.returncode == 0, result.stderr
 
 
-def test_muted_account_is_a_rate_limit_that_rests_the_key_for_the_session():
+def test_muted_account_is_a_rate_limit_that_rests_the_key_for_the_session(monkeypatch):
     import math
 
     class MutedPage(Page):
@@ -528,3 +530,9 @@ def test_muted_account_is_a_rate_limit_that_rests_the_key_for_the_session():
     with pytest.raises(ds.AuthDSError) as error:
         ds._complete(page, 'flash', [{'content': 'x'}], 5, None, None, None)
     assert error.value.error_type == 'rate_limit' and error.value.retry_after == math.inf
+    # the mute is remembered: later requests fail at once, without opening DeepSeek
+    opened = []
+    monkeypatch.setattr(ds, '_open_browser', lambda **k: opened.append(1))
+    with pytest.raises(ds.AuthDSError, match='muted') as again:
+        ds.send_chat_completion(messages=[{'content': 'x'}], log_fn=lambda _: None)
+    assert again.value.retry_after == math.inf and not opened

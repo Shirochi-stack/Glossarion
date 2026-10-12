@@ -84,7 +84,8 @@ def _git_show(relpath: str, sha: str = P5B_BASE_SHA) -> str:
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
             pytest.fail(message + " (CI checks out full history; the P5b pins need the base commit)")
         pytest.skip(message)
-    return data.decode("utf-8-sig").replace("\r\n", "\n")
+    from parity.approved_changes import apply_to_source  # owner-approved default changes since the pin
+    return apply_to_source(relpath, data.decode("utf-8-sig").replace("\r\n", "\n"))
 
 
 def _assigns(tree, name):

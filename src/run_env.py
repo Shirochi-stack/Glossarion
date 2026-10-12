@@ -1286,7 +1286,7 @@ class RunEnvMixin:
             'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', self.config.get('translation_chunk_prompt', ''))),
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
-            'SKIP_PDF_TITLE_TRANSLATION': "1" if getattr(self, 'skip_pdf_title_translation_var', False) else "0",
+            'SKIP_PDF_TITLE_TRANSLATION': "1" if getattr(self, 'skip_pdf_title_translation_var', True) else "0",
             'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
             'SKIP_TITLE_TAG_TRANSLATION': "1" if getattr(self, 'skip_title_tag_translation_var', False) else "0",
             'USE_TITLE': "0" if getattr(self, 'skip_title_tag_translation_var', False) else "1",
@@ -2585,7 +2585,7 @@ class RunEnvMixin:
                 # Book title handling
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
                 ('SKIP_TXT_TITLE_TRANSLATION', '1' if getattr(self, 'skip_txt_title_translation_var', True) else '0'),
-                ('SKIP_PDF_TITLE_TRANSLATION', '1' if getattr(self, 'skip_pdf_title_translation_var', False) else '0'),
+                ('SKIP_PDF_TITLE_TRANSLATION', '1' if getattr(self, 'skip_pdf_title_translation_var', True) else '0'),
                 ('SKIP_IMAGE_TITLE_TRANSLATION', '1' if getattr(self, 'skip_image_title_translation_var', True) else '0'),
                 ('SKIP_TITLE_TAG_TRANSLATION', '1' if getattr(self, 'skip_title_tag_translation_var', False) else '0'),
                 ('IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT', str(getattr(
@@ -3272,7 +3272,7 @@ class RunEnvMixin:
         # Set book title translation settings
         os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
         os.environ['SKIP_TXT_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0"
-        os.environ['SKIP_PDF_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_pdf_title_translation_var', False) else "0"
+        os.environ['SKIP_PDF_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_pdf_title_translation_var', True) else "0"
         skip_title_tag = bool(getattr(self, 'skip_title_tag_translation_var', False))
         os.environ['SKIP_TITLE_TAG_TRANSLATION'] = "1" if skip_title_tag else "0"
         os.environ['USE_TITLE'] = "0" if skip_title_tag else "1"

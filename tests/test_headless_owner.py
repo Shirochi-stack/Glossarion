@@ -128,7 +128,8 @@ def _git_show(relpath: str) -> str:
             # drop every desktop-parity check of the U2 moves
             pytest.fail(message + " (CI must fetch the base commit)")
         pytest.skip(message)
-    return data.decode("utf-8-sig").replace("\r\n", "\n")
+    from parity.approved_changes import apply_to_source  # owner-approved default changes since the pin
+    return apply_to_source(relpath, data.decode("utf-8-sig").replace("\r\n", "\n"))
 
 
 # ---------------------------------------------------------------------------

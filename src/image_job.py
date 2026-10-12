@@ -52,6 +52,10 @@ GENERATIVE_MODE_SENTINEL = "__generative_mode__"
 GENERATIVE_PROMPT_ATTR = "_generative_prompt_override"
 
 
+
+class _SkipTitle(Exception):
+    """Graceful stop: save the image translation without requesting its title translation."""
+
 class ImageJobMixin:
     """Image / video inputs and the prompt-only generation run (moved verbatim; see the module docstring)."""
 
@@ -1025,8 +1029,10 @@ class ImageJobMixin:
                     if hasattr(response, 'raw_content_object'):
                         raw_obj = response.raw_content_object
                 
-                # Check if stopped after API call
-                if self.stop_requested:
+                # Check if stopped after API call. A graceful stop lets this in-flight request finish:
+                # its answer is saved below; only a hard stop discards it.
+                graceful_stop = os.environ.get('GRACEFUL_STOP') == '1'
+                if self.stop_requested and not graceful_stop:
                     self.append_log("⏹️ Image translation stopped after API call")
                     self.image_progress_manager.update(image_path, content_hash, status="cancelled")
                     return False
@@ -1237,12 +1243,16 @@ class ImageJobMixin:
                     
                     if not skip_img_title:
                         try:
-                            # Check for stop before title translation
+                            # Check for stop before title translation: a hard stop cancels; a graceful
+                            # stop keeps the received translation and only skips the title request
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            if self.stop_requested or graceful_stop_active:
+                            if self.stop_requested and not graceful_stop_active:
                                 self.append_log("⏹️ Image translation cancelled before title translation")
                                 self.image_progress_manager.update(image_path, content_hash, status="cancelled")
                                 return False
+                            if graceful_stop_active:
+                                self.append_log("⏹️ Graceful stop: saving the received translation without translating the title")
+                                raise _SkipTitle()
                             
                             title_response = client.send(
                                 title_messages,
@@ -1257,6 +1267,8 @@ class ImageJobMixin:
                                 # Handle tuple response
                                 title_content, *_ = title_response
                                 translated_title = title_content.strip() if title_content else base_name
+                        except _SkipTitle:
+                            translated_title = base_name
                         except Exception as e:
                             # If stop/graceful stop toggled during title call, don't treat as failure
                             if self.stop_requested or os.environ.get('GRACEFUL_STOP') == '1' or "cancelled" in str(e).lower():

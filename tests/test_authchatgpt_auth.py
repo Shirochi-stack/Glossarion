@@ -231,7 +231,7 @@ def token(email="reader@example.com", plan="pro"):
 
 
 def test_login_identity_names_the_plan():
-    assert gpt.login_identity(token(plan="prolite")) == ("reader@example.com", "Pro Lite")
+    assert gpt.login_identity(token(plan="prolite")) == ("reader@example.com", "Pro")  # ChatGPT shows prolite as Pro
     assert gpt.login_identity(token(plan="plus")) == ("reader@example.com", "Plus")
 
 

@@ -7460,14 +7460,14 @@ def _create_prompt_management_section(self, parent):
     skip_txt_title_cb.toggled.connect(_on_skip_txt_title_toggle)
     section_v.addWidget(skip_txt_title_cb)
 
-    # PDF titles are translated by default, but users can opt out independently
-    # from EPUB metadata and plain-text filename handling.
+    # Skip .pdf book title translation (enabled by default, like .txt titles); EPUB
+    # metadata and plain-text filename handling are separate.
     if not hasattr(self, 'skip_pdf_title_translation_var'):
         self.skip_pdf_title_translation_var = bool(
-            self.config.get('skip_pdf_title_translation', False)
+            self.config.get('skip_pdf_title_translation', True)
         )
         if 'skip_pdf_title_translation' not in self.config:
-            self.config['skip_pdf_title_translation'] = False
+            self.config['skip_pdf_title_translation'] = True
     skip_pdf_title_cb = self._create_styled_checkbox(
         "Skip .pdf book title translation"
     )
