@@ -7,6 +7,7 @@ not the paid DeepSeek API. Every completion uses a new chat and a fresh proof.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -28,9 +29,11 @@ _login_generation = 0
 
 
 class AuthDSError(RuntimeError):
-    def __init__(self, message, error_type="api_error"):
+    def __init__(self, message, error_type="api_error", retry_after=None):
         super().__init__(message)
         self.error_type = error_type
+        # seconds the limit lasts; math.inf for an account mute (a key pool rests it for the session)
+        self.retry_after = retry_after
 
 
 def cancel_stream():
@@ -260,7 +263,7 @@ def _clear_page_token(page):
 
 def resolve_model(model):
     name = re.sub(r"^authds/", "", str(model).lower()).strip()
-    choices = {"flash": ("default", False), "pro": ("expert", False),
+    choices = {"flash": ("default", False), "auto": ("default", False), "pro": ("expert", False),
                "flash-thinking": ("default", True), "pro-thinking": ("expert", True),
                "deepseek-chat": ("default", False), "deepseek-reasoner": ("default", True)}
     if name not in choices:
@@ -268,16 +271,46 @@ def resolve_model(model):
     return choices[name]
 
 
-def build_prompt(messages, error=AuthDSError, label="AuthDS"):
-    """One web-chat prompt from chat messages, keeping each role as a ``[role]`` header."""
+_IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+
+
+def _image(part, error, label, index):
+    """``{mime, b64, name}`` of an OpenAI-style ``image_url`` part holding a base64 data URI."""
+    url = part.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else url
+    match = re.match(r"data:([\w/+.-]+);base64,(.+)", str(url or ""), re.S)
+    if not match or match.group(1).lower() not in _IMAGE_TYPES:
+        raise error(f"{label} can only send PNG, JPEG, WebP or GIF images given as data URLs.", "config_error")
+    mime = match.group(1).lower()
+    return {"mime": mime, "b64": re.sub(r"\s+", "", match.group(2)), "name": f"image{index}.{_IMAGE_TYPES[mime]}"}
+
+
+def build_prompt(messages, error=AuthDSError, label="AuthDS", images=None):
+    """One web-chat prompt from chat messages, keeping each role as a ``[role]`` header.
+
+    Messages may carry OpenAI-style parts (``text`` / ``image_url``); with an ``images`` list the
+    images are collected into it (the route uploads them), otherwise they are refused."""
     parts = []
     for message in messages:
         content = message.get("content", "")
-        if not isinstance(content, str):
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                kind = part.get("type") if isinstance(part, dict) else None
+                if isinstance(part, str):
+                    texts.append(part)
+                elif kind == "text":
+                    texts.append(str(part.get("text") or ""))
+                elif kind == "image_url" and images is not None:
+                    images.append(_image(part, error, label, len(images) + 1))
+                else:
+                    raise error(f"{label} currently supports text and images only.", "config_error")
+            content = "\n".join(text for text in texts if text)
+        elif not isinstance(content, str):
             raise error(f"{label} currently supports text messages only.", "config_error")
         if content:
             parts.append(f"[{message.get('role', 'user')}]\n{content}")
-    if not parts:
+    if not parts and not images:
         raise error(f"{label} cannot send an empty prompt.", "config_error")
     return "\n\n".join(parts)
 
@@ -389,30 +422,76 @@ _START_SCRIPT = r"""(() => {
    }
    return j.data.biz_data;
   }
-  const target='/api/v0/chat/completion';
-  const {challenge}=await post('/api/v0/chat/create_pow_challenge',{target_path:target});
-  const workerResponse=await fetch(cfg.worker || cfg.fallbackWorker, {signal:controller.signal});
-  if(!workerResponse.ok) throw Error('Proof worker unavailable; update AUTHDS_POW_WORKER_URL');
-  const workerURL=URL.createObjectURL(new Blob([await workerResponse.text()],{type:'application/javascript'}));
-  const worker=new Worker(workerURL);
-  let answer;
-  try { answer=await new Promise((resolve,reject)=>{
-   const timer=setTimeout(()=>reject(Error('Proof timed out')),120000);
-   controller.signal.addEventListener('abort',()=>{clearTimeout(timer);reject(Error('Cancelled'));},{once:true});
-   worker.onerror=()=>{clearTimeout(timer);reject(Error('Proof worker failed'));};
-   worker.onmessage=e=>{clearTimeout(timer);
-    if(e.data?.type==='pow-answer' && e.data.answer) resolve(e.data.answer);
-    else reject(Error('Invalid proof response'));};
-   worker.postMessage({type:'pow-challenge',challenge:{...challenge,expireAt:challenge.expire_at}});
-  }); } finally {worker.terminate();URL.revokeObjectURL(workerURL);}
-  const proof={algorithm:answer.algorithm,challenge:answer.challenge,salt:answer.salt,
-   answer:answer.answer,signature:answer.signature,target_path:target};
-  let binary=''; for(const byte of new TextEncoder().encode(JSON.stringify(proof))) binary+=String.fromCharCode(byte);
+  // A muted account (DeepSeek's limit after too many requests) fails every chat: say so up front.
+  try {
+   const me=await fetch('/api/v0/users/current',{headers,signal:controller.signal});
+   const chat=me.ok ? (await me.json()).data?.biz_data?.chat : null;
+   if(chat && chat.is_muted){
+    state.status=429;
+    if(chat.mute_until) state.retryAfter=Math.max(60, Math.ceil(chat.mute_until - Date.now()/1000));
+    const until=chat.mute_until ? new Date(chat.mute_until*1000).toLocaleString() : 'later';
+    throw Error('DeepSeek has muted this account until '+until+' (too many requests). Try again then.');
+   }
+  } catch(e) { if(state.status===429 || e.name==='AbortError') throw e; }
+  const target='/api/v0/chat/completion', uploadTarget='/api/v0/file/upload_file';
+  let workerSource=null;
+  // Each completion and each upload needs its own proof of work for its path.
+  async function proofFor(path) {
+   const {challenge}=await post('/api/v0/chat/create_pow_challenge',{target_path:path});
+   if(workerSource===null){
+    const workerResponse=await fetch(cfg.worker || cfg.fallbackWorker, {signal:controller.signal});
+    if(!workerResponse.ok) throw Error('Proof worker unavailable; update AUTHDS_POW_WORKER_URL');
+    workerSource=await workerResponse.text();
+   }
+   const workerURL=URL.createObjectURL(new Blob([workerSource],{type:'application/javascript'}));
+   const worker=new Worker(workerURL);
+   let answer;
+   try { answer=await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(Error('Proof timed out')),120000);
+    controller.signal.addEventListener('abort',()=>{clearTimeout(timer);reject(Error('Cancelled'));},{once:true});
+    worker.onerror=()=>{clearTimeout(timer);reject(Error('Proof worker failed'));};
+    worker.onmessage=e=>{clearTimeout(timer);
+     if(e.data?.type==='pow-answer' && e.data.answer) resolve(e.data.answer);
+     else reject(Error('Invalid proof response'));};
+    worker.postMessage({type:'pow-challenge',challenge:{...challenge,expireAt:challenge.expire_at}});
+   }); } finally {worker.terminate();URL.revokeObjectURL(workerURL);}
+   const proof={algorithm:answer.algorithm,challenge:answer.challenge,salt:answer.salt,
+    answer:answer.answer,signature:answer.signature,target_path:path};
+   let binary=''; for(const byte of new TextEncoder().encode(JSON.stringify(proof))) binary+=String.fromCharCode(byte);
+   return btoa(binary);
+  }
+  // Images: uploaded like the site's own attach button, then referenced by the completion
+  // once DeepSeek has processed them.
+  const fileIds=[];
+  for(const image of cfg.images || []){
+   const raw=atob(image.b64), bytes=new Uint8Array(raw.length);
+   for(let i=0;i<raw.length;i++) bytes[i]=raw.charCodeAt(i);
+   const form=new FormData(); form.append('file',new Blob([bytes],{type:image.mime}),image.name);
+   const uploadHeaders={...headers,'x-ds-pow-response':await proofFor(uploadTarget),
+    'x-thinking-enabled':cfg.thinking?'1':'0','x-model-type':cfg.model,'x-file-size':String(bytes.length)};
+   delete uploadHeaders['content-type'];
+   const uploaded=await fetch(uploadTarget,{method:'POST',headers:uploadHeaders,body:form,signal:controller.signal});
+   state.status=uploaded.status;
+   if(!uploaded.ok) throw Error('Image upload failed: HTTP '+uploaded.status);
+   const u=await uploaded.json();
+   if(u.code!==0 || u.data?.biz_code!==0) throw Error('DeepSeek refused the image: '+String(u.data?.biz_msg || u.msg || ''));
+   const id=u.data.biz_data.id;
+   const {'content-type':_ignored,...readHeaders}=headers;
+   for(let attempt=0;;attempt++){
+    const f=await fetch('/api/v0/file/fetch_files?file_ids='+encodeURIComponent(id),{headers:readHeaders,signal:controller.signal});
+    const file=(await f.json()).data?.biz_data?.files?.[0];
+    if(file && file.status==='SUCCESS') break;
+    if(file && /FAIL|ERROR|EMPTY|UNSUPPORTED/i.test(String(file.status))) throw Error('DeepSeek could not read the image ('+file.status+')');
+    if(attempt>=120) throw Error('DeepSeek took too long to process the image');
+    await new Promise(r=>setTimeout(r,1000));
+   }
+   fileIds.push(id);
+  }
   const session=await post('/api/v0/chat_session/create',{});
-  headers['x-ds-pow-response']=btoa(binary);
+  headers['x-ds-pow-response']=await proofFor(target);
   const response=await fetch(target,{method:'POST',headers,signal:controller.signal,body:JSON.stringify({
    chat_session_id:session.chat_session.id,parent_message_id:null,model_type:cfg.model,
-   prompt:cfg.prompt,ref_file_ids:[],thinking_enabled:cfg.thinking,search_enabled:false,action:null,preempt:false})});
+   prompt:cfg.prompt,ref_file_ids:fileIds,thinking_enabled:cfg.thinking,search_enabled:false,action:null,preempt:false})});
   state.status=response.status;
   if(!response.ok) throw Error('HTTP '+response.status);
   const reader=response.body.getReader(), decoder=new TextDecoder();
@@ -451,7 +530,9 @@ def _discover_worker(page):
 
 def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None):
     model_type, thinking = resolve_model(model)
-    cfg = {"model": model_type, "thinking": thinking, "prompt": build_prompt(messages),
+    images = []
+    cfg = {"model": model_type, "thinking": thinking, "prompt": build_prompt(messages, images=images),
+           "images": images,
            "worker": os.environ.get("AUTHDS_POW_WORKER_URL") or _discover_worker(page),
            "fallbackWorker": POW_WORKER_URL}
     if before_send_callback:
@@ -463,14 +544,15 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
     try:
         while time.monotonic() < deadline:
             _check(cancel_check)
-            state = page.evaluate("(() => {const s=window.__glossarionDS; return s ? {chunks:s.chunks.splice(0),done:s.done,error:s.error,status:s.status} : null;})()")
+            state = page.evaluate("(() => {const s=window.__glossarionDS; return s ? {chunks:s.chunks.splice(0),done:s.done,error:s.error,status:s.status,retryAfter:s.retryAfter||null} : null;})()")
             if not state:
                 raise AuthDSError("AuthDS page was reloaded during translation.", "browser_error")
             if state.get("error"):
                 status = state.get("status", 0)
                 kind = "auth_error" if status == 401 else "access_denied" if status == 403 else "rate_limit" if status == 429 else "api_error"
                 # No server bodies, tokens, or browser state are included in logs.
-                raise AuthDSError(f"AuthDS: {state['error']}", kind)
+                raise AuthDSError(f"AuthDS: {state['error']}", kind,
+                                  retry_after=math.inf if state.get("retryAfter") else None)
             for chunk in state.get("chunks", []):
                 for delta in parser.feed(chunk):
                     if on_delta:
@@ -498,7 +580,7 @@ def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
                          cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None):
     global _login_generation
     resolve_model(model)
-    build_prompt(messages)
+    build_prompt(messages, images=[])
     login_generation = _login_generation
     # Try the saved session once, then permit an interactive re-login once.
     for attempt in range(2):

@@ -65,6 +65,14 @@ KEYLESS = (("authchatgpt", "ChatGPT web chat (authchatgpt/, no sign-in)"),
            ("authnd", "NVIDIA Build free models (authnd/, no sign-in)"))
 #: output-token slider range (the mobile default is 16,384; the field takes any value)
 TOKEN_SLIDER = (1024, 131072)
+#: batch-size slider range; the field takes any larger value
+BATCH_SLIDER = (1, 50)
+#: desktop defaults when nothing is saved (``delay`` 5.0 s, ``translation_temperature`` 0.3)
+DEFAULT_DELAY = 5.0
+DEFAULT_TEMPERATURE = 0.3
+RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower delays send them faster: respect your "
+                      "provider's rate limits. authds/ (DeepSeek) and authchatgpt/ (ChatGPT) run on the sites' "
+                      "own web chat; keep them at batch size 1 with a delay, or the site may limit or block you.")
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
 PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
@@ -112,6 +120,7 @@ class WelcomeScreen(Screen):
         on_set_model: Optional[Callable[[str], Any]] = None,
         default_max_tokens: Optional[int] = None,
         default_chunk_size: str = "",
+        config_get: Optional[Callable[[str, Any], Any]] = None,  # saved delay / temperature / batch size
     ) -> None:
         super().__init__(match)
         self.flow = flow or WelcomeFlow()
@@ -143,6 +152,7 @@ class WelcomeScreen(Screen):
         self.on_set_model = on_set_model
         self.default_max_tokens = default_max_tokens  # the saved budget, else the mobile default
         self.default_chunk_size = default_chunk_size
+        self.config_get = config_get
         self.model_notes: dict = {}  # provider -> the model check's line
         self.keyless_chosen: set = set()  # keyless routes whose recommended model is in use
         self.changing_provider: Optional[str] = None  # the row whose "Change model" opened the ModelSheet
@@ -297,7 +307,118 @@ class WelcomeScreen(Screen):
             chunk,
             ft.Text("Lower limits suit phones and free tiers; leave the chunk size blank to let Glossarion choose.",
                     theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+            self._request_pacing(),
+            self._batch_size(),
+            ft.Text(RATE_LIMIT_WARNING, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ERROR,
+                    key="welcome-rate-limit-warning"),
         ], spacing=6, tight=True)
+
+    def _saved(self, key: str, default: Any) -> Any:
+        if self.config_get is None:
+            return default
+        try:
+            value = self.config_get(key, None)
+        except Exception:
+            return default
+        return default if value in (None, "") else value
+
+    def default_batch_size(self) -> int:
+        """The batch size shown when the user has not set one: the saved one, else the current model's
+        default (1 for authds/ and authchatgpt/, else 5; ``settings_rules.default_batch_size``)."""
+        from glossarion_mobile.state.setting_writes import default_batch_size
+        from glossarion_mobile.ui.chat.send_state import DEFAULT_MODEL
+
+        saved = self._saved("batch_size", None)
+        try:
+            if saved is not None and int(saved) > 0:
+                return int(saved)
+        except (TypeError, ValueError):
+            pass
+        model = str(self.current_model() if self.current_model is not None else "") or DEFAULT_MODEL
+        return default_batch_size(model)
+
+    def _request_pacing(self) -> ft.Control:
+        """The API call delay, the temperature and Disable temperature (one row, above the batch size)."""
+        def number(value: Any, default: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        delay = self.flow.delay if self.flow.delay is not None else number(self._saved("delay", DEFAULT_DELAY),
+                                                                           DEFAULT_DELAY)
+        temperature = (self.flow.temperature if self.flow.temperature is not None
+                       else number(self._saved("translation_temperature", DEFAULT_TEMPERATURE), DEFAULT_TEMPERATURE))
+        disabled = (self.flow.disable_temperature if self.flow.disable_temperature is not None
+                    else bool(self._saved("disable_temperature", False)))
+        delay_field = ft.TextField(label="API call delay (s)", value=f"{delay:g}", dense=True, width=150,
+                                   keyboard_type=number_keyboard(), key="welcome-delay")
+        temperature_field = ft.TextField(label="Temperature", value=f"{temperature:g}", dense=True, width=120,
+                                         keyboard_type=number_keyboard(), disabled=disabled,
+                                         key="welcome-temperature")
+        disable = ft.Checkbox(label="Disable temperature", value=disabled, key="welcome-disable-temperature")
+
+        def on_delay(e: Any) -> None:
+            try:
+                value = float(str(e.control.value or "").strip())
+            except ValueError:
+                return
+            if value >= 0:
+                self.flow.delay = value
+
+        def on_temperature(e: Any) -> None:
+            try:
+                value = float(str(e.control.value or "").strip())
+            except ValueError:
+                return
+            if 0 <= value <= 2:
+                self.flow.temperature = value
+
+        def on_disable(e: Any) -> None:
+            self.flow.disable_temperature = bool(e.control.value)
+            temperature_field.disabled = self.flow.disable_temperature
+            try:
+                temperature_field.update()
+            except Exception:
+                pass
+
+        delay_field.on_change = on_delay
+        temperature_field.on_change = on_temperature
+        disable.on_change = on_disable
+        return ft.Row([delay_field, temperature_field, disable], spacing=8, wrap=True,
+                      vertical_alignment=ft.CrossAxisAlignment.CENTER, key="welcome-pacing")
+
+    def _batch_size(self) -> ft.Control:
+        """Batch size: a 1-50 slider and a field that takes any larger value."""
+        low, high = BATCH_SLIDER
+        current = int(self.flow.batch_size or self.default_batch_size())
+        field = ft.TextField(label="Batch size", value=str(current), dense=True, width=120,
+                             keyboard_type=number_keyboard(), key="welcome-batch-size")
+        slider = ft.Slider(min=low, max=high, divisions=high - low, value=max(low, min(high, current)), expand=True,
+                           label="{value}", key="welcome-batch-size-slider")
+
+        def from_slider(e: Any) -> None:
+            value = max(low, int(round(float(e.control.value))))
+            self.flow.batch_size = value
+            field.value = str(value)
+            try:
+                field.update()
+            except Exception:
+                pass
+
+        def from_field(e: Any) -> None:
+            text = str(e.control.value or "").strip()
+            if text.isdigit() and int(text) > 0:
+                self.flow.batch_size = int(text)  # may go beyond the slider's 50
+                slider.value = max(low, min(high, int(text)))
+                try:
+                    slider.update()
+                except Exception:
+                    pass
+
+        slider.on_change = from_slider
+        field.on_change = from_field
+        return ft.Row([slider, field], spacing=8, key="welcome-batch")
 
     def _page_providers(self) -> ft.Control:
         local: ft.Control
@@ -589,7 +710,9 @@ class WelcomeScreen(Screen):
             except Exception:
                 pass  # the cached catalog still decides
             models = tuple(getattr(getattr(self.catalog, "snapshot", None), "models", ()) or ())
-        current = str(self.current_model() if self.current_model is not None else "") or mc.DEFAULT_AUTH_MODEL
+        from glossarion_mobile.ui.chat.send_state import DEFAULT_MODEL
+
+        current = str(self.current_model() if self.current_model is not None else "") or DEFAULT_MODEL
         listed = {str(m).casefold() for m in models}
         if mc.login_route(current)[0] == provider and current.casefold() in listed:
             note = f"✓ Using {current}"

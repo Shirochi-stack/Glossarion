@@ -608,17 +608,21 @@ class APIKeyEntry:
                 return False
             if self.last_error_time and self.is_cooling_down:
                 time_since_error = time.time() - self.last_error_time
-                if time_since_error < self.cooldown:
+                if time_since_error < (getattr(self, 'error_cooldown', None) or self.cooldown):
                     return False
                 else:
                     self.is_cooling_down = False
+                    self.error_cooldown = None
             return True
 
-    def mark_error(self, error_code: int = None):
+    def mark_error(self, error_code: int = None, cooldown: float = None):
+        """``cooldown`` (seconds) overrides the key's own cooldown for this rate limit, e.g. a
+        provider's retry-after or an account mute that lasts hours."""
         with self._lock:
             self.error_count += 1
             self.times_used = getattr(self, 'times_used', 0) + 1
             self.last_error_time = time.time()
+            self.error_cooldown = float(cooldown) if error_code == 429 and cooldown else None
             if error_code == 429:
                 self.is_cooling_down = True
 
@@ -1045,19 +1049,22 @@ class APIKeyPool:
             logger.warning(f"[{self.pool_name}] No request keys are currently available")
             return None
 
-    def mark_key_error(self, key_index: int, error_code: int = None):
-        """Mark a key as having an error (thread-safe with key-specific lock)"""
+    def mark_key_error(self, key_index: int, error_code: int = None, cooldown: float = None):
+        """Mark a key as having an error (thread-safe with key-specific lock).
+
+        A 429 rests the key for ``cooldown`` seconds when given (the provider's own wait),
+        else for the key's configured cooldown; the other keys keep serving meanwhile."""
         if 0 <= key_index < len(self.keys):
             # Use key-specific lock for this operation
             with self.key_locks.get(key_index, threading.Lock()):
                 # Mark error on the key itself
-                self.keys[key_index].mark_error(error_code)
+                self.keys[key_index].mark_error(error_code, cooldown=cooldown)
 
                 # Add to rate limit cache if it's a 429
                 if error_code == 429:
                     key = self.keys[key_index]
                     key_id = f"Key#{key_index+1} ({key.model})"
-                    self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
+                    self._rate_limit_cache.add_rate_limit(key_id, cooldown or key.cooldown)
 
                     logger.debug(f"Marked key {key_id} with an error code")
                     time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers

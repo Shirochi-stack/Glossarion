@@ -118,7 +118,8 @@ PROVIDER_INFO: dict[str, ProviderInfo] = {
     "authgpt": ProviderInfo(
         "authgpt", "ChatGPT", "authgpt_auth", "loopback", "authgpt0/",
         "authgpt0/ uses every signed-in ChatGPT slot in turn; authgptN/ uses slot #N only.",
-        "Your ChatGPT Plus/Pro subscription powers GPT-6 Luna, the default model.",
+        "Your ChatGPT subscription powers the authgpt/ models such as GPT-6 Luna, and your plan's models "
+        "on authchatgpt/ (ChatGPT web chat, the default model, which also works without signing in).",
         "http://localhost:1455/auth/callback?code=…&state=…",
     ),
     "authgrok": ProviderInfo(

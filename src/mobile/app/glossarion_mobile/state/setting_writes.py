@@ -45,6 +45,8 @@ __all__ = [
     "CONTEXT_MODE_KEY",
     "CONTEXT_MODE_WRITES",
     "MOBILE_MAX_OUTPUT_TOKENS",
+    "MOBILE_DEFAULT_MODEL",
+    "default_batch_size",
     "MOBILE_STREAMING_DEFAULT",
     "PROFILE_KEY",
     "RULE_KEYS",
@@ -101,6 +103,12 @@ STREAMING_WRITES = STREAMING_KEYS + ("enable_thoughts",)
 MOBILE_STREAMING_DEFAULT = True
 #: the mobile output-token budget when none is saved (desktop default 128000; owner, U13)
 MOBILE_MAX_OUTPUT_TOKENS = 16384
+#: The model when none is saved on Glossarion Mobile (owner 2026-10-12): ChatGPT's web chat, which needs
+#: no API key and no sign-in. The desktop default stays authgpt/gpt-6-luna; the default is never written.
+MOBILE_DEFAULT_MODEL = "authchatgpt/auto"
+#: ``settings_rules.DEFAULT_BATCH_SIZE`` / ``SERIAL_BATCH_ROUTES`` (literals: loads before the backend).
+_BATCH_SIZE = 5
+_SERIAL_BATCH_ROUTES = ("authds/", "authchatgpt/")
 #: Enable thoughts when absent (owner_state / run_env: ``config.get('enable_thoughts', True)``).
 THOUGHTS_DEFAULT = True
 _STREAMING_DEFAULTS = {**{key: MOBILE_STREAMING_DEFAULT for key in STREAMING_KEYS}, "enable_thoughts": THOUGHTS_DEFAULT}
@@ -252,16 +260,32 @@ def streaming_enabled(source: Any) -> bool:
     return bool(streaming_states(source)["enable_streaming"])
 
 
+def default_batch_size(model: Any) -> int:
+    """``settings_rules.default_batch_size``: 1 for the web-chat routes (authds/, authchatgpt/), else 5."""
+    rules = _rules()
+    if rules is not None and hasattr(rules, "default_batch_size"):
+        try:
+            return int(rules.default_batch_size(model))
+        except Exception:
+            log.debug("default_batch_size failed", exc_info=True)
+    return 1 if str(model or "").strip().lower().startswith(_SERIAL_BATCH_ROUTES) else _BATCH_SIZE
+
+
 def with_mobile_streaming_defaults(config: Any) -> Any:
-    """A job's config snapshot (changed in place and returned) with the mobile Streaming default for
-    every absent toggle and the desktop thoughts lock (stream thinking on keeps Enable thoughts on,
-    ``settings_rules.apply_thoughts_lock``). Saved values win; config.json is never written."""
+    """A job's config snapshot (changed in place and returned) with the mobile defaults for absent keys:
+    Streaming on, the 16,384-token budget, the model (``MOBILE_DEFAULT_MODEL``) and the model's batch
+    size (:func:`default_batch_size`), plus the desktop thoughts lock (stream thinking on keeps Enable
+    thoughts on, ``settings_rules.apply_thoughts_lock``). Saved values win; config.json is never written."""
     if not isinstance(config, dict):
         return config
     for key in STREAMING_KEYS:
         config.setdefault(key, MOBILE_STREAMING_DEFAULT)
     # owner (U13): a phone run asks for at most 16,384 output tokens unless the user saved another budget
     config.setdefault("max_output_tokens", MOBILE_MAX_OUTPUT_TOKENS)
+    if not config.get("model"):
+        config["model"] = MOBILE_DEFAULT_MODEL
+    if config.get("batch_size") in (None, ""):
+        config["batch_size"] = default_batch_size(config.get("model"))
     if bool(config.get("stream_thinking_logs")) and not bool(config.get("enable_thoughts", THOUGHTS_DEFAULT)):
         rules = _rules()
         try:

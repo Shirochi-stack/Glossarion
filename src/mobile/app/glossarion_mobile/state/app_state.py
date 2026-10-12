@@ -1,11 +1,10 @@
 """App-wide UI state (Signals). Pure Python, no Flet import.
 
 Until MobileConfigStore (U2), JobService and the shared cores (U3+) exist, the
-values here are placeholders with the desktop defaults: model
-``authgpt/gpt-6-luna`` (translator_gui ``config.get('model', ...)``), the first
+values here are placeholders with the defaults: model ``authchatgpt/auto`` (Glossarion
+Mobile's own default; the desktop's is ``authgpt/gpt-6-luna``), the first
 built-in prompt profile ``Universal`` and target language ``English``
-(``lang_var`` fallback). No ChatGPT account is signed in, so Send shows the
-``blocked`` state with "Sign in with ChatGPT" once the engine is ready.
+(``lang_var`` fallback). authchatgpt/ needs no sign-in, so Send is ready once the engine is.
 """
 
 from __future__ import annotations

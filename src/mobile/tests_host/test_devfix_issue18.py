@@ -96,7 +96,8 @@ def _foundations():
 PHONE_DP = (320, 360, 411)
 #: a "This chat only" model long enough that the subtitle needs an ellipsis at every phone width
 LONG_MODEL = "gemini-3-pro-preview"
-DEFAULT_SUBTITLE = "authgpt/gpt-6-luna · Universal · → English ▾"
+#: a fresh chat's subtitle (the mobile default model, authchatgpt/auto since 2026-10-12)
+DEFAULT_SUBTITLE = "authchatgpt/auto · Universal · → English ▾"
 
 
 # ---- what the Flutter client receives ------------------------------------------------------------
@@ -352,8 +353,10 @@ def test_chat_header_subtitle_ellipsizes_in_the_app_bar(app_env, width):
             assert_header_fits(layout, width=width, state="fresh chat", custom=False)
             before = pre_fix_overflow(encoded, width, header)
             assert before > 0, f"the pre-fix row should overflow at {width} dp"
-            if width == 320:  # the CI emulator: Build Mobile run 37800059580's numbers
-                assert layout["slot"] == 88 and before == pytest.approx(148)
+            if width == 320:  # the CI emulator: Build Mobile run 37800059580 measured the 44-character
+                # authgpt/gpt-6-luna subtitle "overflowed by 148 pixels" (= 44 x 236/44 - 88) in this slot
+                assert layout["slot"] == 88
+                assert before == pytest.approx(len(DEFAULT_SUBTITLE) * LABEL_SMALL_PX_PER_CHAR - 88)
 
             # the owner's case: per-chat overrides show the "custom" chip next to the subtitle
             view._on_model_sheet_select("model", LONG_MODEL, True)

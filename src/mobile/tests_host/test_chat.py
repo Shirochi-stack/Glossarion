@@ -1271,9 +1271,8 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             assert kinds == ["UserBubble", "AssistantMessage", "UserFileCard", "JobCard"]
             assert view.transcript.cards[1].content_md.value == "안녕 → **Hello**"
             assert view.transcript.cards[1].thinking_body.visible  # expanded index 1 persisted
-            # blocked until ChatGPT sign-in (default model authgpt/gpt-6-luna)
-            assert view.composer.send_state is SendState.BLOCKED
-            assert view.caption.fix_button.content == "Sign in with ChatGPT"
+            # the mobile default model authchatgpt/auto needs no sign-in (owner 2026-10-12): ready at once
+            assert view.composer.send_state is SendState.IDLE_READY
             oauth.signed_in.add("authgpt")  # the token store is authoritative (refresh_sign_in re-reads it)
             await feature.refresh_sign_in()
             assert app.state.signed_in.value == frozenset({"authgpt"})

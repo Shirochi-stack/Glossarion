@@ -2563,6 +2563,17 @@ class UnifiedClient:
             return best_truncated_content, best_truncated_finish_reason
         return None
 
+    def _indefinite_rate_limit_retry(self) -> bool:
+        """Retry rate limits without the attempt cap: the Indefinite Rate Limit Retry toggle (off
+        unless exported), and always for authds/, whose limit is DeepSeek's temporary mute."""
+        if os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "0") == "1":
+            return True
+        try:
+            model = self._get_active_request_model() or getattr(self, 'model', '')
+        except Exception:
+            model = getattr(self, 'model', '')
+        return str(model or '').strip().lower().startswith('authds/')
+
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         if getattr(exc, 'error_type', None) == 'autharena_stream_error':
             return False  # An interrupted/uncertain Arena stream must not rotate and replay.
@@ -5565,17 +5576,24 @@ class UnifiedClient:
         
         # Mark the current key as rate limited (if we have one)
         if current_key_index is not None and self._api_key_pool:
+            # A route that knows how long the limit lasts (authds/: a DeepSeek account mute) rests
+            # this key for that long; the pool keeps serving with its other keys.
+            retry_after = getattr(tls, 'rate_limit_retry_after', None)
+            tls.rate_limit_retry_after = None
             # Use the pool's thread-safe method to mark the error
-            self._api_key_pool.mark_key_error(current_key_index, 429)
+            self._api_key_pool.mark_key_error(current_key_index, 429, cooldown=retry_after)
             
             # Get cooldown value safely
             cooldown = 60  # Default
             with self.__class__._pool_lock:
                 if current_key_index < len(self._api_key_pool.keys):
                     key = self._api_key_pool.keys[current_key_index]
-                    cooldown = getattr(key, 'cooldown', 60)
-            
-            defer_batch_log(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
+                    cooldown = retry_after or getattr(key, 'cooldown', 60)
+            if cooldown == float('inf'):
+                defer_batch_log(f"[THREAD-{thread_name}] ⛔ {current_key_identifier} is muted by the provider; "
+                                f"it stays out of the pool for the rest of this session")
+            else:
+                defer_batch_log(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
             
             # APIKeyPool.mark_key_error already updates this pool's cooldown cache.
         
@@ -7377,7 +7395,10 @@ class UnifiedClient:
             except Exception as exc:
                 last_error = exc
                 try:
-                    pool.mark_key_error(key_idx, 429 if self._is_rate_limit_error(exc) else None)
+                    details = getattr(exc, 'details', None)
+                    retry_after = details.get('retry_after_seconds') if isinstance(details, dict) else None
+                    pool.mark_key_error(key_idx, 429 if self._is_rate_limit_error(exc) else None,
+                                        cooldown=retry_after)
                 except Exception:
                     pass
                 if not self._is_rate_limit_error(exc):
@@ -8394,7 +8415,7 @@ class UnifiedClient:
             
             if self._multi_key_mode:
                 # Check if indefinite retry is enabled for multi-key mode too
-                indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                indefinite_retry_enabled = self._indefinite_rate_limit_retry()
                 last_error = None
                 attempt = 0
                 
@@ -11170,7 +11191,7 @@ class UnifiedClient:
                         raise
                     
                     # In single-key mode, check if indefinite retry is enabled
-                    indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "0") == "1"
+                    indefinite_retry_enabled = self._indefinite_rate_limit_retry()
                     
                     if indefinite_retry_enabled:
                         # Calculate wait time from Retry-After header if available
@@ -11507,7 +11528,7 @@ class UnifiedClient:
                         raise
                     
                     # In single-key mode, check if indefinite retry is enabled
-                    indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                    indefinite_retry_enabled = self._indefinite_rate_limit_retry()
                     
                     if indefinite_retry_enabled:
                         # Calculate wait time from Retry-After header if available
@@ -17653,7 +17674,7 @@ class UnifiedClient:
                     pass
 
                 # Check if indefinite rate limit retry is enabled
-                indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                indefinite_retry_enabled = self._indefinite_rate_limit_retry()
                 
                 retry_after_val = resp.headers.get('Retry-After', '')
                 retry_secs = self._parse_retry_after(retry_after_val)
@@ -29503,7 +29524,12 @@ class UnifiedClient:
             return UnifiedResponse(content=result['content'], finish_reason=result['finish_reason'],
                                    usage=result.get('usage'), raw_response=result)
         except route_error as exc:
-            raise UnifiedClientError(str(exc), error_type=exc.error_type) from exc
+            retry_after = getattr(exc, 'retry_after', None)
+            # the key rotation (multi-key mode) rests this key for the route's own wait
+            tls.rate_limit_retry_after = retry_after
+            finite = retry_after if retry_after and retry_after != float('inf') else None
+            raise UnifiedClientError(str(exc), error_type=exc.error_type,
+                                     details={'retry_after_seconds': finite} if finite else None) from exc
         finally:
             flush_thinking()
             if log_buf and log_buf[0]:

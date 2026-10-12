@@ -74,6 +74,7 @@ __all__ = [
     "is_google_service_account",
     "authgpt_login_needed", "authgrok_login_needed", "authcd_login_needed", "authgem_login_needed", "authnan_login_needed",
     "excluded_route_reason", "route_controls",
+    "DEFAULT_BATCH_SIZE", "SERIAL_BATCH_ROUTES", "default_batch_size",
     # chunk size / compression
     "parse_chunk_size_text", "factor_for_chunk_size", "record_chunk_size", "remember_manual_chunk_size",
     "held_manual_chunk_size", "chunk_budget_margin", "auto_compression_factor", "apply_auto_compression_factor",
@@ -680,6 +681,18 @@ EXCLUDED_ROUTE_PREFIXES = {
     'autharena': "Arena needs a desktop browser session proxy (QtWebEngine).",
     'search/opera': "Opera Aria mints its token by driving a desktop Opera browser.",
 }
+
+
+#: Batch size when none is saved (desktop ``batch_size_var`` default).
+DEFAULT_BATCH_SIZE = 5
+#: Web-chat routes that drive one browser chat per request (DeepSeek, ChatGPT): one at a time by
+#: default, since parallel chats quickly hit the sites' rate limits.
+SERIAL_BATCH_ROUTES = ('authds/', 'authchatgpt/')
+
+
+def default_batch_size(model):
+    """The batch size for *model* when none is saved: 1 for the web-chat routes, else 5."""
+    return 1 if str(model or '').strip().lower().startswith(SERIAL_BATCH_ROUTES) else DEFAULT_BATCH_SIZE
 
 
 def excluded_route_reason(model, platform='mobile'):

@@ -670,7 +670,9 @@ class SettingsTab(MangaTab):
             value = cfg.get(key, default)
             return "" if value is None else str(value)
 
-        rows = [("Model", val("model", "authgpt/gpt-6-luna")), ("Profile", val("active_profile", "")),
+        from glossarion_mobile.ui.chat.send_state import DEFAULT_MODEL
+
+        rows = [("Model", val("model", DEFAULT_MODEL)), ("Profile", val("active_profile", "")),
                 ("Target language", val("output_language", "English")),
                 ("Temperature", val("translation_temperature", "")),
                 ("Contextual", "On" if cfg.get("contextual", True) else "Off"),

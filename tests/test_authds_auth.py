@@ -450,3 +450,81 @@ def test_unified_transport_dispatch(monkeypatch):
     with pytest.raises(UnifiedClientError) as exc:
         client._send_authds([{'content':'source'}],.5,8192,'chapter')
     assert exc.value.error_type=='rate_limit'
+
+
+def test_images_are_collected_for_upload():
+    import base64
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+    images = []
+    prompt = ds.build_prompt([{"role": "system", "content": "translate"},
+                              {"role": "user", "content": [{"type": "text", "text": "page 1"},
+                                                           {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}}]}],
+                             images=images)
+    assert prompt == "[system]\ntranslate\n\n[user]\npage 1"
+    assert images == [{"mime": "image/png", "b64": png, "name": "image1.png"}]
+    with pytest.raises(ds.AuthDSError):  # only data URLs of real image types
+        ds.build_prompt([{"content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}], images=[])
+    assert ds.resolve_model("authds/auto") == ds.resolve_model("authds/flash")
+
+
+def test_browser_script_uploads_images_before_the_completion(tmp_path):
+    import shutil
+    import subprocess
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to execute the browser JavaScript test')
+    config = {'model': 'default', 'thinking': False, 'prompt': 'translate the page',
+              'images': [{'mime': 'image/png', 'b64': 'iVBORw0KGgo=', 'name': 'image1.png'}],
+              'worker': 'https://fe-static.deepseek.com/chat/static/current-worker.js', 'fallbackWorker': ds.POW_WORKER_URL}
+    setup = r'''
+const assert = require('node:assert/strict');
+global.window=global; global.location={href:'https://chat.deepseek.com/'};
+global.localStorage={getItem:()=>JSON.stringify({value:'test-token'})};
+const requests=[]; let polls=0;
+global.Worker=class { postMessage(input){ queueMicrotask(()=>this.onmessage({data:{type:'pow-answer',answer:{
+  algorithm:'DeepSeekHashV1',challenge:'c',salt:'s',signature:'sig',answer:input.challenge.target_path.length}}})); } terminate(){} };
+const ok=data=>Response.json({code:0,data:{biz_code:0,biz_data:data}});
+global.fetch=async (url, options={})=>{
+ requests.push({url,options});
+ if(url.endsWith('current-worker.js'))return new Response('worker');
+ if(url.endsWith('users/current'))return ok({chat:{is_muted:0}});
+ if(url.endsWith('create_pow_challenge'))return ok({challenge:{algorithm:'DeepSeekHashV1',challenge:'c',salt:'s',signature:'sig',difficulty:1,expire_at:9,target_path:JSON.parse(options.body).target_path}});
+ if(url.endsWith('file/upload_file'))return ok({id:'file-1'});
+ if(url.includes('fetch_files'))return ok({files:[{id:'file-1',status:++polls>1?'SUCCESS':'PENDING'}]});
+ if(url.endsWith('chat_session/create'))return ok({chat_session:{id:'fresh'}});
+ if(url.endsWith('chat/completion'))return new Response('event: close\ndata: {}\n\n');
+ throw Error('Unexpected endpoint '+url);
+};
+'''
+    checks = r'''
+(async()=>{
+ while(!window.__glossarionDS.done)await new Promise(r=>setTimeout(r,1));
+ assert.equal(window.__glossarionDS.error,null);
+ const upload=requests.find(r=>r.url.endsWith('file/upload_file'));
+ assert.ok(upload.options.body instanceof FormData);
+ assert.equal(upload.options.headers['x-model-type'],'default');
+ assert.equal(upload.options.headers['x-file-size'],'8');
+ assert.equal('content-type' in upload.options.headers,false);
+ const proof=JSON.parse(Buffer.from(upload.options.headers['x-ds-pow-response'],'base64').toString());
+ assert.equal(proof.target_path,'/api/v0/file/upload_file');
+ const completion=requests.find(r=>r.url.endsWith('chat/completion'));
+ assert.deepEqual(JSON.parse(completion.options.body).ref_file_ids,['file-1']);
+ assert.ok(requests.indexOf(completion)>requests.indexOf(upload));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    script = tmp_path / 'authds_images.cjs'
+    script.write_text(setup + ds._START_SCRIPT.replace('__CONFIG__', json.dumps(config)) + ';\n' + checks, encoding='utf-8')
+    result = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_muted_account_is_a_rate_limit_that_rests_the_key_for_the_session():
+    import math
+
+    class MutedPage(Page):
+        pass
+    page = MutedPage([{'chunks': [], 'done': True, 'error': 'DeepSeek has muted this account', 'status': 429,
+                       'retryAfter': 90000}])
+    with pytest.raises(ds.AuthDSError) as error:
+        ds._complete(page, 'flash', [{'content': 'x'}], 5, None, None, None)
+    assert error.value.error_type == 'rate_limit' and error.value.retry_after == math.inf

@@ -50,9 +50,10 @@ __all__ = [
     "visual_for",
 ]
 
-# Desktop default model (translator_gui: self.config.get('model', 'authgpt/gpt-6-luna')).
-DEFAULT_MODEL = "authgpt/gpt-6-luna"
-DEFAULT_MODEL_NAME = "GPT-6 Luna"
+# The model when none is saved: Glossarion Mobile's own default (state.setting_writes.MOBILE_DEFAULT_MODEL,
+# ChatGPT web chat without sign-in); the desktop default stays authgpt/gpt-6-luna.
+DEFAULT_MODEL = "authchatgpt/auto"
+DEFAULT_MODEL_NAME = "ChatGPT (web)"
 
 
 class SendState(str, Enum):

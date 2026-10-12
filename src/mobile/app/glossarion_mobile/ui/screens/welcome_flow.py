@@ -87,6 +87,11 @@ class WelcomeFlow:
     # U13: the run budget the user sets here (None: leave the setting alone)
     max_output_tokens: Optional[int] = None
     chunk_size: Optional[str] = None  # "" = auto (manual_chunk_size cleared)
+    # the request pacing and batch size set here (None: leave the saved / model default alone)
+    delay: Optional[float] = None  # API call delay, seconds (``delay``)
+    temperature: Optional[float] = None  # ``translation_temperature``
+    disable_temperature: Optional[bool] = None  # ``disable_temperature`` (send no temperature)
+    batch_size: Optional[int] = None  # ``batch_size``
     finished: bool = False
     skipped: bool = False
     history: list = field(default_factory=list)
@@ -135,6 +140,14 @@ class WelcomeFlow:
             updates["max_output_tokens"] = int(self.max_output_tokens)
         if self.chunk_size is not None:
             updates["manual_chunk_size"] = str(self.chunk_size)
+        if self.delay is not None:
+            updates["delay"] = float(self.delay)
+        if self.temperature is not None:
+            updates["translation_temperature"] = float(self.temperature)
+        if self.disable_temperature is not None:
+            updates["disable_temperature"] = bool(self.disable_temperature)
+        if self.batch_size:
+            updates["batch_size"] = int(self.batch_size)
         updates["glossary_mode_dialog_shown"] = True
         self.finished = True
         return updates

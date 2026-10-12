@@ -89,8 +89,13 @@ def resolve_model(model):
     return name
 
 
-def build_prompt(messages):
-    return _build_prompt(messages, AuthChatGPTError, "AuthChatGPT")
+def build_prompt(messages, images=None):
+    return _build_prompt(messages, AuthChatGPTError, "AuthChatGPT", images=images)
+
+
+#: logged-out chatgpt.com cannot attach files ("Log in to use")
+IMAGES_NEED_LOGIN = ("AuthChatGPT needs a ChatGPT login to send images (logged-out ChatGPT cannot attach files). "
+                     "Click ChatGPT Login.")
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +493,16 @@ _HOOK_SCRIPT = r"""((window) => {
    if (pick.error) { state.error = pick.error; state.kind = 'config_error'; return new Response(null, {status:400}); }
    state.resolved = pick;
    const payload = JSON.parse(new TextDecoder().decode(body));
-   payload.messages[payload.messages.length - 1].content = {content_type:'text', parts:[cfg.prompt]};
+   const last = payload.messages[payload.messages.length - 1];
+   // the page uploaded the images itself: keep its image parts, replace only the text
+   const media = ((last.content && Array.isArray(last.content.parts)) ? last.content.parts : []).filter(p => p && typeof p === 'object');
+   if ((cfg.images || 0) > media.length) {
+    state.error = 'ChatGPT did not attach the image (' + media.length + ' of ' + cfg.images + ').';
+    state.kind = 'browser_error';
+    return new Response(null, {status:400});
+   }
+   last.content = media.length ? {content_type:'multimodal_text', parts:[...media, cfg.prompt]}
+    : {content_type:'text', parts:[cfg.prompt]};
    payload.model = pick.model;
    if (pick.effort) payload.thinking_effort = pick.effort; else delete payload.thinking_effort;
    if (cfg.temporary) payload.history_and_training_disabled = true;
@@ -553,6 +567,24 @@ _COMPOSER = ("(() => {const c = document.querySelector('#prompt-textarea'), b = 
 _TYPE = ("(() => {const c = document.querySelector('#prompt-textarea'); if (!c) return false; c.focus();"
          " return document.execCommand('insertText', false, '.');})()")
 _SEND = "(() => {const b = document.querySelector('[data-testid=\"send-button\"]'); if (b) b.click(); return true;})()"
+# Images go in through the composer's own file input, so the page uploads them itself.
+_ATTACH = r"""(() => {
+ const list = window.__glossarionImages || [];
+ const input = document.querySelector('#upload-files') ||
+  [...document.querySelectorAll('input[type=file]')].find(i => /image/.test(i.accept || ''));
+ if (!input) return 'no-input';
+ const files = new window.DataTransfer();
+ for (const image of list) {
+  const raw = atob(image.b64), bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  files.items.add(new window.File([bytes], image.name, {type: image.mime}));
+ }
+ input.files = files.files;
+ input.dispatchEvent(new window.Event('change', {bubbles: true}));
+ return 'ok';
+})()"""
+_ATTACHED = ("(() => {const busy = document.querySelector('form [role=\"progressbar\"], form circle[stroke-dasharray]');"
+             " return !busy && document.querySelectorAll('form img').length;})()")
 _LOAD_CATALOG = "(() => {window.__glossarionGPT.loadCatalog(); return true;})()"
 _CATALOG = ("(() => {const s = window.__glossarionGPT; return s ? {catalog: s.catalog && {names: s.catalog.names},"
             " error: s.catalogError} : null;})()")
@@ -757,6 +789,23 @@ def _kind(status):
     return {401: "auth_error", 403: "access_denied", 429: "rate_limit"}.get(status, "api_error")
 
 
+def _attach(page, images, cancel_check):
+    """Adds ``images`` to the composer and waits until the page has uploaded them."""
+    page.evaluate("(window.__glossarionImages = " + json.dumps(images) + ", true)")
+    if page.evaluate(_ATTACH) != "ok":
+        raise AuthChatGPTError("ChatGPT's page has no image upload here; images need a ChatGPT login.",
+                               "browser_error")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        _check(cancel_check)
+        if (page.evaluate(_ATTACHED) or 0) >= len(images):
+            time.sleep(1.5)  # the thumbnail shows before the upload's last step
+            if (page.evaluate(_ATTACHED) or 0) >= len(images):
+                return
+        time.sleep(.5)
+    raise AuthChatGPTError("ChatGPT did not finish uploading the image.", "timeout")
+
+
 def _submit(page, cancel_check, before_send_callback):
     """Send one message from the composer; the hook swaps in the real prompt and model.
 
@@ -783,7 +832,9 @@ def _submit(page, cancel_check, before_send_callback):
     raise AuthChatGPTError("ChatGPT did not accept the message. Try again.", "browser_error")
 
 
-def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None):
+def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None, images=None):
+    if images:
+        _attach(page, images, cancel_check)
     _submit(page, cancel_check, before_send_callback)
     parser = StreamParser()
     parser.on_thinking = on_thinking
@@ -851,14 +902,18 @@ def _login_rejected(exc):
 def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=print,
                          cancel_check=None, on_delta=None, before_send_callback=None, on_thinking=None):
     name = resolve_model(model)
-    prompt = build_prompt(messages)
+    images = []
+    prompt = build_prompt(messages, images=images)
     token = _access_token(log_fn)
     refreshed = False
     while True:
-        config = {"token": token, "prompt": prompt, "model": name, "temporary": bool(token)}
+        if images and not token:
+            raise AuthChatGPTError(IMAGES_NEED_LOGIN, "config_error")
+        config = {"token": token, "prompt": prompt, "model": name, "temporary": bool(token), "images": len(images)}
         with _open_tab(config, cancel_check) as page:
             try:
-                result = _complete(page, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
+                result = _complete(page, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking,
+                                   images=images)
                 if token:
                     _announce_logged_in(token, log_fn)
                 return result

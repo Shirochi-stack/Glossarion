@@ -728,6 +728,7 @@ class ChatFeature:
             on_set_model=set_model,
             default_max_tokens=int((env.config_get("max_output_tokens", None) if env else None) or 16384),
             default_chunk_size=str((env.config_get("manual_chunk_size", "") if env else "") or ""),
+            config_get=env.config_get if env else None,
         )
         if previous is not None:  # the sign-in rows, model lines and permission state of the same session
             for name in ("provider_status", "model_notes", "keyless_chosen", "permission_state"):

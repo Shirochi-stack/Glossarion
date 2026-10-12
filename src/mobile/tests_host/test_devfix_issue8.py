@@ -520,6 +520,10 @@ def test_owner_issue8_first_use_after_launch_needs_no_library_visit(isolated):
             view = app.chat_view
             chats = app.chat_feature.chats
             route = _route(page)
+            # a ChatGPT (authgpt/) model without sign-in (the mobile default, authchatgpt/auto, needs none)
+            from glossarion_mobile.state.app_state import ChatContext
+
+            app.state.chat_context.set(ChatContext(model="authgpt/gpt-6-luna"))
             await driver.wait(key="send-blocked", timeout=30)  # not signed in: Send explains the block
             await driver.enter("/library alp", text=COMPOSER_HINT)
             items = [c for c in tester._walk() if str(_key(c) or "").startswith("slash-library-")]

@@ -168,7 +168,9 @@ def inherited_value(get: Callable[[str, Any], Any], field_name: str, listing: An
         value = get("glossary_target_language", "") or ""
     if field_name == "profile" and listing is not None and listing.active and value not in listing.texts:
         value = listing.active  # what the desktop start-up runs for a missing / unset one
-    return str(value or {"model": "authgpt/gpt-6-luna", "profile": (list(profiles) or ["Universal"])[0],
+    from glossarion_mobile.ui.chat.send_state import DEFAULT_MODEL
+
+    return str(value or {"model": DEFAULT_MODEL, "profile": (list(profiles) or ["Universal"])[0],
                          "target_language": "English"}[field_name])
 
 

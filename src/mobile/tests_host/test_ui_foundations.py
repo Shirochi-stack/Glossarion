@@ -288,7 +288,10 @@ def test_launch_links_from_shared_items():
 # Send/Stop state machine (UI_SPEC §2.4)
 # ==========================================================================
 
-SIGN_IN = chatgpt_sign_in_reason(DEFAULT_MODEL)
+# The mobile default (authchatgpt/auto) needs no sign-in; the sign-in flow is checked on a ChatGPT model.
+LUNA = "authgpt/gpt-6-luna"
+LUNA_SIGN_IN = "Sign in with ChatGPT to use authgpt/gpt-6-luna"
+SIGN_IN = chatgpt_sign_in_reason(LUNA)
 
 
 @pytest.mark.parametrize(
@@ -330,7 +333,7 @@ def test_send_machine_taps_and_long_press():
     assert [label for _, label in machine.long_press_items()] == ["Queue", "Stop current & send"]
     machine.apply(SendInputs(has_content=True, block=SIGN_IN))
     assert machine.tap() is SendAction.EXPLAIN_BLOCK
-    assert machine.caption == "Sign in with ChatGPT to use GPT-6 Luna"
+    assert machine.caption == LUNA_SIGN_IN
     assert machine.long_press_items() == ()
 
 
@@ -930,12 +933,14 @@ def test_recents_grouping_and_placeholder_index():
 
 def test_app_state_send_block_progression():
     state = AppState(guard=LoopGuard())
-    assert state.chat_context.value == ChatContext("authgpt/gpt-6-luna", "Universal", "English", False)
+    assert state.chat_context.value == ChatContext(DEFAULT_MODEL, "Universal", "English", False)
     assert state.send_block() is BLOCK_ENGINE_NOT_READY
     state.backend.set({"ok": False, "failed": {"x": "boom"}})
     assert state.send_block().code == "engine_failed"
     state.backend.set({"ok": True})
-    assert state.send_block().message == "Sign in with ChatGPT to use GPT-6 Luna"
+    assert state.send_block() is None  # the default (ChatGPT web chat) needs no sign-in
+    state.chat_context.set(ChatContext(model=LUNA))
+    assert state.send_block().message == LUNA_SIGN_IN
     state.signed_in.set(frozenset({"authgpt"}))
     assert state.send_block() is None
     state.signed_in.set(frozenset())
@@ -1144,7 +1149,7 @@ def test_output_mode_row_and_send_button():
         assert visual.key == f"send-{state.value}"
         assert not getattr(visual, "disabled", False)  # blocked stays tappable
     button.apply(SendInputs(block=SIGN_IN))
-    assert button.switcher.content.tooltip == "Sign in with ChatGPT to use GPT-6 Luna"
+    assert button.switcher.content.tooltip == LUNA_SIGN_IN
     assert button.menu.primary_trigger == ft.ContextMenuTrigger.LONG_PRESS and button.menu.secondary_trigger is None
     assert button.tap() is SendAction.EXPLAIN_BLOCK and actions == [SendAction.EXPLAIN_BLOCK]
     button.apply(SendInputs(own_job_state="RUNNING"))
@@ -1192,7 +1197,7 @@ def test_composer_header_transcript_and_plus_sheet():
     assert composer.border_radius == 24 and composer.output_row.label_text.value == "Output: Text"
 
     header = ChatHeader()
-    assert header.subtitle_text == "authgpt/gpt-6-luna · Universal · → English ▾"
+    assert header.subtitle_text == f"{DEFAULT_MODEL} · Universal · → English ▾"
     bar = header.build(tablet=False)
     assert isinstance(bar, ft.AppBar) and bar.bgcolor == ft.Colors.SURFACE and bar.elevation_on_scroll == 0
     assert bar.leading is header.menu_button and header.menu_button.size_constraints.min_height == 48
@@ -1206,7 +1211,7 @@ def test_composer_header_transcript_and_plus_sheet():
     header.on_transcript_scroll(E())
     assert bar.bgcolor == ft.Colors.SURFACE
     header.set_compact_text(True)
-    assert header.subtitle_text == "authgpt/gpt-6-luna ▾"
+    assert header.subtitle_text == f"{DEFAULT_MODEL} ▾"
     assert isinstance(header.build(tablet=True), ft.Container)
     opened = []
     header.on_open_model_sheet = opened.append
@@ -1317,10 +1322,15 @@ def test_app_builds_chat_shell_offline(app_env, capsys):
             assert app.chat_view.transcript.is_empty
             assert app_env, "warm import was not started"
             await _wait(lambda: app.state.engine_ready)
+            # the mobile default needs no sign-in: ready at once
+            assert app.chat_view.composer.send_state is SendState.IDLE_EMPTY
+            assert app.drawer.status_text.value == f"{DEFAULT_MODEL} · Ready"
+            # a ChatGPT (authgpt/) model is blocked until sign-in
+            app.state.chat_context.set(ChatContext(model=LUNA))
             assert app.chat_view.composer.send_state is SendState.BLOCKED
-            assert app.chat_view.caption.visible and app.chat_view.caption.text.value == "Sign in with ChatGPT to use GPT-6 Luna"
+            assert app.chat_view.caption.visible and app.chat_view.caption.text.value == LUNA_SIGN_IN
             assert app.chat_view.caption.fix_button.content == "Sign in with ChatGPT"
-            assert app.drawer.status_text.value == "authgpt/gpt-6-luna · Sign in with ChatGPT"
+            assert app.drawer.status_text.value == f"{LUNA} · Sign in with ChatGPT"
             assert app.drawer.section_titles == ["Today"] and "1" in app.drawer.chat_rows
             assert conn.bytes_sent > 0
         finally:
@@ -1479,6 +1489,7 @@ def test_drawer_chat_view_actions_and_worker_updates(app_env):
             assert drawer.chat_rows == {}
             drawer.set_query("")
             # send tap while blocked explains the reason (snackbar with the fix action)
+            app.state.chat_context.set(ChatContext(model=LUNA))
             assert app.chat_view.composer.send_button.tap() is SendAction.EXPLAIN_BLOCK
             # ＋ sheet and the active-mode options sheet
             plus = app.chat_view.open_plus_sheet()
