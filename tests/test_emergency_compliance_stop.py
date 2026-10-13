@@ -21,7 +21,8 @@ def load_functions(filename, names, namespace, class_name=None):
     if class_name:
         body = next(n for n in body if isinstance(n, ast.ClassDef)
                     and n.name == class_name).body
-    nodes = [n for n in body if isinstance(n, ast.FunctionDef) and n.name in names]
+    nodes = [n for n in body if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+             and n.name in names]
     assert len(nodes) == len(names)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), namespace)
     return namespace
@@ -33,6 +34,8 @@ def backend(monkeypatch):
         monkeypatch.delenv(flag, raising=False)
     ns = load_functions("TransateKRtoEN.py", {
         "apply_emergency_glossary_compliance", "_translation_prequeue_stop_mode",
+        "_prepare_emergency_glossary_compliance",
+        "_apply_prepared_emergency_glossary_compliance",
         "is_stop_requested", "set_stop_flag",
     }, {"os": os, "json": json, "re": re, "_stop_requested": False,
         "_request_glossary_setting": lambda settings, key, default: settings.get(key, default)})

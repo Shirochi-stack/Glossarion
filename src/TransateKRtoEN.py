@@ -9869,6 +9869,7 @@ class BatchTranslationProcessor:
         self.client = client
         self.base_msg = base_msg
         self.out_dir = out_dir
+        self._emergency_glossary_compliance_cache = _EmergencyGlossaryComplianceCache()
         self.progress_lock = progress_lock
         self.save_progress_fn = save_progress_fn
         self.update_progress_fn = update_progress_fn
@@ -10537,6 +10538,7 @@ class BatchTranslationProcessor:
                     chunk_html = apply_emergency_glossary_compliance(
                         chunk_html,
                         self.out_dir,
+                        _cache=self._emergency_glossary_compliance_cache,
                     )
                 user_prompt = chunk_html
                 
@@ -12610,7 +12612,10 @@ class BatchTranslationProcessor:
                 assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
 
             # Apply emergency glossary compliance pre-edit to merged content
-            merged_content = apply_emergency_glossary_compliance(merged_content, self.out_dir)
+            merged_content = apply_emergency_glossary_compliance(
+                merged_content, self.out_dir,
+                _cache=self._emergency_glossary_compliance_cache,
+            )
 
             msgs = [{"role": "system", "content": chapter_system_prompt}] + rolling_summary_msgs + memory_msgs + assistant_prefill_msgs + [
                 {"role": "user", "content": merged_content}
@@ -14276,24 +14281,58 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             print(f"⚠️ Single Pass Glossary: failed to persist glossary: {e}")
             return 0
 
-def apply_emergency_glossary_compliance(
-    content,
+class _EmergencyGlossaryComplianceCache:
+    """One translation-run cache; never share it between books or runs."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._key = None
+        self._prepared = None
+
+    @staticmethod
+    def _file_signature(path):
+        try:
+            info = os.stat(path)
+            return (os.path.normcase(os.path.abspath(path)), info.st_dev,
+                    info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        except OSError:
+            return None
+
+    def prepare(self, path, options, loader):
+        # A waiting chapter must still respond to Stop while another prepares.
+        while not self._lock.acquire(timeout=0.05):
+            if _translation_prequeue_stop_mode() is not None:
+                return None
+        try:
+            if _translation_prequeue_stop_mode() is not None:
+                return None
+            signature = self._file_signature(path)
+            key = (signature, options)
+            if signature is not None and key == self._key:
+                return self._prepared
+            prepared = loader()
+            # Do not retain failures, cancelled preparation, or a changing file.
+            if (prepared is not None
+                    and _translation_prequeue_stop_mode() is None
+                    and signature is not None
+                    and signature == self._file_signature(path)):
+                self._key, self._prepared = key, prepared
+            else:
+                self._key, self._prepared = None, None
+            return prepared
+        finally:
+            self._lock.release()
+
+
+def _prepare_emergency_glossary_compliance(
     output_dir,
     glossary_path=None,
     *,
     settings=None,
     source_path=None,
+    _cache=None,
 ):
-    """Pre-edit source text by replacing glossary raw_names with translated_names.
-    
-    Reads EMERGENCY_GLOSSARY_COMPLIANCE, EMERGENCY_GLOSSARY_COMPLIANCE_MODE,
-    EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES, and
-    EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS settings to decide what to replace.
-    Supports CSV, token-efficient (parsed), and JSON glossary formats.
-    Returns the modified content (unchanged if feature is disabled or no glossary found).
-    """
-    original_content = content
-
+    """Load an immutable, longest-first replacement plan for this request."""
     def stopped():
         # This is pre-send work: graceful stop must not start another scan.
         return _translation_prequeue_stop_mode() is not None
@@ -14303,12 +14342,12 @@ def apply_emergency_glossary_compliance(
             print(message)
 
     if stopped():
-        return original_content
+        return None
 
     if str(_request_glossary_setting(
         settings, "EMERGENCY_GLOSSARY_COMPLIANCE", "0"
     )) != "1":
-        return content
+        return None
 
     auto_mode = str(_request_glossary_setting(
         settings, "AUTO_GLOSSARY_MODE", ""
@@ -14320,7 +14359,7 @@ def apply_emergency_glossary_compliance(
                 log("🔄 Emergency Glossary Compliance: skipped because Glossary Mode is No Glossary")
         except Exception:
             pass
-        return content
+        return None
     
     mode = str(_request_glossary_setting(
         settings, "EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters"
@@ -14354,7 +14393,25 @@ def apply_emergency_glossary_compliance(
     )
     if not glossary_path or not os.path.exists(glossary_path):
         log("⚠️ Emergency Glossary Compliance: No glossary file found — skipping")
-        return content
+        return None
+    if _cache is not None:
+        # Keep the cache key and its loaded plan on the same settings snapshot.
+        cache_settings = dict(settings or {})
+        cache_settings.update({
+            "EMERGENCY_GLOSSARY_COMPLIANCE": "1",
+            "AUTO_GLOSSARY_MODE": auto_mode,
+            "EMERGENCY_GLOSSARY_COMPLIANCE_MODE": mode,
+            "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": min_chars,
+            "EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES": custom_types,
+        })
+        return _cache.prepare(
+            glossary_path, (mode, min_chars, tuple(custom_types)),
+            lambda: _prepare_emergency_glossary_compliance(
+                output_dir, glossary_path, settings=cache_settings,
+                source_path=source_path,
+            ),
+        )
+
     try:
         glossary_path_abs = os.path.abspath(glossary_path)
         if not hasattr(apply_emergency_glossary_compliance, "_logged_paths"):
@@ -14370,10 +14427,10 @@ def apply_emergency_glossary_compliance(
             raw = gf.read()
     except Exception as e:
         log(f"⚠️ Emergency Glossary Compliance: Failed to read glossary: {e}")
-        return content
+        return None
     
     if stopped():
-        return original_content
+        return None
 
     # Parse glossary entries as list of (type, raw_name, translated_name)
     entries = []
@@ -14389,7 +14446,7 @@ def apply_emergency_glossary_compliance(
             if isinstance(data, dict):
                 for key, value in data.items():
                     if stopped():
-                        return original_content
+                        return None
                     if isinstance(value, dict):
                         entry_type = value.get("type", "term").lower()
                         raw_name = value.get("raw_name", value.get("raw", key))
@@ -14401,7 +14458,7 @@ def apply_emergency_glossary_compliance(
             elif isinstance(data, list):
                 for entry in data:
                     if stopped():
-                        return original_content
+                        return None
                     if isinstance(entry, dict):
                         entry_type = entry.get("type", "term").lower()
                         raw_name = entry.get("raw_name", entry.get("raw", ""))
@@ -14447,7 +14504,7 @@ def apply_emergency_glossary_compliance(
 
         for line in raw.split("\n"):
             if stopped():
-                return original_content
+                return None
             stripped = line.strip()
             if stripped.startswith("=== ") and stripped.endswith(" ==="):
                 # Extract type from section header, e.g. "=== CHARACTERS ===" -> "character"
@@ -14481,7 +14538,7 @@ def apply_emergency_glossary_compliance(
             header_skipped = False
             for line in raw.strip().split('\n'):
                 if stopped():
-                    return original_content
+                    return None
                 if not line.strip():
                     continue
                 row = [p.strip() for p in line.split(_GLOSSARY_SEP)]
@@ -14503,7 +14560,7 @@ def apply_emergency_glossary_compliance(
             header_skipped = False
             for row in reader:
                 if stopped():
-                    return original_content
+                    return None
                 if not row or len(row) < 3:
                     continue
                 if not header_skipped and row[0].strip().lower() == "type":
@@ -14517,7 +14574,7 @@ def apply_emergency_glossary_compliance(
     
     if not entries:
         log("⚠️ Emergency Glossary Compliance: No entries parsed from glossary")
-        return content
+        return None
     
     # Filter by mode and source-entry length before applying literal replacements.
     if mode == "characters":
@@ -14540,7 +14597,7 @@ def apply_emergency_glossary_compliance(
     
     if not entries:
         log(f"⚠️ Emergency Glossary Compliance: No entries match mode '{mode}' and minimum length {min_chars}")
-        return content
+        return None
     
     # Build replacement map sorted longest-first to avoid partial matches
     # Deduplicate: if same raw_name appears, keep the first
@@ -14548,12 +14605,31 @@ def apply_emergency_glossary_compliance(
     replacements = []
     for entry_type, raw_name, translated in entries:
         if stopped():
-            return original_content
+            return None
         if raw_name not in seen:
             seen.add(raw_name)
             replacements.append((raw_name, translated))
     replacements.sort(key=lambda x: len(x[0]), reverse=True)
     
+    if stopped():
+        return None
+    return mode, tuple(replacements)
+
+
+def _apply_prepared_emergency_glossary_compliance(content, prepared, *, summary=None):
+    """Apply the original sequential substitutions without rebuilding the plan."""
+    original_content = content
+
+    def stopped():
+        return _translation_prequeue_stop_mode() is not None
+
+    def log(message):
+        if not stopped():
+            print(message)
+
+    if prepared is None or stopped():
+        return original_content
+    mode, replacements = prepared
     # Apply replacements
     count = 0
     for raw_name, translated in replacements:
@@ -14565,12 +14641,37 @@ def apply_emergency_glossary_compliance(
     
     if stopped():
         return original_content
-    if count > 0:
+    if summary is not None:
+        summary["values"] += 1
+        summary["replaced"] += count
+    elif count > 0:
         log(f"🔄 Emergency Glossary Compliance: replaced {count} entries (mode: {mode}, total candidates: {len(replacements)})")
     else:
         log(f"🔄 Emergency Glossary Compliance: 0 matches found in content (mode: {mode}, {len(replacements)} candidates)")
     
     return content
+
+
+def apply_emergency_glossary_compliance(
+    content,
+    output_dir,
+    glossary_path=None,
+    *,
+    settings=None,
+    source_path=None,
+    _cache=None,
+):
+    """Pre-edit source text using the active glossary's literal replacements.
+
+    A translation-run cache reuses preparation across chapter chunks, checking
+    the glossary file and compliance options before every reuse.
+    """
+    prepared = _prepare_emergency_glossary_compliance(
+        output_dir, glossary_path, settings=settings, source_path=source_path,
+        _cache=_cache,
+    )
+    return _apply_prepared_emergency_glossary_compliance(content, prepared)
+
 
 def clean_memory_artifacts(text):
     """Remove any memory/summary artifacts"""
@@ -23535,6 +23636,12 @@ def prepare_glossary_aware_request(
         else:
             source_text = str(payload or "")
 
+    prepared_compliance = _prepare_emergency_glossary_compliance(
+        resolved_output_dir, actual_glossary_path, settings=settings,
+        source_path=source_path,
+    )
+    compliance_summary = {'values': 0, 'replaced': 0}
+
     def compliant_value(value):
         if isinstance(value, dict):
             return {key: compliant_value(item) for key, item in value.items()}
@@ -23543,16 +23650,20 @@ def prepare_glossary_aware_request(
         if isinstance(value, tuple):
             return tuple(compliant_value(item) for item in value)
         if isinstance(value, str):
-            return apply_emergency_glossary_compliance(
-                value,
-                resolved_output_dir,
-                actual_glossary_path,
-                settings=settings,
-                source_path=source_path,
+            return _apply_prepared_emergency_glossary_compliance(
+                value, prepared_compliance, summary=compliance_summary,
             )
         return value
 
     compliant_payload = compliant_value(payload)
+    if (prepared_compliance is not None and compliance_summary['values']
+            and _translation_prequeue_stop_mode() is None):
+        mode, replacements = prepared_compliance
+        print(
+            f"🔄 Emergency Glossary Compliance: replaced {compliance_summary['replaced']} "
+            f"entries across {compliance_summary['values']} text value(s) "
+            f"(mode: {mode}, total candidates: {len(replacements)})"
+        )
     prepared_system_prompt = build_system_prompt(
         system_prompt,
         actual_glossary_path,
@@ -24838,6 +24949,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception:
         pass
     
+    emergency_glossary_compliance_cache = _EmergencyGlossaryComplianceCache()
     config = TranslationConfig()
     builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
     
@@ -31593,6 +31705,7 @@ def main(log_callback=None, stop_callback=None):
                     chunk_html = apply_emergency_glossary_compliance(
                         chunk_html,
                         out,
+                        _cache=emergency_glossary_compliance_cache,
                     )
                 user_prompt = chunk_html
                 

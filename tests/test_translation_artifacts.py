@@ -1046,7 +1046,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
     monkeypatch.setattr(
         translation_module,
         "apply_emergency_glossary_compliance",
-        lambda text, _out: text,
+        lambda text, _out, **_kwargs: text,
     )
     monkeypatch.setattr(
         translation_module,
@@ -1712,7 +1712,7 @@ def _run_batch_chapter_failure(
     monkeypatch.setattr(
         translation_module,
         "apply_emergency_glossary_compliance",
-        lambda text, _out: text,
+        lambda text, _out, **_kwargs: text,
     )
     monkeypatch.setattr(
         translation_module,
@@ -1913,7 +1913,7 @@ def test_batch_document_chunk_progress_submits_only_missing_chunks(
     monkeypatch.setattr(
         translation_module,
         "apply_emergency_glossary_compliance",
-        lambda text, _out: text,
+        lambda text, _out, **_kwargs: text,
     )
     monkeypatch.setattr(
         translation_module,

@@ -448,6 +448,8 @@ def _artifact_glossary_config(
         "MANUAL_GLOSSARY": "",
         "EMERGENCY_GLOSSARY_COMPLIANCE": "1",
         "EMERGENCY_GLOSSARY_COMPLIANCE_MODE": "all",
+        # These fixtures intentionally exercise a two-character source name.
+        "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "0",
         "GLOSSARY_SKIP_GENDER_TRACKING": "0",
         "GLOSSARY_GENDER_NOISE_THRESHOLD": "0",
         "GLOSSARY_GENDER_TRACKING_BIAS": "none",
@@ -505,10 +507,98 @@ def test_header_and_toc_requests_use_compressed_tracked_glossary_in_all_batch_mo
     assert translated == {1: "Translated 1", 2: "Translated 2"}
     assert set(captured) == {1, 2}
     assert "GLOSSARY_REFERENCE" in captured[1][0]["content"]
-    assert "character,루나,Luna,male,Hero" in captured[1][0]["content"]
-    assert "character,루나,Luna,female,Hero" in captured[2][0]["content"]
+    assert "character,루나,Luna,Male,Hero" in captured[1][0]["content"]
+    assert "character,루나,Luna,Female,Hero" in captured[2][0]["content"]
     assert "루나" not in captured[1][1]["content"]
     assert "Luna 1" in captured[1][1]["content"]
+
+
+@pytest.mark.parametrize("batch_enabled", ["0", "1"])
+@pytest.mark.parametrize("translation_type", ["header", "toc"])
+def test_header_and_toc_prepare_compliance_once_per_batch(
+    tmp_path, monkeypatch, capsys, batch_enabled, translation_type
+):
+    import TransateKRtoEN
+
+    config = _artifact_glossary_config(tmp_path)
+    monkeypatch.setenv("BATCH_TRANSLATION", batch_enabled)
+    monkeypatch.setenv("EXTRACTION_WORKERS", "2")
+    prepared_batches = []
+    captured = []
+    lock = threading.Lock()
+    original_prepare = TransateKRtoEN._prepare_emergency_glossary_compliance
+
+    def prepare(*args, **kwargs):
+        with lock:
+            prepared_batches.append(True)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(TransateKRtoEN, "_prepare_emergency_glossary_compliance", prepare)
+
+    class Client:
+        model = "test-model"
+        output_dir = config["output_dir"]
+
+    translator = BatchHeaderTranslator(Client(), config)
+
+    def send(**kwargs):
+        titles = json.loads(
+            kwargs["messages"][-1]["content"].rsplit("Titles to translate:\n", 1)[1]
+        )
+        with lock:
+            captured.append(titles)
+        return json.dumps(titles)
+
+    translator._send_with_retry = send
+    result = translator.translate_headers_batch(
+        {i: f"루나 {i}" for i in range(1, 41)}, batch_size=20,
+        translation_type=translation_type,
+    )
+    assert result == {i: f"Luna {i}" for i in range(1, 41)}
+    assert len(prepared_batches) == 2
+    assert len(captured) == 2
+    assert capsys.readouterr().out.count("Emergency Glossary Compliance: replaced") == 2
+
+
+def test_regular_chapter_compliance_cache_refreshes_after_glossary_edit(
+    tmp_path, monkeypatch
+):
+    import builtins
+    import os
+    import TransateKRtoEN
+
+    config = _artifact_glossary_config(tmp_path)
+    settings = config["_glossary_settings"]
+    path = TransateKRtoEN.find_glossary_file(
+        config["output_dir"], source_path=config["source_path"], settings=settings
+    )
+    cache = TransateKRtoEN._EmergencyGlossaryComplianceCache()
+    original_open = builtins.open
+    reads = []
+
+    def open_file(file, *args, **kwargs):
+        if os.fspath(file) == path:
+            reads.append(True)
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", open_file)
+    chapter = "루나 " + "Chapter text. " * 100
+    for _ in range(3):
+        assert TransateKRtoEN.apply_emergency_glossary_compliance(
+            chapter, config["output_dir"], path, settings=settings, _cache=cache
+        ) == "Luna " + "Chapter text. " * 100
+    assert len(reads) == 1
+
+    info = os.stat(path)
+    with original_open(path, "r", encoding="utf-8") as glossary_file:
+        raw = glossary_file.read()
+    with original_open(path, "w", encoding="utf-8") as glossary_file:
+        glossary_file.write(raw.replace("Luna", "Lena"))
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    assert TransateKRtoEN.apply_emergency_glossary_compliance(
+        chapter, config["output_dir"], path, settings=settings, _cache=cache
+    ) == "Lena " + "Chapter text. " * 100
+    assert len(reads) == 2
 
 
 def test_header_request_appends_full_glossary_when_compression_is_disabled(
@@ -566,7 +656,7 @@ def test_metadata_requests_use_compliance_and_manual_gender_decision(
     assert len(captured) == 1
     system, user = captured[0]
     assert "GLOSSARY_REFERENCE" in system["content"]
-    assert "character,루나,Luna,female,Hero" in system["content"]
+    assert "character,루나,Luna,Female,Hero" in system["content"]
     assert "루나" not in user["content"]
     assert "Luna의 이야기" in user["content"]
 
@@ -598,8 +688,8 @@ def test_metadata_auto_gender_uses_the_stable_stored_winner(
     )
 
     system = captured[0][0]["content"]
-    assert "character,루나,Luna,male,Hero" in system
-    assert "character,루나,Luna,female,Hero" not in system
+    assert "character,루나,Luna,Male,Hero" in system
+    assert "character,루나,Luna,Female,Hero" not in system
 
 
 def test_metadata_worker_title_request_uses_same_glossary_pipeline(
@@ -634,7 +724,7 @@ def test_metadata_worker_title_request_uses_same_glossary_pipeline(
     assert translated == "Luna's Story"
     system, user = captured[0]
     assert "GLOSSARY_REFERENCE" in system["content"]
-    assert "character,루나,Luna,female,Hero" in system["content"]
+    assert "character,루나,Luna,Female,Hero" in system["content"]
     assert "루나" not in user["content"]
     assert "Luna의 이야기" in user["content"]
 
@@ -678,5 +768,5 @@ def test_primary_book_title_request_uses_same_glossary_pipeline(
     assert translated == "Luna's Story"
     system, user = captured[0]
     assert "GLOSSARY_REFERENCE" in system["content"]
-    assert "character,루나,Luna,female,Hero" in system["content"]
+    assert "character,루나,Luna,Female,Hero" in system["content"]
     assert "Luna의 이야기" in user["content"]
