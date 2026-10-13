@@ -612,7 +612,9 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             # ---- defaults: every provider off, nothing sent --------------------------------------------------
             assert [s.id for s in shares.provider_states()] == ["transferit", "gofile", "send", "pixeldrain"]
             assert all(not s.enabled and not s.consented for s in shares.provider_states())
-            assert await _until(lambda: _card_share_reason(_result_card(app)) == u10.SHARE_OFF_REASON, 15), \
+            # the Result card's button stays tappable with every service off: it opens the service list,
+            # which turns one on behind its consent sheet
+            assert await _until(lambda: _card_share_reason(_result_card(app)) is None, 15), \
                 f"Result card share action: {_card_share_reason(_result_card(app))!r}"
             screen = await open_book_output()
             assert screen.output.share_reason() == u10.SHARE_OFF_REASON
@@ -984,7 +986,8 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key="share-file-0", timeout=30)
             await d.wait(key="share-settings", timeout=30)
             off = _control(tester, "share-provider-send")
-            assert isinstance(off.trailing, ReasonChip) and off.trailing.reason == u10.SERVICE_OFF_REASON, off.trailing
+            # an off service stays tappable in the list (its consent sheet turns it on): no reason chip
+            assert not isinstance(off.trailing, ReasonChip) and not off.disabled, off.trailing
             await d.tap(key="cancel")
             await d.wait(key="share-settings", gone=True, timeout=15)
             assert len(send.uploads) == uploads_before

@@ -1686,7 +1686,8 @@ class ChatFeature:
     def _u10_card_state(self, resolve: Callable[[], Any]) -> dict:
         """Blocking: what a Result card shows and allows for U10 (``JobCard.set_u10``)."""
         from glossarion_mobile.ui.chat.chat_ops import workspace_outputs
-        from glossarion_mobile.ui.screens.cloud_sync import NO_DESTINATION_REASON, book_status_line, compiled_kinds
+        from glossarion_mobile.ui.screens.cloud_sync import (NO_DESTINATION_REASON, SHARE_OFF_REASON, book_status_line,
+                                                             compiled_kinds)
 
         value = resolve()
         folder, in_attachments = value if isinstance(value, tuple) else (value, None)
@@ -1712,7 +1713,9 @@ class ChatFeature:
             "cloud_reason": (None if (reason := actions.cloud_reason(cloud_state, has_outputs=bool(outputs),
                                                                     in_library=in_library)) == NO_DESTINATION_REASON
                              else reason),
-            "share_reason": actions.share_reason(providers, has_outputs=bool(actions.shareable(outputs))),
+            # no service on yet: the button still opens the service list, which turns one on with its consent
+            "share_reason": (None if (reason := actions.share_reason(providers, has_outputs=bool(actions.shareable(outputs))))
+                             == SHARE_OFF_REASON else reason),
             "status": line[:3] if line else None,
             "status_action": line[3] if line else None,
             "links": links,

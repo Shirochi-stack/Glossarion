@@ -816,7 +816,7 @@ class StreamingTile(SwitchTile):
     ``setting_writes`` (``settings_rules.apply_streaming``: only the keys that change, the desktop thoughts
     lock). Toggles that differ (an imported desktop config) show "Custom · N of 4 on" with the switch
     following Enable streaming responses; one tap sets all four. Under it: the desktop's silent-truncation
-    warning and forced-stream note (``settings_rules`` texts, the ones other_settings shows)."""
+    warning (``settings_rules``, the text other_settings shows)."""
 
     kind = "switch"
 
@@ -858,18 +858,16 @@ class StreamingTile(SwitchTile):
         return label_for(spec) if spec is not None else key
 
     def _texts(self) -> tuple:
-        """(the silent-truncation warning, the forced-stream note) the desktop dialog shows."""
+        """(the desktop dialog's silent-truncation warning,). The desktop's forced-stream note (the list of
+        routes that always stream) is not shown on mobile (owner 2026-10-14: noise on a phone)."""
         rules = _settings_rules()
-        return (str(getattr(rules, "STREAMING_TRUNCATION_WARNING", "") or ""),
-                str(getattr(rules, "FORCED_STREAM_NOTE", "") or ""))
+        return (str(getattr(rules, "STREAMING_TRUNCATION_WARNING", "") or ""),)
 
     def build_editor_row(self) -> Optional[ft.Control]:
-        warning, note = self._texts()
+        (warning,) = self._texts()
         self.warning_text = ft.Text(warning, theme_style=ft.TextThemeStyle.BODY_SMALL, color=semantic("warning", False),
                                     visible=bool(warning))
-        self.note_text = ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True,
-                                 color=ft.Colors.ON_SURFACE_VARIANT, visible=bool(note))
-        return ft.Column([self.warning_text, self.note_text], spacing=2, tight=True)
+        return ft.Column([self.warning_text], spacing=2, tight=True)
 
     def refresh(self, push: bool = True) -> None:
         super().refresh(push=False)

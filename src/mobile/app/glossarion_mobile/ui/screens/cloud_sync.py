@@ -1437,6 +1437,9 @@ class U10Actions:
         menu = await self.io(self.shares.menu, path)
         items: list = []
         for provider, reason in menu:
+            if reason is not None and reason == short_reason(provider.get("reason")) and \
+                    not (provider.get("enabled") and provider.get("consented")):
+                reason = None  # off / not accepted yet: tapping it asks for consent and turns it on here
             limit = int(provider.get("max_bytes") or 0)
             if reason is None and limit and size > limit:
                 reason = f"{TOO_LARGE_REASON} (max {human_size(limit)})"
@@ -1459,14 +1462,22 @@ class U10Actions:
         return self._show_sheet(sheet)
 
     async def start_provider(self, provider: Mapping, path: str, identity: str) -> Any:
-        """Consent first when the current consent text was never accepted, then the upload or the hand-off."""
-        if not provider.get("consented"):
+        """Consent first when the current consent text was never accepted (a service still off is turned
+        on with it, right from the list), then the upload or the hand-off."""
+        if not provider.get("consented") or not provider.get("enabled"):
             accepted = await self.ask_consent(provider, path)
             if not accepted:
                 return None
-            result = await self.shares.give_consent(str(provider.get("id")))
+            if provider.get("enabled"):
+                result = await self.shares.give_consent(str(provider.get("id")))
+            else:
+                result = await self.shares.enable(str(provider.get("id")), True, consent=True)
             if not result.get("ok"):
                 self.say(str(result.get("message") or "Could not save your answer"))
+                return None
+            provider = {**dict(provider), "enabled": True, "consented": True}
+            if provider.get("needs_key") and not provider.get("has_key"):
+                self.say(f"Add your {provider.get('label')} API key in Settings first", "Settings", self.open_settings)
                 return None
         if provider.get("handoff"):
             return await self.handoff(provider, path, identity)

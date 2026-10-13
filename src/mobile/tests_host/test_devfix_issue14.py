@@ -316,7 +316,8 @@ def test_fresh_phone_one_streaming_switch_on_by_default(phone):
             assert tile.switch.value is True and tile.value_text.value == "On · default", tile.value_text.value
             assert tile.editable and not tile.switch.disabled
             assert not any(str(c).startswith("Custom") for c in _chips(tile)), _chips(tile)
-            assert tile.warning_text.value == DESKTOP_WARNING and tile.note_text.value == DESKTOP_NOTE
+            assert tile.warning_text.value == DESKTOP_WARNING and DESKTOP_NOTE  # the routes note: not on mobile
+            assert not hasattr(tile, "note_text")
             titles = [page.tile(key).title_text.value for key in page.keys]
             assert titles.count("Streaming") == 1
             assert not set(labels.values()) & set(titles), (labels, titles)

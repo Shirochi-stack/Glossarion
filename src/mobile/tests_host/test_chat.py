@@ -2068,9 +2068,8 @@ def test_open_in_library_action_and_moved_workspace_retry(desktop_store_cls, iso
             workspace = Path(adapter.messages("2")[3][4])
             (workspace / "translation_progress.json").write_text(json.dumps({"chapters": {}}), encoding="utf-8")
             result = next(c for c in _cards(view, JobCard) if c.title_text.value == "book.epub")
-            waiting = result.action_buttons["library"]
-            assert isinstance(waiting, ft.Row) and isinstance(waiting.controls[1], ReasonChip)
-            assert waiting.controls[1].reason == LIBRARY_WAIT_REASON
+            # still in the chat's Attachments: no Open in Library button (nor its waiting note) yet
+            assert "library" not in result.action_buttons and LIBRARY_WAIT_REASON
             assert await view.env.run_io(view._job_workspace_state, item) == (str(workspace), True)
             # Resume / Retry of a workspace still in the chat: the chat's own run (nothing to resume here)
             view._on_job_action("retry", item)

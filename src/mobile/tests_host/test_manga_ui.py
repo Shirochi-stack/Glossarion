@@ -3008,6 +3008,10 @@ def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso
         # the viewer reports its size: the page takes the full width and is centred, unconstrained
         tab._on_viewport_size(types.SimpleNamespace(width=200.0, height=500.0))
         assert not tab.interactive.constrained and tab.interactive.boundary_margin == me.ft.Margin.all(0)
+        # the size listener sits on the viewer's own container, never on the positioned holder: a size
+        # listener on a Stack's positioned child breaks its layout (the device showed a grey error box)
+        assert tab.viewer_holder.on_size_change is None
+        assert tab.viewer_holder.content.on_size_change is not None
         assert (tab.stack.width, tab.stack.height, tab.frame.width, tab.frame.height) == (200, 400, 200, 500)
         assert tab.geometry.display_w == 200 and tab.geometry.scale == 2.0
         fake_session.add_box(10, 20, 40, 60)  # displayed at (20, 40) 80 x 120

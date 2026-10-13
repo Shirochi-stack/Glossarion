@@ -1226,7 +1226,8 @@ def test_output_tab_share_link_upload_and_saved_links(tmp_path, caplog):
         assert choice.items[2].label.startswith("PDF")
         menu = await tab.actions.provider_sheet(env.epub_new, identity)
         reasons = {i.key: i.disabled_reason for i in menu.items}
-        assert reasons["share-provider-gofile"] is None and reasons["share-provider-send"] == u10.SERVICE_OFF_REASON
+        # a service still off stays tappable: its consent sheet turns it on right here
+        assert reasons["share-provider-gofile"] is None and reasons["share-provider-send"] is None
         assert reasons["share-provider-pixeldrain"] == u10.NEEDS_KEY_REASON or reasons["share-provider-pixeldrain"] \
             .startswith(u10.TOO_LARGE_REASON)
         assert menu.items[-1].key == "share-settings"

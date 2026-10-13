@@ -380,7 +380,7 @@ def test_streaming_tile_custom_state_and_one_tap_normalises(tmp_path):
     assert tile.switch.value is True and tile.summary() == "Custom · 2 of 4 on"
     assert "Custom · 2 of 4 on" in chips and any("excluded on mobile" in reason for reason in chips)
     assert tile.warning_text.value == settings_rules.STREAMING_TRUNCATION_WARNING
-    assert tile.note_text.value == settings_rules.FORCED_STREAM_NOTE
+    assert not hasattr(tile, "note_text")  # the desktop's always-streaming routes note: not on mobile
     assert tile.activate() and all(ctx.store.get(key) is False for key in WRITES)  # one tap: all four (+ thoughts)
     chips = [c.reason for c in tile.badges.controls if isinstance(c, ReasonChip)]
     assert tile.switch.value is False and tile.summary() == "Off" and not any(r.startswith("Custom") for r in chips)

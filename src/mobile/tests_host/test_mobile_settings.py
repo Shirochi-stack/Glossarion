@@ -1098,7 +1098,8 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
         page.update()
         home.did_show()
         assert home.group_titles == ["General", "Translation", "Models & keys", "Glossary", "QA", "Data", "About"]
-        assert home.section_tiles["context"].subtitle.value == "8 settings · 1 changed"
+        # (counts the settings the page lists: read-only ones are not listed)
+        assert home.section_tiles["context"].subtitle.value == "6 settings · 1 changed"
         assert "settings.appearance" not in home.route_tiles  # the schema section "appearance" covers it
         assert isinstance(home.route_tiles["settings.logs"].trailing, ft.Icon)
         assert home.route_tiles["settings.env_preview"].trailing.icon == ft.Icons.CHEVRON_RIGHT

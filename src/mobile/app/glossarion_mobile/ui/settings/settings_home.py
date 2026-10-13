@@ -40,6 +40,7 @@ from glossarion_mobile.ui.settings.banners import JobBanner, notice
 from glossarion_mobile.ui.settings.model import ordered_groups
 from glossarion_mobile.ui.settings.schema_access import SearchHit, SectionInfo
 from glossarion_mobile.ui.settings.search import SettingsSearch
+from glossarion_mobile.ui.settings.tiles import listed_setting
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["PROFILES_REASON", "ROUTE_GROUPS", "ROUTE_SECTIONS", "SettingsHome", "section_screen_for"]
@@ -227,7 +228,7 @@ class SettingsHome(HubScreen):
     def _section_tile(self, section: SectionInfo) -> ft.ListTile:
         store = self.ctx.store
         modified = sum(1 for key in section.keys if store.is_modified(self.ctx.schema.path_of(key)))
-        count = len(section.keys)
+        count = len(self._listed_keys(section))
         subtitle = f"{count} setting{'s' if count != 1 else ''}"
         if modified:
             subtitle += f" · {modified} changed"
@@ -265,6 +266,17 @@ class SettingsHome(HubScreen):
         self.route_tiles[spec.name] = tile
         return tile
 
+    def _listed_keys(self, section: SectionInfo) -> list:
+        """The settings the section's page lists (available on mobile and not read-only)."""
+        return [key for key in section.keys
+                if (spec := self.ctx.schema.spec(key)) is not None and listed_setting(self.ctx, spec)]
+
+    @staticmethod
+    def _has_pools(section: SectionInfo) -> bool:
+        from glossarion_mobile.ui.settings.section_page import SECTION_POOL_KEYS
+
+        return bool(SECTION_POOL_KEYS.get(section.id))
+
     def group_cards(self) -> list[ft.Control]:
         self.section_tiles = {}
         self.route_tiles = {}
@@ -274,6 +286,8 @@ class SettingsHome(HubScreen):
         for group, sections in self.ctx.schema.groups():
             for section in sections:
                 section_ids.add(section.id)
+                if not self._listed_keys(section) and not self._has_pools(section):
+                    continue  # nothing to change here (Direct Text: edited in Chat settings): not listed
                 groups.setdefault(group, []).append(self._section_tile(section))
                 names.append(group)
         for spec in self.children():

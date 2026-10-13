@@ -446,8 +446,7 @@ class EditorTab(MangaTab):
                                 expand=True, key="me-tools")
         self.toolbar = ft.Row([self.view_button, self.tools_row, self.more_menu], spacing=0,
                               vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-toolbar")
-        self.viewer_holder = ft.Container(left=0, top=0, right=0, bottom=0, on_size_change=self._on_viewport_size,
-                                          key="me-viewer-holder")
+        self.viewer_holder = ft.Container(left=0, top=0, right=0, bottom=0, key="me-viewer-holder")
         self.viewer_area = ft.Stack([self.viewer_holder, self.panel_holder], expand=True, key="me-viewer-area")
         self.step_buttons: dict = {}
         for step, label, icon in STEP_BUTTONS:
@@ -972,7 +971,10 @@ class EditorTab(MangaTab):
         self.canvas.shapes = self._shapes()
         self._surface_mode = None
         self._set_surface(editing)
-        container = ft.Container(content=self.interactive, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+        # the viewer's size: reported by this (not positioned) container; a size listener on the
+        # positioned holder breaks the Stack's layout (Flutter's grey error box on the device)
+        container = ft.Container(content=self.interactive, on_size_change=self._on_viewport_size,
+                                 bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
                                  border_radius=tokens.RADII["field"], clip_behavior=ft.ClipBehavior.HARD_EDGE,
                                  key=f"me-source-{self._gen}")
         self._source_cache = (signature, container)

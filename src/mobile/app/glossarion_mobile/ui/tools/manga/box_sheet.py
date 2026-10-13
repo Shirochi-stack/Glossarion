@@ -189,6 +189,7 @@ class BoxPanel:
             length=len(BOX_TABS), selected_index=names.index(self.tab), on_change=self._on_tab, expand=True,
             content=ft.TabBar(tabs=[ft.Tab(label=label, height=34) for _name, label in BOX_TABS], scrollable=False,
                               label_text_style=LABEL_TEXT, unselected_label_text_style=LABEL_TEXT,
+                              label_padding=ft.Padding.symmetric(horizontal=6),  # three tabs on one line
                               divider_height=0, key=f"box-tabbar-{n}"),
             key=f"box-tabs-{n}")
         self.ocr_body = ft.Column([

@@ -924,6 +924,8 @@ class JobCard(ft.Container):
                     reason = self.action_reasons[action_id]
                 else:
                     reason = ATTACHMENT_ACTION_REASONS.get(action_id) or (f"Arrives in {milestone}" if milestone else None)
+                if reason == LIBRARY_WAIT_REASON:
+                    continue  # the book moves into the Library by itself: no button (or note) until it is there
                 buttons.append(self._button(action_id, label, disabled_reason=reason))
             if name in ("stopped", "interrupted"):
                 buttons.insert(0, self._button("resume", "Resume", "filled"))
