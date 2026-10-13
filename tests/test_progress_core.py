@@ -168,6 +168,11 @@ MIXIN_EDITS = {
         "                prog,\n"
         "            )\n",
     )],
+    # owner 2026-10-12: Skip .pdf book title translation is on by default for new users
+    "_metadata_progress_tracking_enabled": [(
+        "config.get('skip_pdf_title_translation', False)",
+        "config.get('skip_pdf_title_translation', True)",
+    )],
 }
 #: Moved methods rewritten as a split (checked as blocks below).
 SPLIT_METHODS = {"_progress_list_display_text"}

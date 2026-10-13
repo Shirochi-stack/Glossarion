@@ -67,7 +67,37 @@ EDITS = {
         ("out_dir = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / 'Generated_Media'",
          "out_dir = pathlib.Path(data_dir(os.path.dirname(os.path.abspath(__file__)))) / 'Generated_Media'", 1),
     ],
-    "_process_image_file": [],
+    # owner 2026-10-12: a graceful stop keeps the received translation (it only skips the title request)
+    "_process_image_file": [
+        ("                # Check if stopped after API call\n"
+         "                if self.stop_requested:\n",
+         "                # Check if stopped after API call. A graceful stop lets this in-flight request finish:\n"
+         "                # its answer is saved below; only a hard stop discards it.\n"
+         "                graceful_stop = os.environ.get('GRACEFUL_STOP') == '1'\n"
+         "                if self.stop_requested and not graceful_stop:\n", 1),
+        ("                            # Check for stop before title translation\n"
+         "                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'\n"
+         "                            if self.stop_requested or graceful_stop_active:\n"
+         "                                self.append_log(\"⏹️ Image translation cancelled before title translation\")\n"
+         "                                self.image_progress_manager.update(image_path, content_hash, status=\"cancelled\")\n"
+         "                                return False\n",
+         "                            # Check for stop before title translation: a hard stop cancels; a graceful\n"
+         "                            # stop keeps the received translation and only skips the title request\n"
+         "                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'\n"
+         "                            if self.stop_requested and not graceful_stop_active:\n"
+         "                                self.append_log(\"⏹️ Image translation cancelled before title translation\")\n"
+         "                                self.image_progress_manager.update(image_path, content_hash, status=\"cancelled\")\n"
+         "                                return False\n"
+         "                            if graceful_stop_active:\n"
+         "                                self.append_log(\"⏹️ Graceful stop: saving the received translation without translating the title\")\n"
+         "                                raise _SkipTitle()\n", 1),
+        ("                                translated_title = title_content.strip() if title_content else base_name\n"
+         "                        except Exception as e:\n",
+         "                                translated_title = title_content.strip() if title_content else base_name\n"
+         "                        except _SkipTitle:\n"
+         "                            translated_title = base_name\n"
+         "                        except Exception as e:\n", 1),
+    ],
 }
 
 
