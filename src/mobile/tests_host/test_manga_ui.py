@@ -1601,7 +1601,8 @@ def test_editor_tab_boxes_steps_sheet_and_ocr(iso, tmp_path, monkeypatch):
         tab.pan_update(20, 40)
         await tab.pan_end()
         assert fake_session.calls[-1] == ("update_box", 0, 20, 30, 40, 60, False)
-        assert tab.tap_at(1, 1) == 1 and tab.tap_at(48, 99) is None
+        # a tap beside every box keeps the selection (another box, ✕ / Back or another tool ends it)
+        assert tab.tap_at(1, 1) == 1 and tab.tap_at(48, 99) == 1
         tab.selected = 0
         await tab.toggle_exclude()
         assert fake_session.calls[-1] == ("set_box_excluded", 0, True) and tab.boxes[0]["exclude_from_clean"]
@@ -2381,7 +2382,7 @@ def test_editor_display_mode_button_clean_and_box_tabs(iso, tmp_path, monkeypatc
         await tab._apply_snapshot(await tab._snapshot())
         panel = tab.long_press_at(15, 35)
         header = panel.control.content.controls[0]
-        assert header.controls == [panel.title, panel.tabs, panel.menu] and not header.wrap
+        assert header.controls == [panel.title, panel.tabs, panel.menu, panel.close_button] and not header.wrap
         assert panel.tab == "translated" and panel.translation_body.visible and not panel.ocr_body.visible
         assert tab.show_box_tab("ocr") is panel and panel.ocr_body.visible and not panel.ocr_field.read_only
         panel.ocr_field.value = "原文!"
@@ -2914,5 +2915,177 @@ def test_empty_manga_tabs_show_the_faded_halgakos(iso, tmp_path):
             images = faded(tab.empty)
             assert len(images) == 1 and 0 < images[0].opacity < 0.5, (tab, images)
         assert screen.files_tab.empty.visible
+
+    asyncio.run(scenario())
+
+
+# ==========================================================================
+# Editor layout and box moving (owner list 2026-10-13: full width, steady selection, handles, Move tab,
+# the moved text following the box)
+# ==========================================================================
+
+
+def test_editor_layout_transform_and_box_placement_helpers(tmp_path):
+    from glossarion_mobile.ui.tools.manga import editor as me
+
+    # the page is always the viewer's full width; a short page is centred, a tall one pans
+    short = me.PageLayout.fit(300, 600, 1.0)
+    assert (short.page_w, short.page_h, short.content_h, short.page_top) == (300, 300, 600, 150)
+    tall = me.PageLayout.fit(300, 400, 0.5)
+    assert (tall.page_w, tall.page_h, tall.content_h, tall.page_top) == (300, 600, 600, 0)
+    # the viewer's transform, clamped like InteractiveViewer with no boundary margin
+    t = me.ViewTransform()
+    t.resize(300, 400, 300, 600)
+    t.start(0, 0)
+    t.update(50, 30)  # at 1x the page fits the width: no sideways drag; a tall page pans up only
+    assert (t.scale, t.tx, t.ty) == (1.0, 0.0, 0.0)
+    t.update(50, -170)
+    assert (t.tx, t.ty) == (0.0, -200.0)
+    t.end()
+    t.start(150, 200, pointers=2)
+    t.update(150, 200, 2.0)  # pinch 2x about the focal point
+    assert t.scale == 2.0 and t.to_view(150, 400) == (150.0, 200.0)
+    t.end()
+    t.start(0, 0)
+    t.update(-1000, -1000)
+    t.end(vx=-5000)  # flings stop at the edges
+    assert (t.tx, t.ty) == (-300.0, -800.0)
+    t.reset()
+    assert (t.scale, t.tx, t.ty) == (1.0, 0.0, 0.0)
+    # handles: top-left moves, bottom-right resizes (the nearer one wins)
+    box = {"x": 10, "y": 10, "width": 40, "height": 30}
+    assert me.handle_at(box, 12, 8, 5) == "move" and me.handle_at(box, 52, 41, 5) == "resize"
+    assert me.handle_at(box, 30, 25, 5) is None and me.on_resize_handle(box, 50, 40, 1)
+    assert me.handle_at({"x": 0, "y": 0, "width": 4, "height": 4}, 3, 3, 10) == "resize"
+    # placing a box keeps it on the page and at least MIN_BOX, a lasso polygon follows
+    lasso = {"x": 0, "y": 0, "width": 10, "height": 10, "polygon": [[0, 0], [10, 0], [10, 10]]}
+    me.place_box(lasso, 95, -5, 20, 20, 100, 200)
+    assert (lasso["x"], lasso["y"], lasso["width"], lasso["height"]) == (80.0, 0.0, 20.0, 20.0)
+    assert lasso["polygon"] == [[80.0, 0.0], [100.0, 0.0], [100.0, 20.0]]
+    me.place_box(lasso, 0, 0, 2, 500, 100, 200)
+    assert (lasso["width"], lasso["height"]) == (me.MIN_BOX, 200.0)
+    # the live preview's patches: the rendered text and the page under it, cut at the box
+    page = write_png(tmp_path / "p.png", 100, 200)
+    hole, text = me.crop_patches(page, page, (10, 20, 30, 40), (50, 100))  # the files are twice the size
+    assert hole.startswith(b"\x89PNG") and text.startswith(b"\x89PNG")
+    from PIL import Image
+
+    import io
+
+    with Image.open(io.BytesIO(text)) as im:
+        assert im.size == (60, 80)
+    assert me.crop_patches(str(tmp_path / "missing.png"), page, (0, 0, 5, 5), (100, 200)) == (None, None)
+
+
+@needs_flet
+def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga import editor as me
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+    import flet.canvas as cv
+
+    pages = [write_png(tmp_path / "in" / f"{n}.png", 100, 200) for n in (1, 2)]
+    fake_session = FakeEditorSession(pages)
+    monkeypatch.setitem(sys.modules, "manga_editor_core",
+                        _module("manga_editor_core", MangaEditorSession=lambda *a, **k: fake_session,
+                                default_state_file=lambda: str(tmp_path / "state.json")))
+    monkeypatch.setattr(me, "image_size", lambda path: (100, 200))
+    monkeypatch.setattr(me, "RENDER_DELAY", 0.3)
+    monkeypatch.setitem(sys.modules, "manga_models", None)
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        jobs = FakeJobs()
+        ctx = _ctx(page, {}, jobs=jobs, files=FakeFiles(), output_root=str(iso["Output"]))
+        manga = _session(tmp_path, {})
+        manga.files.host.selected_files = list(pages)
+        manga.loaded = True
+        screen = MangaScreen(parse_route("/tools/manga?tab=editor"), ctx, session=manga)
+        _mount(page, screen.get_body())
+        tab = screen.editor_tab
+        await tab.open_page(0)
+        # the viewer reports its size: the page takes the full width and is centred, unconstrained
+        tab._on_viewport_size(types.SimpleNamespace(width=200.0, height=500.0))
+        assert not tab.interactive.constrained and tab.interactive.boundary_margin == me.ft.Margin.all(0)
+        assert (tab.stack.width, tab.stack.height, tab.frame.width, tab.frame.height) == (200, 400, 200, 500)
+        assert tab.geometry.display_w == 200 and tab.geometry.scale == 2.0
+        fake_session.add_box(10, 20, 40, 60)  # displayed at (20, 40) 80 x 120
+        fake_session.add_box(10, 150, 40, 30)
+        fake_session.boxes[pages[0]][0].update(ocr_text="原文", translation="Hi")
+        await tab._apply_snapshot(await tab._snapshot())
+        # no number / check mark on the boxes, and no handles outside Select / move
+        tab.selected = 0
+        tab.refresh()
+        assert not [s for s in tab.canvas.shapes if isinstance(s, (cv.Text, cv.Circle))]
+        tab.set_tool("select")
+        tab.refresh()
+        handles = [s for s in tab.canvas.shapes if isinstance(s, cv.Circle)]
+        assert [(h.x, h.y) for h in handles] == [(20, 40), (100, 160)]
+        # the panel floats over the viewer, away from the box: the page keeps its size
+        assert tab.panel_holder.visible and tab.panel_holder.content is tab.panel.control
+        assert tab.viewer_area.controls == [tab.viewer_holder, tab.panel_holder] and tab.panel_side == "bottom"
+        tab.selected = 1  # low on the page: the panel goes to the top
+        tab.refresh()
+        assert tab.panel_side == "top" and tab.panel_holder.top == 0 and tab.panel_holder.bottom is None
+        assert (tab.stack.width, tab.stack.height) == (200, 400)
+        # a tap or a press beside every box keeps the selection; another box takes it
+        assert tab.tap_at(190, 10) == 1
+        tab.pan_start(190, 10)
+        assert tab.drag is None and tab.selected == 1
+        assert tab.tap_at(30, 50) == 0
+        # the move handle (top-left) drags the box, the resize handle (bottom-right) resizes it
+        tab.pan_start(22, 42)
+        assert tab.drag["mode"] == "move"
+        tab.pan_update(42, 62)
+        await tab.pan_end()
+        assert fake_session.calls[-1] == ("update_box", 0, 20, 30, 40, 60, False) and tab.selected == 0
+        assert tab.live == {}  # nothing rendered on the page yet: nothing to carry along, no re-render
+        # translated: the text cut from the render follows the box until the page renders again
+        job_id = await tab.run_step("translate")
+        fake_session.translate(pages[0])
+        jobs.finish(job_id, result={"manga_step": "translate"})
+        await _settle()
+        assert tab.translated_view and tab.view == "translated"
+        tab.pan_start(120, 180)  # the resize handle at (20 + 40, 30 + 60) image px
+        assert tab.drag["mode"] == "resize"
+        tab.pan_update(140, 200)
+        assert (tab.boxes[0]["width"], tab.boxes[0]["height"]) == (50.0, 70.0)
+        await tab.pan_end()
+        await _settle()
+        live = tab.live[0]
+        assert live["text"] in tab.canvas.shapes and live["hole"] in tab.canvas.shapes
+        assert (live["text"].x, live["text"].y, live["text"].width) == (40, 60, 100)  # where the box is now
+        assert (live["hole"].x, live["hole"].y, live["hole"].width) == (40, 60, 80)  # where the text was
+        # ... a moment after the last move the page is rendered (Save & Update Overlay)
+        assert jobs.specs[-1].params["step"] == "translate"
+        await asyncio.sleep(0.4)
+        await _settle()
+        assert jobs.specs[-1].params["step"] == "render" and tab.busy
+        jobs.finish(manga.step_job_id, result={"manga_step": "render"})
+        await _settle()
+        assert tab.live == {}
+        # the Move tab: exact numbers, nudges by the step, saved like a drag
+        tab.show_box_tab("move")
+        panel = tab.panel
+        assert panel.move_body.visible and panel.geometry_fields["width"].value == "50"
+        panel.geometry_fields["x"].value = "5"
+        panel.apply_geometry()
+        await _settle()
+        assert fake_session.calls[-1][:3] == ("update_box", 0, 5)
+        assert panel.cycle_step() == 20
+        panel.nudge(dx=1)
+        await _settle()
+        assert fake_session.calls[-1][:3] == ("update_box", 0, 25) and tab.panel.geometry_fields["x"].value == "25"
+        tab.panel.nudge(dw=-1, dh=1)
+        await _settle()
+        assert fake_session.calls[-1][4:6] == (30, 90)
+        # ✕ deselects; leaving Select / move does too
+        tab.panel.close_button.on_click(None)
+        assert tab.selected is None and not tab.panel_holder.visible
+        assert tab.tap_at(60, 100) == 0
+        tab.set_tool("box")
+        assert tab.selected is None
+        screen.dispose()
 
     asyncio.run(scenario())

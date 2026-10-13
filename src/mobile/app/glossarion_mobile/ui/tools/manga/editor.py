@@ -12,20 +12,25 @@ same code the desktop preview runs):
   translated render, the cleaned page or the original page. A finished Translate / Translate all /
   Start switches to ✒️, a finished Clean to 🧽 (desktop ``_restore_clean_button``); the mode is also
   the session preview's ``source_display_mode`` the shared Clean-this-box code reads.
-* The page sits in an ``InteractiveViewer`` (pinch zoom 1-8x, pan, a boundary margin) with its box
-  overlay in the same transformed ``Stack(Image, canvas.Canvas, GestureDetector)``, so the boxes
-  stay on the image at every zoom; the viewer (and its zoom) is kept across the tools. **Pan**
-  mode: the viewer pans and zooms. **Edit** modes (the zoom stays where Pan left it): Select/Move
-  (drag a box, drag its bottom-right corner to resize), Box, Circle and Lasso; Delete and Exclude
-  from Clean act on the selected box.
+* The page sits in an ``InteractiveViewer`` (pinch zoom 1-8x, pan) with its box overlay in the
+  same transformed ``Stack(Image, canvas.Canvas, GestureDetector)``, so the boxes stay on the
+  image at every zoom; the viewer (and its zoom) is kept across the tools. The page is always the
+  viewer's full width and does not move at 1x unless it is taller than the viewer. **Pan** mode:
+  the viewer pans and zooms. **Edit** modes (the zoom stays where Pan left it): Select/Move (drag
+  a box or its top-left move handle; its bottom-right handle resizes; the handles show in this
+  tool only), Box, Circle and Lasso; Delete and Exclude from Clean act on the selected box. A
+  box stays selected until another box is picked, ✕ / Back, or Select/Move is left. A moved
+  translated box carries its rendered text along at once; the page is re-rendered (Save & Update
+  Overlay) a moment after the last move.
 * **Workflow buttons** Detect · Clean · Recognize · Translate · Translate all · Save & Update
   Overlay, and the per-box OCR / Translate / Clean actions — ``manga_step`` jobs on the
   JobService: OCR and translation need the job's HeadlessOwner (plan §1), which only exists on
   the job thread. Box edits (add, move, resize, delete, texts, flags) are session calls on the
   io pool; editing waits while a step runs (the session runs one step at a time). A step that
   loads a model not on the device yet (detector / ONNX inpainter) offers its download first.
-* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` under the page: OCR
-  and Translated tabs, each text edited in place. The toolbar's ⋯ holds Share, Import OCR
+* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` floating over the
+  page, at the bottom or the top, away from the box (the page keeps its size): OCR and
+  Translated tabs, each text edited in place, and Move (exact position / size, nudges). The toolbar's ⋯ holds Share, Import OCR
   (renders imported translations: a job) / Export OCR (``manga_ocr_io`` JSON in the OCR Text
   folder) / the auto-saved OCR files and Files.
 * The editor rewrites the same output file on every render, so the cleaned / translated views show
@@ -55,7 +60,8 @@ from glossarion_mobile.ui.tools.manga.box_sheet import COMPACT_BUTTON, ITERATION
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
-__all__ = ["EditorTab", "Geometry", "TOOLS", "VIEWS", "hit_test", "lasso_bounds", "next_view", "normalize_rect"]
+__all__ = ["EditorTab", "Geometry", "PageLayout", "TOOLS", "VIEWS", "ViewTransform", "crop_patches", "handle_at",
+           "hit_test", "lasso_bounds", "next_view", "normalize_rect", "place_box"]
 
 log = logging.getLogger("glossarion.tools.manga")
 
@@ -70,7 +76,9 @@ TOOLS = (
 STEP_BUTTONS = (("detect", "Detect", "CENTER_FOCUS_STRONG"), ("clean", "Clean", "CLEANING_SERVICES"),
                 ("recognize", "Recognize", "DOCUMENT_SCANNER"), ("translate", "Translate", "TRANSLATE"),
                 ("translate_all", "Translate all", "LIBRARY_BOOKS"), ("render", "Update overlay", "AUTO_FIX_NORMAL"))
-HANDLE = 24.0  # dp: the resize handle
+HANDLE = 26.0  # dp on screen: the move (top-left) / resize (bottom-right) handle of the selected box
+HANDLE_REACH = 22.0  # dp on screen from a handle's centre that still grabs it
+RENDER_DELAY = 1.2  # s after the last move / resize before the page is re-rendered (Save & Update Overlay)
 THUMB_W, THUMB_H = 40, 52  # dp: a page strip thumbnail
 MIN_BOX = 8.0  # image px
 DRAG_INTERVAL = 24
@@ -88,8 +96,11 @@ VIEW_MODES = tuple(view[0] for view in VIEWS)
 #: Steps after which the desktop shows the translated output.
 TRANSLATED_STEPS = ("translate", "render", "translate_all", "translate_box", "import_ocr")
 MIN_ZOOM, MAX_ZOOM = 1.0, 8.0
-BOUNDARY = 32  # dp the zoomed page may be pulled past its edges
 GUTTER = 2  # dp around the editor: the page takes the full width
+#: The viewer's fling friction (Flutter's default ``interactionEndFrictionCoefficient``): a fling
+#: glides velocity / -ln(friction) further.
+FRICTION = 0.0000135
+DEFAULT_VIEWPORT = (360.0, 480.0)  # dp, until the viewer reports its size
 
 
 def next_view(view: str) -> str:
@@ -145,9 +156,156 @@ def hit_test(boxes: Sequence[dict], x: float, y: float) -> Optional[int]:
 
 def on_resize_handle(box: dict, x: float, y: float, tolerance: float) -> bool:
     """Image point (x, y) is on ``box``'s bottom-right corner handle."""
-    right = float(box.get("x", 0)) + float(box.get("width", 0))
-    bottom = float(box.get("y", 0)) + float(box.get("height", 0))
-    return abs(x - right) <= tolerance and abs(y - bottom) <= tolerance
+    return handle_at(box, x, y, tolerance) == "resize"
+
+
+def handle_at(box: dict, x: float, y: float, tolerance: float) -> Optional[str]:
+    """``move`` (top-left corner) / ``resize`` (bottom-right corner): the handle of ``box`` at image
+    point (x, y) within ``tolerance`` (the nearer one when both are), else None."""
+    left, top = float(box.get("x", 0)), float(box.get("y", 0))
+    right, bottom = left + float(box.get("width", 0)), top + float(box.get("height", 0))
+    found = []
+    for name, (hx, hy) in (("move", (left, top)), ("resize", (right, bottom))):
+        distance = max(abs(x - hx), abs(y - hy))
+        if distance <= tolerance:
+            found.append((distance, name))
+    return min(found)[1] if found else None
+
+
+def place_box(box: dict, x: float, y: float, width: float, height: float,
+              image_w: float = 0.0, image_h: float = 0.0) -> dict:
+    """Move / resize ``box`` in place (image px), kept on the page and at least ``MIN_BOX``; a lasso
+    polygon is translated and scaled with it (``EditorBox.set_geometry``'s rule)."""
+    width, height = max(MIN_BOX, float(width)), max(MIN_BOX, float(height))
+    if image_w:
+        width = min(width, image_w)
+        x = max(0.0, min(float(x), image_w - width))
+    else:
+        x = max(0.0, float(x))
+    if image_h:
+        height = min(height, image_h)
+        y = max(0.0, min(float(y), image_h - height))
+    else:
+        y = max(0.0, float(y))
+    old = (float(box.get("x", 0)), float(box.get("y", 0)), float(box.get("width", 0)), float(box.get("height", 0)))
+    if box.get("polygon") and old[2] > 0 and old[3] > 0:
+        sx, sy = width / old[2], height / old[3]
+        box["polygon"] = [[x + (px - old[0]) * sx, y + (py - old[1]) * sy] for px, py in box["polygon"]]
+    box["x"], box["y"], box["width"], box["height"] = x, y, width, height
+    return box
+
+
+@dataclass
+class PageLayout:
+    """The page in the viewer: always the viewer's full width (``page_w`` × ``page_h``), in a content
+    frame at least as tall as the viewer with the page centred in it. A page taller than the
+    viewer pans vertically; one that fits does not move until it is zoomed."""
+    viewport_w: float
+    viewport_h: float
+    page_w: float
+    page_h: float
+    content_h: float
+
+    @property
+    def page_top(self) -> float:
+        return (self.content_h - self.page_h) / 2
+
+    @classmethod
+    def fit(cls, viewport_w: float, viewport_h: float, aspect: float) -> "PageLayout":
+        page_h = viewport_w / aspect if aspect else viewport_h
+        return cls(viewport_w, viewport_h, viewport_w, page_h, max(viewport_h, page_h))
+
+
+@dataclass
+class ViewTransform:
+    """The viewer's pan / zoom, followed from its interaction events (Flutter keeps the matrix; Flet
+    only reports the gestures): scale ``scale`` and translation (``tx``, ``ty``) of the content in the
+    viewport, clamped like ``InteractiveViewer`` with a zero boundary margin. It places the box
+    panel away from the selected box and keeps the handles a finger's size at every zoom."""
+    scale: float = 1.0
+    tx: float = 0.0
+    ty: float = 0.0
+    viewport_w: float = 0.0
+    viewport_h: float = 0.0
+    content_w: float = 0.0
+    content_h: float = 0.0
+    _focal: Optional[tuple] = None
+    _start_scale: float = 1.0
+    _pointers: int = 1
+
+    def resize(self, viewport_w: float, viewport_h: float, content_w: float, content_h: float) -> None:
+        self.viewport_w, self.viewport_h = viewport_w, viewport_h
+        self.content_w, self.content_h = content_w, content_h
+        self.clamp()
+
+    def reset(self) -> None:
+        self.scale, self.tx, self.ty, self._focal = 1.0, 0.0, 0.0, None
+
+    def clamp(self) -> None:
+        self.scale = max(MIN_ZOOM, min(MAX_ZOOM, self.scale))
+        low_x = min(0.0, self.viewport_w - self.content_w * self.scale)
+        low_y = min(0.0, self.viewport_h - self.content_h * self.scale)
+        self.tx = max(low_x, min(0.0, self.tx))
+        self.ty = max(low_y, min(0.0, self.ty))
+
+    def start(self, fx: float, fy: float, pointers: int = 1) -> None:
+        self._focal, self._start_scale, self._pointers = (fx, fy), self.scale, max(1, int(pointers or 1))
+
+    def update(self, fx: float, fy: float, gesture_scale: float = 1.0) -> None:
+        """The gesture moved: the content point under the previous focal point is scaled about it,
+        then follows the focal point."""
+        if self._focal is None:
+            self.start(fx, fy)
+        px, py = self._focal
+        scale = max(MIN_ZOOM, min(MAX_ZOOM, self._start_scale * float(gesture_scale or 1.0)))
+        cx, cy = (px - self.tx) / self.scale, (py - self.ty) / self.scale
+        self.tx, self.ty = px - cx * scale + (fx - px), py - cy * scale + (fy - py)
+        self.scale = scale
+        self._focal = (fx, fy)
+        self.clamp()
+
+    def end(self, vx: float = 0.0, vy: float = 0.0) -> None:
+        """The gesture ended: a one-finger fling glides on (velocity / -ln(friction))."""
+        import math
+
+        if self._pointers <= 1:
+            glide = -1.0 / math.log(FRICTION)
+            self.tx += vx * glide
+            self.ty += vy * glide
+        self._focal = None
+        self.clamp()
+
+    def to_view(self, x: float, y: float) -> tuple:
+        """Content (unzoomed) point -> viewport point."""
+        return (self.tx + x * self.scale, self.ty + y * self.scale)
+
+
+def crop_patches(translated: str, background: str, rect: tuple, image_size: tuple) -> tuple:
+    """Blocking: PNG bytes of ``rect`` (x, y, w, h in page px) cut from the translated render (the
+    box's rendered text) and from ``background`` (the cleaned / original page: what the text covers),
+    each scaled from ``image_size`` to its file's own size. (None, None) when either cannot be read."""
+    import io as _io
+
+    try:
+        from safe_image import open_page_image  # the owner's guarded Pillow open (pages are untrusted)
+    except Exception:
+        return (None, None)
+    out = []
+    iw, ih = (float(v) for v in image_size)
+    x, y, w, h = rect
+    for path in (translated, background):
+        try:
+            with open_page_image(path) as im:
+                sx = im.width / iw if iw else 1.0
+                sy = im.height / ih if ih else 1.0
+                box = (int(x * sx), int(y * sy), max(int(x * sx) + 1, int((x + w) * sx)),
+                       max(int(y * sy) + 1, int((y + h) * sy)))
+                buffer = _io.BytesIO()
+                im.crop(box).save(buffer, format="PNG")
+                out.append(buffer.getvalue())
+        except Exception:
+            return (None, None)
+    return tuple(out)
 
 
 def lasso_bounds(points: Sequence[tuple]) -> Optional[tuple]:
@@ -209,6 +367,17 @@ class EditorTab(MangaTab):
         # page stays the same, so the InteractiveViewer keeps its zoom and pan
         self._source_cache: Optional[tuple] = None  # (signature, control)
         self._surface_mode: Optional[bool] = None  # the gesture surface's mode (True: an edit tool)
+        self.view_transform = ViewTransform()  # the viewer's pan / zoom (from its gestures)
+        self.layout: Optional[PageLayout] = None
+        self._viewport: Optional[tuple] = None  # the viewer's reported (width, height)
+        self.panel_side = "bottom"  # where the box panel floats over the viewer (away from the box)
+        self.nudge_step: Optional[int] = None  # the Move tab's step, kept across panels
+        # moved / resized translated boxes until the page is rendered again: {index: {"origin": the
+        # box's (x, y, w, h) in the render, "hole": cv.Image, "text": cv.Image}} — the text cut from
+        # the render follows the box, the page under it covers where it was (instant, like the
+        # desktop's overlay moving with its rectangle), then Save & Update Overlay renders it for real
+        self.live: dict = {}
+        self._render_token = 0
 
     # ---- build --------------------------------------------------------------------------------------
 
@@ -224,7 +393,9 @@ class EditorTab(MangaTab):
                                          on_click=lambda e: self.cycle_view())
         self.view_hint = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                  visible=False, key="me-view-hint")
-        self.panel_holder = ft.Container(key="me-box-panel-holder")
+        # the selected box's panel floats over the page (top or bottom, away from the box): the page
+        # keeps its size when a box is picked
+        self.panel_holder = ft.Container(left=0, right=0, bottom=0, key="me-box-panel-holder")
         self.page_label = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="me-page-label")
         self.prev_button = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous page", key="me-prev",
                                          size_constraints=HIT_TARGET,
@@ -275,7 +446,9 @@ class EditorTab(MangaTab):
                                 expand=True, key="me-tools")
         self.toolbar = ft.Row([self.view_button, self.tools_row, self.more_menu], spacing=0,
                               vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-toolbar")
-        self.viewer_holder = ft.Container(expand=True, key="me-viewer-holder")
+        self.viewer_holder = ft.Container(left=0, top=0, right=0, bottom=0, on_size_change=self._on_viewport_size,
+                                          key="me-viewer-holder")
+        self.viewer_area = ft.Stack([self.viewer_holder, self.panel_holder], expand=True, key="me-viewer-area")
         self.step_buttons: dict = {}
         for step, label, icon in STEP_BUTTONS:
             self.step_buttons[step] = ft.FilledTonalButton(content=label,
@@ -300,8 +473,7 @@ class EditorTab(MangaTab):
             self.pages_row,
             self.toolbar,
             self.view_hint,
-            self.viewer_holder,
-            self.panel_holder,
+            self.viewer_area,
             ft.Row(list(self.step_buttons.values()), scroll=ft.ScrollMode.AUTO, spacing=4, key="me-steps"),
             self.status_row,
             self.step_bar,
@@ -537,30 +709,61 @@ class EditorTab(MangaTab):
         if not box_selected:
             if self.panel is not None:
                 self.panel_tab = self.panel.tab
+                self.nudge_step = self.panel.step
             self.panel = None
             self.panel_holder.content = None
+            self.panel_holder.visible = False
             return
+        self.panel_holder.visible = True
+        self._place_panel()
         index = int(self.selected)
         box = self.boxes[index]
         reasons = (self._busy_reason(), self._steps_reason())
         panel = self.panel
         if panel is not None and panel.signature == box_signature(box, index) and \
                 getattr(panel, "_reasons", None) == reasons:
+            panel.set_geometry(box)
             self.panel_holder.content = panel.control
             return
         typing = panel if panel is not None and \
             panel.signature == box_signature(box, index) else None  # only the step state changed
         if panel is not None:
             self.panel_tab = panel.tab
+            self.nudge_step = panel.step
         panel = BoxPanel(box, index, on_action=lambda name, i, changes: self.ctx.spawn(self.box_action(name, i, changes)),
-                         on_iterations=lambda i: self.open_iterations(i), busy_reason=reasons[0],
-                         steps_reason=reasons[1], tab=self.panel_tab)
+                         on_iterations=lambda i: self.open_iterations(i),
+                         on_geometry=lambda i, values: self.ctx.spawn(self.set_box_geometry(i, values)),
+                         on_close=self.deselect, busy_reason=reasons[0], steps_reason=reasons[1],
+                         tab=self.panel_tab, **({"step": self.nudge_step} if self.nudge_step else {}))
         if typing is not None:
             panel.keep_typing(typing)
+            panel.set_geometry(box)
         panel._reasons = reasons
         self.panel = panel
         self.ctx.extras["manga_box_panel"] = panel
         self.panel_holder.content = panel.control
+
+    def _place_panel(self) -> str:
+        """The box panel floats at the bottom of the viewer, or at its top when the selected box
+        is shown in the viewer's lower half (it never covers the box being edited)."""
+        side = "bottom"
+        layout = self.layout
+        if layout is not None and self.selected is not None and 0 <= self.selected < len(self.boxes):
+            box = self.boxes[self.selected]
+            scale = self.geometry.scale
+            centre = (float(box.get("y", 0)) + float(box.get("height", 0)) / 2) * scale + layout.page_top
+            _x, y = self.view_transform.to_view(0.0, centre)
+            side = "top" if y > layout.viewport_h / 2 else "bottom"
+        self.panel_side = side
+        self.panel_holder.top = 0 if side == "top" else None
+        self.panel_holder.bottom = 0 if side == "bottom" else None
+        return side
+
+    def deselect(self) -> None:
+        """✕ on the box panel (and Back): no box selected."""
+        if self.selected is not None:
+            self.selected = None
+            self.refresh()
 
     def _thumb(self, index: int, path: str) -> ft.Control:
         current = index == self.session.page_index
@@ -652,6 +855,17 @@ class EditorTab(MangaTab):
     def _shapes(self) -> list:
         shapes: list = []
         scale = self.geometry.scale
+        if self.live and self.translated_view and self.background() == self.translated_view:
+            for index, entry in self.live.items():
+                if not (0 <= index < len(self.boxes)) or entry.get("text") is None:
+                    continue
+                ox, oy, ow, oh = entry["origin"]
+                hole, text = entry["hole"], entry["text"]
+                hole.x, hole.y, hole.width, hole.height = ox * scale, oy * scale, ow * scale, oh * scale
+                box = self.boxes[index]
+                text.x, text.y = float(box.get("x", 0)) * scale, float(box.get("y", 0)) * scale
+                text.width, text.height = float(box.get("width", 0)) * scale, float(box.get("height", 0)) * scale
+                shapes.extend((hole, text))
         for index, box in enumerate(self.boxes):
             excluded = bool(box.get("exclude_from_clean"))
             color = SELECTED_COLOR if index == self.selected else (EXCLUDED_COLOR if excluded else BOX_COLOR)
@@ -669,12 +883,8 @@ class EditorTab(MangaTab):
                 shapes.append(cv.Oval(x, y, w, h, paint=paint))
             else:
                 shapes.append(cv.Rect(x, y, w, h, paint=paint))
-            marks = ("✓" if box.get("translation") else ("·" if box.get("ocr_text") else "")) + (" ✕" if excluded else "")
-            shapes.append(cv.Text(x + 3, y + 2, f"{index + 1}{marks}",
-                                  style=ft.TextStyle(size=11, color=color, weight=ft.FontWeight.W_700)))
-            if index == self.selected:
-                shapes.append(cv.Rect(x + w - 8, y + h - 8, 16, 16,
-                                      paint=ft.Paint(color=SELECTED_COLOR, style=ft.PaintingStyle.FILL)))
+            if index == self.selected and self.tool == "select":
+                shapes.extend(self._handle_shapes(x, y, x + w, y + h))
         drag = self.drag or {}
         paint = ft.Paint(color=SELECTED_COLOR, stroke_width=2, style=ft.PaintingStyle.STROKE)
         if drag.get("mode") == "draw" and drag.get("current"):
@@ -687,13 +897,42 @@ class EditorTab(MangaTab):
             shapes.append(cv.Path(elements=elements, paint=paint))
         return shapes
 
+    def _handle_shapes(self, left: float, top: float, right: float, bottom: float) -> list:
+        """The selected box's handles (Select / move tool only): a move icon (four arrows) on the
+        top-left corner, a resize icon (a diagonal double arrow) on the bottom-right one, the same
+        size on screen at every zoom."""
+        r = HANDLE / 2 / max(self.view_transform.scale, 1e-6)
+        fill = ft.Paint(color=SELECTED_COLOR, style=ft.PaintingStyle.FILL)
+        ink = ft.Paint(color="#FFFFFF", stroke_width=max(r / 6, 0.5), style=ft.PaintingStyle.STROKE,
+                       stroke_cap=ft.StrokeCap.ROUND)
+        a, head = r * 0.62, r * 0.26  # arrow half-length, arrowhead size
+        shapes: list = [cv.Circle(left, top, r, paint=fill), cv.Circle(right, bottom, r, paint=fill)]
+        cx, cy = left, top
+        move = [cv.Path.MoveTo(cx - a, cy), cv.Path.LineTo(cx + a, cy), cv.Path.MoveTo(cx, cy - a),
+                cv.Path.LineTo(cx, cy + a)]
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            tx, ty = cx + dx * a, cy + dy * a
+            move += [cv.Path.MoveTo(tx - dx * head - dy * head, ty - dy * head - dx * head), cv.Path.LineTo(tx, ty),
+                     cv.Path.LineTo(tx - dx * head + dy * head, ty - dy * head + dx * head)]
+        shapes.append(cv.Path(elements=move, paint=ink))
+        cx, cy, d = right, bottom, a * 0.75
+        resize = [cv.Path.MoveTo(cx - d, cy - d), cv.Path.LineTo(cx + d, cy + d),
+                  cv.Path.MoveTo(cx - d + head * 1.3, cy - d), cv.Path.LineTo(cx - d, cy - d),
+                  cv.Path.LineTo(cx - d, cy - d + head * 1.3),
+                  cv.Path.MoveTo(cx + d - head * 1.3, cy + d), cv.Path.LineTo(cx + d, cy + d),
+                  cv.Path.LineTo(cx + d, cy + d - head * 1.3)]
+        shapes.append(cv.Path(elements=resize, paint=ink))
+        return shapes
+
     def _source_viewer(self) -> ft.Control:
         """The page (the display mode's image) with its boxes, in an ``InteractiveViewer`` (pinch
-        zoom, pan, a boundary margin). Image, box canvas and gesture surface share one
-        aspect-ratio ``Stack`` inside the viewer, so the viewer's transform moves them together:
-        the boxes stay on the image at every zoom, and the surface's local positions stay in the
-        unzoomed page coordinates the ``Geometry`` maps. The stack is centred in the viewer (fit:
-        the whole page, full width or full height).
+        zoom, pan). Image, box canvas and gesture surface share one ``Stack`` inside the viewer, so
+        the viewer's transform moves them together: the boxes stay on the image at every zoom, and
+        the surface's local positions stay in the unzoomed page coordinates the ``Geometry`` maps.
+        The page is always the viewer's full width (``PageLayout``: the viewer is unconstrained and
+        the stack sized from the viewer's reported size), centred in a frame at least the viewer's
+        height, with no boundary margin: a page that fits does not move until it is pinch-zoomed,
+        a taller one pans vertically. The floating box panel never resizes it.
 
         Pan mode: the viewer pans and zooms, and the surface only takes long-presses (box panel):
         a pan recognizer there would win Flutter's gesture arena against the viewer's own and
@@ -714,18 +953,23 @@ class EditorTab(MangaTab):
                 self.page_image.src = background
             self._set_surface(editing)
             return cached[1]
-        # every layer fills the aspect-ratio box: image, shapes, then the gesture surface on top
-        self.canvas = cv.Canvas(shapes=self._shapes(), on_resize=self._on_canvas_resize, left=0, top=0, right=0,
+        # every layer fills the page-sized stack: image, shapes, then the gesture surface on top
+        self.canvas = cv.Canvas(shapes=[], on_resize=self._on_canvas_resize, left=0, top=0, right=0,
                                 bottom=0, key=f"me-canvas-{self._gen}")
         image = ft.Image(src=background, fit=ft.BoxFit.FILL, gapless_playback=True, left=0, top=0, right=0,
                          bottom=0, key=f"me-image-{self._gen}")
         self.page_image = image
-        self.stack = ft.Stack([image, self.canvas], aspect_ratio=aspect, key=f"me-stack-{self._gen}")
+        self.stack = ft.Stack([image, self.canvas], key=f"me-stack-{self._gen}")
+        self.frame = ft.Container(content=self.stack, alignment=ft.Alignment.CENTER, key=f"me-frame-{self._gen}")
         self.interactive = ft.InteractiveViewer(
-            # the centring frame fills the viewport and lets the aspect-ratio stack size itself
-            content=ft.Container(content=self.stack, alignment=ft.Alignment.CENTER, key=f"me-frame-{self._gen}"),
-            min_scale=MIN_ZOOM, max_scale=MAX_ZOOM, boundary_margin=ft.Margin.all(BOUNDARY),
-            key=f"me-iv-{self._gen}")
+            content=self.frame, constrained=False, min_scale=MIN_ZOOM, max_scale=MAX_ZOOM,
+            boundary_margin=ft.Margin.all(0), interaction_update_interval=50,
+            on_interaction_start=self._on_view_start, on_interaction_update=self._on_view_update,
+            on_interaction_end=self._on_view_end, key=f"me-iv-{self._gen}")
+        self.view_transform.reset()
+        self.live.clear()
+        self._apply_layout(*(self._viewport or self._estimated_viewport()), push_now=False)
+        self.canvas.shapes = self._shapes()
         self._surface_mode = None
         self._set_surface(editing)
         container = ft.Container(content=self.interactive, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
@@ -733,6 +977,71 @@ class EditorTab(MangaTab):
                                  key=f"me-source-{self._gen}")
         self._source_cache = (signature, container)
         return container
+
+    # ---- the viewer's size and transform ----------------------------------------------------------------
+
+    def _estimated_viewport(self) -> tuple:
+        """The viewer's size before it reports it: the page's width (the editor has the full width)."""
+        width = getattr(self.ctx.page, "width", None) if getattr(self.ctx, "page", None) is not None else None
+        try:
+            width = float(width) - 2 * GUTTER if width else DEFAULT_VIEWPORT[0]
+        except (TypeError, ValueError):
+            width = DEFAULT_VIEWPORT[0]
+        return (max(1.0, width), DEFAULT_VIEWPORT[1])
+
+    def _aspect(self) -> float:
+        g = self.geometry
+        return (g.image_w / g.image_h) if g.image_w and g.image_h else 0.7
+
+    def _apply_layout(self, viewport_w: float, viewport_h: float, push_now: bool = True) -> PageLayout:
+        """Size the page stack and its frame for a viewer of this size (full width, centred)."""
+        layout = PageLayout.fit(float(viewport_w), float(viewport_h), self._aspect())
+        self.layout = layout
+        stack, frame = getattr(self, "stack", None), getattr(self, "frame", None)
+        if stack is not None and frame is not None:
+            stack.width, stack.height = layout.page_w, layout.page_h
+            frame.width, frame.height = layout.viewport_w, layout.content_h
+        self.view_transform.resize(layout.viewport_w, layout.viewport_h, layout.viewport_w, layout.content_h)
+        if push_now and frame is not None:
+            push(frame)
+        return layout
+
+    def _on_viewport_size(self, e: Any) -> None:
+        width, height = float(getattr(e, "width", 0) or 0), float(getattr(e, "height", 0) or 0)
+        if width <= 0 or height <= 0 or (width, height) == self._viewport:
+            return
+        self._viewport = (width, height)
+        if getattr(self, "stack", None) is not None and self._source_cache is not None:
+            layout = self._apply_layout(width, height)
+            if abs(layout.page_w - self.geometry.display_w) > 0.5:  # (the canvas reports it too)
+                self.geometry.display_w = layout.page_w
+                self._redraw()
+            if self.panel is not None and self._place_panel():
+                push(self.panel_holder)
+
+    @staticmethod
+    def _point(value: Any) -> tuple:
+        return (float(getattr(value, "x", 0.0) or 0.0), float(getattr(value, "y", 0.0) or 0.0))
+
+    def _on_view_start(self, e: Any) -> None:
+        self.view_transform.start(*self._point(getattr(e, "local_focal_point", None)),
+                                  pointers=int(getattr(e, "pointer_count", 1) or 1))
+
+    def _on_view_update(self, e: Any) -> None:
+        self.view_transform.update(*self._point(getattr(e, "local_focal_point", None)),
+                                   float(getattr(e, "scale", 1.0) or 1.0))
+
+    def _on_view_end(self, e: Any) -> None:
+        self.view_transform.end(*self._point(getattr(e, "velocity", None)))
+        self._after_view_change()
+
+    def _after_view_change(self) -> None:
+        """Pan / zoom ended: the handles keep their size, the box panel moves off the box."""
+        if self.selected is not None:
+            self._redraw()
+            if self.panel is not None:
+                self._place_panel()
+                push(self.panel_holder)
 
     def _set_surface(self, editing: bool) -> None:
         """The gesture surface for the Pan / Edit mode (a new one, under a new key, when the mode
@@ -823,6 +1132,8 @@ class EditorTab(MangaTab):
         if reason:
             self.ctx.say(reason)
             return
+        if self.tool == "select" and tool != "select":
+            self.selected = None  # leaving Select / move ends the box being moved
         self.tool = tool
         self.drag = None
         self.refresh()
@@ -852,15 +1163,19 @@ class EditorTab(MangaTab):
     # ---- gestures (display coords in, image px stored) --------------------------------------------------
 
     def tap_at(self, dx: float, dy: float) -> Optional[int]:
+        """Tap in an edit tool: a box is selected; a tap beside every box keeps the selection (it
+        ends with ✕, Back, another box or leaving Select / move)."""
         if not self.image_path or self.tool == "pan":
             return None
         ix, iy = self.geometry.to_image(dx, dy)
-        self.selected = hit_test(self.boxes, ix, iy)
+        index = hit_test(self.boxes, ix, iy)
+        if index is not None:
+            self.selected = index
         self.refresh()
         return self.selected
 
     def long_press_at(self, dx: float, dy: float) -> Optional[BoxPanel]:
-        """Long-press a box (any mode, also Pan): select it; its ``BoxPanel`` shows under the page."""
+        """Long-press a box (any mode, also Pan): select it; its ``BoxPanel`` floats over the page."""
         if not self.image_path:
             return None
         ix, iy = self.geometry.to_image(dx, dy)
@@ -877,23 +1192,36 @@ class EditorTab(MangaTab):
     def _on_long_press(self, e: Any) -> None:
         self.long_press_at(*self._local(e))
 
+    def _handle_reach(self) -> float:
+        """How far (image px) from a handle's centre a press still grabs it."""
+        return HANDLE_REACH / max(self.geometry.scale * self.view_transform.scale, 1e-6)
+
     def pan_start(self, dx: float, dy: float) -> None:
         if self.tool == "pan" or not self._can_edit():
             return
+        self._render_token += 1  # a pending re-render waits for this edit
         if self.tool in ("box", "circle"):
             self.drag = {"mode": "draw", "start": (dx, dy), "current": (dx, dy)}
         elif self.tool == "lasso":
             self.drag = {"mode": "lasso", "points": [(dx, dy)]}
         elif self.tool == "select":
             ix, iy = self.geometry.to_image(dx, dy)
-            tolerance = HANDLE / max(self.geometry.scale, 1e-6)
-            if self.selected is not None and 0 <= self.selected < len(self.boxes) and \
-                    on_resize_handle(self.boxes[self.selected], ix, iy, tolerance):
-                self.drag = {"mode": "resize", "index": self.selected, "last": (ix, iy)}
-                return
+            selected = self.selected
+            if selected is not None and 0 <= selected < len(self.boxes):
+                handle = handle_at(self.boxes[selected], ix, iy, self._handle_reach())
+                if handle is not None:
+                    self.drag = {"mode": handle, "index": selected, "last": (ix, iy)}
+                    self._begin_live(selected)
+                    return
             index = hit_test(self.boxes, ix, iy)
-            self.selected = index
-            self.drag = {"mode": "move", "index": index, "last": (ix, iy)} if index is not None else None
+            if index is None:  # beside every box: nothing moves, the selection stays
+                self.drag = None
+                return
+            if index != selected:
+                self.selected = index
+                self.refresh()
+            self.drag = {"mode": "move", "index": index, "last": (ix, iy)}
+            self._begin_live(index)
 
     def pan_update(self, dx: float, dy: float) -> None:
         drag = self.drag
@@ -911,15 +1239,14 @@ class EditorTab(MangaTab):
             ix, iy = self.geometry.to_image(dx, dy)
             lx, ly = drag["last"]
             box = self.boxes[index]
-            old = (float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"]))
+            x, y, w, h = (float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"]))
+            g = self.geometry
             if mode == "move":
-                box["x"], box["y"] = max(0.0, old[0] + ix - lx), max(0.0, old[1] + iy - ly)
+                place_box(box, x + ix - lx, y + iy - ly, w, h, g.image_w, g.image_h)
             else:
-                box["width"], box["height"] = max(MIN_BOX, old[2] + ix - lx), max(MIN_BOX, old[3] + iy - ly)
-            if box.get("polygon") and old[2] > 0 and old[3] > 0:  # EditorBox.set_geometry's polygon rule
-                sx, sy = float(box["width"]) / old[2], float(box["height"]) / old[3]
-                box["polygon"] = [[box["x"] + (px - old[0]) * sx, box["y"] + (py - old[1]) * sy]
-                                  for px, py in box["polygon"]]
+                width, height = w + ix - lx, h + iy - ly
+                place_box(box, x, y, min(width, g.image_w - x) if g.image_w else width,
+                          min(height, g.image_h - y) if g.image_h else height, g.image_w, g.image_h)
             drag["last"] = (ix, iy)
         self._redraw()
 
@@ -931,6 +1258,7 @@ class EditorTab(MangaTab):
         es = self.session.editor
         mode = drag.get("mode")
         result = None
+        moved = False
         self._editing = True
         try:
             if mode == "draw" and drag.get("current"):
@@ -954,6 +1282,7 @@ class EditorTab(MangaTab):
                 await self.ctx.io(lambda: es.update_box(index, box["x"], box["y"], box["width"], box["height"],
                                                         rerender=False))
                 result = index
+                moved = True
         except Exception as exc:
             self.ctx.say(f"Could not change the box: {exc}")
         finally:
@@ -961,6 +1290,8 @@ class EditorTab(MangaTab):
         if result is not None:
             self.selected = result
         await self._apply_snapshot(await self._snapshot())
+        if moved:
+            self._schedule_render()
         return result
 
     def _on_pan_start(self, e: Any) -> None:
@@ -971,6 +1302,77 @@ class EditorTab(MangaTab):
 
     def _on_pan_end(self, e: Any) -> None:
         self.ctx.spawn(self.pan_end())
+
+    async def set_box_geometry(self, index: int, values: dict) -> bool:
+        """The Move tab: place box ``index`` at {x, y, width, height} (image px, kept on the page),
+        saved like a drag (the page is re-rendered shortly after, a translated box follows at once)."""
+        es = self.session.editor
+        if es is None or not (0 <= index < len(self.boxes)):
+            return False
+        if not self._can_edit():
+            self.ctx.say("Wait for the running step" if self.busy else "Open a page first")
+            return False
+        self._render_token += 1
+        self._begin_live(index)
+        box = self.boxes[index]
+        g = self.geometry
+        place_box(box, values.get("x", box["x"]), values.get("y", box["y"]), values.get("width", box["width"]),
+                  values.get("height", box["height"]), g.image_w, g.image_h)
+        if self.panel is not None and self.panel.index == index:
+            self.panel.set_geometry(box)
+        self._redraw()
+        if not await self._box_call(lambda: es.update_box(index, box["x"], box["y"], box["width"], box["height"],
+                                                          rerender=False)):
+            return False
+        self._schedule_render()
+        return True
+
+    # ---- the moved box's text, live ---------------------------------------------------------------------
+
+    def _begin_live(self, index: int) -> None:
+        """A translated box starts moving: cut its rendered text (and the page under it) from the
+        translated render once, so the text follows the box until the page is rendered again."""
+        if index in self.live or not (0 <= index < len(self.boxes)) or not self.translated_view:
+            return
+        box = self.boxes[index]
+        if not str(box.get("translation") or "").strip():
+            return
+        origin = (float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"]))
+        entry: dict = {"origin": origin, "hole": None, "text": None}
+        self.live[index] = entry
+        translated = self.translated_view
+        background = self.cleaned_view or self.image_path
+        size = (self.geometry.image_w, self.geometry.image_h)
+
+        async def cut() -> None:
+            try:
+                hole, text = await self.ctx.io(crop_patches, translated, background, origin, size)
+            except Exception:
+                hole = text = None
+            if self.live.get(index) is not entry or hole is None or text is None:
+                return
+            entry["hole"] = cv.Image(src=hole, x=0, y=0, width=1, height=1)
+            entry["text"] = cv.Image(src=text, x=0, y=0, width=1, height=1)
+            self._redraw()
+
+        self.ctx.spawn(cut())
+
+    def _schedule_render(self) -> None:
+        """Re-render the page (Save & Update Overlay, the desktop's rectangle-moved auto save)
+        ``RENDER_DELAY`` seconds after the last move of a translated box; another edit first
+        postpones it."""
+        if not self.live:
+            return
+        self._render_token += 1
+        self.ctx.spawn(self._render_later(self._render_token))
+
+    async def _render_later(self, token: int) -> Optional[str]:
+        import asyncio
+
+        await asyncio.sleep(RENDER_DELAY)
+        if token != self._render_token or self.drag or self.busy or self._editing or not self.live:
+            return None
+        return await self.run_step("render")
 
     # ---- box actions ------------------------------------------------------------------------------------
 
@@ -995,6 +1397,7 @@ class EditorTab(MangaTab):
         if index is None or es is None:
             return False
         self.selected = None
+        self.live.clear()
         return await self._box_call(lambda: es.delete_box(index))
 
     async def clear_boxes(self, *, confirm: bool = True) -> bool:
@@ -1013,6 +1416,7 @@ class EditorTab(MangaTab):
             if answer != "yes":
                 return False
         self.selected = None
+        self.live.clear()
         return await self._box_call(lambda: es.clear_page())
 
     async def toggle_exclude(self) -> bool:
@@ -1192,6 +1596,10 @@ class EditorTab(MangaTab):
                     text = "The OCR file does not match any loaded image"
         self.step_status.value = text
         self.step_progress_text = ""
+        if step in TRANSLATED_STEPS or step in ("detect", "clean"):
+            self.live.clear()  # the page was rendered (or its boxes replaced): the render shows it
+        elif self.live:
+            self._schedule_render()  # a move waited for this step
         self.ctx.spawn(self._reload_after_step(step))
 
     async def _reload_after_step(self, step: str) -> None:

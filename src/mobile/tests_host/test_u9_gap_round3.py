@@ -271,7 +271,8 @@ def test_advanced_filter_chip_keeps_the_advanced_group(tmp_path):
     ctx = _ctx(tmp_path)
     hits = find_settings(ctx, "", ["advanced"], limit=500)
     assert hits and {h.group for h in hits} == {"Advanced"}
-    assert {"lang_prompt_behavior", "has_gender"} & {h.key for h in hits} == {"has_gender"}
+    # (has_gender, read-only, is not listed at all since 2026-10-13)
+    assert not {"lang_prompt_behavior", "has_gender"} & {h.key for h in hits}
     ctx.store._saver.close()
 
 

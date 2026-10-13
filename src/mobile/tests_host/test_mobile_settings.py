@@ -1138,7 +1138,7 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
 def test_real_schema_renders_every_section(tmp_path):
     """The generated schema: a page builds for every section without exceptions (store empty = fresh install)."""
     from glossarion_mobile.ui.settings.section_page import SectionPage
-    from glossarion_mobile.ui.settings.tiles import TILE_CLASSES
+    from glossarion_mobile.ui.settings.tiles import TILE_CLASSES, listed_setting
 
     async def scenario():
         conn, session = _fake_session("android")
@@ -1156,7 +1156,7 @@ def test_real_schema_renders_every_section(tmp_path):
             page.update()
             for key in section.keys:
                 if (schema.spec(key) is not None and schema.display_key(key) == key  # devfix4: folded keys
-                        and ctx.schema.availability(key)[0]):  # U12 item 1: unavailable keys are not listed
+                        and listed_setting(ctx, schema.spec(key))):  # unavailable / read-only keys are not listed
                     tile = screen.tiles[key]
                     assert tile.kind in TILE_CLASSES
                     available, reason = schema.availability(key)

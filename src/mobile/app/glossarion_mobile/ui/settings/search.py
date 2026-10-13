@@ -18,7 +18,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.settings.model import config_path, label_for, summarize, tile_kind
 from glossarion_mobile.ui.settings.schema_access import SEARCH_LIMIT, SearchHit
-from glossarion_mobile.ui.settings.tiles import EffectiveConfig
+from glossarion_mobile.ui.settings.tiles import EffectiveConfig, listed_setting
 
 __all__ = ["FILTERS", "SettingsSearch", "find_settings", "matches_filters", "search_sheet"]
 
@@ -71,7 +71,7 @@ def find_settings(ctx: Any, query: str, filters: Iterable[str] = (), limit: int 
     out: list[SearchHit] = []
     seen: set[str] = set()
     for hit in candidates:
-        if hit.key in seen or not ctx.schema.availability(hit.key)[0] or not matches_filters(ctx, hit, filters, config):
+        if hit.key in seen or not listed_setting(ctx, hit.spec) or not matches_filters(ctx, hit, filters, config):
             continue
         seen.add(hit.key)
         out.append(hit)

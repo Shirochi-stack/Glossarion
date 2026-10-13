@@ -8,10 +8,14 @@ place:
 * **Translated** — the desktop's "🌍 Translation Result": the translation, **Save & Update Overlay**
   (re-render the page with the edited text) and **Translate this text**.
 
-The header row holds the box number, the two tabs and the ⋯ menu: Save (no re-render), **Clean
-this box**, the box type (free text / bubble text: the renderer's background and the cleaner's
+* **Move** — the box's position and size in image pixels: X / Y / W / H fields with **Apply**, and
+  nudge buttons (move by the step, W / H smaller / larger) for what a finger cannot place exactly.
+
+The header row holds the box number, the tabs, the ⋯ menu (Save (no re-render), **Clean this
+box**, the box type (free text / bubble text: the renderer's background and the cleaner's
 dilation follow it), **Exclude from Clean**, the inpainting iterations (Auto or 0-50) and
-**Delete**. Compact type (body small / label small) so the page keeps the room.
+**Delete**) and ✕ (done: the box is deselected). Compact type (body small / label small) so the
+page keeps the room.
 
 The texts come from the editor's page snapshot (``manga_editor_core`` page state), and every
 action is a ``MangaEditorSession`` call the editor tab makes (box edits on the io pool, OCR /
@@ -29,14 +33,19 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.manga.common import push
 
-__all__ = ["BOX_TABS", "BoxPanel", "COMPACT_BUTTON", "ITERATION_CHOICES", "NOT_RECOGNIZED", "box_signature"]
+__all__ = ["BOX_TABS", "BoxPanel", "COMPACT_BUTTON", "GEOMETRY_KEYS", "ITERATION_CHOICES", "NOT_RECOGNIZED",
+           "NUDGE_STEPS", "box_geometry", "box_signature"]
 
 #: Inpainting iterations: -1 = Auto (the dialog's range is -1..50).
 ITERATION_CHOICES = (-1, 0, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 50)
 _KEYS = itertools.count(1)  # a new key per panel (never a reused id())
 NOT_RECOGNIZED = "Run “OCR this text” (or Recognize) first"
 #: The panel's tabs: (id, label).
-BOX_TABS = (("ocr", "OCR"), ("translated", "Translated"))
+BOX_TABS = (("ocr", "OCR"), ("translated", "Translated"), ("move", "Move"))
+#: The Move tab's fields: (box key, label).
+GEOMETRY_KEYS = (("x", "X"), ("y", "Y"), ("width", "W"), ("height", "H"))
+#: The Move tab's nudge steps (image px); the step button cycles them.
+NUDGE_STEPS = (1, 5, 20)
 
 _BODY = tokens.TYPE_SCALE["body_small"]
 _LABEL = tokens.TYPE_SCALE["label_small"]
@@ -61,6 +70,15 @@ def box_signature(box: Mapping[str, Any], index: int) -> tuple:
             bool(box.get("exclude_from_clean")), _iterations(box))
 
 
+def box_geometry(box: Mapping[str, Any]) -> dict:
+    """The box's {x, y, width, height} (image px, floats)."""
+    return {key: float(box.get(key) or 0) for key, _label in GEOMETRY_KEYS}
+
+
+def _number(value: float) -> str:
+    return str(int(round(value)))
+
+
 def _field(value: str, label: str, key: str, **kwargs: Any) -> ft.TextField:
     return ft.TextField(value=value, label=label, multiline=True, min_lines=2, max_lines=4, dense=True, key=key,
                         text_style=BODY_TEXT, label_style=LABEL_TEXT, hint_style=BODY_TEXT,
@@ -71,16 +89,21 @@ def _field(value: str, label: str, key: str, **kwargs: Any) -> ft.TextField:
 class BoxPanel:
     """``on_action(name, index, values)``: ``save`` / ``save_render`` / ``ocr`` / ``translate`` /
     ``clean`` / ``delete``; ``values`` = what changed (the edited OCR text and translation, a
-    flag), applied first. ``on_iterations(index)`` opens the iterations choice. ``tab`` is the tab
-    shown first (``ocr`` / ``translated``)."""
+    flag), applied first. ``on_iterations(index)`` opens the iterations choice.
+    ``on_geometry(index, {x, y, width, height})`` places the box (the Move tab). ``on_close()``
+    deselects it (✕). ``tab`` is the tab shown first (``ocr`` / ``translated`` / ``move``)."""
 
     def __init__(self, box: Mapping[str, Any], index: int, *, on_action: Callable[[str, int, dict], Any],
                  on_iterations: Optional[Callable[[int], Any]] = None,
+                 on_geometry: Optional[Callable[[int, dict], Any]] = None,
+                 on_close: Optional[Callable[[], Any]] = None,
                  busy_reason: Optional[str] = None, steps_reason: Optional[str] = None,
-                 tab: str = "translated") -> None:
+                 tab: str = "translated", step: int = NUDGE_STEPS[1]) -> None:
         self.box = dict(box)
         self.index = index
         self.on_action = on_action
+        self.on_geometry = on_geometry
+        self.step = step if step in NUDGE_STEPS else NUDGE_STEPS[1]
         self.signature = box_signature(box, index)
         self.tab = tab if tab in dict(BOX_TABS) else "translated"
         n = next(_KEYS)
@@ -109,6 +132,32 @@ class BoxPanel:
                                               key="box-translate", tooltip=translate_reason,
                                               disabled=translate_reason is not None, style=COMPACT_BUTTON,
                                               on_click=lambda e: self.act("translate"))
+        # ---- Move tab
+        geometry = box_geometry(box)
+        self.geometry_fields = {
+            key: ft.TextField(value=_number(geometry[key]), label=label, dense=True, width=64, key=f"box-geo-{key}",
+                              keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT, label_style=LABEL_TEXT,
+                              content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                              border_radius=tokens.RADII["field"], on_submit=lambda e: self.apply_geometry())
+            for key, label in GEOMETRY_KEYS}
+        self.apply_button = ft.TextButton(content="Apply", icon=ft.Icons.CHECK, key="box-geo-apply",
+                                          disabled=busy_reason is not None, style=COMPACT_BUTTON,
+                                          on_click=lambda e: self.apply_geometry())
+        self.step_button = ft.TextButton(content=f"{self.step} px", key="box-geo-step", style=COMPACT_BUTTON,
+                                         tooltip="Nudge step (tap to change)", on_click=lambda e: self.cycle_step())
+        moves = (("ARROW_BACK", "Left", -1, 0), ("ARROW_UPWARD", "Up", 0, -1), ("ARROW_DOWNWARD", "Down", 0, 1),
+                 ("ARROW_FORWARD", "Right", 1, 0))
+        self.nudge_buttons = [
+            ft.IconButton(icon=getattr(ft.Icons, icon), tooltip=f"Move {label.lower()}", key=f"box-nudge-{label.lower()}",
+                          disabled=busy_reason is not None, size_constraints=HIT_TARGET,
+                          on_click=lambda e, dx=dx, dy=dy: self.nudge(dx=dx, dy=dy))
+            for icon, label, dx, dy in moves]
+        sizes = (("W−", "Narrower", -1, 0), ("W+", "Wider", 1, 0), ("H−", "Shorter", 0, -1), ("H+", "Taller", 0, 1))
+        self.size_buttons = [
+            ft.TextButton(content=text, tooltip=label, key=f"box-size-{label.lower()}", style=COMPACT_BUTTON,
+                          disabled=busy_reason is not None,
+                          on_click=lambda e, dw=dw, dh=dh: self.nudge(dw=dw, dh=dh))
+            for text, label, dw, dh in sizes]
         # ---- ⋯ menu
         free_text = bool(box.get("free_text"))
         excluded = bool(box.get("exclude_from_clean"))
@@ -150,16 +199,27 @@ class BoxPanel:
             self.translation_field,
             ft.Row([self.save_render_button, self.translate_button], spacing=4, scroll=ft.ScrollMode.AUTO),
         ], spacing=4, tight=True, visible=self.tab == "translated", key=f"box-translation-body-{n}")
+        self.move_body = ft.Column([
+            ft.Row([*self.geometry_fields.values(), self.apply_button], spacing=4, scroll=ft.ScrollMode.AUTO),
+            ft.Row([*self.nudge_buttons, self.step_button, *self.size_buttons], spacing=0,
+                   scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=4, tight=True, visible=self.tab == "move", key=f"box-move-body-{n}")
+        self.close_button = ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Done", key="box-close",
+                                          size_constraints=HIT_TARGET,
+                                          on_click=lambda e: on_close() if on_close else None)
         self.control = ft.Container(
             content=ft.Column([
-                # one row: the box, its tabs and the ⋯ menu (never wrapped onto a row of its own)
-                ft.Row([self.title, self.tabs, self.menu], spacing=4,
+                # one row: the box, its tabs, the ⋯ menu and ✕ (never wrapped onto a row of its own)
+                ft.Row([self.title, self.tabs, self.menu, self.close_button], spacing=4,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER, key=f"box-header-{n}"),
                 self.ocr_body,
                 self.translation_body,
+                self.move_body,
             ], spacing=2, tight=True),
             padding=ft.Padding.only(left=8, right=0, top=0, bottom=4), bgcolor=ft.Colors.SURFACE_CONTAINER,
-            border_radius=tokens.RADII["field"], key=f"me-box-panel-{n}",
+            border_radius=tokens.RADII["field"], border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            shadow=ft.BoxShadow(blur_radius=8, color=ft.Colors.with_opacity(0.25, ft.Colors.SHADOW)),
+            key=f"me-box-panel-{n}",
         )
 
     # ---- tabs ---------------------------------------------------------------------------------------
@@ -177,7 +237,53 @@ class BoxPanel:
         self.tabs.selected_index = names.index(name)
         self.ocr_body.visible = name == "ocr"
         self.translation_body.visible = name == "translated"
+        self.move_body.visible = name == "move"
         push(self.control)
+
+    # ---- Move ---------------------------------------------------------------------------------------
+
+    def set_geometry(self, box: Mapping[str, Any]) -> bool:
+        """The box was moved or resized (a drag, a nudge): its fields show the new place. Fields
+        are left alone while the geometry is unchanged (what is typed there stays)."""
+        geometry = box_geometry(box)
+        if geometry == box_geometry(self.box):
+            return False
+        self.box.update(geometry)
+        for key, field in self.geometry_fields.items():
+            field.value = _number(geometry[key])
+        push(self.move_body)
+        return True
+
+    def typed_geometry(self) -> Optional[dict]:
+        """The Move fields as {x, y, width, height}; None when one is not a number."""
+        values: dict = {}
+        for key, field in self.geometry_fields.items():
+            try:
+                values[key] = float(str(field.value or "").strip())
+            except ValueError:
+                return None
+        return values
+
+    def apply_geometry(self) -> Any:
+        values = self.typed_geometry()
+        if values is None or self.on_geometry is None:
+            return None
+        return self.on_geometry(self.index, values)
+
+    def nudge(self, *, dx: int = 0, dy: int = 0, dw: int = 0, dh: int = 0) -> Any:
+        """Move by / grow by one step (image px) from the box's current place."""
+        if self.on_geometry is None:
+            return None
+        g = box_geometry(self.box)
+        s = self.step
+        return self.on_geometry(self.index, {"x": g["x"] + dx * s, "y": g["y"] + dy * s,
+                                             "width": g["width"] + dw * s, "height": g["height"] + dh * s})
+
+    def cycle_step(self) -> int:
+        self.step = NUDGE_STEPS[(NUDGE_STEPS.index(self.step) + 1) % len(NUDGE_STEPS)]
+        self.step_button.content = f"{self.step} px"
+        push(self.step_button)
+        return self.step
 
     # ---- values -------------------------------------------------------------------------------------
 
@@ -199,6 +305,10 @@ class BoxPanel:
         """Carry what is typed in ``other`` (the same box, rebuilt for a new step state) over."""
         self.ocr_field.value = other.ocr_field.value
         self.translation_field.value = other.translation_field.value
+        for key, field in self.geometry_fields.items():
+            field.value = other.geometry_fields[key].value
+        self.step = other.step
+        self.step_button.content = f"{self.step} px"
 
     def act(self, name: str) -> Any:
         return self.on_action(name, self.index, self.changes())

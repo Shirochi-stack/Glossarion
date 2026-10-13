@@ -271,7 +271,8 @@ def test_section_page_pool_tiles_links_and_curated_headings(tmp_path):
         page = SectionPage(parse_route("/settings/s/context_memory"), ctx)
         session.page.views[0].controls.append(page.get_body())
         session.page.update()
-        assert page.headings["use_rolling_summary"] == "Rolling summary"
+        assert page.headings["rolling_summary_exchanges"] == "Rolling summary"
+        assert "use_rolling_summary" not in page.keys  # follows Context mode: read-only, not listed
         keys = [t.key for t in page.pool_tiles]
         assert keys == ["use_rolling_summary_keys", "rolling_summary_keys"]
         assert page.pool_tiles[1].summary() == "1 key"

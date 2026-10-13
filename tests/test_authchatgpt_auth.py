@@ -489,3 +489,31 @@ def test_images_need_a_login(monkeypatch):
     with pytest.raises(gpt.AuthChatGPTError) as error:
         gpt.send_chat_completion(messages=[{"content": [{"type": "text", "text": "x"}, image]}], log_fn=lambda _: None)
     assert error.value.error_type == "config_error" and "login" in str(error.value)
+
+
+def test_every_mobile_script_is_one_expression(tmp_path, monkeypatch):
+    """The WebView bridge evaluates ``var value = (<script>);`` (webview_bridge.page_script): a statement
+    list there is a syntax error, which once left the cookie unset and the page "not loaded"."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is needed to parse the scripts")
+    scripts = []
+    for config in ({"token": None, "prompt": "p", "model": "auto", "temporary": False},
+                   {"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+        page = DriverPage()
+        page.run_js = lambda script, timeout=0, page=page: (scripts.append(script), DriverPage.run_js(page, script))[1]
+        mobile_driver(monkeypatch, page)
+        with gpt._open_tab(config) as tab:
+            for script in (gpt._POLL, gpt._COMPOSER, gpt._TYPE, gpt._SEND, gpt._LOAD_CATALOG, gpt._CATALOG,
+                           gpt._POLL_ANSWER, gpt._ATTACH, gpt._ATTACHED, gpt._DOWNLOAD.replace("__POINTER__", '"x"')):
+                tab.evaluate(script)
+    source = tmp_path / "scripts.js"
+    newline = "String.fromCharCode(10)"
+    source.write_text("const s = " + json.dumps(scripts) + ";\n"
+                      "for (const x of s) new Function('var value = (' + " + newline + " + x + " + newline + " + ');');\n"
+                      "console.log(s.length);\n", encoding="utf-8")
+    out = subprocess.run([node, str(source)], capture_output=True, text=True, timeout=20)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert int(out.stdout) == len(scripts) > 20

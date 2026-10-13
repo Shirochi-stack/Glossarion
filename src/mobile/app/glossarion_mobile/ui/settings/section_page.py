@@ -31,7 +31,8 @@ from glossarion_mobile.ui.settings.banners import JobBanner
 from glossarion_mobile.ui.settings.model import WINDOW_SIZE, grouped_specs, window_bounds
 from glossarion_mobile.ui.settings.schema_access import SearchHit
 from glossarion_mobile.ui.settings.search import SettingsSearch, search_sheet
-from glossarion_mobile.ui.settings.tiles import MOBILE_READONLY_REASONS, EffectiveConfig, SettingTile, make_tile
+from glossarion_mobile.ui.settings.tiles import (MOBILE_READONLY_REASONS, EffectiveConfig, SettingTile, listed_setting,
+                                                 make_tile)
 from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["HIGHLIGHT_SECONDS", "SECTION_POOL_KEYS", "STATIC_LINKS", "STATIC_ROWS", "SectionPage",
@@ -41,9 +42,9 @@ log = logging.getLogger("glossarion.settings")
 
 HIGHLIGHT_SECONDS = 1.5
 
-#: Desktop controls without a config key that mobile cannot offer: shown at the end of their
-#: section as disabled rows with the reason (plan principle "nothing silently missing").
-#: section id -> ((title, reason, detail), ...)
+#: Desktop controls without a config key that mobile cannot offer: section id -> ((title, reason,
+#: detail), ...). Not shown (owner 2026-10-13: informational rows only bloated the pages); kept as the
+#: record of what is missing on purpose.
 STATIC_ROWS: dict = {
     "other.processing.extraction": (
         ("Async chapter extraction (subprocess)", "No subprocesses on mobile",
@@ -181,9 +182,9 @@ class SectionPage(Screen):
                               body=f"There is no section “{self.section_id}” in this build.", key="settings-unknown")
         # Sub-headings (U9): the desktop group boxes (QA Scanner › Foreign Character Detection,
         # Word Count Analysis, ...) or the nested path (AI Hunter › Thresholds / Weights).
-        # U12 item 1: settings that cannot work on mobile (Tor, desktop-only, PyTorch) are not listed at all
-        specs = [spec for spec in self.ctx.schema.specs_for(self.section)
-                 if self.ctx.schema.availability(str(getattr(spec, "key", "")))[0]]
+        # U12 item 1: settings that cannot work on mobile (Tor, desktop-only, PyTorch) are not listed at all,
+        # nor informational read-only ones (owner 2026-10-13)
+        specs = [spec for spec in self.ctx.schema.specs_for(self.section) if listed_setting(self.ctx, spec)]
         curated = dict(getattr(self.section, "headings", ()) or ())
         if curated:  # UI_SPEC §4.15 curated section: its own sub-headings, in its order
             self.specs = list(specs)
@@ -208,7 +209,7 @@ class SectionPage(Screen):
             start = window_bounds(self.keys.index(self.focus_target), len(self.keys), self.window_size)[0]
         self.render_window(start, push=False)
         controls: list[ft.Control] = [self.banner.control]
-        if not self.specs:
+        if not self.specs and not STATIC_LINKS.get(self.section_id) and not SECTION_POOL_KEYS.get(self.section_id):
             controls.append(EmptyState(icon="SETTINGS", title=self.title, body="This section has no settings yet.",
                                        key="settings-empty-section"))
         controls.append(self.list_view)
@@ -268,7 +269,6 @@ class SectionPage(Screen):
             self.later_button.content = f"Show more settings ({total - end})"
             controls.append(self.later_button)
         else:
-            controls.extend(static_row(*row) for row in STATIC_ROWS.get(self.section_id, ()))
             pools = self.pool_controls()
             if pools:
                 controls.append(self._heading("API key pools"))

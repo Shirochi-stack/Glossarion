@@ -81,6 +81,7 @@ __all__ = [
     "ListSettingTile",
     "MIRRORS",
     "MOBILE_READONLY_REASONS",
+    "listed_setting",
     "MultiplierGridTile",
     "NumberTile",
     "PathTile",
@@ -191,6 +192,19 @@ def pool_slug_for(key: str) -> Optional[str]:
 #: desktop-shared list is ``settings_schema.READONLY_REASONS``): the raw JSON would bypass the desktop
 #: ``save_profiles`` and could drop built-ins the desktop start-up does not re-add (Manga_*, Original, ...).
 MOBILE_READONLY_REASONS = {"prompt_profiles": "Edited in Settings › Profiles & prompts"}
+
+
+def listed_setting(ctx: Any, spec: Any) -> bool:
+    """A setting the Settings pages and search list: available on mobile and something the user can
+    change here. Informational read-only tiles ("Follows Output mode", "Edited in Chat settings",
+    the desktop's own disabled flags) are not listed (owner 2026-10-13: they only bloated the pages);
+    an API-key pool tile stays (it opens its pool page)."""
+    key = str(spec_attr(spec, "key", ""))
+    if not ctx.schema.availability(key)[0]:
+        return False
+    if pool_slug_for(key):
+        return True
+    return not (spec_attr(spec, "readonly", "") or (len(config_path(spec)) == 1 and key in MOBILE_READONLY_REASONS))
 
 
 class SettingTile:

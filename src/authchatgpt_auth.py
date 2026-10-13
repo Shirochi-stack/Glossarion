@@ -43,8 +43,10 @@ BROWSER_OWNER = "authchatgpt"
 # until the token is added to its backend calls).
 _APP_COOKIE = {"name": "__Secure-next-auth.session-token", "value": "glossarion",
                "url": BASE_URL + "/", "httpOnly": True, "secure": True}
-_APP_COOKIE_JS = ("document.cookie = '__Secure-next-auth.session-token=glossarion; Secure; Path=/; "
-                  "SameSite=Lax'; true")
+# Scripts for the mobile WebView bridge must be single expressions: it evaluates them as
+# ``var value = (<script>);`` (webview_bridge.page_script), so no statement lists.
+_APP_COOKIE_JS = ("(document.cookie = '__Secure-next-auth.session-token=glossarion; Secure; Path=/; "
+                  "SameSite=Lax', true)")
 _PLANS = {"free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro", "team": "Team",
           "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "guest": "Guest"}
 _cancel = threading.Event()
@@ -371,7 +373,7 @@ def _driver_tab(config, cancel_check=None):
             cdp_browser.wait_until(wrapped, "!!document.querySelector('#prompt-textarea')", timeout=45,
                                    check=_check, error=AuthChatGPTError, cancel_check=cancel_check,
                                    message=_NOT_LOADED, tolerate=("browser_error", "timeout"), interval=.3)
-            wrapped.evaluate(_hook(config) + "; true")
+            wrapped.evaluate("(" + _hook(config) + ", true)")
         yield wrapped
     finally:
         page.close()

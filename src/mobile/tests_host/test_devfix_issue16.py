@@ -974,8 +974,9 @@ def test_owner_issue16_settings_profile_section_leads_to_every_profile_never_to_
                 section = await _open_prompt_section(app, driver)
 
             # ---- "Prompt profiles": no raw JSON way around the profile editor -----------------------------------
-            json_tile = section.tile("prompt_profiles")
-            if json_tile.editable:
+            # (read-only tiles are not listed at all since 2026-10-13)
+            json_tile = section.tile("prompt_profiles") if "prompt_profiles" in section.keys else None
+            if json_tile is not None and json_tile.editable:
                 await driver.wait(key="prompt_profiles", timeout=10)  # the tile on screen; its ListTile takes taps
                 await _tap_control(tester, json_tile.list_tile)
                 editor = await _until(lambda: json_tile.editor, 10)

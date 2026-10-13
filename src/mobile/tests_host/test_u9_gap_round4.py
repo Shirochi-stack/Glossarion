@@ -726,7 +726,10 @@ def test_context_mode_tile_and_the_follow_tiles(tmp_path):
     assert isinstance(tile, ContextModeTile) and tile.value() == "contextual_history" and tile.editable
     assert tile.apply("rolling_summary_replace")
     assert ctx.store.get("use_rolling_summary") is True and ctx.store.get("contextual") is False
-    follow = page.tile("contextual")
+    assert "contextual" not in page.keys  # a follow tile is read-only: not listed (owner 2026-10-13)
+    from glossarion_mobile.ui.settings.tiles import make_tile
+
+    follow = make_tile(ctx.schema.spec("contextual"), ctx)
     assert follow.readonly_reason == "Follows Context mode" and not follow.editable
     ctx.store._saver.close()
 

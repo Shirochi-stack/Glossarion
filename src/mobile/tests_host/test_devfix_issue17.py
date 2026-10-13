@@ -636,7 +636,9 @@ def test_chat_settings_have_no_key_settings(app_env, storage, form):
             assert type(section).__name__ == "SectionPage", type(section).__name__
             body = section.get_body()
             tiles = {getattr(c.key, "value", c.key) for c in _tree(body) if getattr(c, "key", None) is not None}
-            assert "direct_text_output_mode" in tiles, sorted(map(str, tiles))  # the section is built
+            # the section is built: its tiles are read-only (edited in Chat settings), so only the link shows
+            assert "link-action-chat_settings_global" in tiles, sorted(map(str, tiles))
+            assert "settings-empty-section" not in tiles
             assert not pool_keys & tiles and not getattr(section, "pool_tiles", [])
             assert _key_violations(body) == [], _key_violations(body)
         finally:

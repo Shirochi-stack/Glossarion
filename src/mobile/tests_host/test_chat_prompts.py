@@ -695,7 +695,11 @@ def test_profile_section_tiles_only_choose_real_profiles_and_keep_the_profiles(t
     assert store.get("active_profile") == "Korean_html2text"
     assert tile.apply("wuxia house style") and store.get("active_profile") == "Korean_html2text"
 
-    json_tile = page.tile("prompt_profiles")
+    # read-only, so not listed at all (owner 2026-10-13); the tile itself still refuses edits
+    assert "prompt_profiles" not in page.keys
+    from glossarion_mobile.ui.settings.tiles import make_tile
+
+    json_tile = make_tile(ctx.schema.spec("prompt_profiles"), ctx)
     assert not json_tile.editable and json_tile.readonly_reason == "Edited in Settings › Profiles & prompts"
     assert json_tile.activate() is None
     removed = page.reset_section()
