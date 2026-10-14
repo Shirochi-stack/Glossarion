@@ -9,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import re
+import itertools
 import subprocess
 import tempfile
 import unittest
@@ -106,40 +107,70 @@ class BuildBridgeTests(unittest.TestCase):
 class PipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
+        header, cls.config = yaml.safe_load_all((ROOT / ".gitlab-ci.yml").read_text())
+        cls.inputs = header["spec"]["inputs"]
         for include in cls.config["include"]:
             cls.config.update(yaml.safe_load((ROOT / include["local"]).read_text()))
 
-    def test_only_web_pipeline_is_admitted(self):
-        self.assertEqual(self.config["workflow"]["rules"], [{"if": '$CI_PIPELINE_SOURCE == "web"'}, {"when": "never"}])
+    def test_only_explicit_manual_web_or_api_pipeline_is_admitted(self):
+        self.assertEqual(self.config["workflow"]["rules"], [{"if": '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'}, {"when": "never"}])
+
+    def test_original_mobile_inputs_have_same_defaults_and_choices(self):
+        workflow = ci.workflow("build-mobile.yml")
+        original = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
+        for name, value in original.items():
+            with self.subTest(input=name):
+                self.assertEqual(self.inputs[name]["default"], value["default"])
+                if "options" in value:
+                    self.assertEqual(self.inputs[name]["options"], value["options"])
+                if value["type"] == "boolean":
+                    self.assertEqual(self.inputs[name]["type"], "boolean")
+        self.assertEqual(workflow["env"]["IOS_SIMULATOR_SMOKE_POLICY"], "required")
+        self.assertEqual(workflow["env"]["ANDROID_UI_TESTS_POLICY"], "optional")
 
     def test_every_selection_has_complete_dependency_graph(self):
         jobs = {name: job for name, job in self.config.items() if isinstance(job, dict) and "script" in job}
-        for task in self.config["variables"]["GLOSSARION_TASK"]["options"]:
-            # The configuration uses only literal equalities or anchored regexes
-            # for task selection. Reject a new expression until this check understands it.
+        cases = [(task, "all", "true", "auto", "auto") for task in self.inputs["task"]["options"]]
+        cases += [("mobile", *values) for values in itertools.product(
+            ("all", "android", "ios"), ("true", "false"), ("auto", "on", "off"), ("auto", "on", "off"))]
+        for task, targets, smoke, simulator, ui in cases:
+            variables = dict(GLOSSARION_TASK=task, GLOSSARION_TARGETS=targets,
+                             GLOSSARION_EMULATOR_SMOKE=smoke, GLOSSARION_IOS_SIMULATOR_SMOKE=simulator,
+                             GLOSSARION_UI_TESTS=ui, GLOSSARION_PUBLISH="false",
+                             CI_COMMIT_TAG="", CI_COMMIT_REF_PROTECTED="true")
             selected = set()
             for name, job in jobs.items():
                 for rule in job["rules"]:
                     expression = rule.get("if", "")
-                    if "$GLOSSARION_TASK" not in expression:
+                    if not expression:
                         continue
-                    if " =~ " in expression:
-                        match = re.fullmatch(r'\$GLOSSARION_TASK =~ /(.+)/', expression)
-                        self.assertIsNotNone(match)
-                        enabled = re.search(match[1], task) is not None
-                    else:
-                        choices = expression.split(" || ")
-                        self.assertTrue(all(re.fullmatch(r'\$GLOSSARION_TASK == "[a-z-]+"', part) for part in choices))
-                        enabled = task in [part.split('"')[1] for part in choices]
-                    if enabled:
+                    expression = re.sub(r'\$(\w+) =~ /([^/]+)/',
+                        lambda m: str(bool(re.search(m[2], variables[m[1]]))), expression)
+                    expression = re.sub(r'\$(\w+)', lambda m: repr(variables[m[1]]), expression)
+                    expression = expression.replace("&&", "and").replace("||", "or")
+                    if eval(expression, {"__builtins__": {}}, {}):
                         selected.add(name)
-            with self.subTest(task=task):
+                        break
+            with self.subTest(task=task, targets=targets, smoke=smoke, simulator=simulator, ui=ui):
                 self.assertTrue(selected)
                 for name in selected:
                     for need in jobs[name].get("needs", []):
+                        if isinstance(need, dict):
+                            if need.get("optional") and need["job"] not in selected:
+                                continue
+                            need = need["job"]
                         self.assertIn(need, selected)
                         self.assertLess(self.config["stages"].index(jobs[need]["stage"]), self.config["stages"].index(jobs[name]["stage"]))
+                if task == "mobile":
+                    android, ios = targets in ("all", "android"), targets in ("all", "ios")
+                    self.assertEqual("android-apk" in selected, android)
+                    self.assertEqual("ios-unsigned" in selected, ios)
+                    self.assertEqual("android-smoke" in selected, android and smoke == "true")
+                    self.assertEqual("ios-simulator" in selected, ios and simulator != "off")
+                    self.assertEqual("android-ui" in selected, android and ui == "on")
+                    self.assertNotIn("android-signed", selected)
+                    self.assertNotIn("ios-signed", selected)
+                    self.assertNotIn("publish-existing-release", selected)
 
     def test_signing_and_publish_are_blocking_manual_jobs(self):
         for name in ("android-signed", "ios-signed", "publish-existing-release"):

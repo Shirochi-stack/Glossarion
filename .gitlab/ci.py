@@ -115,7 +115,8 @@ class Runner:
         if not plan:
             self.work.mkdir(parents=True, exist_ok=True)
             self.report.mkdir(parents=True, exist_ok=True)
-            self.env.update(RUNNER_TEMP=str(self.work), GITHUB_STEP_SUMMARY=str(self.report / "summary.md"))
+            self.env.update(RUNNER_TEMP=str(self.work), GITHUB_STEP_SUMMARY=str(self.report / "summary.md"),
+                            PYTHONPYCACHEPREFIX=str(self.work / "pycache"))
         self.operations = []
 
     def command(self, args, cwd=ROOT, capture=False, label=None):
@@ -343,6 +344,8 @@ def mobile_build(r, target, signed=False):
     r.env.update(BUILD_VERSION=str(version["build_version"]), BUILD_NUMBER=str(version["build_number"]),
                  ARTIFACT_PREFIX=version["artifact_prefix"], APP_PACKAGE="com.glossarion.app", HAS_KEYSTORE="true" if signed else "false")
     command = ["uv", "run", "--locked", "python", "tools/build.py", target, "--skip-prepare"]
+    if target == "apk" and r.env.get("GLOSSARION_ANDROID_LEGACY_PACKAGING") == "true":
+        command.append("--legacy-packaging")
     if signed and target_platform == "ios":
         # Identity/profile must already be provisioned in an isolated runner by its owner.
         # No importing certificates, creating keychains, or printing signing arguments.
@@ -358,6 +361,9 @@ def mobile_build(r, target, signed=False):
         r.context[f"steps.{target}.outputs.output-path"] = str(MOBILE / "build" / target)
         r.step("build-mobile.yml", "android", "Collect APKs" if target == "apk" else "Collect AAB")
         r.step("build-mobile.yml", "android", "Verify APK/AAB (package, versions, permissions, FGS, ABIs, signature)")
+        if target == "apk":
+            r.step("build-mobile.yml", "android", "APK size report (native libraries, Python zips, legacy-packaging estimate)",
+                   {"needs.prepare.outputs.android_legacy_packaging": r.env.get("GLOSSARION_ANDROID_LEGACY_PACKAGING", "false")})
         r.collect(["dist/*." + target])
     elif target == "ipa":
         r.context["steps.build.outputs.output-path"] = str(MOBILE / "build/ipa")

@@ -1,109 +1,189 @@
 mobile-check:
   stage: check
-  tags: [glossarion-linux-mobile-py313]
+  tags:
+  - saas-linux-medium-amd64
   timeout: 2 hours
   rules:
-    - if: '$GLOSSARION_TASK == "mobile-check"'
+  - if: $GLOSSARION_TASK == "mobile-check"
   script:
-    - python .gitlab/ci.py mobile-check
-
+  - python .gitlab/ci.py mobile-check
+  image: python:3.13-bookworm
+  before_script:
+  - python -m pip install -r .gitlab/requirements.txt uv
 wheels-android:
   stage: wheels
-  tags: [glossarion-linux-mobile-py313]
+  tags:
+  - saas-linux-medium-amd64
   timeout: 2 hours
   rules:
-    - if: '$GLOSSARION_TASK =~ /^(android|android-signed|android-ui|android-smoke|wheels-android)$/'
+  - if: $GLOSSARION_TASK =~ /^(android|android-signed|android-ui|android-smoke|wheels-android)$/
+      || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS
+      == "android"))
   script:
-    - python .gitlab/ci.py wheels --platform android
-
+  - python .gitlab/ci.py wheels --platform android
+  image: python:3.13-bookworm
+  before_script:
+  - source .gitlab/setup_android.sh
+  - python -m pip install -r .gitlab/requirements.txt
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+    - artifacts/wheelhouse-android/
+    - artifacts/wheels-android/
+    - .gitlab-work/wheels-android/forge/logs/
 wheels-ios:
   stage: wheels
-  tags: [glossarion-macos-mobile-py313]
+  tags:
+  - glossarion-macos-mobile-py313
   timeout: 2 hours
   rules:
-    - if: '$GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/'
+  - if: $GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/ || ($GLOSSARION_TASK
+      == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "ios"))
   script:
-    - python .gitlab/ci.py wheels --platform ios
-
+  - python .gitlab/ci.py wheels --platform ios
 android-apk:
   stage: build
-  tags: [glossarion-linux-mobile-py313]
-  needs: [wheels-android]
+  tags:
+  - saas-linux-medium-amd64
+  needs:
+  - wheels-android
+  - job: mobile-prepare
+    optional: true
+    artifacts: false
   timeout: 4 hours
   rules:
-    - if: '$GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke"'
+  - if: $GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke" || ($GLOSSARION_TASK
+      == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "android"))
   script:
-    - python .gitlab/ci.py mobile --target apk
-
+  - python .gitlab/ci.py mobile --target apk
+  image: python:3.13-bookworm
+  before_script:
+  - source .gitlab/setup_android.sh
+  - python -m pip install -r .gitlab/requirements.txt
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+    - artifacts/mobile-apk/
+    - artifacts/mobile-aab/
+    - src/mobile/build/*report*.md
+    - build/apk_size*
 android-signed:
   stage: build
-  tags: [glossarion-linux-mobile-py313]
-  needs: [wheels-android]
+  tags:
+  - saas-linux-medium-amd64
+  needs:
+  - wheels-android
   timeout: 4 hours
   interruptible: false
   rules:
-    - if: '$GLOSSARION_TASK == "android-signed"'
-      when: manual
-      allow_failure: false
-  manual_confirmation: "Use the provisioned Android signing key to build APK/AAB artifacts?"
+  - if: $GLOSSARION_TASK == "android-signed"
+    when: manual
+    allow_failure: false
+  manual_confirmation: Use the provisioned Android signing key to build APK/AAB artifacts?
   environment:
     name: android-signing
   script:
-    - python .gitlab/ci.py mobile --target apk --signed
-    - python .gitlab/ci.py mobile --target aab --signed
-
+  - python .gitlab/ci.py mobile --target apk --signed
+  - python .gitlab/ci.py mobile --target aab --signed
+  image: python:3.13-bookworm
+  before_script:
+  - source .gitlab/setup_android.sh
+  - python -m pip install -r .gitlab/requirements.txt
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+    - artifacts/mobile-apk/
+    - artifacts/mobile-aab/
+    - src/mobile/build/*report*.md
+    - build/apk_size*
 ios-unsigned:
   stage: build
-  tags: [glossarion-macos-mobile-py313]
-  needs: [wheels-ios]
+  tags:
+  - glossarion-macos-mobile-py313
+  needs:
+  - wheels-ios
+  - job: mobile-prepare
+    optional: true
+    artifacts: false
   timeout: 4 hours
   rules:
-    - if: '$GLOSSARION_TASK == "ios"'
+  - if: $GLOSSARION_TASK == "ios" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "ios"))
   script:
-    - python .gitlab/ci.py mobile --target ipa
-
+  - python .gitlab/ci.py mobile --target ipa
 ios-signed:
   stage: build
-  tags: [glossarion-macos-mobile-py313]
-  needs: [wheels-ios]
+  tags:
+  - glossarion-macos-mobile-py313
+  needs:
+  - wheels-ios
   timeout: 4 hours
   interruptible: false
   rules:
-    - if: '$GLOSSARION_TASK == "ios-signed"'
-      when: manual
-      allow_failure: false
-  manual_confirmation: "Use the pre-provisioned Apple signing identity and profile to build this IPA?"
+  - if: $GLOSSARION_TASK == "ios-signed"
+    when: manual
+    allow_failure: false
+  manual_confirmation: Use the pre-provisioned Apple signing identity and profile
+    to build this IPA?
   environment:
     name: ios-signing
   script:
-    - python .gitlab/ci.py mobile --target ipa --signed
-
+  - python .gitlab/ci.py mobile --target ipa --signed
 ios-simulator:
   stage: build
-  tags: [glossarion-macos-mobile-py313]
-  needs: [wheels-ios]
+  tags:
+  - glossarion-macos-mobile-py313
+  needs:
+  - wheels-ios
+  - job: mobile-prepare
+    optional: true
+    artifacts: false
   timeout: 4 hours
   rules:
-    - if: '$GLOSSARION_TASK == "ios-simulator"'
+  - if: $GLOSSARION_TASK == "ios-simulator" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "ios") && ($GLOSSARION_IOS_SIMULATOR_SMOKE
+      == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE == "auto"))
   script:
-    - python .gitlab/ci.py mobile --target ios-simulator
-
+  - python .gitlab/ci.py mobile --target ios-simulator
 android-ui:
   stage: device
-  tags: [glossarion-android-emulator-py313]
-  needs: [wheels-android]
+  tags:
+  - glossarion-android-emulator-py313
+  needs:
+  - wheels-android
   timeout: 4 hours
   rules:
-    - if: '$GLOSSARION_TASK == "android-ui"'
+  - if: $GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS
+      == "android") && $GLOSSARION_UI_TESTS == "on"
+    allow_failure: true
+  - if: $GLOSSARION_TASK == "android-ui"
   script:
-    - python .gitlab/ci.py android-ui
-
+  - python .gitlab/ci.py android-ui
 android-smoke:
   stage: device
-  tags: [glossarion-android-emulator-py313]
-  needs: [android-apk]
+  tags:
+  - glossarion-android-emulator-py313
+  needs:
+  - android-apk
   timeout: 1 hour
   rules:
-    - if: '$GLOSSARION_TASK == "android-smoke"'
+  - if: $GLOSSARION_TASK == "android-smoke" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "android") && $GLOSSARION_EMULATOR_SMOKE
+      == "true")
   script:
-    - python .gitlab/ci.py android-smoke
+  - python .gitlab/ci.py android-smoke
+mobile-prepare:
+  stage: check
+  tags:
+  - saas-linux-medium-amd64
+  image: python:3.13-bookworm
+  before_script:
+  - python -m pip install -r .gitlab/requirements.txt uv
+  timeout: 2 hours
+  rules:
+  - if: $GLOSSARION_TASK == "mobile"
+  script:
+  - python .gitlab/ci.py mobile-check

@@ -3,15 +3,40 @@
 The GitHub workflow files stay in place and retain their original execution
 behavior. GitLab does not execute GitHub Actions YAML. `.gitlab-ci.yml` adds an
 opt-in alternative: only a pipeline created through **Run pipeline** (`web`)
-is admitted. Pushes, mirrors, merge requests, schedules, and tags alone start
+or the authenticated Pipelines API (`api`) is admitted. Pushes, mirrors, merge requests, schedules, and tags alone start
 no GitLab jobs. No runner, secret, project setting, or live pipeline was
 configured as part of this source change.
 
-Choose `GLOSSARION_TASK` in the Run pipeline form. The default `source-check`
+Choose the typed `task` input in the Run pipeline form. This also works when
+the project disables pipeline-variable overrides; no access setting change
+is needed. The default `source-check`
 checks source syntax and the GitLab helper tests; it does not claim to run the
 application test suites. A requested job fails when its prerequisites or
 required tests are absent. Builds and dependency downloads can consume runner
-time/storage; the user must choose and provision appropriate runners first.
+time/storage. Android APK and wheel jobs now bootstrap their dependencies on
+the existing `saas-linux-medium-amd64` hosted runner in a disposable Python
+3.13 container. The SDK download is checked against Google's published digest,
+and the Rust/NDK pins come from the existing wheelhouse manifest. This installs
+no persistent runner and needs no signing or publishing credentials.
+
+Select `task=mobile` for the original **Build Mobile (Android + iOS)** graph.
+Its `targets` (`all`, `android`, `ios`), `emulator_smoke` (true),
+`ios_simulator_smoke` (`auto`, `on`, `off`), `ui_tests` (`auto`, `on`, `off`),
+and `android_legacy_packaging` (false) inputs preserve the GitHub defaults.
+`auto` runs the required iOS simulator suite and leaves the optional Android
+UI suite off. An explicitly enabled optional Android UI suite may fail without
+failing the pipeline, matching the current GitHub policy. Android device smoke
+remains blocking. The combined mobile task adds an explicit host preparation
+job before the platform build jobs. Build helpers still rerun required host
+checks in their own checkout before packaging.
+
+macOS/Xcode and device jobs retain their custom tags: a missing matching
+runner leaves them pending. `targets=android` with `emulator_smoke=false` is
+the build-only APK selection for hosted Linux; it does not validate a device.
+`publish` and `signing_approved` are separate typed boolean inputs defaulting
+to false; the signed tasks and existing-release upload still require their
+blocking manual job and protected-ref gates. The ordinary `mobile` task never
+selects signing or release publication.
 
 ## Workflow mapping
 
@@ -25,6 +50,7 @@ time/storage; the user must choose and provision appropriate runners first.
 | `build-all.yml` | `desktop` | All the desktop jobs above (12 variants) |
 | `mobile-wheels.yml` | `wheels-android`, `wheels-ios` | Pinned self-built wheelhouses with structure/native/provenance checks |
 | `build-mobile.yml` | `android`, `ios` | Verified debug-signed APKs or unsigned IPA, preceded by wheel builds and included tests |
+| `build-mobile.yml`, workflow dispatch | `mobile` + platform/smoke inputs | Combined preparation, wheelhouses, APK/IPA and selected device suites |
 | `build-mobile.yml` | `android-signed`, `ios-signed` | Blocking manual signing job after the platform's wheel build |
 | `build-mobile.yml` | `ios-simulator` | Simulator app archive plus actual simulator smoke/cryptography checks |
 | `build-mobile.yml` | `android-ui`, `android-smoke` | UI suite or APK smoke/E2E on an already running emulator/device |
@@ -46,7 +72,7 @@ events, and marketplace actions are not silently translated.
 
 ## Runner prerequisites
 
-The tags below are intentional custom tags. No matching runner means a job
+The desktop, macOS and device tags below are intentional custom tags. No matching runner means a job
 waits; it does not fall back to an arbitrary shared machine. Use isolated,
 disposable build environments. Installing/registering a runner, purchasing
 capacity, or granting credentials is a separate owner action.
@@ -58,7 +84,7 @@ capacity, or granting credentials is a separate owner action.
 | `glossarion-windows-py312` | Windows x64, Python 3.12, PowerShell **7.4+** as `pwsh`, Git, MSYS2 MINGW64 with the GTK/Pango/Cairo package list from `build-windows.yml`; set `MSYS2_ROOT` if not `C:/msys64` |
 | `glossarion-macos-arm64-py312` | Native ARM Python 3.12 on Apple Silicon, Bash, Git, create-dmg, pango, cairo, libffi, gdk-pixbuf, gobject-introspection, pkg-config, cmake |
 | `glossarion-macos-x64-py312` | Same dependencies with x86_64 Python on an Intel-compatible Mac; an ARM interpreter does not produce the Intel variant |
-| `glossarion-linux-mobile-py313` | Linux x64, Python 3.13, uv, Bash, Git, pkg-config, SQLite, Rust/Cargo; for Android: JDK 17, keytool, Android SDK tools/adb/sdkmanager and `ANDROID_HOME` |
+| `saas-linux-medium-amd64` | Existing hosted Linux runner; Python 3.13 container, uv and disposable Android SDK/JDK 17/Rust setup are supplied by the jobs |
 | `glossarion-macos-mobile-py313` | macOS/Xcode compatible with the current `macos-26` workflow, Python 3.13, uv, Bash, Git, CocoaPods, Xcode command-line tools, simulator runtimes, Rust/Cargo, pkg-config, GNU `timeout` on PATH |
 | `glossarion-android-emulator-py313` | Android toolchain above plus an available API-35 x86_64 emulator/device; `ANDROID_SERIAL` identifies it; emulator host needs working hardware acceleration/KVM |
 
@@ -100,7 +126,7 @@ a separate provider/configuration decision. macOS notarization is not added.
 
 For a signed mobile job, use a protected ref, select the signed task, set
 `GLOSSARION_SIGNING_APPROVED=true`, then explicitly start the blocking manual
-job. Provision protected/masked variables through the platform's secure
+job. Use `signing_approved=true`. Provision protected/masked variables through the platform's secure
 settings, not the public YAML or the manual-job free-text variable form:
 
 - Android: `FLET_ANDROID_SIGNING_KEY_STORE` (file variable or private runner
@@ -141,4 +167,8 @@ all build plans, honest missing-prerequisite failures, and release gating/hash
 checks with mocked HTTP. It does not establish successful multi-platform
 builds or signing. Run GitLab CI Lint and the selected jobs on the provisioned
 runners before relying on release output. No remote lint/pipeline, full build,
-signing operation, or release upload was executed during implementation.
+signing operation, or release upload was executed during the initial migration.
+The follow-up mobile wiring is covered by all task dependency graphs, all
+platform/smoke/UI input combinations, and checks against the original dispatch
+defaults. Server lint and actual pipeline status are separate runtime evidence;
+successful static checks do not prove an APK/IPA was produced.
