@@ -1,4 +1,4 @@
-# Manual web/API pipelines only; pushes and tag pushes remain disabled.
+# Original main/MR test and v* tag build triggers; publication remains owner-gated.
 spec:
   inputs:
     task:
@@ -21,6 +21,7 @@ spec:
       - android-smoke
       - wheels-android
       - wheels-ios
+      - mobile-backend-check
       description: Select mobile for the Build Mobile (Android + iOS) workflow, or
         an individual task.
     targets:
@@ -65,6 +66,27 @@ spec:
 workflow:
   rules:
   - if: $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+      == "main"
+    variables:
+      GLOSSARION_TASK: ci
+      GLOSSARION_PUBLISH: 'false'
+      GLOSSARION_SIGNING_APPROVED: 'false'
+  - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+    variables:
+      GLOSSARION_TASK: ci
+      GLOSSARION_PUBLISH: 'false'
+      GLOSSARION_SIGNING_APPROVED: 'false'
+  - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG =~ /^v/
+    variables:
+      GLOSSARION_TASK: tag-builds
+      GLOSSARION_TARGETS: all
+      GLOSSARION_EMULATOR_SMOKE: 'true'
+      GLOSSARION_IOS_SIMULATOR_SMOKE: auto
+      GLOSSARION_UI_TESTS: auto
+      GLOSSARION_ANDROID_LEGACY_PACKAGING: 'false'
+      GLOSSARION_PUBLISH: 'false'
+      GLOSSARION_SIGNING_APPROVED: 'false'
   - when: never
 stages:
 - check
@@ -77,13 +99,13 @@ variables:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
   GLOSSARION_TASK: $[[ inputs.task ]]
-  GLOSSARION_PUBLISH: '$[[ inputs.publish ]]'
-  GLOSSARION_SIGNING_APPROVED: '$[[ inputs.signing_approved ]]'
+  GLOSSARION_PUBLISH: $[[ inputs.publish ]]
+  GLOSSARION_SIGNING_APPROVED: $[[ inputs.signing_approved ]]
   GLOSSARION_TARGETS: $[[ inputs.targets ]]
-  GLOSSARION_EMULATOR_SMOKE: '$[[ inputs.emulator_smoke ]]'
+  GLOSSARION_EMULATOR_SMOKE: $[[ inputs.emulator_smoke ]]
   GLOSSARION_IOS_SIMULATOR_SMOKE: $[[ inputs.ios_simulator_smoke ]]
   GLOSSARION_UI_TESTS: $[[ inputs.ui_tests ]]
-  GLOSSARION_ANDROID_LEGACY_PACKAGING: '$[[ inputs.android_legacy_packaging ]]'
+  GLOSSARION_ANDROID_LEGACY_PACKAGING: $[[ inputs.android_legacy_packaging ]]
 default:
   interruptible: true
   before_script:
@@ -112,12 +134,18 @@ source-check:
 desktop-tests:
   stage: check
   tags:
-  - glossarion-linux-py310
+  - saas-linux-medium-amd64
   timeout: 2 hours
   rules:
-  - if: $GLOSSARION_TASK == "desktop-tests"
+  - if: $GLOSSARION_TASK == "desktop-tests" || $GLOSSARION_TASK == "ci"
   script:
   - python .gitlab/ci.py desktop-tests
+  image: python:3.10-bookworm
+  before_script:
+  - apt-get update -qq && apt-get install -y --no-install-recommends libcairo2-dev
+    pkg-config python3-dev libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3 libfontconfig1
+    libfreetype6
+  - python -m pip install -r .gitlab/requirements.txt
 publish-existing-release:
   stage: release
   resource_group: glossarion-release
@@ -135,3 +163,15 @@ publish-existing-release:
     name: gitlab-release
   script:
   - python .gitlab/release.py
+mobile-backend-check:
+  stage: check
+  tags:
+  - saas-linux-medium-amd64
+  image: python:3.13-bookworm
+  timeout: 2 hours
+  before_script:
+  - python -m pip install -r .gitlab/requirements.txt uv
+  rules:
+  - if: $GLOSSARION_TASK == "ci" || $GLOSSARION_TASK == "mobile-backend-check"
+  script:
+  - python .gitlab/ci.py mobile-backend-check

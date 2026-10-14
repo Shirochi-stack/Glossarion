@@ -1,11 +1,29 @@
 # GitLab alternatives alongside GitHub Actions
 
 The GitHub workflow files stay in place and retain their original execution
-behavior. GitLab does not execute GitHub Actions YAML. `.gitlab-ci.yml` adds an
-opt-in alternative: only a pipeline created through **Run pipeline** (`web`)
-or the authenticated Pipelines API (`api`) is admitted. Pushes, mirrors, merge requests, schedules, and tags alone start
-no GitLab jobs. No runner, secret, project setting, or live pipeline was
-configured as part of this source change.
+behavior. GitLab does not execute GitHub Actions YAML. `.gitlab-ci.yml` provides
+manual alternatives and the original automatic event triggers:
+
+- A push to `main`, or a merge request targeting `main`, runs the Python
+  application's desktop tests (Python 3.10) and mobile backend check (Python 3.13).
+- A push of a tag matching `v*` runs Linux, macOS and the complete mobile build
+  graph. Windows and Build All remain manual, matching their original workflows.
+- **Run pipeline** (`web`) and the authenticated Pipelines API (`api`) retain
+  the typed manual task inputs. Other branches, other MR targets, non-version
+  tags, schedules and token-trigger pipelines are not admitted automatically.
+
+None of the seven original workflows defines a cron schedule; no new schedule
+or cadence is created. Automatic rules set their own task selection and keep
+signing approval/publication false, so a manual input cannot turn a branch or
+MR check into a release. Tag jobs use the original mobile platform/suite defaults.
+
+Both hosts can consume runner time if the same event is mirrored/pushed to
+GitHub and GitLab. The preserved GitHub Linux/macOS tag workflows publish
+releases and the mobile tag workflow updates existing release assets. Automatic
+GitLab publication is held for an owner-approved release cutover to avoid
+duplicate consequential publication: `publish-existing-release` remains a
+separate blocking manual job, requiring the existing release and protected ref.
+No signing credentials, tokens, runner registration or paid capacity is added.
 
 Choose the typed `task` input in the Run pipeline form. This also works when
 the project disables pipeline-variable overrides; no access setting change
@@ -52,6 +70,7 @@ selects signing or release publication.
 | --- | --- | --- |
 | `python-app.yml` | `desktop-tests` | Original dependency install, syntax/import checks, shared-module test list, import hygiene |
 | `python-app.yml`, mobile prepare job | `mobile-check` | Backend/assets, host smoke, included mobile/extension tests and offline E2E |
+| `python-app.yml`, automatic mobile backend job | `mobile-backend-check` or automatic main/MR checks | Original collector/compile/assets/Android host smoke/mobile CI policy steps |
 | `build-windows.yml` | `windows` | Lite, NoCuda, TurboLite, Main, Heavy executables, unsigned |
 | `build-linux.yml` | `linux` | Standard, NoCuda, TurboLite ZIPs with existing bundle checks |
 | `build-macos.yml` | `macos` | ARM and Intel Lite/NoCuda DMGs |
@@ -180,3 +199,12 @@ The follow-up mobile wiring is covered by all task dependency graphs, all
 platform/smoke/UI input combinations, and checks against the original dispatch
 defaults. Server lint and actual pipeline status are separate runtime evidence;
 successful static checks do not prove an APK/IPA was produced.
+
+Automatic event selection is checked against the checked-in GitHub trigger
+definitions, including rejection of feature-branch pushes, MRs to other targets,
+non-version tags and schedules. Automatic desktop tests use the existing hosted
+Linux medium runner with the original Python 3.10/headless native prerequisites.
+Linux/macOS desktop packaging still requires the custom runner tags listed
+above; their event wiring is restored, but a missing matching desktop runner
+leaves those build jobs pending. The current manually triggered mobile run is
+left alone while its completion verification is deferred until the user resumes.

@@ -1,47 +1,66 @@
 windows-build:
   stage: build
-  tags: [glossarion-windows-py312]
+  tags:
+  - glossarion-windows-py312
   timeout: 4 hours
   rules:
-    - if: '$GLOSSARION_TASK == "windows" || $GLOSSARION_TASK == "desktop"'
+  - if: $GLOSSARION_TASK == "windows" || $GLOSSARION_TASK == "desktop"
   parallel:
     matrix:
-      - VARIANT: [lite, nocuda, turbolite, main, heavy]
+    - VARIANT:
+      - lite
+      - nocuda
+      - turbolite
+      - main
+      - heavy
   script:
-    - python .gitlab/ci.py desktop --platform windows --variant $env:VARIANT
-
+  - python .gitlab/ci.py desktop --platform windows --variant $env:VARIANT
 linux-build:
   stage: build
-  tags: [glossarion-linux-py312]
+  tags:
+  - glossarion-linux-py312
   timeout: 3 hours
   rules:
-    - if: '$GLOSSARION_TASK == "linux" || $GLOSSARION_TASK == "desktop"'
+  - if: $GLOSSARION_TASK == "linux" || $GLOSSARION_TASK == "desktop" || $GLOSSARION_TASK
+      == "tag-builds"
   parallel:
     matrix:
-      - VARIANT: [standard, nocuda, turbolite]
+    - VARIANT:
+      - standard
+      - nocuda
+      - turbolite
   script:
-    - python .gitlab/ci.py desktop --platform linux --variant "$VARIANT"
-
+  - python .gitlab/ci.py desktop --platform linux --variant "$VARIANT"
+  needs: []
 macos-arm-build:
   stage: build
-  tags: [glossarion-macos-arm64-py312]
+  tags:
+  - glossarion-macos-arm64-py312
   timeout: 3 hours
   rules:
-    - if: '$GLOSSARION_TASK == "macos" || $GLOSSARION_TASK == "desktop"'
+  - if: $GLOSSARION_TASK == "macos" || $GLOSSARION_TASK == "desktop" || $GLOSSARION_TASK
+      == "tag-builds"
   parallel:
     matrix:
-      - VARIANT: [lite, nocuda]
+    - VARIANT:
+      - lite
+      - nocuda
   script:
-    - python .gitlab/ci.py desktop --platform macos-arm --variant "$VARIANT"
-
+  - python .gitlab/ci.py desktop --platform macos-arm --variant "$VARIANT"
+  needs: []
 macos-intel-build:
   stage: build
-  tags: [glossarion-macos-x64-py312]
+  tags:
+  - glossarion-macos-x64-py312
   timeout: 3 hours
   rules:
-    - if: '$GLOSSARION_TASK == "macos" || $GLOSSARION_TASK == "desktop"'
+  - if: $GLOSSARION_TASK == "macos" || $GLOSSARION_TASK == "desktop" || $GLOSSARION_TASK
+      == "tag-builds"
   parallel:
     matrix:
-      - VARIANT: [lite, nocuda]
+    - VARIANT:
+      - lite
+      - nocuda
   script:
-    - python .gitlab/ci.py desktop --platform macos-intel --variant "$VARIANT"
+  - python .gitlab/ci.py desktop --platform macos-intel --variant "$VARIANT"
+  needs: []

@@ -17,8 +17,8 @@ wheels-android:
   timeout: 2 hours
   rules:
   - if: $GLOSSARION_TASK =~ /^(android|android-signed|android-ui|android-smoke|wheels-android)$/
-      || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS
-      == "android"))
+      || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "android"))
   script:
   - python .gitlab/ci.py wheels --platform android
   image: python:3.13-bookworm
@@ -40,8 +40,9 @@ wheels-ios:
   - saas-macos-medium-m1
   timeout: 2 hours
   rules:
-  - if: $GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/ || ($GLOSSARION_TASK
-      == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "ios"))
+  - if: $GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/ || (($GLOSSARION_TASK
+      == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS ==
+      "all" || $GLOSSARION_TARGETS == "ios"))
   script:
   - python .gitlab/ci.py wheels --platform ios
   image: macos-26-xcode-26
@@ -68,8 +69,9 @@ android-apk:
     artifacts: true
   timeout: 4 hours
   rules:
-  - if: $GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke" || ($GLOSSARION_TASK
-      == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "android"))
+  - if: $GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK
+      == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS ==
+      "all" || $GLOSSARION_TARGETS == "android"))
   script:
   - python .gitlab/ci.py mobile --target apk
   image: python:3.13-bookworm
@@ -125,8 +127,9 @@ ios-unsigned:
     artifacts: true
   timeout: 4 hours
   rules:
-  - if: $GLOSSARION_TASK == "ios" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
-      == "all" || $GLOSSARION_TARGETS == "ios"))
+  - if: $GLOSSARION_TASK == "ios" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
+      == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
+      "ios"))
   script:
   - python .gitlab/ci.py mobile --target ipa
   image: macos-26-xcode-26
@@ -166,9 +169,10 @@ ios-simulator:
     artifacts: true
   timeout: 4 hours
   rules:
-  - if: $GLOSSARION_TASK == "ios-simulator" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
-      == "all" || $GLOSSARION_TARGETS == "ios") && ($GLOSSARION_IOS_SIMULATOR_SMOKE
-      == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE == "auto"))
+  - if: $GLOSSARION_TASK == "ios-simulator" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
+      == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
+      "ios") && ($GLOSSARION_IOS_SIMULATOR_SMOKE == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE
+      == "auto"))
   script:
   - python .gitlab/ci.py mobile --target ios-simulator
   image: macos-26-xcode-26
@@ -183,8 +187,8 @@ android-ui:
   - wheels-android
   timeout: 4 hours
   rules:
-  - if: $GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS
-      == "android") && $GLOSSARION_UI_TESTS == "on"
+  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "android") && $GLOSSARION_UI_TESTS == "on"
     allow_failure: true
   - if: $GLOSSARION_TASK == "android-ui"
   script:
@@ -201,9 +205,9 @@ android-smoke:
   - android-apk
   timeout: 1 hour
   rules:
-  - if: $GLOSSARION_TASK == "android-smoke" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
-      == "all" || $GLOSSARION_TARGETS == "android") && $GLOSSARION_EMULATOR_SMOKE
-      == "true")
+  - if: $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
+      == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
+      "android") && $GLOSSARION_EMULATOR_SMOKE == "true")
   script:
   - python .gitlab/ci.py android-smoke
   image: python:3.13-bookworm
@@ -219,7 +223,7 @@ mobile-prepare:
   - python -m pip install -r .gitlab/requirements.txt uv
   timeout: 2 hours
   rules:
-  - if: $GLOSSARION_TASK == "mobile"
+  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds")
   script:
   - python .gitlab/ci.py mobile-check
   artifacts:

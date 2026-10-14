@@ -37,7 +37,7 @@ class BuildBridgeTests(unittest.TestCase):
                     for platform, variants in (("windows", ci.WINDOWS), ("linux", ci.LINUX),
                                                ("macos-arm", ("lite", "nocuda")), ("macos-intel", ("lite", "nocuda")))
                     for variant in variants]
-        commands += [[task, "--plan"] for task in ("desktop-tests", "mobile-check", "android-ui", "android-smoke")]
+        commands += [[task, "--plan"] for task in ("desktop-tests", "mobile-backend-check", "mobile-check", "android-ui", "android-smoke")]
         commands += [["wheels", "--platform", platform, "--plan"] for platform in ("android", "ios")]
         commands += [["mobile", "--target", target, "--plan"] + (["--signed"] if signed else [])
                      for target, signed in (("apk", False), ("apk", True), ("aab", True), ("ipa", False), ("ipa", True), ("ios-simulator", False))]
@@ -128,8 +128,45 @@ class PipelineTests(unittest.TestCase):
         for include in cls.config["include"]:
             cls.config.update(yaml.safe_load((ROOT / include["local"]).read_text()))
 
-    def test_only_explicit_manual_web_or_api_pipeline_is_admitted(self):
-        self.assertEqual(self.config["workflow"]["rules"], [{"if": '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'}, {"when": "never"}])
+    def test_original_automatic_events_and_manual_dispatch_are_admitted(self):
+        defaults = dict(CI_PIPELINE_SOURCE="", CI_COMMIT_BRANCH="", CI_COMMIT_TAG="", CI_MERGE_REQUEST_TARGET_BRANCH_NAME="")
+        cases = [
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_BRANCH":"main"}, "ci"),
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_BRANCH":"feature"}, None),
+            ({"CI_PIPELINE_SOURCE":"merge_request_event", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME":"main"}, "ci"),
+            ({"CI_PIPELINE_SOURCE":"merge_request_event", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME":"develop"}, None),
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v9.14.4"}, "tag-builds"),
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v"}, "tag-builds"),
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"nightly"}, None),
+            ({"CI_PIPELINE_SOURCE":"schedule", "CI_COMMIT_BRANCH":"main"}, None),
+            ({"CI_PIPELINE_SOURCE":"web"}, "source-check"),
+            ({"CI_PIPELINE_SOURCE":"api"}, "source-check"),
+        ]
+        for values, expected in cases:
+            variables={**defaults, **values}
+            actual=None
+            for rule in self.config["workflow"]["rules"]:
+                if rule.get("when") == "never": break
+                expression=re.sub(r'\$(\w+) =~ /([^/]+)/', lambda m:str(bool(re.search(m[2],variables[m[1]]))), rule["if"])
+                expression=re.sub(r'\$(\w+)',lambda m:repr(variables[m[1]]),expression).replace("&&","and").replace("||","or")
+                if eval(expression,{"__builtins__":{}},{}):
+                    actual=rule.get("variables",{}).get("GLOSSARION_TASK","source-check")
+                    if actual in ("ci","tag-builds"):
+                        self.assertEqual(rule["variables"]["GLOSSARION_PUBLISH"],"false")
+                        self.assertEqual(rule["variables"]["GLOSSARION_SIGNING_APPROVED"],"false")
+                    break
+            with self.subTest(event=values): self.assertEqual(actual,expected)
+
+    def test_trigger_mapping_matches_original_workflows_without_new_schedules(self):
+        originals={p.name:yaml.safe_load(p.read_text()).get("on",yaml.safe_load(p.read_text()).get(True))
+                   for p in (ROOT/".github/workflows").glob("*.yml")}
+        self.assertTrue(all("schedule" not in trigger for trigger in originals.values()))
+        self.assertEqual(originals["python-app.yml"]["push"],{"branches":["main"]})
+        self.assertEqual(originals["python-app.yml"]["pull_request"],{"branches":["main"]})
+        for name in ("build-linux.yml","build-macos.yml","build-mobile.yml"):
+            self.assertEqual(originals[name]["push"],{"tags":["v*"]})
+        for name in ("build-all.yml","build-windows.yml","mobile-wheels.yml"):
+            self.assertNotIn("push",originals[name])
 
     def test_original_mobile_inputs_have_same_defaults_and_choices(self):
         workflow = ci.workflow("build-mobile.yml")
@@ -147,6 +184,7 @@ class PipelineTests(unittest.TestCase):
     def test_every_selection_has_complete_dependency_graph(self):
         jobs = {name: job for name, job in self.config.items() if isinstance(job, dict) and "script" in job}
         cases = [(task, "all", "true", "auto", "auto") for task in self.inputs["task"]["options"]]
+        cases += [(task,"all","true","auto","auto") for task in ("ci","tag-builds")]
         cases += [("mobile", *values) for values in itertools.product(
             ("all", "android", "ios"), ("true", "false"), ("auto", "on", "off"), ("auto", "on", "off"))]
         for task, targets, smoke, simulator, ui in cases:
@@ -187,6 +225,11 @@ class PipelineTests(unittest.TestCase):
                     self.assertNotIn("android-signed", selected)
                     self.assertNotIn("ios-signed", selected)
                     self.assertNotIn("publish-existing-release", selected)
+                if task == "ci":
+                    self.assertEqual(selected,{"desktop-tests","mobile-backend-check"})
+                if task == "tag-builds":
+                    self.assertEqual(selected,{"mobile-prepare","wheels-android","wheels-ios","android-apk","ios-unsigned",
+                                              "ios-simulator","android-smoke","linux-build","macos-arm-build","macos-intel-build"})
 
     def test_signing_and_publish_are_blocking_manual_jobs(self):
         for name in ("android-signed", "ios-signed", "publish-existing-release"):

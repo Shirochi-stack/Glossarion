@@ -111,6 +111,7 @@ class Runner:
                         CI="true", UV_LOCK_ARG="--locked", GITHUB_WORKSPACE=str(ROOT))
         self.context = {"github.workspace": str(ROOT)}
         self.work = ROOT / ".gitlab-work" / label
+        self.context["runner.temp"] = str(self.work)
         self.report = ROOT / "artifacts" / label
         if not plan:
             self.work.mkdir(parents=True, exist_ok=True)
@@ -253,6 +254,17 @@ def desktop_tests(r):
                  "Mobile shared-module and backend patch tests (Python 3.10)",
                  "Import hygiene of the shared GUI-free modules (PySide6 blocked)"):
         r.step("python-app.yml", "test", name)
+
+
+def mobile_backend_check(r):
+    """The Python application's automatic Python 3.13 backend-check job."""
+    mobile_prerequisites(r)
+    r.command(["uv", "sync", "--locked", "--group", "dev"], MOBILE)
+    for name in ("Collector check", "Compile mobile app, tools and CI scripts (Python 3.13)",
+                 "Collect backend bundle", "Prepare assets (tiktoken cache, self-test EPUB)",
+                 "Host import smoke (Android simulation)",
+                 "Mobile CI policy (no tag trigger, never publishes, optional suites)"):
+        r.step("python-app.yml", "mobile-backend-check", name)
 
 
 def mobile_prerequisites(r, target=None):
@@ -406,7 +418,7 @@ def mobile_build(r, target, signed=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task", choices=("source-check", "desktop-tests", "mobile-check", "desktop", "wheels", "mobile", "android-ui", "android-smoke"))
+    parser.add_argument("task", choices=("source-check", "desktop-tests", "mobile-backend-check", "mobile-check", "desktop", "wheels", "mobile", "android-ui", "android-smoke"))
     parser.add_argument("--platform", choices=("windows", "linux", "macos-arm", "macos-intel", "android", "ios"))
     parser.add_argument("--variant", default="lite")
     parser.add_argument("--target", choices=("apk", "aab", "ipa", "ios-simulator"))
@@ -417,6 +429,7 @@ def main(argv=None):
     runner = Runner(label, args.plan)
     if args.task == "source-check": source_check(runner)
     elif args.task == "desktop-tests": desktop_tests(runner)
+    elif args.task == "mobile-backend-check": mobile_backend_check(runner)
     elif args.task == "desktop": desktop(runner, args.platform, args.variant)
     elif args.task == "mobile-check": mobile_prepare(runner)
     elif args.task == "wheels":
