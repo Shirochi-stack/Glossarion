@@ -35,13 +35,17 @@ wheels-android:
 wheels-ios:
   stage: wheels
   tags:
-  - glossarion-macos-mobile-py313
+  - saas-macos-medium-m1
   timeout: 2 hours
   rules:
   - if: $GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/ || ($GLOSSARION_TASK
       == "mobile" && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "ios"))
   script:
   - python .gitlab/ci.py wheels --platform ios
+  image: macos-26-xcode-26
+  before_script:
+  - source .gitlab/setup_ios.sh
+  - python -m pip install -r .gitlab/requirements.txt
 android-apk:
   stage: build
   tags:
@@ -102,7 +106,7 @@ android-signed:
 ios-unsigned:
   stage: build
   tags:
-  - glossarion-macos-mobile-py313
+  - saas-macos-medium-m1
   needs:
   - wheels-ios
   - job: mobile-prepare
@@ -114,10 +118,14 @@ ios-unsigned:
       == "all" || $GLOSSARION_TARGETS == "ios"))
   script:
   - python .gitlab/ci.py mobile --target ipa
+  image: macos-26-xcode-26
+  before_script:
+  - source .gitlab/setup_ios.sh
+  - python -m pip install -r .gitlab/requirements.txt
 ios-signed:
   stage: build
   tags:
-  - glossarion-macos-mobile-py313
+  - saas-macos-medium-m1
   needs:
   - wheels-ios
   timeout: 4 hours
@@ -132,10 +140,14 @@ ios-signed:
     name: ios-signing
   script:
   - python .gitlab/ci.py mobile --target ipa --signed
+  image: macos-26-xcode-26
+  before_script:
+  - source .gitlab/setup_ios.sh
+  - python -m pip install -r .gitlab/requirements.txt
 ios-simulator:
   stage: build
   tags:
-  - glossarion-macos-mobile-py313
+  - saas-macos-medium-m1
   needs:
   - wheels-ios
   - job: mobile-prepare
@@ -148,10 +160,14 @@ ios-simulator:
       == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE == "auto"))
   script:
   - python .gitlab/ci.py mobile --target ios-simulator
+  image: macos-26-xcode-26
+  before_script:
+  - source .gitlab/setup_ios.sh
+  - python -m pip install -r .gitlab/requirements.txt
 android-ui:
   stage: device
   tags:
-  - glossarion-android-emulator-py313
+  - saas-linux-medium-amd64
   needs:
   - wheels-android
   timeout: 4 hours
@@ -162,10 +178,14 @@ android-ui:
   - if: $GLOSSARION_TASK == "android-ui"
   script:
   - python .gitlab/ci.py android-ui
+  image: python:3.13-bookworm
+  before_script:
+  - source .gitlab/setup_emulator.sh
+  - python -m pip install -r .gitlab/requirements.txt
 android-smoke:
   stage: device
   tags:
-  - glossarion-android-emulator-py313
+  - saas-linux-medium-amd64
   needs:
   - android-apk
   timeout: 1 hour
@@ -175,6 +195,10 @@ android-smoke:
       == "true")
   script:
   - python .gitlab/ci.py android-smoke
+  image: python:3.13-bookworm
+  before_script:
+  - source .gitlab/setup_emulator.sh
+  - python -m pip install -r .gitlab/requirements.txt
 mobile-prepare:
   stage: check
   tags:

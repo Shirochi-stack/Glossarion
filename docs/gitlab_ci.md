@@ -30,8 +30,12 @@ remains blocking. The combined mobile task adds an explicit host preparation
 job before the platform build jobs. Build helpers still rerun required host
 checks in their own checkout before packaging.
 
-macOS/Xcode and device jobs retain their custom tags: a missing matching
-runner leaves them pending. `targets=android` with `emulator_smoke=false` is
+macOS/Xcode jobs use `saas-macos-medium-m1` and `macos-26-xcode-26`, with
+Python 3.13, pinned Rust and GNU timeout bootstrapped in the disposable job.
+This requires existing hosted macOS entitlement (no subscription is purchased).
+Android device jobs start an isolated API-35 emulator on hosted Linux. They
+use KVM when available, otherwise software acceleration, and fail with logs
+if the emulator does not boot within 600 seconds. `targets=android` with `emulator_smoke=false` is
 the build-only APK selection for hosted Linux; it does not validate a device.
 `publish` and `signing_approved` are separate typed boolean inputs defaulting
 to false; the signed tasks and existing-release upload still require their
@@ -72,7 +76,7 @@ events, and marketplace actions are not silently translated.
 
 ## Runner prerequisites
 
-The desktop, macOS and device tags below are intentional custom tags. No matching runner means a job
+The desktop tags below are intentional custom tags. No matching runner means a job
 waits; it does not fall back to an arbitrary shared machine. Use isolated,
 disposable build environments. Installing/registering a runner, purchasing
 capacity, or granting credentials is a separate owner action.
@@ -85,8 +89,8 @@ capacity, or granting credentials is a separate owner action.
 | `glossarion-macos-arm64-py312` | Native ARM Python 3.12 on Apple Silicon, Bash, Git, create-dmg, pango, cairo, libffi, gdk-pixbuf, gobject-introspection, pkg-config, cmake |
 | `glossarion-macos-x64-py312` | Same dependencies with x86_64 Python on an Intel-compatible Mac; an ARM interpreter does not produce the Intel variant |
 | `saas-linux-medium-amd64` | Existing hosted Linux runner; Python 3.13 container, uv and disposable Android SDK/JDK 17/Rust setup are supplied by the jobs |
-| `glossarion-macos-mobile-py313` | macOS/Xcode compatible with the current `macos-26` workflow, Python 3.13, uv, Bash, Git, CocoaPods, Xcode command-line tools, simulator runtimes, Rust/Cargo, pkg-config, GNU `timeout` on PATH |
-| `glossarion-android-emulator-py313` | Android toolchain above plus an available API-35 x86_64 emulator/device; `ANDROID_SERIAL` identifies it; emulator host needs working hardware acceleration/KVM |
+| `saas-macos-medium-m1` | Existing hosted macOS entitlement, `macos-26-xcode-26`; uv/Python 3.13, Rust targets, pkg-config and GNU timeout setup supplied by the jobs; CocoaPods/Xcode/simulators from the image |
+| `saas-linux-medium-amd64`, device jobs | Android toolchain above plus isolated API-35 x86_64 emulator; setup supplies `ANDROID_SERIAL`, boot timeout and emulator log; KVM preferred, software acceleration fallback |
 
 Provision Flet/Flutter-compatible native tools and accept required SDK/Xcode
 licenses yourself. The mobile jobs use the locked project environment and
